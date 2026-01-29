@@ -1,0 +1,10 @@
+__pycache__
+output
+# targets配下のバイナリファイルを除外
+targets/**/*-x86_64-gcc-O*
+targets/**/*-x86_64-clang-O*
+targets/**/*-arm64-gcc-O*
+targets/**/*-arm64-clang-O*
+targets/**/*-mips64-gcc-O*
+targets/**/*-mips64-clang-O*
+targets/**/*.sh

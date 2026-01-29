@@ -1,0 +1,26 @@
+function_tracer_pcode/
+├── __init__.py
+├── main.py                 # エントリーポイント
+├── settings.py             # 設定ファイル
+├── expression.py           # 式の表現クラス
+├── pcode_tracer.py         # P-codeトレースロジック
+├── condition_tracker.py    # 条件分岐追跡
+├── condition_simplifier.py # 条件の簡略化・矛盾検出
+├── phi_handler.py          # PHI処理専用モジュール
+├── expression_expander.py  # PHIの展開モジュール
+├── return_analyzer.py      # Return解析メイン
+├── output_formatter.py     # 出力フォーマッタ
+├── smt/
+│   ├── __init__.py
+│   ├── solver_interface.py    # SMTソルバーの抽象インターフェース
+│   ├── solver_z3.py           # Z3実装
+│   ├── solver_boolector.py    # Boolector実装（使用していない）
+│   ├── solver_yices2.py       # Yices2実装
+│   ├── solver_cvc5.py         # CVC5実装
+│   └── parallel_runner.py     # 並列実行管理
+├── equivalence/
+│   ├── __init__.py
+│   ├── checker.py             # 等価性判定メインロジック
+│   ├── formula_builder.py     # SMT式構築
+│   └── counterexample.py      # 反例フォーマット
+└── main.py                     # main
