@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""等価性判定メインロジック（デバッグ強化版）"""
+"""等価性判定メインロジック（型修正リトライ対応版）"""
 
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
@@ -10,6 +10,7 @@ from ..smt.parallel_runner import ParallelSolverRunner, ParallelResult
 from ..smt.solver_interface import SolverStatus
 from .formula_builder import FormulaBuilder
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
+from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 
 
 @dataclass
@@ -25,7 +26,9 @@ class EquivalenceResult:
     smt_formula: Optional[str] = None
     total_time: float = 0.0
     error_message: Optional[str] = None
-    upper_bits_mode: str = "free"  # "free" or "zero"
+    upper_bits_mode: str = "free"
+    type_fix_result: Optional[TypeFixResult] = None
+    retry_count: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -39,10 +42,11 @@ class EquivalenceResult:
             "total_time": self.total_time,
             "error_message": self.error_message,
             "upper_bits_mode": self.upper_bits_mode,
+            "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
+            "retry_count": self.retry_count,
         }
     
     def to_string(self, verbose: bool = False) -> str:
-        """結果を文字列で返す"""
         lines = []
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")
@@ -52,6 +56,12 @@ class EquivalenceResult:
         lines.append(f"Binary 2: {self.binary2_name}")
         lines.append(f"Function 2: {self.function2_name}")
         lines.append(f"Upper bits mode: {self.upper_bits_mode}")
+        
+        if self.type_fix_result and self.type_fix_result.any_fix_applied():
+            lines.append(f"Type fix applied: {self.type_fix_result}")
+        if self.retry_count > 0:
+            lines.append(f"Retry count: {self.retry_count}")
+        
         lines.append("-" * 70)
         
         if self.error_message:
@@ -94,19 +104,13 @@ class EquivalenceChecker:
         self,
         timeout: int = 180,
         debug: bool = False,
-        upper_bits_zero: bool = False
+        upper_bits_zero: bool = False,
+        type_fixer_config: Optional[TypeFixerConfig] = None
     ):
-        """
-        Args:
-            timeout: SMTソルバーのタイムアウト（秒）
-            debug: デバッグモード
-            upper_bits_zero: ビット幅が異なる場合に上位ビットを0に制約するか
-                             False（デフォルト）: 上位ビットは自由（ランダム）
-                             True: 上位ビットは0に制約
-        """
         self.timeout = timeout
         self.debug = debug
         self.upper_bits_zero = upper_bits_zero
+        self.type_fixer_config = type_fixer_config or TypeFixerConfig()
         self.formula_builder = FormulaBuilder(debug=debug, upper_bits_zero=upper_bits_zero)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
     
@@ -114,22 +118,48 @@ class EquivalenceChecker:
         if self.debug:
             print(f"[EquivalenceChecker] {msg}")
     
+    def _get_params_via_decompile(
+        self,
+        program,
+        function_name: str,
+        timeout: int
+    ) -> List[Dict[str, Any]]:
+        """
+        デコンパイルして引数情報を取得
+        
+        Returns:
+            [{"name": str, "data_type": str, "size": int, "index": int}, ...]
+        """
+        from ..return_analyzer import ReturnAnalyzer
+        
+        self._debug_print(f"Getting params via decompile for '{function_name}'")
+        
+        analyzer = ReturnAnalyzer(program, debug=self.debug)
+        try:
+            analysis = analyzer.analyze_function_by_name(function_name, timeout)
+            if analysis and analysis.parameters:
+                self._debug_print(f"Found {len(analysis.parameters)} parameters")
+                return analysis.parameters
+            self._debug_print("No parameters found")
+            return []
+        finally:
+            analyzer.dispose()
+    
     def check(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
         binary1_name: str = "binary1",
         binary2_name: str = "binary2",
-        save_formula: bool = False
+        save_formula: bool = False,
+        type_fix_result: Optional[TypeFixResult] = None,
+        retry_count: int = 0
     ) -> EquivalenceResult:
-        """
-        2つの関数の等価性を判定
-        """
+        """2つの関数の等価性を判定"""
         start_time = time.time()
         upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         try:
-            # SMT式を構築
             smt_formula, return_var1, return_var2 = self.formula_builder.build_equivalence_formula(
                 analysis1, analysis2
             )
@@ -141,7 +171,6 @@ class EquivalenceChecker:
                 print(smt_formula)
                 print("=" * 60 + "\n")
             
-            # 利用可能なソルバーを確認
             available_solvers = self.solver_runner.get_available_solvers()
             if not available_solvers:
                 return EquivalenceResult(
@@ -153,38 +182,31 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message="No SMT solvers available",
-                    upper_bits_mode=upper_bits_mode
+                    upper_bits_mode=upper_bits_mode,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count
                 )
             
             if self.debug:
                 print(f"Available solvers: {available_solvers}")
-                print("Starting parallel solver execution...")
-            
-            # 並列実行
-            parallel_result = self.solver_runner.run_parallel(smt_formula)
-
-            # デバック用
-            if self.debug:
-                print("Using sequential execution for debugging...", flush=True)
-            parallel_result = self.solver_runner.run_sequential(smt_formula)
+                self._debug_print("Using sequential execution for debugging...")
+                parallel_result = self.solver_runner.run_sequential(smt_formula)
+            else:
+                parallel_result = self.solver_runner.run_parallel(smt_formula)
             
             total_time = time.time() - start_time
             
-            # 反例のフォーマット
             counterexample = None
             if parallel_result.is_equivalent is False:
                 raw_model = parallel_result.get_counterexample()
                 self._debug_print(f"Raw counterexample model: {raw_model}")
                 
                 if raw_model:
-                    # パラメータ名を収集（サフィックス付き）
                     param_names = []
                     for p in analysis1.parameters:
                         param_names.append(f"{p.get('name', 'param')}_1")
                     for p in analysis2.parameters:
                         param_names.append(f"{p.get('name', 'param')}_2")
-                    
-                    self._debug_print(f"Parameter names for formatting: {param_names}")
                     
                     counterexample = CounterexampleFormatter.format(
                         raw_model,
@@ -192,8 +214,6 @@ class EquivalenceChecker:
                         return_var1,
                         return_var2
                     )
-                else:
-                    self._debug_print("No model available from solvers")
             
             return EquivalenceResult(
                 is_equivalent=parallel_result.is_equivalent,
@@ -205,7 +225,9 @@ class EquivalenceChecker:
                 counterexample=counterexample,
                 smt_formula=smt_formula if save_formula else None,
                 total_time=total_time,
-                upper_bits_mode=upper_bits_mode
+                upper_bits_mode=upper_bits_mode,
+                type_fix_result=type_fix_result,
+                retry_count=retry_count
             )
         
         except Exception as e:
@@ -223,7 +245,9 @@ class EquivalenceChecker:
                 solver_results=ParallelResult(results=[]),
                 total_time=time.time() - start_time,
                 error_message=str(e),
-                upper_bits_mode=upper_bits_mode
+                upper_bits_mode=upper_bits_mode,
+                type_fix_result=type_fix_result,
+                retry_count=retry_count
             )
     
     def check_from_binaries(
@@ -233,24 +257,98 @@ class EquivalenceChecker:
         function_name1: str,
         function_name2: str,
         decompile_timeout: int = 60,
-        save_formula: bool = False
+        save_formula: bool = False,
+        retry_with_type_fix: bool = False
     ) -> EquivalenceResult:
-        """
-        2つのバイナリから関数を解析して等価性を判定
-        
-        Args:
-            program1: Ghidra Program オブジェクト1
-            program2: Ghidra Program オブジェクト2
-            function_name1: 関数名1
-            function_name2: 関数名2
-            decompile_timeout: デコンパイルのタイムアウト
-            save_formula: SMT式を結果に含めるか
-        """
-        from ..return_analyzer import ReturnAnalyzer
-        
+        """2つのバイナリから関数を解析して等価性を判定"""
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
         binary2_name = program2.getName() if hasattr(program2, 'getName') else "binary2"
+        
+        type_fix_result = TypeFixResult()
+        retry_count = 0
+        
+        if retry_with_type_fix:
+            self._debug_print("=== Pre-analysis: Getting parameter info via decompile ===")
+            
+            # 最初にデコンパイルして引数情報を取得
+            params1 = self._get_params_via_decompile(program1, function_name1, decompile_timeout)
+            params2 = self._get_params_via_decompile(program2, function_name2, decompile_timeout)
+            
+            self._debug_print(f"Binary 1 params: {params1}")
+            self._debug_print(f"Binary 2 params: {params2}")
+            
+            # 型修正が必要かチェック
+            type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
+            type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
+            
+            ret_needs_fix1, param_needs_fix1 = type_fixer1.check_needs_fix_with_params(
+                function_name1, params1
+            )
+            ret_needs_fix2, param_needs_fix2 = type_fixer2.check_needs_fix_with_params(
+                function_name2, params2
+            )
+            
+            self._debug_print(f"Binary 1 needs fix: return={ret_needs_fix1}, params={param_needs_fix1}")
+            self._debug_print(f"Binary 2 needs fix: return={ret_needs_fix2}, params={param_needs_fix2}")
+            
+            # 型修正を実行（引数情報を使用）
+            if ret_needs_fix1 or param_needs_fix1 or ret_needs_fix2 or param_needs_fix2:
+                self._debug_print("=== Fixing function signatures ===")
+                type_fix_result.retry_phase = "signature_fix"
+                
+                if ret_needs_fix1 or param_needs_fix1:
+                    ret_fixed1, param_fixed1 = type_fixer1.fix_function_signature_by_name(
+                        function_name1,
+                        params1,
+                        fix_return_type=ret_needs_fix1,
+                        fix_param_types=param_needs_fix1
+                    )
+                    type_fix_result.return_type_fixed_binary1 = ret_fixed1
+                    type_fix_result.param_types_fixed_binary1 = param_fixed1
+                
+                if ret_needs_fix2 or param_needs_fix2:
+                    ret_fixed2, param_fixed2 = type_fixer2.fix_function_signature_by_name(
+                        function_name2,
+                        params2,
+                        fix_return_type=ret_needs_fix2,
+                        fix_param_types=param_needs_fix2
+                    )
+                    type_fix_result.return_type_fixed_binary2 = ret_fixed2
+                    type_fix_result.param_types_fixed_binary2 = param_fixed2
+                
+                retry_count += 1
+        
+        # 等価性判定を実行
+        result = self._analyze_and_check(
+            program1, program2,
+            function_name1, function_name2,
+            decompile_timeout, save_formula,
+            binary1_name, binary2_name,
+            type_fix_result=type_fix_result,
+            retry_count=retry_count
+        )
+        
+        result.total_time = time.time() - start_time
+        return result
+    
+    def _analyze_and_check(
+        self,
+        program1,
+        program2,
+        function_name1: str,
+        function_name2: str,
+        decompile_timeout: int,
+        save_formula: bool,
+        binary1_name: str,
+        binary2_name: str,
+        type_fix_result: Optional[TypeFixResult] = None,
+        retry_count: int = 0
+    ) -> EquivalenceResult:
+        """関数を解析して等価性をチェック（内部メソッド）"""
+        from ..return_analyzer import ReturnAnalyzer
+        
+        start_time = time.time()
         upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         # 関数1を解析
@@ -267,7 +365,9 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name1}' not found in {binary1_name}",
-                    upper_bits_mode=upper_bits_mode
+                    upper_bits_mode=upper_bits_mode,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count
                 )
         finally:
             analyzer1.dispose()
@@ -286,14 +386,17 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name2}' not found in {binary2_name}",
-                    upper_bits_mode=upper_bits_mode
+                    upper_bits_mode=upper_bits_mode,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count
                 )
         finally:
             analyzer2.dispose()
         
-        # 等価性チェック
         return self.check(
             analysis1, analysis2,
             binary1_name, binary2_name,
-            save_formula
+            save_formula,
+            type_fix_result=type_fix_result,
+            retry_count=retry_count
         )

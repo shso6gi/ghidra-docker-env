@@ -19,7 +19,7 @@ class CVC5Solver(SMTSolver):
     
     def __init__(self, timeout: int = 180, debug: bool = False):
         super().__init__(timeout)
-        self._cvc5: Optional[Any] = None  # 型を Any として宣言
+        self._cvc5: Optional[Any] = None
         self._solver: Optional[Any] = None
         self._tm: Optional[Any] = None
         self._model: Optional[Dict[str, Any]] = None

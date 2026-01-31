@@ -60,6 +60,12 @@ def parse_arguments():
   # ビット幅が異なる場合、上位ビットを0に制約して比較
   python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --upper-bits-zero
 
+  # 型修正リトライを有効にして比較（longlong/undefined → int）
+  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --retry-with-int
+
+  # デバッグモードで詳細を確認
+  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f target_func --retry-with-int -d -v
+
   # 詳細出力とSMT式保存
   python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func -v --save-formula
 
@@ -167,6 +173,13 @@ def parse_arguments():
         default="dec",
         help="定数の表示形式 (dec: 10進数, hex: 16進数, auto: 自動判定)"
     )
+
+    # === 型修正リトライオプション ===
+    parser.add_argument(
+        "--retry-with-int",
+        action="store_true",
+        help="等価性判定に失敗した場合、longlong/undefined型をint型に変更してリトライする"
+    )
     
     return parser.parse_args()
 
@@ -254,7 +267,7 @@ def analyze_and_output(
 def run_equivalence_check(args):
     """等価性判定を実行"""
     import pyghidra
-    from .equivalence import EquivalenceChecker
+    from .equivalence import EquivalenceChecker, TypeFixerConfig
     
     binary1_path, binary2_path = args.equiv
     function_names = get_target_functions(args)
@@ -272,6 +285,9 @@ def run_equivalence_check(args):
     # 上位ビットの制約モードを取得
     upper_bits_zero = getattr(args, 'upper_bits_zero', False)
     
+    # 型修正リトライオプションを取得
+    retry_with_type_fix = getattr(args, 'retry_with_int', False)
+    
     if not args.quiet:
         print(f"等価性判定モード")
         print(f"  Binary 1: {binary1_path}")
@@ -280,16 +296,21 @@ def run_equivalence_check(args):
         print(f"  Function 2: {func_name2}")
         print(f"  Timeout: {args.equiv_timeout}秒")
         print(f"  Upper bits mode: {'zero' if upper_bits_zero else 'free (random)'}")
+        print(f"  Retry with int type fix: {'enabled' if retry_with_type_fix else 'disabled'}")
         print()
     
     # Ghidra起動
     pyghidra.start(install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None)
     
-    # 等価性チェッカーを初期化（upper_bits_zeroを渡す）
+    # 型修正の設定（将来的に引数で制御可能にする場合はここを拡張）
+    type_fixer_config = TypeFixerConfig()
+    
+    # 等価性チェッカーを初期化
     checker = EquivalenceChecker(
         timeout=args.equiv_timeout,
         debug=args.debug,
-        upper_bits_zero=upper_bits_zero
+        upper_bits_zero=upper_bits_zero,
+        type_fixer_config=type_fixer_config
     )
     
     # 利用可能なソルバーを表示
@@ -321,21 +342,21 @@ def run_equivalence_check(args):
                 # 自動解析を実行 (open_programは自動で行っていたため明示的に呼び出し)
                 pyghidra.analyze(program1)
                 
-                # Binary 2 をロード (ネストすることで同時に開いておく)
+                # Binary 2 をロード
                 loader2 = pyghidra.program_loader().project(project).source(binary2_path).name("binary2")
                 with loader2.load() as result2:
                     program2 = result2.getPrimaryDomainObject()
-                    
                     pyghidra.analyze(program2)
                     
-                    # 等価性判定を実行
+                    # 等価性判定を実行（リトライオプションを渡す）
                     result = checker.check_from_binaries(
                         program1,
                         program2,
                         func_name1,
                         func_name2,
                         decompile_timeout=args.timeout,
-                        save_formula=args.save_formula
+                        save_formula=args.save_formula,
+                        retry_with_type_fix=retry_with_type_fix
                     )
     
     # 結果を出力

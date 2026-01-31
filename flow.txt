@@ -1,0 +1,11 @@
+等価性判定実行
+    ↓ (is_equivalent=False)
+戻り値の型を確認（両バイナリ）
+    ↓ (longlong/undefined等の場合)
+int型に変更 → 再デコンパイル → 再判定
+    ↓ (まだis_equivalent=False)
+引数の型を確認（両バイナリ）
+    ↓ (longlong/undefined等の引数がある場合)
+int型に変更 → 再デコンパイル → 再判定
+    ↓
+最終結果を返す
