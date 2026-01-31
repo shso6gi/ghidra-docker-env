@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """型修正モジュール - 等価性判定のリトライ時に使用"""
 
-from typing import List, Set, Optional, Tuple, Dict, Any
+from typing import List, Set, Optional, Tuple, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from contextlib import contextmanager
+
+# Pylance等の静的解析用スタブ
+if TYPE_CHECKING:
+    from ghidra.program.model.listing import Program, Function, Parameter # type: ignore[import]
+    from ghidra.program.model.data import DataType, DataTypeManager # type: ignore[import]
 
 
 @dataclass
@@ -47,13 +52,15 @@ class TypeFixer:
     
     def __init__(
         self,
-        program,
+        program,  # type: Program
         config: Optional[TypeFixerConfig] = None,
         debug: bool = False
     ):
         self.program = program
         self.config = config or TypeFixerConfig()
         self.debug = debug
+        # プログラム固有のint型をキャッシュ
+        self._cached_int_type = None
     
     def _debug_print(self, msg: str):
         if self.debug:
@@ -73,6 +80,25 @@ class TypeFixer:
             self._debug_print(f"Rolled back transaction: {tx_id} due to {e}")
             raise
     
+    def _resolve_program_int_type(self):
+        """
+        現在のプログラムアーキテクチャに適したint型を取得する。
+        DataTypeManagerから '/int' を検索し、なければ汎用のIntegerDataTypeを使用。
+        """
+        from ghidra.program.model.data import IntegerDataType  # type: ignore[import]
+        
+        dtm = self.program.getDataTypeManager()
+        # アーキテクチャ固有のint（サイズが正しく定義されているもの）を探す
+        int_type = dtm.getDataType("/int")
+        
+        if int_type is None:
+            # 見つからない場合は汎用シングルトンを使用
+            self._debug_print("Program-specific '/int' not found. Using generic IntegerDataType.")
+            return IntegerDataType.dataType
+        
+        self._debug_print(f"Using program-specific int type: {int_type}")
+        return int_type
+    
     def _should_fix_type(self, type_str: Optional[str]) -> bool:
         """型を修正すべきか判定"""
         if type_str is None:
@@ -88,13 +114,14 @@ class TypeFixer:
         return False
     
     def _get_replacement_data_type(self):
-        """置換先のデータ型を取得"""
-        from ghidra.program.model.data import IntegerDataType # type: ignore[import]
-        return IntegerDataType.dataType
+        """置換先のデータ型を取得（キャッシュ済み）"""
+        if self._cached_int_type is None:
+            self._cached_int_type = self._resolve_program_int_type()
+        return self._cached_int_type
     
     def _resolve_data_type(self, type_str: Optional[str]):
         """型名からGhidraのDataTypeを解決"""
-        from ghidra.program.model.data import ( # type: ignore[import]
+        from ghidra.program.model.data import (  # type: ignore[import]
             IntegerDataType,
             UnsignedIntegerDataType,
             LongDataType,
@@ -105,14 +132,14 @@ class TypeFixer:
         )
         
         if type_str is None:
-            return IntegerDataType.dataType
+            return self._get_replacement_data_type()
         
         type_lower = type_str.lower().strip()
         
         # 修正対象のパターンにマッチする場合はintに置換
         if self._should_fix_type(type_str):
             self._debug_print(f"Resolving '{type_str}' -> int (pattern match)")
-            return IntegerDataType.dataType
+            return self._get_replacement_data_type()
         
         # 通常の型マッピング
         if "unsigned int" in type_lower or "uint" in type_lower:
@@ -128,11 +155,11 @@ class TypeFixer:
         if "void" in type_lower:
             return VoidDataType.dataType
         if "int" in type_lower:
-            return IntegerDataType.dataType
+            return self._get_replacement_data_type()
         
         # デフォルトはint
         self._debug_print(f"Unknown type '{type_str}', defaulting to int")
-        return IntegerDataType.dataType
+        return self._get_replacement_data_type()
     
     def _find_function_by_name(self, function_name: str):
         """関数名から関数オブジェクトを取得"""
@@ -206,7 +233,13 @@ class TypeFixer:
         # 引数情報から修正が必要かチェック
         param_needs_fix = False
         for i, info in enumerate(param_info):
-            type_str = info.get("data_type", "")
+            # DataTypeオブジェクトがある場合はそちらを優先
+            raw_dt = info.get("data_type_obj")
+            if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                type_str = str(raw_dt)
+            else:
+                type_str = info.get("data_type", "")
+            
             if self._should_fix_type(type_str):
                 self._debug_print(
                     f"Param {i} '{info.get('name', 'unknown')}': "
@@ -216,6 +249,17 @@ class TypeFixer:
         
         return (return_needs_fix, param_needs_fix)
     
+    def _is_type_equivalent(self, type1, type2) -> bool:
+        """2つの型が等価かどうかを安全に判定"""
+        if type1 is None or type2 is None:
+            return type1 is type2
+        
+        try:
+            return type1.isEquivalent(type2)
+        except Exception:
+            # isEquivalentが失敗した場合は文字列比較にフォールバック
+            return str(type1) == str(type2)
+    
     def fix_function_signature(
         self,
         function,
@@ -224,25 +268,29 @@ class TypeFixer:
         fix_param_types: bool = True
     ) -> Tuple[bool, bool]:
         """
-        関数のシグネチャを修正（戻り値と引数）
+        関数のシグネチャをアトミックに修正（戻り値と引数）
+        
+        updateFunctionによる一括アトミック更新を使用し、
+        DataTypeオブジェクトを可能な限り維持します。
         
         Args:
             function: Ghidra Function オブジェクト
             param_info: 引数情報のリスト
-                [{"name": str, "data_type": str, "size": int}, ...]
+                [{"name": str, "data_type": str, "data_type_obj": DataType, "size": int}, ...]
+                ※ "data_type_obj" にDataTypeオブジェクトを渡すことを推奨
             fix_return_type: 戻り値の型を修正するか
             fix_param_types: 引数の型を修正するか
         
         Returns:
             (戻り値を修正したか, 引数を修正したか) のタプル
         """
-        from ghidra.program.model.symbol import SourceType # type: ignore[import]
-        from ghidra.program.model.listing import ( # type: ignore[import]
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import]
+        from ghidra.program.model.listing import (  # type: ignore[import]
             ParameterImpl,
             ReturnParameterImpl,
             Function as GhidraFunction
         )
-        from java.util import ArrayList # type: ignore[import]
+        from java.util import ArrayList  # type: ignore[import]
         
         function_name = function.getName()
         return_fixed = False
@@ -258,8 +306,12 @@ class TypeFixer:
         
         if fix_return_type and self._should_fix_type(current_return_type_str):
             new_return_type = self._get_replacement_data_type()
-            return_fixed = True
-            self._debug_print(f"Will fix return type: '{current_return_type_str}' -> 'int'")
+            # 実際に変更があるか確認
+            if not self._is_type_equivalent(current_return_type, new_return_type):
+                return_fixed = True
+                self._debug_print(f"Will fix return type: '{current_return_type_str}' -> 'int'")
+            else:
+                new_return_type = current_return_type
         else:
             new_return_type = current_return_type
         
@@ -272,42 +324,77 @@ class TypeFixer:
         
         for i, info in enumerate(param_info):
             param_name = info.get("name", f"param_{i}")
-            param_type_str = info.get("data_type", "int")
             
-            # 引数の型を決定
-            if fix_param_types and self._should_fix_type(param_type_str):
-                param_type = self._get_replacement_data_type()
-                self._debug_print(
-                    f"Param {i} '{param_name}': '{param_type_str}' -> 'int' (fixed)"
-                )
-                params_fixed = True
+            # DataTypeオブジェクトが渡されている場合はそれを優先使用（重要）
+            # これにより、ポインタ型や構造体が文字列変換で失われるのを防ぐ
+            raw_dt = info.get("data_type_obj")
+            if raw_dt is None:
+                # 後方互換性：オブジェクトがない場合はキー "data_type" の文字列を見る
+                raw_dt = info.get("data_type")
+            
+            # 型修復判定
+            final_dt = None
+            type_str = ""
+            
+            # raw_dt が DataType オブジェクトの場合
+            if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                type_str = str(raw_dt)
+                if fix_param_types and self._should_fix_type(type_str):
+                    new_dt = self._get_replacement_data_type()
+                    if not self._is_type_equivalent(raw_dt, new_dt):
+                        final_dt = new_dt
+                        params_fixed = True
+                        self._debug_print(
+                            f"Param {i} '{param_name}': '{type_str}' -> 'int' (fixed)"
+                        )
+                    else:
+                        final_dt = raw_dt
+                else:
+                    final_dt = raw_dt  # 既存の型を維持
+                    self._debug_print(
+                        f"Param {i} '{param_name}': '{type_str}' (preserved)"
+                    )
+            
+            # raw_dt が文字列、または None の場合（フォールバック）
             else:
-                param_type = self._resolve_data_type(param_type_str)
-                self._debug_print(
-                    f"Param {i} '{param_name}': '{param_type_str}' -> '{param_type}' (resolved)"
-                )
+                type_str = str(raw_dt) if raw_dt else "undefined"
+                if fix_param_types and self._should_fix_type(type_str):
+                    final_dt = self._get_replacement_data_type()
+                    params_fixed = True
+                    self._debug_print(
+                        f"Param {i} '{param_name}': '{type_str}' -> 'int' (fixed from string)"
+                    )
+                else:
+                    final_dt = self._resolve_data_type(type_str)
+                    self._debug_print(
+                        f"Param {i} '{param_name}': '{type_str}' -> '{final_dt}' (resolved)"
+                    )
             
             param_impl = ParameterImpl(
                 param_name,
-                param_type,
+                final_dt,
                 self.program
             )
             new_params.add(param_impl)
         
         self._debug_print(f"Total params to set: {new_params.size()}")
         
-        # 変更がある場合のみ更新
+        # 変更がある場合のみ更新（アトミック更新）
         if return_fixed or params_fixed or new_params.size() > 0:
             with self._transaction(f"Fix function signature of {function_name}"):
-                self._debug_print("Calling updateFunction...")
-                function.updateFunction(
-                    calling_convention,
-                    return_param,
-                    new_params,
-                    GhidraFunction.FunctionUpdateType.DYNAMIC_STORAGE_FORMAL_PARAMS,
-                    True,
-                    SourceType.USER_DEFINED
-                )
+                self._debug_print("Calling updateFunction (Atomic Update)...")
+                try:
+                    function.updateFunction(
+                        calling_convention,
+                        return_param,
+                        new_params,
+                        GhidraFunction.FunctionUpdateType.DYNAMIC_STORAGE_FORMAL_PARAMS,
+                        True,  # force: 競合があっても強制適用
+                        SourceType.USER_DEFINED
+                    )
+                except Exception as e:
+                    self._debug_print(f"Error updating function {function_name}: {e}")
+                    raise
             
             self._debug_print(
                 f"Fixed function signature of '{function_name}': "
@@ -349,12 +436,13 @@ class TypeFixer:
     # 以下は後方互換性のために残す
     def fix_return_type(self, function) -> bool:
         """戻り値の型をint型に修正（引数情報なし）"""
-        # 既存のパラメータを取得（空の可能性あり）
+        # 既存のパラメータをDataTypeオブジェクトとして取得（重要）
         params = []
         for param in function.getParameters():
             params.append({
                 "name": param.getName(),
                 "data_type": str(param.getDataType()) if param.getDataType() else "int",
+                "data_type_obj": param.getDataType(),  # DataTypeオブジェクトを維持
                 "size": param.getSize()
             })
         
@@ -370,6 +458,7 @@ class TypeFixer:
             params.append({
                 "name": param.getName(),
                 "data_type": str(param.getDataType()) if param.getDataType() else "int",
+                "data_type_obj": param.getDataType(),  # DataTypeオブジェクトを維持
                 "size": param.getSize()
             })
         
