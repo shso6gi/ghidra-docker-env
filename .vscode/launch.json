@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug function_tracer_pcode - equiv divide",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.function_tracer_pcode.main",
+            "args": [
+                "--equiv",
+                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-arm64-clang-O0",
+                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-x86_64-gcc-O0",
+                "-f",
+                "divide",
+                "--retry-with-int",
+                "-d",
+                "-v"
+            ],
+            "cwd": "/workspaces/ghidra-docker-env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}
