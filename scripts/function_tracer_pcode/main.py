@@ -93,8 +93,8 @@ def parse_arguments():
     parser.add_argument(
         "--equiv-timeout",
         type=int,
-        default=180,
-        help="等価性判定のタイムアウト（秒）デフォルト: 180秒（3分）"
+        default=10,
+        help="等価性判定のタイムアウト（秒）デフォルト: 10秒"
     )
     
     parser.add_argument(

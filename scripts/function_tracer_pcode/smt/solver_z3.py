@@ -10,7 +10,7 @@ from .solver_interface import SMTSolver, SolverResult, SolverStatus
 class Z3Solver(SMTSolver):
     """Z3 SMTソルバー"""
     
-    def __init__(self, timeout: int = 180, debug: bool = False):
+    def __init__(self, timeout: int = 10, debug: bool = False):
         super().__init__(timeout)
         self._z3 = None
         self._solver = None

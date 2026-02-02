@@ -69,7 +69,7 @@ class ParallelSolverRunner:
     
     def __init__(
         self,
-        timeout: int = 180,
+        timeout: int = 10,
         solver_classes: Optional[List[Type[SMTSolver]]] = None,
         debug: bool = False
     ):

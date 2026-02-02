@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class CVC5Solver(SMTSolver):
     """CVC5 SMTソルバー"""
     
-    def __init__(self, timeout: int = 180, debug: bool = False):
+    def __init__(self, timeout: int = 10, debug: bool = False):
         super().__init__(timeout)
         self._cvc5: Optional[Any] = None
         self._solver: Optional[Any] = None

@@ -47,7 +47,7 @@ class SolverResult:
 class SMTSolver(ABC):
     """SMTソルバーの抽象基底クラス"""
     
-    def __init__(self, timeout: int = 180):
+    def __init__(self, timeout: int = 10):
         """
         Args:
             timeout: タイムアウト（秒）
