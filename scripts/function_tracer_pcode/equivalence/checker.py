@@ -14,6 +14,51 @@ from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 
 
 @dataclass
+class FunctionSignature:
+    """関数シグネチャ情報"""
+    return_type: Optional[str] = None
+    parameters: Optional[List[Dict[str, Any]]] = None
+    
+    def format_return_type(self) -> str:
+        """戻り値の型をフォーマット"""
+        return self.return_type if self.return_type else "unknown"
+    
+    def format_parameters(self) -> str:
+        """引数リストをフォーマット（例: (int a, long b)）"""
+        if not self.parameters:
+            return "(void)"
+        
+        param_strs = []
+        for p in self.parameters:
+            dtype = p.get("data_type", "unknown")
+            name = p.get("name", "")
+            if name:
+                param_strs.append(f"{dtype} {name}")
+            else:
+                param_strs.append(dtype)
+        
+        return f"({', '.join(param_strs)})"
+    
+    def format_full(self, func_name: str) -> str:
+        """完全なシグネチャをフォーマット（例: int func(int a, long b)）"""
+        return f"{self.format_return_type()} {func_name}{self.format_parameters()}"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "return_type": self.return_type,
+            "parameters": self.parameters
+        }
+    
+    @classmethod
+    def from_analysis(cls, analysis: FunctionReturnAnalysis) -> 'FunctionSignature':
+        """FunctionReturnAnalysisからシグネチャを抽出"""
+        return cls(
+            return_type=analysis.return_type,
+            parameters=analysis.parameters.copy() if analysis.parameters else None
+        )
+
+
+@dataclass
 class EquivalenceResult:
     """等価性判定の結果"""
     is_equivalent: Optional[bool]
@@ -29,6 +74,9 @@ class EquivalenceResult:
     upper_bits_mode: str = "free"
     type_fix_result: Optional[TypeFixResult] = None
     retry_count: int = 0
+    # 関数シグネチャ情報（オリジナル）
+    function1_signature: Optional[FunctionSignature] = None
+    function2_signature: Optional[FunctionSignature] = None
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -61,6 +109,8 @@ class EquivalenceResult:
             "function2_name": self.function2_name,
             "binary1_name": self.binary1_name,
             "binary2_name": self.binary2_name,
+            "function1_signature": self.function1_signature.to_dict() if self.function1_signature else None,
+            "function2_signature": self.function2_signature.to_dict() if self.function2_signature else None,
             "solver_results": self.solver_results.to_dict() if self.solver_results else None,
             "counterexample": self.counterexample.to_string("json") if self.counterexample else None,
             "total_time": self.total_time,
@@ -76,10 +126,22 @@ class EquivalenceResult:
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")
         lines.append("=" * 70)
+        
+        # Binary 1 の情報
         lines.append(f"Binary 1: {self.binary1_name}")
         lines.append(f"Function 1: {self.function1_name}")
+        if self.function1_signature:
+            lines.append(f"  Original signature: {self.function1_signature.format_full(self.function1_name)}")
+        
+        lines.append("")
+        
+        # Binary 2 の情報
         lines.append(f"Binary 2: {self.binary2_name}")
         lines.append(f"Function 2: {self.function2_name}")
+        if self.function2_signature:
+            lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
+        
+        lines.append("")
         lines.append(f"Upper bits mode: {self.upper_bits_mode}")
         
         if self.type_fix_result and self.type_fix_result.any_fix_applied():
@@ -130,7 +192,7 @@ class EquivalenceChecker:
     
     def __init__(
         self,
-        timeout: int = 180,
+        timeout: int = 10,
         debug: bool = False,
         upper_bits_zero: bool = False,
         type_fixer_config: Optional[TypeFixerConfig] = None
@@ -215,11 +277,19 @@ class EquivalenceChecker:
         binary2_name: str = "binary2",
         save_formula: bool = False,
         type_fix_result: Optional[TypeFixResult] = None,
-        retry_count: int = 0
+        retry_count: int = 0,
+        original_signature1: Optional[FunctionSignature] = None,
+        original_signature2: Optional[FunctionSignature] = None
     ) -> EquivalenceResult:
         """2つの関数の等価性を判定"""
         start_time = time.time()
         upper_bits_mode = "zero" if self.upper_bits_zero else "free"
+        
+        # シグネチャが渡されなかった場合は現在の解析結果から取得
+        if original_signature1 is None:
+            original_signature1 = FunctionSignature.from_analysis(analysis1)
+        if original_signature2 is None:
+            original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
             smt_formula, return_var1, return_var2 = self.formula_builder.build_equivalence_formula(
@@ -246,7 +316,9 @@ class EquivalenceChecker:
                     error_message="No SMT solvers available",
                     upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
-                    retry_count=retry_count
+                    retry_count=retry_count,
+                    function1_signature=original_signature1,
+                    function2_signature=original_signature2
                 )
             
             if self.debug:
@@ -289,7 +361,9 @@ class EquivalenceChecker:
                 total_time=total_time,
                 upper_bits_mode=upper_bits_mode,
                 type_fix_result=type_fix_result,
-                retry_count=retry_count
+                retry_count=retry_count,
+                function1_signature=original_signature1,
+                function2_signature=original_signature2
             )
         
         except Exception as e:
@@ -309,7 +383,9 @@ class EquivalenceChecker:
                 error_message=str(e),
                 upper_bits_mode=upper_bits_mode,
                 type_fix_result=type_fix_result,
-                retry_count=retry_count
+                retry_count=retry_count,
+                function1_signature=original_signature1,
+                function2_signature=original_signature2
             )
     
     def check_from_binaries(
@@ -337,6 +413,10 @@ class EquivalenceChecker:
         
         type_fix_result = TypeFixResult()
         
+        # オリジナルのシグネチャを保存（型修正前）
+        original_signature1: Optional[FunctionSignature] = None
+        original_signature2: Optional[FunctionSignature] = None
+        
         # ============================================
         # Phase 0: 型修正なしで等価性判定
         # ============================================
@@ -351,8 +431,13 @@ class EquivalenceChecker:
             decompile_timeout, save_formula,
             binary1_name, binary2_name,
             type_fix_result=type_fix_result,
-            retry_count=0
+            retry_count=0,
+            capture_signature=True  # 初回はシグネチャをキャプチャ
         )
+        
+        # オリジナルのシグネチャを保存
+        original_signature1 = result.function1_signature
+        original_signature2 = result.function2_signature
         
         # 等価の場合は終了
         if result.is_equivalent is True:
@@ -431,14 +516,16 @@ class EquivalenceChecker:
                 type_fix_result.return_type_fixed_binary2 = ret_fixed2
                 self._debug_print(f"Binary 2 return type fixed: {ret_fixed2}")
             
-            # 再解析と等価性判定
+            # 再解析と等価性判定（オリジナルシグネチャを引き継ぐ）
             result = self._analyze_and_check(
                 program1, program2,
                 function_name1, function_name2,
                 decompile_timeout, save_formula,
                 binary1_name, binary2_name,
                 type_fix_result=type_fix_result,
-                retry_count=1
+                retry_count=1,
+                original_signature1=original_signature1,
+                original_signature2=original_signature2
             )
             
             # 等価の場合は終了
@@ -494,14 +581,16 @@ class EquivalenceChecker:
                 type_fix_result.param_types_fixed_binary2 = param_fixed2
                 self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
             
-            # 再解析と等価性判定
+            # 再解析と等価性判定（オリジナルシグネチャを引き継ぐ）
             result = self._analyze_and_check(
                 program1, program2,
                 function_name1, function_name2,
                 decompile_timeout, save_formula,
                 binary1_name, binary2_name,
                 type_fix_result=type_fix_result,
-                retry_count=2
+                retry_count=2,
+                original_signature1=original_signature1,
+                original_signature2=original_signature2
             )
             
             # 結果のログ出力
@@ -537,7 +626,10 @@ class EquivalenceChecker:
         binary1_name: str,
         binary2_name: str,
         type_fix_result: Optional[TypeFixResult] = None,
-        retry_count: int = 0
+        retry_count: int = 0,
+        capture_signature: bool = False,
+        original_signature1: Optional[FunctionSignature] = None,
+        original_signature2: Optional[FunctionSignature] = None
     ) -> EquivalenceResult:
         """関数を解析して等価性をチェック（内部メソッド）"""
         from ..return_analyzer import ReturnAnalyzer
@@ -562,7 +654,9 @@ class EquivalenceChecker:
                     error_message=f"Function '{function_name1}' not found in {binary1_name}",
                     upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
-                    retry_count=retry_count
+                    retry_count=retry_count,
+                    function1_signature=original_signature1,
+                    function2_signature=original_signature2
                 )
         finally:
             analyzer1.dispose()
@@ -584,10 +678,17 @@ class EquivalenceChecker:
                     error_message=f"Function '{function_name2}' not found in {binary2_name}",
                     upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
-                    retry_count=retry_count
+                    retry_count=retry_count,
+                    function1_signature=original_signature1,
+                    function2_signature=original_signature2
                 )
         finally:
             analyzer2.dispose()
+        
+        # シグネチャをキャプチャする場合（初回解析時）
+        if capture_signature:
+            original_signature1 = FunctionSignature.from_analysis(analysis1)
+            original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         self._debug_print("Running equivalence check...")
         return self.check(
@@ -595,5 +696,7 @@ class EquivalenceChecker:
             binary1_name, binary2_name,
             save_formula,
             type_fix_result=type_fix_result,
-            retry_count=retry_count
+            retry_count=retry_count,
+            original_signature1=original_signature1,
+            original_signature2=original_signature2
         )

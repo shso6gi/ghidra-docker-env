@@ -43,19 +43,42 @@ class FunctionReturnAnalysis:
         function_name: str,
         entry_point: str,
         parameters: List[Dict],
-        returns: List[ReturnInfo]
+        returns: List[ReturnInfo],
+        return_type: Optional[str] = None
     ):
         self.function_name = function_name
         self.entry_point = entry_point
         self.parameters = parameters
         self.returns = returns
+        self.return_type = return_type
+    
+    def get_signature_string(self) -> str:
+        """関数シグネチャを文字列で取得（例: int func(int a, long b)）"""
+        ret_type = self.return_type or "unknown"
+        
+        if not self.parameters:
+            params_str = "void"
+        else:
+            param_strs = []
+            for p in self.parameters:
+                dtype = p.get("data_type", "unknown")
+                name = p.get("name", "")
+                if name:
+                    param_strs.append(f"{dtype} {name}")
+                else:
+                    param_strs.append(dtype)
+            params_str = ", ".join(param_strs)
+        
+        return f"{ret_type} {self.function_name}({params_str})"
     
     def to_dict(self) -> Dict:
         return {
             "function_name": self.function_name,
             "entry_point": self.entry_point,
+            "return_type": self.return_type,
             "parameters": self.parameters,
             "returns": [r.to_dict() for r in self.returns],
+            "signature": self.get_signature_string(),
         }
 
 
@@ -107,6 +130,10 @@ class ReturnAnalyzer:
         parameters = self._collect_parameters(high_function)
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
         
+        # 戻り値の型を取得
+        return_type = self._get_return_type(high_function)
+        self._debug_print(f"Return type: {return_type}")
+        
         return_infos = []
         return_ops = tracer.find_return_ops()
         
@@ -121,8 +148,21 @@ class ReturnAnalyzer:
             function_name=function.getName(),
             entry_point=str(function.getEntryPoint()),
             parameters=parameters,
-            returns=return_infos
+            returns=return_infos,
+            return_type=return_type
         )
+    
+    def _get_return_type(self, high_function) -> Optional[str]:
+        """戻り値の型を取得"""
+        try:
+            func_proto = high_function.getFunctionPrototype()
+            if func_proto:
+                ret_type = func_proto.getReturnType()
+                if ret_type:
+                    return str(ret_type)
+        except Exception as e:
+            self._debug_print(f"Failed to get return type: {e}")
+        return None
     
     def _collect_parameters(self, high_function) -> List[Dict]:
         params = []
