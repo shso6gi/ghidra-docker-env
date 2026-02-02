@@ -64,7 +64,7 @@ class ParallelSolverRunner:
         Z3Solver,
         # BoolectorSolver,
         # Yices2Solver,
-        CVC5Solver,
+        # CVC5Solver,
     ]
     
     def __init__(
