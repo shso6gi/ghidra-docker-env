@@ -2,7 +2,7 @@
 """Z3ソルバー実装（デバッグ強化版）"""
 
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Callable
 
 from .solver_interface import SMTSolver, SolverResult, SolverStatus
 
@@ -53,8 +53,11 @@ class Z3Solver(SMTSolver):
         
         try:
             z3 = self._z3
-            
-            self._solver = z3.Solver()
+            if z3 is None:
+                raise RuntimeError("Z3 module not loaded")
+
+            solver = z3.Solver()
+            self._solver = solver
             self._solver.set("timeout", self.timeout * 1000)  # ミリ秒
             
             # SMT-LIBスクリプトをパース
@@ -123,11 +126,14 @@ class Z3Solver(SMTSolver):
             
             self._debug_print(f"  Model var: {name} = {value} (type: {type(value).__name__})")
             
-            # ビットベクトルを整数に変換
-            if hasattr(value, 'as_long'):
-                result[name] = value.as_long()
-            elif hasattr(value, 'as_signed_long'):
-                result[name] = value.as_signed_long()
+            # ビットベクトルを整数に変換（getattr使用で型チェック問題を回避）
+            as_long: Optional[Callable[[], int]] = getattr(value, 'as_long', None)
+            as_signed_long: Optional[Callable[[], int]] = getattr(value, 'as_signed_long', None)
+            
+            if as_long is not None:
+                result[name] = as_long()
+            elif as_signed_long is not None:
+                result[name] = as_signed_long()
             else:
                 result[name] = str(value)
         

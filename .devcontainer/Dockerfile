@@ -68,9 +68,9 @@ RUN python3 -m pip install --upgrade pip && \
     pip3 install --no-cache-dir \
     pyghidra \
     ipython \
-    z3-solver \
-    pyboolector \
-    cvc5
+    z3-solver
+    # pyboolector \
+    # cvc5
 
 WORKDIR /workspace
 
