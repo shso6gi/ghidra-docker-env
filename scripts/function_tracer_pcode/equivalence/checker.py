@@ -30,30 +30,6 @@ class EquivalenceResult:
     type_fix_result: Optional[TypeFixResult] = None
     retry_count: int = 0
     
-    def is_timeout(self) -> bool:
-        """タイムアウトで結果が不明かどうかを判定"""
-        if self.is_equivalent is not None:
-            return False
-        if not self.solver_results or not self.solver_results.results:
-            return False
-        # いずれかのソルバーがタイムアウトしたかチェック
-        for sr in self.solver_results.results:
-            if sr.status == SolverStatus.TIMEOUT:
-                return True
-        return False
-    
-    def is_unknown(self) -> bool:
-        """結果が不明（タイムアウト含む）かどうかを判定"""
-        return self.is_equivalent is None and self.error_message is None
-    
-    def has_critical_error(self) -> bool:
-        """致命的なエラー（リトライ不可能）があるかどうかを判定"""
-        if self.error_message is None:
-            return False
-        # 関数が見つからないなどのエラーはリトライしても解決しない
-        critical_keywords = ["not found", "not available", "No SMT solvers"]
-        return any(kw in self.error_message for kw in critical_keywords)
-    
     def to_dict(self) -> Dict[str, Any]:
         return {
             "is_equivalent": self.is_equivalent,
@@ -68,7 +44,6 @@ class EquivalenceResult:
             "upper_bits_mode": self.upper_bits_mode,
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
-            "is_timeout": self.is_timeout(),
         }
     
     def to_string(self, verbose: bool = False) -> str:
@@ -92,10 +67,7 @@ class EquivalenceResult:
         if self.error_message:
             lines.append(f"ERROR: {self.error_message}")
         elif self.is_equivalent is None:
-            if self.is_timeout():
-                lines.append("Result: TIMEOUT (could not determine equivalence within time limit)")
-            else:
-                lines.append("Result: UNKNOWN (could not determine equivalence)")
+            lines.append("Result: UNKNOWN (could not determine equivalence)")
         elif self.is_equivalent:
             lines.append("Result: EQUIVALENT ✓")
         else:
@@ -172,40 +144,6 @@ class EquivalenceChecker:
             return []
         finally:
             analyzer.dispose()
-    
-    def _should_retry(self, result: EquivalenceResult) -> bool:
-        """
-        リトライすべきかどうかを判定
-        
-        リトライする条件:
-        - 非等価 (is_equivalent == False)
-        - タイムアウトまたは不明 (is_equivalent == None かつ致命的エラーなし)
-        
-        リトライしない条件:
-        - 等価 (is_equivalent == True)
-        - 致命的エラー（関数が見つからないなど）
-        """
-        # 等価の場合はリトライ不要
-        if result.is_equivalent is True:
-            return False
-        
-        # 致命的エラーの場合はリトライしても解決しない
-        if result.has_critical_error():
-            return False
-        
-        # 非等価、タイムアウト、不明の場合はリトライ
-        return True
-    
-    def _get_retry_reason(self, result: EquivalenceResult) -> str:
-        """リトライの理由を取得（デバッグ用）"""
-        if result.is_equivalent is False:
-            return "NOT EQUIVALENT"
-        elif result.is_timeout():
-            return "TIMEOUT"
-        elif result.is_equivalent is None:
-            return "UNKNOWN"
-        else:
-            return "EQUIVALENT (no retry needed)"
     
     def check(
         self,
@@ -327,9 +265,9 @@ class EquivalenceChecker:
         
         型修正リトライが有効な場合のフロー:
         1. Phase 0: 型修正なしで等価性判定
-        2. Phase 1: 非等価またはタイムアウトの場合、戻り値の型を修正してリトライ
-        3. Phase 2: それでも非等価またはタイムアウトの場合、引数の型も修正してリトライ
-        4. 最終結果: それでも非等価の場合は反例を表示、タイムアウトの場合はその旨を表示
+        2. Phase 1: 非等価の場合、戻り値の型を修正してリトライ
+        3. Phase 2: それでも非等価の場合、引数の型も修正してリトライ
+        4. 最終結果: それでも非等価の場合、反例を表示
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -360,23 +298,16 @@ class EquivalenceChecker:
             result.total_time = time.time() - start_time
             return result
         
-        # リトライ判定
-        should_retry = self._should_retry(result)
-        retry_reason = self._get_retry_reason(result)
-        self._debug_print(f"Phase 0 result: {retry_reason}")
-        
-        # 致命的エラーまたはリトライ無効の場合は終了
-        if not should_retry:
-            self._debug_print("Phase 0: Critical error - cannot retry")
+        # エラーまたは型修正リトライが無効の場合はそのまま返す
+        if result.is_equivalent is None or not retry_with_type_fix:
+            if result.is_equivalent is None:
+                self._debug_print("Phase 0: Error occurred - returning result")
+            else:
+                self._debug_print("Phase 0: NOT EQUIVALENT - retry disabled, returning result")
             result.total_time = time.time() - start_time
             return result
         
-        if not retry_with_type_fix:
-            self._debug_print("Phase 0: Retry disabled - returning result")
-            result.total_time = time.time() - start_time
-            return result
-        
-        self._debug_print(f"Phase 0: {retry_reason} - preparing for type fix retry")
+        self._debug_print("Phase 0: NOT EQUIVALENT - preparing for type fix retry")
         
         # 型修正に必要な情報を事前に収集
         self._debug_print("Collecting parameter information for type fix...")
@@ -395,12 +326,6 @@ class EquivalenceChecker:
         
         self._debug_print(f"Binary 1 '{function_name1}' - return needs fix: {ret_needs_fix1}, params need fix: {param_needs_fix1}")
         self._debug_print(f"Binary 2 '{function_name2}' - return needs fix: {ret_needs_fix2}, params need fix: {param_needs_fix2}")
-        
-        # 型修正が不要な場合はPhase 0の結果を返す
-        if not (ret_needs_fix1 or ret_needs_fix2 or param_needs_fix1 or param_needs_fix2):
-            self._debug_print("No type fix needed for either binary - returning Phase 0 result")
-            result.total_time = time.time() - start_time
-            return result
         
         # ============================================
         # Phase 1: 戻り値の型を修正してリトライ
@@ -441,23 +366,18 @@ class EquivalenceChecker:
                 retry_count=1
             )
             
-            # 等価の場合は終了
+            # 等価またはエラーの場合は終了
             if result.is_equivalent is True:
                 self._debug_print("Phase 1: EQUIVALENT after return type fix")
                 result.total_time = time.time() - start_time
                 return result
             
-            # リトライ判定
-            should_retry = self._should_retry(result)
-            retry_reason = self._get_retry_reason(result)
-            self._debug_print(f"Phase 1 result: {retry_reason}")
-            
-            if not should_retry:
-                self._debug_print("Phase 1: Critical error - cannot continue to Phase 2")
+            if result.is_equivalent is None:
+                self._debug_print("Phase 1: Error occurred - returning result")
                 result.total_time = time.time() - start_time
                 return result
             
-            self._debug_print(f"Phase 1: {retry_reason} - will try Phase 2")
+            self._debug_print("Phase 1: Still NOT EQUIVALENT after return type fix")
         else:
             self._debug_print("Phase 1: Skipped - no return type fix needed")
         
@@ -504,20 +424,17 @@ class EquivalenceChecker:
                 retry_count=2
             )
             
-            # 結果のログ出力
             if result.is_equivalent is True:
                 self._debug_print("Phase 2: EQUIVALENT after parameter type fix")
             elif result.is_equivalent is False:
-                self._debug_print("Phase 2: NOT EQUIVALENT - returning final result with counterexample")
-            elif result.is_timeout():
-                self._debug_print("Phase 2: TIMEOUT - returning final result")
+                self._debug_print("Phase 2: Still NOT EQUIVALENT - returning final result with counterexample")
             else:
-                self._debug_print("Phase 2: UNKNOWN - returning final result")
+                self._debug_print("Phase 2: Error occurred - returning result")
         else:
             self._debug_print("Phase 2: Skipped - no parameter type fix needed")
         
         # ============================================
-        # 最終結果
+        # 最終結果（非等価の場合は反例を含む）
         # ============================================
         self._debug_print("=" * 60)
         self._debug_print("Final Result")
