@@ -260,74 +260,185 @@ class EquivalenceChecker:
         save_formula: bool = False,
         retry_with_type_fix: bool = False
     ) -> EquivalenceResult:
-        """2つのバイナリから関数を解析して等価性を判定"""
+        """
+        2つのバイナリから関数を解析して等価性を判定
+        
+        型修正リトライが有効な場合のフロー:
+        1. Phase 0: 型修正なしで等価性判定
+        2. Phase 1: 非等価の場合、戻り値の型を修正してリトライ
+        3. Phase 2: それでも非等価の場合、引数の型も修正してリトライ
+        4. 最終結果: それでも非等価の場合、反例を表示
+        """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
         binary2_name = program2.getName() if hasattr(program2, 'getName') else "binary2"
         
         type_fix_result = TypeFixResult()
-        retry_count = 0
         
-        if retry_with_type_fix:
-            self._debug_print("=== Pre-analysis: Getting parameter info via decompile ===")
-            
-            # 最初にデコンパイルして引数情報を取得
-            params1 = self._get_params_via_decompile(program1, function_name1, decompile_timeout)
-            params2 = self._get_params_via_decompile(program2, function_name2, decompile_timeout)
-            
-            self._debug_print(f"Binary 1 params: {params1}")
-            self._debug_print(f"Binary 2 params: {params2}")
-            
-            # 型修正が必要かチェック
-            type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
-            type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
-            
-            ret_needs_fix1, param_needs_fix1 = type_fixer1.check_needs_fix_with_params(
-                function_name1, params1
-            )
-            ret_needs_fix2, param_needs_fix2 = type_fixer2.check_needs_fix_with_params(
-                function_name2, params2
-            )
-            
-            self._debug_print(f"Binary 1 needs fix: return={ret_needs_fix1}, params={param_needs_fix1}")
-            self._debug_print(f"Binary 2 needs fix: return={ret_needs_fix2}, params={param_needs_fix2}")
-            
-            # 型修正を実行（引数情報を使用）
-            if ret_needs_fix1 or param_needs_fix1 or ret_needs_fix2 or param_needs_fix2:
-                self._debug_print("=== Fixing function signatures ===")
-                type_fix_result.retry_phase = "signature_fix"
-                
-                if ret_needs_fix1 or param_needs_fix1:
-                    ret_fixed1, param_fixed1 = type_fixer1.fix_function_signature_by_name(
-                        function_name1,
-                        params1,
-                        fix_return_type=ret_needs_fix1,
-                        fix_param_types=param_needs_fix1
-                    )
-                    type_fix_result.return_type_fixed_binary1 = ret_fixed1
-                    type_fix_result.param_types_fixed_binary1 = param_fixed1
-                
-                if ret_needs_fix2 or param_needs_fix2:
-                    ret_fixed2, param_fixed2 = type_fixer2.fix_function_signature_by_name(
-                        function_name2,
-                        params2,
-                        fix_return_type=ret_needs_fix2,
-                        fix_param_types=param_needs_fix2
-                    )
-                    type_fix_result.return_type_fixed_binary2 = ret_fixed2
-                    type_fix_result.param_types_fixed_binary2 = param_fixed2
-                
-                retry_count += 1
+        # ============================================
+        # Phase 0: 型修正なしで等価性判定
+        # ============================================
+        self._debug_print("=" * 60)
+        self._debug_print("Phase 0: Initial check without type fix")
+        self._debug_print("=" * 60)
+        type_fix_result.retry_phase = "initial"
         
-        # 等価性判定を実行
         result = self._analyze_and_check(
             program1, program2,
             function_name1, function_name2,
             decompile_timeout, save_formula,
             binary1_name, binary2_name,
             type_fix_result=type_fix_result,
-            retry_count=retry_count
+            retry_count=0
         )
+        
+        # 等価の場合は終了
+        if result.is_equivalent is True:
+            self._debug_print("Phase 0: EQUIVALENT - No retry needed")
+            result.total_time = time.time() - start_time
+            return result
+        
+        # エラーまたは型修正リトライが無効の場合はそのまま返す
+        if result.is_equivalent is None or not retry_with_type_fix:
+            if result.is_equivalent is None:
+                self._debug_print("Phase 0: Error occurred - returning result")
+            else:
+                self._debug_print("Phase 0: NOT EQUIVALENT - retry disabled, returning result")
+            result.total_time = time.time() - start_time
+            return result
+        
+        self._debug_print("Phase 0: NOT EQUIVALENT - preparing for type fix retry")
+        
+        # 型修正に必要な情報を事前に収集
+        self._debug_print("Collecting parameter information for type fix...")
+        params1 = self._get_params_via_decompile(program1, function_name1, decompile_timeout)
+        params2 = self._get_params_via_decompile(program2, function_name2, decompile_timeout)
+        
+        type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
+        type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
+        
+        ret_needs_fix1, param_needs_fix1 = type_fixer1.check_needs_fix_with_params(
+            function_name1, params1
+        )
+        ret_needs_fix2, param_needs_fix2 = type_fixer2.check_needs_fix_with_params(
+            function_name2, params2
+        )
+        
+        self._debug_print(f"Binary 1 '{function_name1}' - return needs fix: {ret_needs_fix1}, params need fix: {param_needs_fix1}")
+        self._debug_print(f"Binary 2 '{function_name2}' - return needs fix: {ret_needs_fix2}, params need fix: {param_needs_fix2}")
+        
+        # ============================================
+        # Phase 1: 戻り値の型を修正してリトライ
+        # ============================================
+        if ret_needs_fix1 or ret_needs_fix2:
+            self._debug_print("=" * 60)
+            self._debug_print("Phase 1: Fixing return types only")
+            self._debug_print("=" * 60)
+            type_fix_result.retry_phase = "return_type_fix"
+            
+            if ret_needs_fix1:
+                ret_fixed1, _ = type_fixer1.fix_function_signature_by_name(
+                    function_name1,
+                    params1,
+                    fix_return_type=True,
+                    fix_param_types=False
+                )
+                type_fix_result.return_type_fixed_binary1 = ret_fixed1
+                self._debug_print(f"Binary 1 return type fixed: {ret_fixed1}")
+            
+            if ret_needs_fix2:
+                ret_fixed2, _ = type_fixer2.fix_function_signature_by_name(
+                    function_name2,
+                    params2,
+                    fix_return_type=True,
+                    fix_param_types=False
+                )
+                type_fix_result.return_type_fixed_binary2 = ret_fixed2
+                self._debug_print(f"Binary 2 return type fixed: {ret_fixed2}")
+            
+            # 再解析と等価性判定
+            result = self._analyze_and_check(
+                program1, program2,
+                function_name1, function_name2,
+                decompile_timeout, save_formula,
+                binary1_name, binary2_name,
+                type_fix_result=type_fix_result,
+                retry_count=1
+            )
+            
+            # 等価またはエラーの場合は終了
+            if result.is_equivalent is True:
+                self._debug_print("Phase 1: EQUIVALENT after return type fix")
+                result.total_time = time.time() - start_time
+                return result
+            
+            if result.is_equivalent is None:
+                self._debug_print("Phase 1: Error occurred - returning result")
+                result.total_time = time.time() - start_time
+                return result
+            
+            self._debug_print("Phase 1: Still NOT EQUIVALENT after return type fix")
+        else:
+            self._debug_print("Phase 1: Skipped - no return type fix needed")
+        
+        # ============================================
+        # Phase 2: 引数の型も修正してリトライ
+        # ============================================
+        if param_needs_fix1 or param_needs_fix2:
+            self._debug_print("=" * 60)
+            self._debug_print("Phase 2: Fixing parameter types")
+            self._debug_print("=" * 60)
+            type_fix_result.retry_phase = "param_type_fix"
+            
+            # 戻り値修正後の状態で再度パラメータ情報を取得
+            params1_updated = self._get_params_via_decompile(program1, function_name1, decompile_timeout)
+            params2_updated = self._get_params_via_decompile(program2, function_name2, decompile_timeout)
+            
+            if param_needs_fix1:
+                _, param_fixed1 = type_fixer1.fix_function_signature_by_name(
+                    function_name1,
+                    params1_updated,
+                    fix_return_type=False,
+                    fix_param_types=True
+                )
+                type_fix_result.param_types_fixed_binary1 = param_fixed1
+                self._debug_print(f"Binary 1 param types fixed: {param_fixed1}")
+            
+            if param_needs_fix2:
+                _, param_fixed2 = type_fixer2.fix_function_signature_by_name(
+                    function_name2,
+                    params2_updated,
+                    fix_return_type=False,
+                    fix_param_types=True
+                )
+                type_fix_result.param_types_fixed_binary2 = param_fixed2
+                self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
+            
+            # 再解析と等価性判定
+            result = self._analyze_and_check(
+                program1, program2,
+                function_name1, function_name2,
+                decompile_timeout, save_formula,
+                binary1_name, binary2_name,
+                type_fix_result=type_fix_result,
+                retry_count=2
+            )
+            
+            if result.is_equivalent is True:
+                self._debug_print("Phase 2: EQUIVALENT after parameter type fix")
+            elif result.is_equivalent is False:
+                self._debug_print("Phase 2: Still NOT EQUIVALENT - returning final result with counterexample")
+            else:
+                self._debug_print("Phase 2: Error occurred - returning result")
+        else:
+            self._debug_print("Phase 2: Skipped - no parameter type fix needed")
+        
+        # ============================================
+        # 最終結果（非等価の場合は反例を含む）
+        # ============================================
+        self._debug_print("=" * 60)
+        self._debug_print("Final Result")
+        self._debug_print("=" * 60)
         
         result.total_time = time.time() - start_time
         return result
@@ -352,6 +463,7 @@ class EquivalenceChecker:
         upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         # 関数1を解析
+        self._debug_print(f"Analyzing function '{function_name1}' in {binary1_name}...")
         analyzer1 = ReturnAnalyzer(program1, debug=self.debug)
         try:
             analysis1 = analyzer1.analyze_function_by_name(function_name1, decompile_timeout)
@@ -373,6 +485,7 @@ class EquivalenceChecker:
             analyzer1.dispose()
         
         # 関数2を解析
+        self._debug_print(f"Analyzing function '{function_name2}' in {binary2_name}...")
         analyzer2 = ReturnAnalyzer(program2, debug=self.debug)
         try:
             analysis2 = analyzer2.analyze_function_by_name(function_name2, decompile_timeout)
@@ -393,6 +506,7 @@ class EquivalenceChecker:
         finally:
             analyzer2.dispose()
         
+        self._debug_print("Running equivalence check...")
         return self.check(
             analysis1, analysis2,
             binary1_name, binary2_name,
