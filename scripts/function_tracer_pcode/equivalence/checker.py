@@ -121,6 +121,7 @@ class EquivalenceResult:
     retry_count: int = 0
     function1_signature: Optional[FunctionSignature] = None
     function2_signature: Optional[FunctionSignature] = None
+    auto_zero_constrained: List[str] = field(default_factory=list)
     rewrite_info: Optional[RewriteInfo] = None
     
     def is_timeout(self) -> bool:
@@ -162,6 +163,7 @@ class EquivalenceResult:
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
+            "auto_zero_constrained": self.auto_zero_constrained,
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
         }
     
@@ -187,6 +189,11 @@ class EquivalenceResult:
         
         lines.append("")
         lines.append(f"Upper bits mode: {self.upper_bits_mode}")
+        
+        # 自動0制約された変数を表示
+        if self.auto_zero_constrained:
+            vars_str = ", ".join(self.auto_zero_constrained)
+            lines.append(f"Auto-simplified: {vars_str} (upper-bits variables constrained to 0)")
         
         if self.type_fix_result and self.type_fix_result.any_fix_applied():
             lines.append(f"Type fix applied: {self.type_fix_result}")
@@ -378,6 +385,11 @@ class EquivalenceChecker:
             original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
+            # 拡張版のメソッドを使用して詳細情報を取得
+            formula_result = self.formula_builder.build_equivalence_formula_extended(
+                analysis1, analysis2
+            )
+            auto_zero_constrained = formula_result.auto_zero_constrained
             # リライトを適用
             analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
             
@@ -391,6 +403,9 @@ class EquivalenceChecker:
                 print("=" * 60)
                 print(smt_formula)
                 print("=" * 60 + "\n")
+
+                if auto_zero_constrained:
+                    print(f"[EquivalenceChecker] Auto-constrained to 0: {auto_zero_constrained}")
             
             available_solvers = self.solver_runner.get_available_solvers()
             if not available_solvers:
@@ -408,6 +423,7 @@ class EquivalenceChecker:
                     retry_count=retry_count,
                     function1_signature=original_signature1,
                     function2_signature=original_signature2,
+                    auto_zero_constrained=auto_zero_constrained,
                     rewrite_info=rewrite_info
                 )
             
@@ -454,6 +470,7 @@ class EquivalenceChecker:
                 retry_count=retry_count,
                 function1_signature=original_signature1,
                 function2_signature=original_signature2,
+                auto_zero_constrained=auto_zero_constrained,
                 rewrite_info=rewrite_info
             )
         
@@ -476,7 +493,8 @@ class EquivalenceChecker:
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
                 function1_signature=original_signature1,
-                function2_signature=original_signature2
+                function2_signature=original_signature2,
+                auto_zero_constrained=[]
             )
     
     def check_from_binaries(
