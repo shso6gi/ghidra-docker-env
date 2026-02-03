@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Z3ソルバー実装（デバッグ強化版）"""
+"""Z3ソルバー実装（タイムアウト検出修正版）"""
 
 import time
 from typing import Optional, Dict, Any, Tuple, Callable
@@ -43,8 +43,6 @@ class Z3Solver(SMTSolver):
     ) -> SolverResult:
         import sys
         self._debug_print("=== Z3 check_equivalence_direct START ===")
-        print("[Z3] Method entry", flush=True)  # 強制フラッシュ
-        sys.stdout.flush()
         
         if not self.is_available():
             return self._create_error_result("Z3 is not available")
@@ -101,11 +99,27 @@ class Z3Solver(SMTSolver):
                     elapsed_time=elapsed
                 )
             else:
-                return SolverResult(
-                    solver_name=self.name,
-                    status=SolverStatus.UNKNOWN,
-                    elapsed_time=elapsed
-                )
+                # unknown の理由を取得してタイムアウトかどうかを判定
+                reason = str(self._solver.reason_unknown())
+                self._debug_print(f"Reason for unknown: {reason}")
+                
+                is_timeout = self._is_timeout_reason(reason, elapsed)
+                
+                if is_timeout:
+                    self._debug_print("Detected as TIMEOUT")
+                    return SolverResult(
+                        solver_name=self.name,
+                        status=SolverStatus.TIMEOUT,
+                        elapsed_time=elapsed,
+                        error_message=f"Timeout: {reason}"
+                    )
+                else:
+                    return SolverResult(
+                        solver_name=self.name,
+                        status=SolverStatus.UNKNOWN,
+                        elapsed_time=elapsed,
+                        error_message=reason
+                    )
         
         except Exception as e:
             elapsed = time.time() - start_time
@@ -113,6 +127,27 @@ class Z3Solver(SMTSolver):
             if elapsed >= self.timeout:
                 return self._create_timeout_result(elapsed)
             return self._create_error_result(str(e))
+    
+    def _is_timeout_reason(self, reason: str, elapsed: float) -> bool:
+        """
+        Z3のunknown理由がタイムアウトかどうかを判定
+        
+        Args:
+            reason: Z3のreason_unknown()の結果
+            elapsed: 経過時間（秒）
+        
+        Returns:
+            タイムアウトならTrue
+        """
+        if reason == "timeout":
+            return True
+        
+        # 経過時間がタイムアウトの90%以上ならタイムアウトとみなす
+        if elapsed >= self.timeout * 0.9:
+            self._debug_print(f"Elapsed time ({elapsed:.3f}s) >= 90% of timeout ({self.timeout}s)")
+            return True
+        
+        return False
     
     def _extract_model(self) -> Dict[str, Any]:
         """Z3モデルから辞書を抽出"""
@@ -126,7 +161,7 @@ class Z3Solver(SMTSolver):
             
             self._debug_print(f"  Model var: {name} = {value} (type: {type(value).__name__})")
             
-            # ビットベクトルを整数に変換（getattr使用で型チェック問題を回避）
+            # ビットベクトルを整数に変換
             as_long: Optional[Callable[[], int]] = getattr(value, 'as_long', None)
             as_signed_long: Optional[Callable[[], int]] = getattr(value, 'as_signed_long', None)
             
