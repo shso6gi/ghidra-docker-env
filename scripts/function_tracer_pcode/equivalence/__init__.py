@@ -12,21 +12,40 @@ from .variable_analyzer import (
     ConstraintRecommendation,
     get_safe_zero_constraints
 )
+from .expression_rewriter import (
+    ExpressionRewriter,
+    RewriteRule,
+    RewriteResult,
+    ModuloExpansionRule,
+    ModuloToExpansionRule,
+    rewrite_analysis_returns,
+)
 
 __all__ = [
-    'EquivalenceChecker',
-    'EquivalenceResult',
-    'FunctionSignature',
-    'FormulaBuilder',
-    'FormulaBuilderResult',
-    'TypeFixer',
-    'TypeFixerConfig',
-    'TypeFixResult',
-    'CounterexampleFormatter',
-    'FormattedCounterexample',
+    # Checker
+    "EquivalenceChecker",
+    "EquivalenceResult",
+    "FunctionSignature",
+    # Formula
+    "FormulaBuilder",
+    # Type Fixer
+    "TypeFixer",
+    "TypeFixerConfig",
+    "TypeFixResult",
+    # Counterexample
+    "CounterexampleFormatter",
+    "FormattedCounterexample",
+    # Variable Analyzer
     'VariableAnalyzer',
     'ExtraVariableAnalysis',
     'VariableUsageInfo',
     'ConstraintRecommendation',
     'get_safe_zero_constraints',
+    # Rewriter
+    "ExpressionRewriter",
+    "RewriteRule",
+    "RewriteResult",
+    "ModuloExpansionRule",
+    "ModuloToExpansionRule",
+    "rewrite_analysis_returns",
 ]

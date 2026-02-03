@@ -71,6 +71,9 @@ def parse_arguments():
 
   # デバッグモード
   python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func -d
+
+  # リライトを無効にして実行
+  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f modulo --no-rewrite
         """
     )
     
@@ -181,6 +184,19 @@ def parse_arguments():
         help="等価性判定に失敗した場合、longlong/undefined型をint型に変更してリトライする"
     )
     
+    parser.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help="式のリライトを無効にする（デフォルト: 有効）"
+    )
+
+    parser.add_argument(
+        "--rewrite-direction",
+        choices=["to_modulo", "to_expansion"],
+        default="to_modulo",
+        help="リライト方向 (to_modulo: 展開形式→剰余演算子, to_expansion: 剰余演算子→展開形式)"
+    )
+
     return parser.parse_args()
 
 
@@ -304,13 +320,19 @@ def run_equivalence_check(args):
     
     # 型修正の設定（将来的に引数で制御可能にする場合はここを拡張）
     type_fixer_config = TypeFixerConfig()
+
+    # リライト設定を取得
+    enable_rewrite = not getattr(args, 'no_rewrite', False)
+    rewrite_direction = getattr(args, 'rewrite_direction', 'to_modulo')
     
     # 等価性チェッカーを初期化
     checker = EquivalenceChecker(
         timeout=args.equiv_timeout,
         debug=args.debug,
         upper_bits_zero=upper_bits_zero,
-        type_fixer_config=type_fixer_config
+        type_fixer_config=type_fixer_config,
+        enable_rewrite=enable_rewrite,
+        rewrite_direction=rewrite_direction
     )
     
     # 利用可能なソルバーを表示

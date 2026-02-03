@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""等価性判定メインロジック（型修正リトライ対応版）"""
+"""等価性判定メインロジック（リライト機能統合版）"""
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 import time
 
@@ -11,6 +11,7 @@ from ..smt.solver_interface import SolverStatus
 from .formula_builder import FormulaBuilder
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
 from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from .expression_rewriter import ExpressionRewriter, RewriteResult, rewrite_analysis_returns
 
 
 @dataclass
@@ -59,6 +60,50 @@ class FunctionSignature:
 
 
 @dataclass
+class RewriteInfo:
+    """リライト情報"""
+    applied: bool = False
+    function1_rewrites: List[RewriteResult] = field(default_factory=list)
+    function2_rewrites: List[RewriteResult] = field(default_factory=list)
+    
+    def get_summary(self) -> str:
+        """リライトの概要を取得"""
+        if not self.applied:
+            return "No rewrite applied"
+        
+        lines = ["Rewrite applied:"]
+        
+        if any(r.was_rewritten for r in self.function1_rewrites):
+            lines.append("  Function 1:")
+            for i, r in enumerate(self.function1_rewrites):
+                if r.was_rewritten:
+                    for rule, before, after in r.history:
+                        lines.append(f"    Return {i}: [{rule}] {before} -> {after}")
+        
+        if any(r.was_rewritten for r in self.function2_rewrites):
+            lines.append("  Function 2:")
+            for i, r in enumerate(self.function2_rewrites):
+                if r.was_rewritten:
+                    for rule, before, after in r.history:
+                        lines.append(f"    Return {i}: [{rule}] {before} -> {after}")
+        
+        return "\n".join(lines)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "applied": self.applied,
+            "function1_rewrites": [
+                {"was_rewritten": r.was_rewritten, "history": r.history}
+                for r in self.function1_rewrites
+            ],
+            "function2_rewrites": [
+                {"was_rewritten": r.was_rewritten, "history": r.history}
+                for r in self.function2_rewrites
+            ],
+        }
+
+
+@dataclass
 class EquivalenceResult:
     """等価性判定の結果"""
     is_equivalent: Optional[bool]
@@ -74,9 +119,9 @@ class EquivalenceResult:
     upper_bits_mode: str = "free"
     type_fix_result: Optional[TypeFixResult] = None
     retry_count: int = 0
-    # 関数シグネチャ情報（オリジナル）
     function1_signature: Optional[FunctionSignature] = None
     function2_signature: Optional[FunctionSignature] = None
+    rewrite_info: Optional[RewriteInfo] = None
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -84,7 +129,6 @@ class EquivalenceResult:
             return False
         if not self.solver_results or not self.solver_results.results:
             return False
-        # いずれかのソルバーがタイムアウトしたかチェック
         for sr in self.solver_results.results:
             if sr.status == SolverStatus.TIMEOUT:
                 return True
@@ -98,7 +142,6 @@ class EquivalenceResult:
         """致命的なエラー（リトライ不可能）があるかどうかを判定"""
         if self.error_message is None:
             return False
-        # 関数が見つからないなどのエラーはリトライしても解決しない
         critical_keywords = ["not found", "not available", "No SMT solvers"]
         return any(kw in self.error_message for kw in critical_keywords)
     
@@ -119,6 +162,7 @@ class EquivalenceResult:
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
+            "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
         }
     
     def to_string(self, verbose: bool = False) -> str:
@@ -148,6 +192,11 @@ class EquivalenceResult:
             lines.append(f"Type fix applied: {self.type_fix_result}")
         if self.retry_count > 0:
             lines.append(f"Retry count: {self.retry_count}")
+        
+        # リライト情報
+        if self.rewrite_info and self.rewrite_info.applied:
+            lines.append("")
+            lines.append(self.rewrite_info.get_summary())
         
         lines.append("-" * 70)
         
@@ -195,12 +244,25 @@ class EquivalenceChecker:
         timeout: int = 10,
         debug: bool = False,
         upper_bits_zero: bool = False,
-        type_fixer_config: Optional[TypeFixerConfig] = None
+        type_fixer_config: Optional[TypeFixerConfig] = None,
+        enable_rewrite: bool = True,
+        rewrite_direction: str = "to_modulo"
     ):
+        """
+        Args:
+            timeout: SMTソルバーのタイムアウト（秒）
+            debug: デバッグ出力を有効にする
+            upper_bits_zero: 上位ビットを0に制約するか
+            type_fixer_config: 型修正の設定
+            enable_rewrite: 式のリライトを有効にする
+            rewrite_direction: リライト方向 ("to_modulo" or "to_expansion")
+        """
         self.timeout = timeout
         self.debug = debug
         self.upper_bits_zero = upper_bits_zero
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
+        self.enable_rewrite = enable_rewrite
+        self.rewrite_direction = rewrite_direction
         self.formula_builder = FormulaBuilder(debug=debug, upper_bits_zero=upper_bits_zero)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
     
@@ -208,18 +270,57 @@ class EquivalenceChecker:
         if self.debug:
             print(f"[EquivalenceChecker] {msg}")
     
+    def _apply_rewrite(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis
+    ) -> Tuple[FunctionReturnAnalysis, FunctionReturnAnalysis, RewriteInfo]:
+        """
+        両方の解析結果にリライトを適用
+        
+        Returns:
+            (rewritten_analysis1, rewritten_analysis2, rewrite_info)
+        """
+        rewrite_info = RewriteInfo()
+        
+        if not self.enable_rewrite:
+            self._debug_print("Rewrite is disabled")
+            return analysis1, analysis2, rewrite_info
+        
+        self._debug_print(f"Applying rewrite with direction: {self.rewrite_direction}")
+        
+        rewriter = ExpressionRewriter(
+            debug=self.debug,
+            direction=self.rewrite_direction
+        )
+        
+        # Function 1 のリライト
+        rewritten1, results1 = rewrite_analysis_returns(analysis1, rewriter)
+        rewrite_info.function1_rewrites = results1
+        
+        if any(r.was_rewritten for r in results1):
+            self._debug_print(f"Function 1 was rewritten")
+            rewrite_info.applied = True
+            analysis1 = rewritten1
+        
+        # Function 2 のリライト
+        rewritten2, results2 = rewrite_analysis_returns(analysis2, rewriter)
+        rewrite_info.function2_rewrites = results2
+        
+        if any(r.was_rewritten for r in results2):
+            self._debug_print(f"Function 2 was rewritten")
+            rewrite_info.applied = True
+            analysis2 = rewritten2
+        
+        return analysis1, analysis2, rewrite_info
+    
     def _get_params_via_decompile(
         self,
         program,
         function_name: str,
         timeout: int
     ) -> List[Dict[str, Any]]:
-        """
-        デコンパイルして引数情報を取得
-        
-        Returns:
-            [{"name": str, "data_type": str, "size": int, "index": int}, ...]
-        """
+        """デコンパイルして引数情報を取得"""
         from ..return_analyzer import ReturnAnalyzer
         
         self._debug_print(f"Getting params via decompile for '{function_name}'")
@@ -236,30 +337,15 @@ class EquivalenceChecker:
             analyzer.dispose()
     
     def _should_retry(self, result: EquivalenceResult) -> bool:
-        """
-        リトライすべきかどうかを判定
-        
-        リトライする条件:
-        - 非等価 (is_equivalent == False)
-        - タイムアウトまたは不明 (is_equivalent == None かつ致命的エラーなし)
-        
-        リトライしない条件:
-        - 等価 (is_equivalent == True)
-        - 致命的エラー（関数が見つからないなど）
-        """
-        # 等価の場合はリトライ不要
+        """リトライすべきかどうかを判定"""
         if result.is_equivalent is True:
             return False
-        
-        # 致命的エラーの場合はリトライしても解決しない
         if result.has_critical_error():
             return False
-        
-        # 非等価、タイムアウト、不明の場合はリトライ
         return True
     
     def _get_retry_reason(self, result: EquivalenceResult) -> str:
-        """リトライの理由を取得（デバッグ用）"""
+        """リトライの理由を取得"""
         if result.is_equivalent is False:
             return "NOT EQUIVALENT"
         elif result.is_timeout():
@@ -292,6 +378,9 @@ class EquivalenceChecker:
             original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
+            # リライトを適用
+            analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
+            
             smt_formula, return_var1, return_var2 = self.formula_builder.build_equivalence_formula(
                 analysis1, analysis2
             )
@@ -318,7 +407,8 @@ class EquivalenceChecker:
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
-                    function2_signature=original_signature2
+                    function2_signature=original_signature2,
+                    rewrite_info=rewrite_info
                 )
             
             if self.debug:
@@ -363,7 +453,8 @@ class EquivalenceChecker:
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
                 function1_signature=original_signature1,
-                function2_signature=original_signature2
+                function2_signature=original_signature2,
+                rewrite_info=rewrite_info
             )
         
         except Exception as e:
