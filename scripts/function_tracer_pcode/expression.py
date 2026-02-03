@@ -2,7 +2,7 @@
 """式の表現クラス（Python互換出力対応）"""
 
 from enum import Enum, auto
-from typing import List, Optional, Any, Dict, Tuple
+from typing import List, Optional, Any, Dict, Tuple, Set
 
 
 class ExpressionType(Enum):
@@ -643,6 +643,47 @@ class Expression:
         if self.operands:
             result["operands"] = [op.to_dict() for op in self.operands]
         return result
+    
+    def get_all_variables(self) -> Set[str]:
+        """
+        式に含まれる全ての変数名（パラメータ・変数）を取得
+        
+        Returns:
+            変数名のセット
+        """
+        variables: Set[str] = set()
+        self._collect_variables(variables)
+        return variables
+    
+    def _collect_variables(self, variables: Set[str]) -> None:
+        """再帰的に変数を収集"""
+        if self.expr_type == ExpressionType.PARAMETER:
+            if self.name:
+                variables.add(self.name)
+        
+        elif self.expr_type == ExpressionType.VARIABLE:
+            if self.name:
+                variables.add(self.name)
+        
+        elif self.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP):
+            for operand in self.operands:
+                operand._collect_variables(variables)
+        
+        elif self.expr_type == ExpressionType.CALL:
+            for operand in self.operands:
+                operand._collect_variables(variables)
+        
+        elif self.expr_type == ExpressionType.MEMORY:
+            for operand in self.operands:
+                operand._collect_variables(variables)
+        
+        elif self.expr_type == ExpressionType.PHI:
+            if self.value:
+                for cond, val in self.value:
+                    if cond is not None and hasattr(cond, '_collect_variables'):
+                        cond._collect_variables(variables)
+                    if hasattr(val, '_collect_variables'):
+                        val._collect_variables(variables)
 
 
 class Condition:
@@ -706,3 +747,7 @@ class Condition:
             combined = Expression.binary_op("BOOL_AND", combined, to_expr(cond))
         
         return Condition(combined, False)
+    
+    def get_all_variables(self) -> Set[str]:
+        """条件式に含まれる全ての変数名を取得"""
+        return self.expression.get_all_variables()

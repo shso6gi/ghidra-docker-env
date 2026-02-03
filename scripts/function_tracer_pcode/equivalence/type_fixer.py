@@ -29,6 +29,7 @@ class TypeFixerConfig:
         "undefined4",
         "undefined8",
         "ulong",
+        "long"
     })
     replacement_type_name: str = "int"
     

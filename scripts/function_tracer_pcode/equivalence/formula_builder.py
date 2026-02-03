@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """SMT式構築モジュール（ビット幅制約モード対応版）"""
 
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass
 import re
 
 from ..return_analyzer import FunctionReturnAnalysis, ReturnInfo
+from ..expression import Expression, ExpressionType
+from .variable_analyzer import VariableAnalyzer, ExtraVariableAnalysis, get_safe_zero_constraints
 
 
 @dataclass
@@ -18,6 +20,15 @@ class ParameterInfo:
 
 
 @dataclass
+class ExtraVariableInfo:
+    """追加変数情報"""
+    original_name: str
+    smt_name: str
+    bit_width: int
+    analysis: Optional[ExtraVariableAnalysis] = None
+
+
+@dataclass
 class ParameterPair:
     """パラメータペア（2つの関数間のマッピング）"""
     index: int
@@ -25,37 +36,39 @@ class ParameterPair:
     param2: Optional[ParameterInfo]
     
     def has_width_mismatch(self) -> bool:
-        """ビット幅の不一致があるか"""
         if self.param1 is None or self.param2 is None:
             return True
         return self.param1.bit_width != self.param2.bit_width
     
     def get_overlapping_width(self) -> int:
-        """重複するビット幅を取得（小さい方）"""
         if self.param1 is None or self.param2 is None:
             return 0
         return min(self.param1.bit_width, self.param2.bit_width)
     
     def get_larger_width(self) -> int:
-        """大きい方のビット幅を取得"""
         w1 = self.param1.bit_width if self.param1 else 0
         w2 = self.param2.bit_width if self.param2 else 0
         return max(w1, w2)
+
+
+@dataclass
+class FormulaBuilderResult:
+    """SMT式構築の結果"""
+    formula: str
+    return_var1: str
+    return_var2: str
+    extra_vars1: List[ExtraVariableInfo]
+    extra_vars2: List[ExtraVariableInfo]
+    auto_zero_constrained: List[str]  # 自動的に0制約された変数
 
 
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
     def __init__(self, debug: bool = False, upper_bits_zero: bool = False):
-        """
-        Args:
-            debug: デバッグモード
-            upper_bits_zero: ビット幅が異なる場合に上位ビットを0に制約するか
-                             False（デフォルト）: 上位ビットは自由（ランダム）
-                             True: 上位ビットは0に制約
-        """
         self.debug = debug
         self.upper_bits_zero = upper_bits_zero
+        self.variable_analyzer = VariableAnalyzer(debug=debug)
     
     def build_equivalence_formula(
         self,
@@ -67,14 +80,30 @@ class FormulaBuilder:
         """
         2つの関数の等価性検証用SMT式を構築
         
-        ビット幅が異なる場合:
-        - 重複するビット（下位ビット）は同一にする
-        - upper_bits_zero=False: 上位ビットは自由（任意の値）
-        - upper_bits_zero=True: 上位ビットは0に制約
+        Returns:
+            (smt_formula, return_var1, return_var2)
+        """
+        result = self.build_equivalence_formula_extended(
+            analysis1, analysis2, func1_suffix, func2_suffix
+        )
+        return result.formula, result.return_var1, result.return_var2
+    
+    def build_equivalence_formula_extended(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        func1_suffix: str = "_1",
+        func2_suffix: str = "_2"
+    ) -> FormulaBuilderResult:
+        """
+        2つの関数の等価性検証用SMT式を構築（拡張版）
+        
+        Returns:
+            FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         lines = []
+        auto_zero_constrained: List[str] = []
         
-        # 上位ビットモードの説明を追加
         upper_bits_mode_desc = "zero (constrained)" if self.upper_bits_zero else "free (any value)"
         
         # ヘッダー
@@ -92,37 +121,185 @@ class FormulaBuilder:
         params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
         params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
         
+        # パラメータ名のセットを作成
+        param_names1 = {p.original_name for p in params1}
+        param_names2 = {p.original_name for p in params2}
+        
+        # 戻り値のビット幅を取得
+        return_size1 = self._get_return_size(analysis1)
+        return_size2 = self._get_return_size(analysis2)
+        
+        # 追加変数を分析
+        var_analyses1 = self.variable_analyzer.analyze_all_extra_variables(
+            analysis1, param_names1, return_size1
+        )
+        var_analyses2 = self.variable_analyzer.analyze_all_extra_variables(
+            analysis2, param_names2, return_size2
+        )
+        
+        # 追加変数情報を構築
+        extra_vars1 = self._build_extra_variable_infos(var_analyses1, func1_suffix)
+        extra_vars2 = self._build_extra_variable_infos(var_analyses2, func2_suffix)
+        
         if self.debug:
-            print(f"[FormulaBuilder] Function 1 parameters:")
-            for p in params1:
-                print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
-            print(f"[FormulaBuilder] Function 2 parameters:")
-            for p in params2:
-                print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
-            print(f"[FormulaBuilder] Upper bits mode: {upper_bits_mode_desc}")
+            self._print_debug_info(params1, params2, extra_vars1, extra_vars2, upper_bits_mode_desc)
         
         # パラメータペアを構築
         param_pairs = self._build_parameter_pairs(params1, params2)
         
         # 関数1のパラメータを宣言
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Parameters for {analysis1.function_name}")
-        lines.append("; (Bit widths from Ghidra analysis)")
-        lines.append("; " + "-" * 40)
-        for p in params1:
-            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))")
-        lines.append("")
+        lines.extend(self._build_param_declarations(analysis1.function_name, params1))
+        
+        # 関数1の追加変数を宣言
+        if extra_vars1:
+            lines.extend(self._build_extra_var_declarations(analysis1.function_name, extra_vars1))
         
         # 関数2のパラメータを宣言
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Parameters for {analysis2.function_name}")
-        lines.append("; (Bit widths from Ghidra analysis)")
-        lines.append("; " + "-" * 40)
-        for p in params2:
-            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))")
-        lines.append("")
+        lines.extend(self._build_param_declarations(analysis2.function_name, params2))
+        
+        # 関数2の追加変数を宣言
+        if extra_vars2:
+            lines.extend(self._build_extra_var_declarations(analysis2.function_name, extra_vars2))
         
         # パラメータ間の等価制約
+        lines.extend(self._build_param_constraints_section(param_pairs))
+        
+        # 追加変数の制約（自動簡略化）
+        constraint_lines, constrained_vars = self._build_extra_var_constraints(
+            extra_vars1, extra_vars2, var_analyses1, var_analyses2
+        )
+        if constraint_lines:
+            lines.extend(constraint_lines)
+            auto_zero_constrained.extend(constrained_vars)
+        
+        # 全変数の情報を統合（パラメータ + 追加変数）
+        all_vars1 = self._merge_param_and_extra_vars(params1, extra_vars1)
+        all_vars2 = self._merge_param_and_extra_vars(params2, extra_vars2)
+        
+        # 関数1のreturn値を定義
+        lines.append("; " + "-" * 40)
+        lines.append(f"; Return value for {analysis1.function_name}")
+        lines.append("; " + "-" * 40)
+        return_var1 = f"return{func1_suffix}"
+        return_def1 = self._build_return_definition(analysis1, return_var1, all_vars1)
+        lines.extend(return_def1)
+        lines.append("")
+        
+        # 関数2のreturn値を定義
+        lines.append("; " + "-" * 40)
+        lines.append(f"; Return value for {analysis2.function_name}")
+        lines.append("; " + "-" * 40)
+        return_var2 = f"return{func2_suffix}"
+        return_def2 = self._build_return_definition(analysis2, return_var2, all_vars2)
+        lines.extend(return_def2)
+        lines.append("")
+        
+        # 等価性の否定をアサート
+        lines.extend(self._build_equivalence_assertion(return_var1, return_var2, return_size1, return_size2))
+        
+        lines.append("")
+        lines.append("(check-sat)")
+        lines.append("(get-model)")
+        
+        return FormulaBuilderResult(
+            formula="\n".join(lines),
+            return_var1=return_var1,
+            return_var2=return_var2,
+            extra_vars1=extra_vars1,
+            extra_vars2=extra_vars2,
+            auto_zero_constrained=auto_zero_constrained
+        )
+    
+    def _build_extra_variable_infos(
+        self,
+        analyses: Dict[str, ExtraVariableAnalysis],
+        suffix: str
+    ) -> List[ExtraVariableInfo]:
+        """分析結果からExtraVariableInfoを構築"""
+        result = []
+        for name, analysis in analyses.items():
+            result.append(ExtraVariableInfo(
+                original_name=name,
+                smt_name=f"{name}{suffix}",
+                bit_width=analysis.bit_width,
+                analysis=analysis
+            ))
+        return result
+    
+    def _print_debug_info(
+        self,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo],
+        extra_vars1: List[ExtraVariableInfo],
+        extra_vars2: List[ExtraVariableInfo],
+        upper_bits_mode_desc: str
+    ):
+        """デバッグ情報を出力"""
+        print(f"[FormulaBuilder] Function 1 parameters:")
+        for p in params1:
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
+        if extra_vars1:
+            print(f"[FormulaBuilder] Function 1 extra variables:")
+            for v in extra_vars1:
+                status = ""
+                if v.analysis:
+                    status = f" [{v.analysis.recommendation.name}]"
+                print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
+        
+        print(f"[FormulaBuilder] Function 2 parameters:")
+        for p in params2:
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
+        if extra_vars2:
+            print(f"[FormulaBuilder] Function 2 extra variables:")
+            for v in extra_vars2:
+                status = ""
+                if v.analysis:
+                    status = f" [{v.analysis.recommendation.name}]"
+                print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
+        
+        print(f"[FormulaBuilder] Upper bits mode: {upper_bits_mode_desc}")
+    
+    def _build_param_declarations(
+        self,
+        func_name: str,
+        params: List[ParameterInfo]
+    ) -> List[str]:
+        """パラメータ宣言を構築"""
+        lines = []
+        lines.append("; " + "-" * 40)
+        lines.append(f"; Parameters for {func_name}")
+        lines.append("; (Bit widths from Ghidra analysis)")
+        lines.append("; " + "-" * 40)
+        for p in params:
+            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))")
+        lines.append("")
+        return lines
+    
+    def _build_extra_var_declarations(
+        self,
+        func_name: str,
+        extra_vars: List[ExtraVariableInfo]
+    ) -> List[str]:
+        """追加変数宣言を構築"""
+        lines = []
+        lines.append("; " + "-" * 40)
+        lines.append(f"; Extra variables for {func_name}")
+        lines.append("; (Non-parameter variables found in expressions)")
+        lines.append("; " + "-" * 40)
+        for v in extra_vars:
+            comment = ""
+            if v.analysis:
+                comment = f"  ; {v.analysis.recommendation.name}: {v.analysis.reason}"
+            lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width})){comment}")
+        lines.append("")
+        return lines
+    
+    def _build_param_constraints_section(
+        self,
+        param_pairs: List[ParameterPair]
+    ) -> List[str]:
+        """パラメータ制約セクションを構築"""
+        lines = []
         lines.append("; " + "-" * 40)
         lines.append("; Parameter equality constraints")
         lines.append("; For matching bit widths: direct equality")
@@ -137,34 +314,85 @@ class FormulaBuilder:
             lines.extend(constraint_lines)
         
         lines.append("")
+        return lines
+    
+    def _build_extra_var_constraints(
+        self,
+        extra_vars1: List[ExtraVariableInfo],
+        extra_vars2: List[ExtraVariableInfo],
+        analyses1: Dict[str, ExtraVariableAnalysis],
+        analyses2: Dict[str, ExtraVariableAnalysis]
+    ) -> Tuple[List[str], List[str]]:
+        """
+        追加変数の制約を構築
         
-        # 関数1のreturn値を定義
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Return value for {analysis1.function_name}")
-        lines.append("; " + "-" * 40)
-        return_var1 = f"return{func1_suffix}"
-        return_def1 = self._build_return_definition(
-            analysis1, return_var1, params1
-        )
-        lines.extend(return_def1)
-        lines.append("")
+        - upper_bits_zero=True: 全ての追加変数を0制約
+        - upper_bits_zero=False: 安全に制約できる変数のみ0制約（自動簡略化）
         
-        # 関数2のreturn値を定義
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Return value for {analysis2.function_name}")
-        lines.append("; " + "-" * 40)
-        return_var2 = f"return{func2_suffix}"
-        return_def2 = self._build_return_definition(
-            analysis2, return_var2, params2
-        )
-        lines.extend(return_def2)
-        lines.append("")
+        Returns:
+            (制約行のリスト, 0制約された変数名のリスト)
+        """
+        lines = []
+        constrained_vars = []
         
-        # return値のビット幅を取得
-        return_size1 = self._get_return_size(analysis1)
-        return_size2 = self._get_return_size(analysis2)
+        if self.upper_bits_zero:
+            # 明示的に上位ビットを0に制約するモード
+            all_extra = extra_vars1 + extra_vars2
+            if all_extra:
+                lines.append("; " + "-" * 40)
+                lines.append("; Extra variable constraints (--upper-bits-zero mode)")
+                lines.append("; All extra variables constrained to 0")
+                lines.append("; " + "-" * 40)
+                for v in all_extra:
+                    lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
+                    constrained_vars.append(v.smt_name)
+                lines.append("")
+        else:
+            # 自動簡略化モード: 安全に制約できる変数のみ
+            safe_vars1 = [v for v in extra_vars1 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+            safe_vars2 = [v for v in extra_vars2 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+            
+            if safe_vars1 or safe_vars2:
+                lines.append("; " + "-" * 40)
+                lines.append("; Auto-simplified extra variable constraints")
+                lines.append("; Upper-bits variables safely constrained to 0")
+                lines.append("; " + "-" * 40)
+                
+                for v in safe_vars1 + safe_vars2:
+                    reason = v.analysis.reason if v.analysis else ""
+                    lines.append(f"; {v.original_name}: {reason}")
+                    lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
+                    constrained_vars.append(v.smt_name)
+                
+                lines.append("")
         
-        # 等価性の否定をアサート
+        return lines, constrained_vars
+    
+    def _merge_param_and_extra_vars(
+        self,
+        params: List[ParameterInfo],
+        extra_vars: List[ExtraVariableInfo]
+    ) -> List[ParameterInfo]:
+        """パラメータと追加変数を統合"""
+        result = list(params)
+        for v in extra_vars:
+            result.append(ParameterInfo(
+                original_name=v.original_name,
+                smt_name=v.smt_name,
+                bit_width=v.bit_width,
+                index=-1
+            ))
+        return result
+    
+    def _build_equivalence_assertion(
+        self,
+        return_var1: str,
+        return_var2: str,
+        return_size1: int,
+        return_size2: int
+    ) -> List[str]:
+        """等価性アサートを構築"""
+        lines = []
         lines.append("; " + "-" * 40)
         lines.append("; Equivalence assertion (negated)")
         lines.append("; If SAT: functions are NOT equivalent")
@@ -174,7 +402,6 @@ class FormulaBuilder:
         if return_size1 == return_size2:
             lines.append(f"(assert (not (= {return_var1} {return_var2})))")
         else:
-            # return値のビット幅が異なる場合も重複ビットで比較
             overlap_size = min(return_size1, return_size2)
             lines.append(f"; Return sizes differ: {return_size1} vs {return_size2}")
             lines.append(f"; Comparing overlapping {overlap_size} bits")
@@ -183,11 +410,7 @@ class FormulaBuilder:
             else:
                 lines.append(f"(assert (not (= ((_ extract {overlap_size - 1} 0) {return_var1}) {return_var2})))")
         
-        lines.append("")
-        lines.append("(check-sat)")
-        lines.append("(get-model)")
-        
-        return "\n".join(lines), return_var1, return_var2
+        return lines
     
     def _collect_param_info(
         self,
