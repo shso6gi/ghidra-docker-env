@@ -57,9 +57,6 @@ def parse_arguments():
   # タイムアウトを5分に設定
   python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --equiv-timeout 300
 
-  # ビット幅が異なる場合、上位ビットを0に制約して比較
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --upper-bits-zero
-
   # 型修正リトライを有効にして比較（longlong/undefined → int）
   python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --retry-with-int
 
@@ -98,12 +95,6 @@ def parse_arguments():
         type=int,
         default=10,
         help="等価性判定のタイムアウト（秒）デフォルト: 10秒"
-    )
-    
-    parser.add_argument(
-        "--upper-bits-zero",
-        action="store_true",
-        help="ビット幅が異なる場合、重複していない上位ビットを0に制約する（デフォルト: ランダム/自由）"
     )
     
     parser.add_argument(
@@ -298,9 +289,6 @@ def run_equivalence_check(args):
         func_name1 = function_names[0]
         func_name2 = function_names[1]
     
-    # 上位ビットの制約モードを取得
-    upper_bits_zero = getattr(args, 'upper_bits_zero', False)
-    
     # 型修正リトライオプションを取得
     retry_with_type_fix = getattr(args, 'retry_with_int', False)
     
@@ -311,7 +299,6 @@ def run_equivalence_check(args):
         print(f"  Function 1: {func_name1}")
         print(f"  Function 2: {func_name2}")
         print(f"  Timeout: {args.equiv_timeout}秒")
-        print(f"  Upper bits mode: {'zero' if upper_bits_zero else 'free (random)'}")
         print(f"  Retry with int type fix: {'enabled' if retry_with_type_fix else 'disabled'}")
         print()
     
@@ -329,7 +316,6 @@ def run_equivalence_check(args):
     checker = EquivalenceChecker(
         timeout=args.equiv_timeout,
         debug=args.debug,
-        upper_bits_zero=upper_bits_zero,
         type_fixer_config=type_fixer_config,
         enable_rewrite=enable_rewrite,
         rewrite_direction=rewrite_direction
@@ -427,7 +413,6 @@ def run_ghidra_mode(args=None):
             hex = False
             const_format = "dec"
             equiv = None
-            upper_bits_zero = False
         args = DefaultArgs()
     
     target_functions = get_target_functions(args)

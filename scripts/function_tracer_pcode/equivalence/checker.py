@@ -116,7 +116,6 @@ class EquivalenceResult:
     smt_formula: Optional[str] = None
     total_time: float = 0.0
     error_message: Optional[str] = None
-    upper_bits_mode: str = "free"
     type_fix_result: Optional[TypeFixResult] = None
     retry_count: int = 0
     function1_signature: Optional[FunctionSignature] = None
@@ -159,7 +158,6 @@ class EquivalenceResult:
             "counterexample": self.counterexample.to_string("json") if self.counterexample else None,
             "total_time": self.total_time,
             "error_message": self.error_message,
-            "upper_bits_mode": self.upper_bits_mode,
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
@@ -188,7 +186,6 @@ class EquivalenceResult:
             lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
         
         lines.append("")
-        lines.append(f"Upper bits mode: {self.upper_bits_mode}")
         
         # 自動0制約された変数を表示
         if self.auto_zero_constrained:
@@ -250,7 +247,6 @@ class EquivalenceChecker:
         self,
         timeout: int = 10,
         debug: bool = False,
-        upper_bits_zero: bool = False,
         type_fixer_config: Optional[TypeFixerConfig] = None,
         enable_rewrite: bool = True,
         rewrite_direction: str = "to_modulo"
@@ -259,18 +255,16 @@ class EquivalenceChecker:
         Args:
             timeout: SMTソルバーのタイムアウト（秒）
             debug: デバッグ出力を有効にする
-            upper_bits_zero: 上位ビットを0に制約するか
             type_fixer_config: 型修正の設定
             enable_rewrite: 式のリライトを有効にする
             rewrite_direction: リライト方向 ("to_modulo" or "to_expansion")
         """
         self.timeout = timeout
         self.debug = debug
-        self.upper_bits_zero = upper_bits_zero
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
         self.enable_rewrite = enable_rewrite
         self.rewrite_direction = rewrite_direction
-        self.formula_builder = FormulaBuilder(debug=debug, upper_bits_zero=upper_bits_zero)
+        self.formula_builder = FormulaBuilder(debug=debug)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
     
     def _debug_print(self, msg: str):
@@ -376,7 +370,6 @@ class EquivalenceChecker:
     ) -> EquivalenceResult:
         """2つの関数の等価性を判定"""
         start_time = time.time()
-        upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         # シグネチャが渡されなかった場合は現在の解析結果から取得
         if original_signature1 is None:
@@ -418,7 +411,6 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message="No SMT solvers available",
-                    upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
@@ -465,7 +457,6 @@ class EquivalenceChecker:
                 counterexample=counterexample,
                 smt_formula=smt_formula if save_formula else None,
                 total_time=total_time,
-                upper_bits_mode=upper_bits_mode,
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
                 function1_signature=original_signature1,
@@ -489,7 +480,6 @@ class EquivalenceChecker:
                 solver_results=ParallelResult(results=[]),
                 total_time=time.time() - start_time,
                 error_message=str(e),
-                upper_bits_mode=upper_bits_mode,
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
                 function1_signature=original_signature1,
@@ -784,7 +774,6 @@ class EquivalenceChecker:
         from ..return_analyzer import ReturnAnalyzer
         
         start_time = time.time()
-        upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         # 関数1を解析
         self._debug_print(f"Analyzing function '{function_name1}' in {binary1_name}...")
@@ -801,7 +790,6 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name1}' not found in {binary1_name}",
-                    upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
@@ -825,7 +813,6 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name2}' not found in {binary2_name}",
-                    upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
@@ -873,7 +860,6 @@ class EquivalenceChecker:
         from ..return_analyzer import ReturnAnalyzer
         
         start_time = time.time()
-        upper_bits_mode = "zero" if self.upper_bits_zero else "free"
         
         # 関数1を解析
         self._debug_print(f"Analyzing function '{function_name1}' in {binary1_name}...")
@@ -890,7 +876,6 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name1}' not found in {binary1_name}",
-                    upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
@@ -914,7 +899,6 @@ class EquivalenceChecker:
                     solver_results=ParallelResult(results=[]),
                     total_time=time.time() - start_time,
                     error_message=f"Function '{function_name2}' not found in {binary2_name}",
-                    upper_bits_mode=upper_bits_mode,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     function1_signature=original_signature1,
