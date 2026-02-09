@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SMT式構築モジュール（ビット幅制約モード対応版）"""
+"""SMT式構築モジュール"""
 
 from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass
@@ -65,9 +65,8 @@ class FormulaBuilderResult:
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
-    def __init__(self, debug: bool = False, upper_bits_zero: bool = False):
+    def __init__(self, debug: bool = False):
         self.debug = debug
-        self.upper_bits_zero = upper_bits_zero
         self.variable_analyzer = VariableAnalyzer(debug=debug)
     
     def build_equivalence_formula(
@@ -104,14 +103,11 @@ class FormulaBuilder:
         lines = []
         auto_zero_constrained: List[str] = []
         
-        upper_bits_mode_desc = "zero (constrained)" if self.upper_bits_zero else "free (any value)"
-        
         # ヘッダー
         lines.append("; " + "=" * 60)
         lines.append("; Equivalence Check")
         lines.append(f"; Function 1: {analysis1.function_name}")
         lines.append(f"; Function 2: {analysis2.function_name}")
-        lines.append(f"; Upper bits mode: {upper_bits_mode_desc}")
         lines.append("; " + "=" * 60)
         lines.append("")
         lines.append("(set-logic QF_BV)")
@@ -142,7 +138,7 @@ class FormulaBuilder:
         extra_vars2 = self._build_extra_variable_infos(var_analyses2, func2_suffix)
         
         if self.debug:
-            self._print_debug_info(params1, params2, extra_vars1, extra_vars2, upper_bits_mode_desc)
+            self._print_debug_info(params1, params2, extra_vars1, extra_vars2)
         
         # パラメータペアを構築
         param_pairs = self._build_parameter_pairs(params1, params2)
@@ -231,8 +227,7 @@ class FormulaBuilder:
         params1: List[ParameterInfo],
         params2: List[ParameterInfo],
         extra_vars1: List[ExtraVariableInfo],
-        extra_vars2: List[ExtraVariableInfo],
-        upper_bits_mode_desc: str
+        extra_vars2: List[ExtraVariableInfo]
     ):
         """デバッグ情報を出力"""
         print(f"[FormulaBuilder] Function 1 parameters:")
@@ -256,8 +251,6 @@ class FormulaBuilder:
                 if v.analysis:
                     status = f" [{v.analysis.recommendation.name}]"
                 print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
-        
-        print(f"[FormulaBuilder] Upper bits mode: {upper_bits_mode_desc}")
     
     def _build_param_declarations(
         self,
@@ -303,10 +296,7 @@ class FormulaBuilder:
         lines.append("; " + "-" * 40)
         lines.append("; Parameter equality constraints")
         lines.append("; For matching bit widths: direct equality")
-        if self.upper_bits_zero:
-            lines.append("; For different bit widths: overlapping bits equal, upper bits = 0")
-        else:
-            lines.append("; For different bit widths: overlapping bits equal, upper bits free")
+        lines.append("; For different bit widths: overlapping bits equal, upper bits free")
         lines.append("; " + "-" * 40)
         
         for pair in param_pairs:
@@ -326,8 +316,7 @@ class FormulaBuilder:
         """
         追加変数の制約を構築
         
-        - upper_bits_zero=True: 全ての追加変数を0制約
-        - upper_bits_zero=False: 安全に制約できる変数のみ0制約（自動簡略化）
+        安全に制約できる変数のみ0制約（自動簡略化）
         
         Returns:
             (制約行のリスト, 0制約された変数名のリスト)
@@ -335,36 +324,23 @@ class FormulaBuilder:
         lines = []
         constrained_vars = []
         
-        if self.upper_bits_zero:
-            # 明示的に上位ビットを0に制約するモード
-            all_extra = extra_vars1 + extra_vars2
-            if all_extra:
-                lines.append("; " + "-" * 40)
-                lines.append("; Extra variable constraints (--upper-bits-zero mode)")
-                lines.append("; All extra variables constrained to 0")
-                lines.append("; " + "-" * 40)
-                for v in all_extra:
-                    lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
-                    constrained_vars.append(v.smt_name)
-                lines.append("")
-        else:
-            # 自動簡略化モード: 安全に制約できる変数のみ
-            safe_vars1 = [v for v in extra_vars1 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
-            safe_vars2 = [v for v in extra_vars2 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+        # 自動簡略化モード: 安全に制約できる変数のみ
+        safe_vars1 = [v for v in extra_vars1 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+        safe_vars2 = [v for v in extra_vars2 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+        
+        if safe_vars1 or safe_vars2:
+            lines.append("; " + "-" * 40)
+            lines.append("; Auto-simplified extra variable constraints")
+            lines.append("; Upper-bits variables safely constrained to 0")
+            lines.append("; " + "-" * 40)
             
-            if safe_vars1 or safe_vars2:
-                lines.append("; " + "-" * 40)
-                lines.append("; Auto-simplified extra variable constraints")
-                lines.append("; Upper-bits variables safely constrained to 0")
-                lines.append("; " + "-" * 40)
-                
-                for v in safe_vars1 + safe_vars2:
-                    reason = v.analysis.reason if v.analysis else ""
-                    lines.append(f"; {v.original_name}: {reason}")
-                    lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
-                    constrained_vars.append(v.smt_name)
-                
-                lines.append("")
+            for v in safe_vars1 + safe_vars2:
+                reason = v.analysis.reason if v.analysis else ""
+                lines.append(f"; {v.original_name}: {reason}")
+                lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
+                constrained_vars.append(v.smt_name)
+            
+            lines.append("")
         
         return lines, constrained_vars
     
@@ -469,9 +445,7 @@ class FormulaBuilder:
         パラメータ間の制約を構築
         
         - 同じビット幅: 直接等価
-        - 異なるビット幅: 重複するビット（下位ビット）のみ等価
-          - upper_bits_zero=False: 上位ビットは自由（ランダム）
-          - upper_bits_zero=True: 上位ビットは0に制約
+        - 異なるビット幅: 重複するビット（下位ビット）のみ等価、上位ビットは自由
         """
         lines = []
         
@@ -497,25 +471,11 @@ class FormulaBuilder:
             if p1.bit_width < p2.bit_width:
                 # p1が小さい: p1全体 = p2の下位ビット
                 lines.append(f"(assert (= {p1.smt_name} ((_ extract {overlap_bits - 1} 0) {p2.smt_name})))")
-                
-                if self.upper_bits_zero:
-                    # 上位ビットを0に制約
-                    upper_bits_width = p2.bit_width - overlap_bits
-                    lines.append(f"; Upper bits of {p2.smt_name} [{p2.bit_width - 1}:{overlap_bits}] constrained to 0")
-                    lines.append(f"(assert (= ((_ extract {p2.bit_width - 1} {overlap_bits}) {p2.smt_name}) (_ bv0 {upper_bits_width})))")
-                else:
-                    lines.append(f"; Upper bits of {p2.smt_name} [{p2.bit_width - 1}:{overlap_bits}] are free")
+                lines.append(f"; Upper bits of {p2.smt_name} [{p2.bit_width - 1}:{overlap_bits}] are free")
             else:
                 # p2が小さい: p1の下位ビット = p2全体
                 lines.append(f"(assert (= ((_ extract {overlap_bits - 1} 0) {p1.smt_name}) {p2.smt_name}))")
-                
-                if self.upper_bits_zero:
-                    # 上位ビットを0に制約
-                    upper_bits_width = p1.bit_width - overlap_bits
-                    lines.append(f"; Upper bits of {p1.smt_name} [{p1.bit_width - 1}:{overlap_bits}] constrained to 0")
-                    lines.append(f"(assert (= ((_ extract {p1.bit_width - 1} {overlap_bits}) {p1.smt_name}) (_ bv0 {upper_bits_width})))")
-                else:
-                    lines.append(f"; Upper bits of {p1.smt_name} [{p1.bit_width - 1}:{overlap_bits}] are free")
+                lines.append(f"; Upper bits of {p1.smt_name} [{p1.bit_width - 1}:{overlap_bits}] are free")
         
         return lines
     
