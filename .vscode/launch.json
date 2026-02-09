@@ -9,12 +9,12 @@
             "args": [
                 "--equiv",
                 "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-arm64-clang-O0",
-                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-x86_64-gcc-O0",
+                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-mips64-clang-O1",
                 "-f",
                 "divide",
                 "--retry-with-int",
                 "-d",
-                "-v"
+                // "-v"
             ],
             "cwd": "/workspaces/ghidra-docker-env",
             "console": "integratedTerminal",

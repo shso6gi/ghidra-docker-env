@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
 """等価性判定パッケージ"""
-
 from .checker import EquivalenceChecker, EquivalenceResult, FunctionSignature
-from .formula_builder import FormulaBuilder, FormulaBuilderResult
+from .formula_builder import (
+    FormulaBuilder, 
+    FormulaBuilderResult,
+    ParameterInfo,
+    ExtraVariableInfo,
+    ParameterPair,
+)
 from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
 from .variable_analyzer import (
     VariableAnalyzer,
     ExtraVariableAnalysis,
-    VariableUsageInfo,
-    ConstraintRecommendation,
-    get_safe_zero_constraints
+    VariableClassification,
+    ExtensionType,
+    ParameterFragmentInfo,
+    get_parameter_fragment_constraints,
 )
 from .expression_rewriter import (
     ExpressionRewriter,
@@ -26,8 +32,13 @@ __all__ = [
     "EquivalenceChecker",
     "EquivalenceResult",
     "FunctionSignature",
-    # Formula
+
+    # Formula Builder
     "FormulaBuilder",
+    "FormulaBuilderResult",
+    "ParameterInfo",
+    "ExtraVariableInfo",
+    "ParameterPair",
     # Type Fixer
     "TypeFixer",
     "TypeFixerConfig",
@@ -38,9 +49,11 @@ __all__ = [
     # Variable Analyzer
     'VariableAnalyzer',
     'ExtraVariableAnalysis',
-    'VariableUsageInfo',
-    'ConstraintRecommendation',
-    'get_safe_zero_constraints',
+    'VariableClassification',
+    'ExtensionType',
+    'ParameterFragmentInfo',
+    'get_parameter_fragment_constraints',
+    
     # Rewriter
     "ExpressionRewriter",
     "RewriteRule",

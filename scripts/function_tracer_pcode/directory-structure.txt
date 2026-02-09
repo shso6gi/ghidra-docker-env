@@ -15,12 +15,15 @@ function_tracer_pcode/
 │   ├── solver_interface.py    # SMTソルバーの抽象インターフェース
 │   ├── solver_z3.py           # Z3実装
 │   ├── solver_boolector.py    # Boolector実装（使用していない）
-│   ├── solver_yices2.py       # Yices2実装
-│   ├── solver_cvc5.py         # CVC5実装
+│   ├── solver_yices2.py       # Yices2実装（使用していない）
+│   ├── solver_cvc5.py         # CVC5実装（使用していない）
 │   └── parallel_runner.py     # 並列実行管理
 ├── equivalence/
 │   ├── __init__.py
 │   ├── checker.py             # 等価性判定メインロジック
 │   ├── formula_builder.py     # SMT式構築
+│   ├── type_fixer.py          # 型修正モジュール
+│   ├── variable_analyzer.py   # 追加変数の分析
+│   ├── expression_rewriter.py # 複雑な式を、等価な単純な形式に変換
 │   └── counterexample.py      # 反例フォーマット
 └── main.py                     # main

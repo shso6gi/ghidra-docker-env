@@ -120,7 +120,7 @@ class EquivalenceResult:
     retry_count: int = 0
     function1_signature: Optional[FunctionSignature] = None
     function2_signature: Optional[FunctionSignature] = None
-    auto_zero_constrained: List[str] = field(default_factory=list)
+    constrained_fragments: List[str] = field(default_factory=list)
     rewrite_info: Optional[RewriteInfo] = None
     
     def is_timeout(self) -> bool:
@@ -161,7 +161,7 @@ class EquivalenceResult:
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
             "retry_count": self.retry_count,
             "is_timeout": self.is_timeout(),
-            "auto_zero_constrained": self.auto_zero_constrained,
+            "constrained_fragments": self.constrained_fragments,
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
         }
     
@@ -187,10 +187,11 @@ class EquivalenceResult:
         
         lines.append("")
         
-        # 自動0制約された変数を表示
-        if self.auto_zero_constrained:
-            vars_str = ", ".join(self.auto_zero_constrained)
-            lines.append(f"Auto-simplified: {vars_str} (upper-bits variables constrained to 0)")
+        # パラメータ断片として制約された変数を表示
+        if self.constrained_fragments:
+            vars_str = ", ".join(self.constrained_fragments)
+            lines.append(f"Derived fragments: {vars_str}")
+            lines.append(f"  (upper-bits variables constrained via sign/zero extension from parameters)")
         
         if self.type_fix_result and self.type_fix_result.any_fix_applied():
             lines.append(f"Type fix applied: {self.type_fix_result}")
@@ -382,7 +383,8 @@ class EquivalenceChecker:
             formula_result = self.formula_builder.build_equivalence_formula_extended(
                 analysis1, analysis2
             )
-            auto_zero_constrained = formula_result.auto_zero_constrained
+            constrained_fragments = formula_result.param_fragment_constrained
+            
             # リライトを適用
             analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
             
@@ -397,8 +399,8 @@ class EquivalenceChecker:
                 print(smt_formula)
                 print("=" * 60 + "\n")
 
-                if auto_zero_constrained:
-                    print(f"[EquivalenceChecker] Auto-constrained to 0: {auto_zero_constrained}")
+                if constrained_fragments:
+                    print(f"[EquivalenceChecker] Parameter fragments constrained via extension: {constrained_fragments}")
             
             available_solvers = self.solver_runner.get_available_solvers()
             if not available_solvers:
@@ -415,7 +417,7 @@ class EquivalenceChecker:
                     retry_count=retry_count,
                     function1_signature=original_signature1,
                     function2_signature=original_signature2,
-                    auto_zero_constrained=auto_zero_constrained,
+                    constrained_fragments=constrained_fragments,
                     rewrite_info=rewrite_info
                 )
             
@@ -461,7 +463,7 @@ class EquivalenceChecker:
                 retry_count=retry_count,
                 function1_signature=original_signature1,
                 function2_signature=original_signature2,
-                auto_zero_constrained=auto_zero_constrained,
+                constrained_fragments=constrained_fragments,
                 rewrite_info=rewrite_info
             )
         
@@ -484,7 +486,7 @@ class EquivalenceChecker:
                 retry_count=retry_count,
                 function1_signature=original_signature1,
                 function2_signature=original_signature2,
-                auto_zero_constrained=[]
+                constrained_fragments=[]
             )
     
     def check_from_binaries(
@@ -708,6 +710,7 @@ class EquivalenceChecker:
         
         result.total_time = time.time() - start_time
         return result
+
     def _should_fix_return_type_from_analysis(
         self,
         analysis: Optional['FunctionReturnAnalysis']
@@ -724,7 +727,6 @@ class EquivalenceChecker:
                 return True
         
         return False
-
 
     def _should_fix_params_from_analysis(
         self,
@@ -748,7 +750,6 @@ class EquivalenceChecker:
                     return True
         
         return False
-
 
     def _analyze_and_check_with_analysis(
         self,

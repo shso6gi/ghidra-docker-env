@@ -7,7 +7,12 @@ import re
 
 from ..return_analyzer import FunctionReturnAnalysis, ReturnInfo
 from ..expression import Expression, ExpressionType
-from .variable_analyzer import VariableAnalyzer, ExtraVariableAnalysis, get_safe_zero_constraints
+from .variable_analyzer import (
+    VariableAnalyzer, 
+    ExtraVariableAnalysis, 
+    VariableClassification,
+    get_parameter_fragment_constraints
+)
 
 
 @dataclass
@@ -17,6 +22,7 @@ class ParameterInfo:
     smt_name: str
     bit_width: int
     index: int
+    is_signed: bool = True
 
 
 @dataclass
@@ -59,7 +65,8 @@ class FormulaBuilderResult:
     return_var2: str
     extra_vars1: List[ExtraVariableInfo]
     extra_vars2: List[ExtraVariableInfo]
-    auto_zero_constrained: List[str]  # 自動的に0制約された変数
+    constrained_fragments: List[str]  # 後方互換性のため残す（実際はextension制約）
+    param_fragment_constrained: List[str]  # パラメータ断片として制約された変数
 
 
 class FormulaBuilder:
@@ -101,7 +108,8 @@ class FormulaBuilder:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         lines = []
-        auto_zero_constrained: List[str] = []
+        constrained_fragments: List[str] = []
+        param_fragment_constrained: List[str] = []
         
         # ヘッダー
         lines.append("; " + "=" * 60)
@@ -160,13 +168,17 @@ class FormulaBuilder:
         # パラメータ間の等価制約
         lines.extend(self._build_param_constraints_section(param_pairs))
         
-        # 追加変数の制約（自動簡略化）
+        # 追加変数の制約（パラメータ断片としての制約）
         constraint_lines, constrained_vars = self._build_extra_var_constraints(
-            extra_vars1, extra_vars2, var_analyses1, var_analyses2
+            extra_vars1, extra_vars2,
+            var_analyses1, var_analyses2,
+            func1_suffix, func2_suffix
         )
         if constraint_lines:
             lines.extend(constraint_lines)
-            auto_zero_constrained.extend(constrained_vars)
+            param_fragment_constrained.extend(constrained_vars)
+            # 後方互換性のため constrained_fragments にも追加
+            constrained_fragments.extend(constrained_vars)
         
         # 全変数の情報を統合（パラメータ + 追加変数）
         all_vars1 = self._merge_param_and_extra_vars(params1, extra_vars1)
@@ -203,7 +215,8 @@ class FormulaBuilder:
             return_var2=return_var2,
             extra_vars1=extra_vars1,
             extra_vars2=extra_vars2,
-            auto_zero_constrained=auto_zero_constrained
+            constrained_fragments=constrained_fragments,
+            param_fragment_constrained=param_fragment_constrained
         )
     
     def _build_extra_variable_infos(
@@ -232,24 +245,34 @@ class FormulaBuilder:
         """デバッグ情報を出力"""
         print(f"[FormulaBuilder] Function 1 parameters:")
         for p in params1:
-            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
+            signed_str = "signed" if p.is_signed else "unsigned"
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str})")
         if extra_vars1:
             print(f"[FormulaBuilder] Function 1 extra variables:")
             for v in extra_vars1:
                 status = ""
                 if v.analysis:
-                    status = f" [{v.analysis.recommendation.name}]"
+                    status = f" [{v.analysis.classification.name}]"
+                    if v.analysis.fragment_info:
+                        ext_type = v.analysis.fragment_info.extension_type.name
+                        parent = v.analysis.fragment_info.parent_param_name
+                        status += f" -> {parent} ({ext_type})"
                 print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
         
         print(f"[FormulaBuilder] Function 2 parameters:")
         for p in params2:
-            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit)")
+            signed_str = "signed" if p.is_signed else "unsigned"
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str})")
         if extra_vars2:
             print(f"[FormulaBuilder] Function 2 extra variables:")
             for v in extra_vars2:
                 status = ""
                 if v.analysis:
-                    status = f" [{v.analysis.recommendation.name}]"
+                    status = f" [{v.analysis.classification.name}]"
+                    if v.analysis.fragment_info:
+                        ext_type = v.analysis.fragment_info.extension_type.name
+                        parent = v.analysis.fragment_info.parent_param_name
+                        status += f" -> {parent} ({ext_type})"
                 print(f"  {v.original_name} -> {v.smt_name} ({v.bit_width}bit){status}")
     
     def _build_param_declarations(
@@ -264,7 +287,8 @@ class FormulaBuilder:
         lines.append("; (Bit widths from Ghidra analysis)")
         lines.append("; " + "-" * 40)
         for p in params:
-            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))")
+            signed_comment = "signed" if p.is_signed else "unsigned"
+            lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))  ; {signed_comment}")
         lines.append("")
         return lines
     
@@ -282,7 +306,9 @@ class FormulaBuilder:
         for v in extra_vars:
             comment = ""
             if v.analysis:
-                comment = f"  ; {v.analysis.recommendation.name}: {v.analysis.reason}"
+                comment = f"  ; {v.analysis.classification.name}"
+                if v.analysis.fragment_info:
+                    comment += f": {v.analysis.reason}"
             lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width})){comment}")
         lines.append("")
         return lines
@@ -311,36 +337,42 @@ class FormulaBuilder:
         extra_vars1: List[ExtraVariableInfo],
         extra_vars2: List[ExtraVariableInfo],
         analyses1: Dict[str, ExtraVariableAnalysis],
-        analyses2: Dict[str, ExtraVariableAnalysis]
+        analyses2: Dict[str, ExtraVariableAnalysis],
+        suffix1: str,
+        suffix2: str
     ) -> Tuple[List[str], List[str]]:
         """
         追加変数の制約を構築
         
-        安全に制約できる変数のみ0制約（自動簡略化）
+        パラメータ断片として識別された変数には sign/zero extension 制約を適用
         
         Returns:
-            (制約行のリスト, 0制約された変数名のリスト)
+            (制約行のリスト, 制約された変数名のリスト)
         """
         lines = []
         constrained_vars = []
         
-        # 自動簡略化モード: 安全に制約できる変数のみ
-        safe_vars1 = [v for v in extra_vars1 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
-        safe_vars2 = [v for v in extra_vars2 if v.analysis and v.analysis.can_safely_constrain_to_zero()]
+        # パラメータ断片の制約を生成
+        fragment_lines1, fragment_vars1 = get_parameter_fragment_constraints(analyses1, suffix1)
+        fragment_lines2, fragment_vars2 = get_parameter_fragment_constraints(analyses2, suffix2)
         
-        if safe_vars1 or safe_vars2:
+        if fragment_lines1 or fragment_lines2:
             lines.append("; " + "-" * 40)
-            lines.append("; Auto-simplified extra variable constraints")
-            lines.append("; Upper-bits variables safely constrained to 0")
+            lines.append("; Parameter fragment constraints")
+            lines.append("; Upper-bits variables constrained via sign/zero extension")
             lines.append("; " + "-" * 40)
             
-            for v in safe_vars1 + safe_vars2:
-                reason = v.analysis.reason if v.analysis else ""
-                lines.append(f"; {v.original_name}: {reason}")
-                lines.append(f"(assert (= {v.smt_name} (_ bv0 {v.bit_width})))")
-                constrained_vars.append(v.smt_name)
+            if fragment_lines1:
+                lines.append(f"; Function 1 fragments:")
+                lines.extend(fragment_lines1)
+            
+            if fragment_lines2:
+                lines.append(f"; Function 2 fragments:")
+                lines.extend(fragment_lines2)
             
             lines.append("")
+            constrained_vars.extend(fragment_vars1)
+            constrained_vars.extend(fragment_vars2)
         
         return lines, constrained_vars
     
@@ -356,7 +388,8 @@ class FormulaBuilder:
                 original_name=v.original_name,
                 smt_name=v.smt_name,
                 bit_width=v.bit_width,
-                index=-1
+                index=-1,
+                is_signed=True  # デフォルト
             ))
         return result
     
@@ -399,13 +432,15 @@ class FormulaBuilder:
             name = param.get('name', f"param_{param.get('index', 0)}")
             size = param.get('size', 4) * 8
             index = param.get('index', 0)
+            is_signed = param.get('is_signed', True)
             smt_name = f"{name}{suffix}"
             
             result.append(ParameterInfo(
                 original_name=name,
                 smt_name=smt_name,
                 bit_width=size,
-                index=index
+                index=index,
+                is_signed=is_signed
             ))
         
         result.sort(key=lambda x: x.index)

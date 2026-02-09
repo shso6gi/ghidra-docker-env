@@ -165,25 +165,113 @@ class ReturnAnalyzer:
         return None
     
     def _collect_parameters(self, high_function) -> List[Dict]:
+        """パラメータ情報を収集（ストレージ情報付き）"""
         params = []
         local_map = high_function.getLocalSymbolMap()
         
         if local_map:
             for sym in local_map.getSymbols():
                 if sym.isParameter():
+                    data_type = sym.getDataType()
                     param_info = {
                         "name": sym.getName(),
-                        "data_type": str(sym.getDataType()) if sym.getDataType() else None,
+                        "data_type": str(data_type) if data_type else None,
+                        "data_type_obj": data_type,  # 生のDataTypeオブジェクトを保持
                         "size": sym.getSize(),
+                        "is_signed": self._is_signed_type(data_type),
+                        "storage": self._get_storage_info(sym),
                     }
                     try:
                         param_info["index"] = sym.getCategoryIndex()
                     except:
                         param_info["index"] = -1
+                    
+                    if self.debug:
+                        self._debug_print(f"Parameter '{sym.getName()}': "
+                                         f"type={param_info['data_type']}, "
+                                         f"signed={param_info['is_signed']}, "
+                                         f"storage={param_info['storage']}")
+                    
                     params.append(param_info)
         
         params.sort(key=lambda x: x.get("index", -1))
         return params
+    
+    def _is_signed_type(self, data_type) -> bool:
+        """データ型が符号付きかどうかを判定"""
+        if data_type is None:
+            return True  # デフォルトは符号付き
+        
+        type_name = str(data_type).lower()
+        
+        # 明示的に unsigned の場合
+        if "unsigned" in type_name or type_name.startswith("u"):
+            return False
+        
+        # uint, ulong, uchar 等
+        unsigned_patterns = ["uint", "ulong", "uchar", "ushort", "ubyte", 
+                             "size_t", "uintptr"]
+        for pattern in unsigned_patterns:
+            if pattern in type_name:
+                return False
+        
+        # pointer型は符号なし
+        if "*" in type_name or "ptr" in type_name:
+            return False
+        
+        return True
+    
+    def _get_storage_info(self, sym) -> Optional[Dict]:
+        """シンボルのストレージ情報を取得"""
+        try:
+            storage = sym.getStorage()
+            if storage is None:
+                return None
+            
+            # Varnodeリストを取得
+            varnodes = storage.getVarnodes()
+            if not varnodes or len(varnodes) == 0:
+                return None
+            
+            first_vn = varnodes[0]
+            addr = first_vn.getAddress()
+            space = addr.getAddressSpace()
+            
+            storage_info = {
+                "is_register": space.isRegisterSpace(),
+                "offset": first_vn.getOffset(),
+                "size": first_vn.getSize(),
+                "size_bits": first_vn.getSize() * 8,
+                "space_name": space.getName(),
+            }
+            
+            if space.isRegisterSpace():
+                # レジスタ情報を取得
+                reg = self.program.getRegister(addr, first_vn.getSize())
+                if reg:
+                    storage_info["register_name"] = reg.getName()
+                    
+                    # 親レジスタ情報
+                    base_reg = reg.getBaseRegister()
+                    if base_reg and base_reg != reg:
+                        storage_info["base_register_name"] = base_reg.getName()
+                        storage_info["base_register_size"] = base_reg.getBitLength() // 8
+                        storage_info["base_register_size_bits"] = base_reg.getBitLength()
+                        # パラメータのビットオフセット（親レジスタ内での位置）
+                        byte_offset_in_base = reg.getOffset() - base_reg.getOffset()
+                        storage_info["bit_offset_in_base"] = byte_offset_in_base * 8
+                    else:
+                        # 親レジスタと同じ場合
+                        storage_info["base_register_name"] = reg.getName()
+                        storage_info["base_register_size"] = reg.getBitLength() // 8
+                        storage_info["base_register_size_bits"] = reg.getBitLength()
+                        storage_info["bit_offset_in_base"] = 0
+            
+            return storage_info
+        except Exception as e:
+            if self.debug:
+                self._debug_print(f"Failed to get storage info: {e}")
+            return None
     
     def _analyze_return_op(
         self,
@@ -240,12 +328,10 @@ class ReturnAnalyzer:
         
         if has_multiequal:
             self._debug_print("Return value contains MULTIEQUAL - conditions from PHI")
-            # MULTIEQUALがある場合、パス条件は不要（MULTIEQUALが条件を提供）
             expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
             expanded_values = expander.expand_from_varnode(return_varnode, [])
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
-            # MULTIEQUALがない場合、パス条件を使用
             expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
             expanded_values = expander.expand_from_varnode(return_varnode, path_conditions)
         
@@ -301,7 +387,6 @@ class ReturnAnalyzer:
         if mnemonic == "MULTIEQUAL":
             return True
         
-        # 入力を再帰的にチェック
         for i in range(def_op.getNumInputs()):
             input_vn = def_op.getInput(i)
             if self._contains_multiequal(input_vn, depth + 1):

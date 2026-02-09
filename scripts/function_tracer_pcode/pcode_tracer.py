@@ -2,7 +2,7 @@
 """P-codeトレースロジック"""
 
 from typing import Dict, List, Optional, Set, Tuple, Any
-from .expression import Expression, ExpressionType, Condition
+from .expression import Expression, ExpressionType, Condition, StorageInfo
 from .settings import MAX_TRACE_DEPTH, DEBUG_MODE
 
 
@@ -94,6 +94,56 @@ class PcodeTracer:
         self._trace_cache.clear()
         self._trace_stack.clear()
     
+    def _get_storage_info_from_varnode(self, varnode) -> Optional[StorageInfo]:
+        """VarnodeからStorageInfoを作成"""
+        if varnode is None:
+            return None
+        
+        try:
+            addr = varnode.getAddress()
+            space = addr.getAddressSpace()
+            
+            storage_info = StorageInfo(
+                is_register=space.isRegisterSpace(),
+                space_name=space.getName(),
+                offset=varnode.getOffset(),
+                size=varnode.getSize(),
+                size_bits=varnode.getSize() * 8
+            )
+            
+            if space.isRegisterSpace():
+                # レジスタ情報を取得
+                reg = self.program.getRegister(addr, varnode.getSize())
+                if reg:
+                    storage_info.register_name = reg.getName()
+                    
+                    # 親レジスタ情報
+                    base_reg = reg.getBaseRegister()
+                    if base_reg:
+                        storage_info.base_register_name = base_reg.getName()
+                        storage_info.base_register_offset = base_reg.getOffset()
+                        storage_info.base_register_size = base_reg.getBitLength() // 8
+                        storage_info.base_register_size_bits = base_reg.getBitLength()
+                        
+                        # 親レジスタ内でのビットオフセットを計算
+                        # reg.getOffset()はレジスタのバイトオフセット
+                        # base_reg.getOffset()は親レジスタのバイトオフセット
+                        byte_offset_in_base = reg.getOffset() - base_reg.getOffset()
+                        storage_info.bit_offset_in_base = byte_offset_in_base * 8
+                    else:
+                        # 親レジスタがない場合は自身が親
+                        storage_info.base_register_name = reg.getName()
+                        storage_info.base_register_offset = reg.getOffset()
+                        storage_info.base_register_size = reg.getBitLength() // 8
+                        storage_info.base_register_size_bits = reg.getBitLength()
+                        storage_info.bit_offset_in_base = 0
+            
+            return storage_info
+        except Exception as e:
+            if self.debug:
+                print(f"  [Warning] Failed to get storage info: {e}")
+            return None
+    
     def trace_varnode(self, varnode, depth: int = 0, use_cache: bool = True) -> Expression:
         """
         Varnodeを逆順にトレースして式を構築
@@ -128,6 +178,7 @@ class PcodeTracer:
         print(f"{indent}  isRegister: {varnode.isRegister()}")
         print(f"{indent}  isUnique: {varnode.isUnique()}")
         print(f"{indent}  isAddress: {varnode.isAddress()}")
+        print(f"{indent}  isInput: {varnode.isInput()}")
         
         def_op = varnode.getDef()
         print(f"{indent}  getDef(): {def_op}")
@@ -145,6 +196,16 @@ class PcodeTracer:
             if symbol:
                 print(f"{indent}      symbol name: {symbol.getName()}")
                 print(f"{indent}      isParameter: {symbol.isParameter()}")
+        
+        # ストレージ情報を出力
+        storage_info = self._get_storage_info_from_varnode(varnode)
+        if storage_info:
+            print(f"{indent}  storage_info:")
+            print(f"{indent}    is_register: {storage_info.is_register}")
+            print(f"{indent}    register_name: {storage_info.register_name}")
+            print(f"{indent}    base_register_name: {storage_info.base_register_name}")
+            print(f"{indent}    bit_offset_in_base: {storage_info.bit_offset_in_base}")
+            print(f"{indent}    size_bits: {storage_info.size_bits}")
     
     def _trace_varnode_internal(self, varnode, depth: int, use_cache: bool = True) -> Expression:
         """Varnodeトレースの内部処理"""
@@ -155,6 +216,9 @@ class PcodeTracer:
             if self.debug:
                 print(f"  -> Constant: 0x{value:x}")
             return Expression.constant(value, varnode.getSize())
+        
+        # ストレージ情報を取得
+        storage_info = self._get_storage_info_from_varnode(varnode)
         
         # 2. 定義元のPcodeOpを取得
         def_op = varnode.getDef()
@@ -185,29 +249,45 @@ class PcodeTracer:
                     if self.debug:
                         print(f"  -> Parameter: {sym_name} (index={param_idx})")
                     
-                    return Expression.parameter(sym_name, param_idx, dtype, varnode.getSize())
+                    return Expression.parameter(
+                        sym_name, param_idx, dtype, varnode.getSize(),
+                        storage_info=storage_info
+                    )
                 else:
                     dtype = str(symbol.getDataType()) if symbol.getDataType() else None
                     
                     if self.debug:
                         print(f"  -> Variable (from symbol): {sym_name}")
                     
-                    return Expression.variable(sym_name, dtype, varnode.getSize())
+                    return Expression.variable(
+                        sym_name, dtype, varnode.getSize(),
+                        storage_info=storage_info
+                    )
             
             name = high_var.getName()
             if name and name != "UNNAMED":
                 if self.debug:
                     print(f"  -> Variable (from high name): {name}")
-                return Expression.variable(name, size=varnode.getSize())
+                return Expression.variable(
+                    name, size=varnode.getSize(),
+                    storage_info=storage_info
+                )
         
-        # 4. レジスタの場合
+        # 4. レジスタの場合（入力変数として扱う）
         if varnode.isRegister():
             reg = self.program.getRegister(varnode.getAddress(), varnode.getSize())
             if reg:
                 reg_name = reg.getName()
                 if self.debug:
-                    print(f"  -> Register: {reg_name}")
-                return Expression.variable(reg_name, size=varnode.getSize())
+                    print(f"  -> Register (input): {reg_name}")
+                    print(f"     isInput: {varnode.isInput()}")
+                    print(f"     storage_info: {storage_info}")  # 追加
+                
+                # 入力varnodeの場合は変数として扱う
+                return Expression.variable(
+                    reg_name, size=varnode.getSize(),
+                    storage_info=storage_info
+                )
         
         # 5. アドレス空間の変数（メモリ）
         if varnode.isAddress():

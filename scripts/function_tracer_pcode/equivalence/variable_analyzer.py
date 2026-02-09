@@ -2,40 +2,95 @@
 """追加変数の分析モジュール
 
 パラメータ以外の変数（in_a1_hi等）を検出・分析し、
-安全に0制約できるかを判定する。
+ストレージ情報に基づいてパラメータ断片かどうかを判定する。
+
+パラメータ断片と判定された場合は、0固定ではなく
+sign/zero extension から導かれる値として拘束する。
 """
 
-import re
-from typing import List, Dict, Set, Optional
-from dataclasses import dataclass, field
+from typing import List, Dict, Set, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum, auto
 
-from ..expression import Expression, ExpressionType, Condition
+from ..expression import Expression, ExpressionType, Condition, StorageInfo
 from ..return_analyzer import FunctionReturnAnalysis
 
 
-class VariableUsageType(Enum):
-    """変数の使用タイプ"""
-    CONDITION_ONLY = auto()      # 条件式でのみ使用
-    RETURN_VALUE = auto()        # 戻り値計算で使用
-    BOTH = auto()                # 両方で使用
-    UNKNOWN = auto()             # 不明
+class VariableClassification(Enum):
+    """変数の分類"""
+    PARAMETER = auto()              # パラメータ本体
+    PARAMETER_FRAGMENT = auto()     # パラメータの上位ビット断片（sign/zero ext制約が必要）
+    INDEPENDENT_INPUT = auto()      # 独立した入力変数
+    UNKNOWN = auto()                # 分類不明
 
 
-class ConstraintRecommendation(Enum):
-    """制約の推奨"""
-    SAFE_TO_ZERO = auto()        # 安全に0制約可能
-    UNSAFE = auto()              # 0制約すべきでない
-    NEEDS_MANUAL_REVIEW = auto() # 手動確認が必要
+class ExtensionType(Enum):
+    """拡張タイプ"""
+    SIGN_EXTEND = auto()   # 符号拡張
+    ZERO_EXTEND = auto()   # ゼロ拡張
 
 
 @dataclass
-class VariableUsageInfo:
-    """変数の使用情報"""
-    in_condition: bool = False
-    in_return_value: bool = False
-    in_piece_upper: bool = False  # PIECE演算の上位部分として使用
-    piece_contexts: List[str] = field(default_factory=list)  # PIECE使用のコンテキスト
+class ParameterFragmentInfo:
+    """パラメータ断片の情報"""
+    fragment_name: str
+    fragment_bit_width: int
+    parent_param_name: str
+    parent_param_index: int
+    parent_param_bit_width: int
+    extension_type: ExtensionType
+    bit_offset_in_base: int      # 断片のビットオフセット（親レジスタ内）
+    bit_length: int              # 断片のビット長
+    base_register_name: str
+    base_register_size_bits: int
+    
+    def get_smt_constraint(self, fragment_smt_name: str, param_smt_name: str) -> str:
+        """
+        SMT制約を生成
+        
+        断片 = extract(extend(param), high_bit, low_bit)
+        
+        符号拡張/ゼロ拡張後の上位ビットを抽出する。
+        メモリ配置（エンディアン）に関係なく、値としての上位ビットを取得。
+        
+        例: in_a1_hi (32bit) = extract(sign_extend(param_2, 64), 63, 32)
+        """
+        extend_bits = self.base_register_size_bits - self.parent_param_bit_width
+        
+        if extend_bits <= 0:
+            # 拡張不要の場合（通常は発生しない）
+            extended = param_smt_name
+        elif self.extension_type == ExtensionType.SIGN_EXTEND:
+            extended = f"((_ sign_extend {extend_bits}) {param_smt_name})"
+        else:
+            extended = f"((_ zero_extend {extend_bits}) {param_smt_name})"
+        
+        # 上位ビットを抽出（値としての上位、メモリ配置ではない）
+        # sign_extend/zero_extend は常に上位ビットに拡張される
+        high_bit = self.base_register_size_bits - 1
+        low_bit = self.parent_param_bit_width
+        
+        return f"(assert (= {fragment_smt_name} ((_ extract {high_bit} {low_bit}) {extended})))"
+    
+    def get_reason_string(self) -> str:
+        """制約の理由を説明する文字列"""
+        ext_str = "sign_extend" if self.extension_type == ExtensionType.SIGN_EXTEND else "zero_extend"
+        return (f"Upper bits of {self.parent_param_name} in {self.base_register_name} "
+                f"(constrained via {ext_str})")
+    
+    def to_dict(self) -> Dict:
+        return {
+            "fragment_name": self.fragment_name,
+            "fragment_bit_width": self.fragment_bit_width,
+            "parent_param_name": self.parent_param_name,
+            "parent_param_index": self.parent_param_index,
+            "parent_param_bit_width": self.parent_param_bit_width,
+            "extension_type": self.extension_type.name,
+            "bit_offset_in_base": self.bit_offset_in_base,
+            "bit_length": self.bit_length,
+            "base_register_name": self.base_register_name,
+            "base_register_size_bits": self.base_register_size_bits,
+        }
 
 
 @dataclass
@@ -43,38 +98,38 @@ class ExtraVariableAnalysis:
     """追加変数の分析結果"""
     name: str
     bit_width: int
-    usage: VariableUsageInfo
-    is_upper_bits_pattern: bool
-    recommendation: ConstraintRecommendation
-    reason: str
+    classification: VariableClassification
+    fragment_info: Optional[ParameterFragmentInfo] = None
+    reason: str = ""
     
-    def can_safely_constrain_to_zero(self) -> bool:
-        """安全に0制約できるか"""
-        return self.recommendation == ConstraintRecommendation.SAFE_TO_ZERO
+    def is_parameter_fragment(self) -> bool:
+        """パラメータ断片かどうか"""
+        return self.classification == VariableClassification.PARAMETER_FRAGMENT
+    
+    def can_safely_constrain(self) -> bool:
+        """安全に制約できるか（パラメータ断片の場合）"""
+        return self.is_parameter_fragment() and self.fragment_info is not None
+    
+    def get_smt_constraint(self, fragment_smt_name: str, param_smt_name: str) -> Optional[str]:
+        """SMT制約を取得"""
+        if self.fragment_info:
+            return self.fragment_info.get_smt_constraint(fragment_smt_name, param_smt_name)
+        return None
     
     def to_dict(self) -> Dict:
-        return {
+        result = {
             "name": self.name,
             "bit_width": self.bit_width,
-            "is_upper_bits_pattern": self.is_upper_bits_pattern,
-            "used_in_condition": self.usage.in_condition,
-            "used_in_return_value": self.usage.in_return_value,
-            "used_in_piece_upper": self.usage.in_piece_upper,
-            "recommendation": self.recommendation.name,
+            "classification": self.classification.name,
             "reason": self.reason,
         }
+        if self.fragment_info:
+            result["fragment_info"] = self.fragment_info.to_dict()
+        return result
 
 
 class VariableAnalyzer:
-    """追加変数を分析するクラス"""
-    
-    # 上位ビット変数のパターン
-    UPPER_BITS_PATTERNS = [
-        r'^in_[a-z]\d+_hi$',     # in_a0_hi, in_a1_hi, in_v0_hi 等
-        r'^[a-z]\d+_hi$',        # a0_hi, a1_hi, v0_hi 等
-        r'^in_.*_hi$',           # その他の in_*_hi パターン
-        r'^.*_hi$',              # その他の *_hi パターン
-    ]
+    """追加変数を分析するクラス（ストレージベース判定）"""
     
     def __init__(self, debug: bool = False):
         self.debug = debug
@@ -83,192 +138,126 @@ class VariableAnalyzer:
         if self.debug:
             print(f"[VariableAnalyzer] {msg}")
     
-    def is_upper_bits_pattern(self, var_name: str) -> bool:
-        """変数名が上位ビットパターンに一致するか"""
-        for pattern in self.UPPER_BITS_PATTERNS:
-            if re.match(pattern, var_name):
-                return True
-        return False
-    
-    def analyze_variable_usage(
+    def classify_variable_by_storage(
         self,
         var_name: str,
-        analysis: FunctionReturnAnalysis
-    ) -> VariableUsageInfo:
-        """変数の使用パターンを分析"""
-        usage = VariableUsageInfo()
-        
-        for ret in analysis.returns:
-            # 戻り値での使用をチェック
-            if hasattr(ret.value, 'get_all_variables'):
-                if var_name in ret.value.get_all_variables():
-                    usage.in_return_value = True
-                    # PIECE演算の上位部分としての使用をチェック
-                    self._check_piece_usage(ret.value, var_name, usage)
-            
-            # 条件式での使用をチェック
-            for cond in ret.conditions:
-                if hasattr(cond, 'get_all_variables'):
-                    if var_name in cond.get_all_variables():
-                        usage.in_condition = True
-                        # 条件式内のPIECE使用もチェック
-                        if hasattr(cond, 'expression'):
-                            self._check_piece_usage(cond.expression, var_name, usage)
-        
-        return usage
-    
-    def _check_piece_usage(
-        self,
-        expr: Expression,
-        var_name: str,
-        usage: VariableUsageInfo
-    ) -> None:
-        """PIECE演算での使用パターンをチェック"""
-        if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "PIECE":
-            # 上位部分（第1オペランド）をチェック
-            high = expr.operands[0]
-            if self._expr_contains_variable(high, var_name):
-                usage.in_piece_upper = True
-                # コンテキストを記録
-                low = expr.operands[1]
-                context = f"PIECE({high.to_string()}, {low.to_string()})"
-                if context not in usage.piece_contexts:
-                    usage.piece_contexts.append(context)
-        
-        # 再帰的にチェック
-        for operand in expr.operands:
-            self._check_piece_usage(operand, var_name, usage)
-        
-        # PHIノードもチェック
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            for cond, val in expr.value:
-                if hasattr(val, 'operands'):
-                    self._check_piece_usage(val, var_name, usage)
-    
-    def _expr_contains_variable(self, expr: Expression, var_name: str) -> bool:
-        """式が指定した変数を含むか"""
-        if expr.expr_type in (ExpressionType.VARIABLE, ExpressionType.PARAMETER):
-            return expr.name == var_name
-        
-        for operand in expr.operands:
-            if self._expr_contains_variable(operand, var_name):
-                return True
-        
-        return False
-    
-    def analyze_extra_variable(
-        self,
-        var_name: str,
-        bit_width: int,
-        analysis: FunctionReturnAnalysis,
-        return_bit_width: int
+        var_storage: Optional[StorageInfo],
+        var_bit_width: int,
+        parameters: List[Dict]
     ) -> ExtraVariableAnalysis:
         """
-        追加変数を分析し、0制約の安全性を判定
-        
-        Args:
-            var_name: 変数名
-            bit_width: 変数のビット幅
-            analysis: 関数解析結果
-            return_bit_width: 戻り値のビット幅
-        
-        Returns:
-            ExtraVariableAnalysis: 分析結果
+        ストレージ情報を使用して変数を分類する
         """
-        is_upper = self.is_upper_bits_pattern(var_name)
-        usage = self.analyze_variable_usage(var_name, analysis)
+        self._debug_print(f"Classifying variable '{var_name}' ({var_bit_width}bit) by storage")
         
-        self._debug_print(f"Analyzing '{var_name}':")
-        self._debug_print(f"  - Is upper bits pattern: {is_upper}")
-        self._debug_print(f"  - Used in condition: {usage.in_condition}")
-        self._debug_print(f"  - Used in return value: {usage.in_return_value}")
-        self._debug_print(f"  - Used in PIECE upper: {usage.in_piece_upper}")
-        self._debug_print(f"  - Return bit width: {return_bit_width}")
-        
-        # 安全性の判定
-        recommendation, reason = self._determine_recommendation(
-            var_name, bit_width, is_upper, usage, return_bit_width
-        )
-        
-        self._debug_print(f"  - Recommendation: {recommendation.name}")
-        self._debug_print(f"  - Reason: {reason}")
-        
-        return ExtraVariableAnalysis(
-            name=var_name,
-            bit_width=bit_width,
-            usage=usage,
-            is_upper_bits_pattern=is_upper,
-            recommendation=recommendation,
-            reason=reason
-        )
-    
-    def _determine_recommendation(
-        self,
-        var_name: str,
-        bit_width: int,
-        is_upper: bool,
-        usage: VariableUsageInfo,
-        return_bit_width: int
-    ) -> tuple:
-        """
-        0制約の推奨を決定
-        
-        安全に0制約できる条件:
-        1. 上位ビットパターン（in_*_hi等）である
-        2. 戻り値のビット幅が変数のビット幅以下（32ビット以下）
-        3. 以下のいずれか:
-           a) 戻り値計算に使用されていない
-           b) PIECE演算の上位部分としてのみ使用されている
-        
-        Returns:
-            (ConstraintRecommendation, reason)
-        """
-        # 条件1: 上位ビットパターンでなければ安全でない
-        if not is_upper:
-            return (
-                ConstraintRecommendation.NEEDS_MANUAL_REVIEW,
-                f"Variable '{var_name}' does not match upper-bits pattern"
+        if var_storage is None:
+            self._debug_print(f"  -> UNKNOWN: No storage info available")
+            return ExtraVariableAnalysis(
+                name=var_name,
+                bit_width=var_bit_width,
+                classification=VariableClassification.UNKNOWN,
+                reason="No storage information available"
             )
         
-        # 条件2: 戻り値のビット幅が変数のビット幅より大きければ、上位ビットが影響する可能性
-        if return_bit_width > bit_width:
-            return (
-                ConstraintRecommendation.UNSAFE,
-                f"Return type ({return_bit_width}bit) is wider than variable ({bit_width}bit)"
+        if not var_storage.is_register:
+            self._debug_print(f"  -> INDEPENDENT_INPUT: Not a register")
+            return ExtraVariableAnalysis(
+                name=var_name,
+                bit_width=var_bit_width,
+                classification=VariableClassification.INDEPENDENT_INPUT,
+                reason="Not a register-based variable"
             )
         
-        # 条件3a: 戻り値計算に使用されていない場合は安全
-        if not usage.in_return_value:
-            return (
-                ConstraintRecommendation.SAFE_TO_ZERO,
-                f"Upper-bits variable not used in return value calculation"
-            )
+        self._debug_print(f"  Variable storage: reg={var_storage.register_name}, "
+                        f"base={var_storage.base_register_name}, "
+                        f"offset={var_storage.bit_offset_in_base}bit, "
+                        f"size={var_storage.size_bits}bit, "
+                        f"base_size={var_storage.base_register_size_bits}bit")
         
-        # 条件3b: PIECE演算の上位部分としてのみ使用されている場合
-        # かつ戻り値のビット幅が32ビット以下なら安全
-        if usage.in_piece_upper and return_bit_width <= 32:
-            return (
-                ConstraintRecommendation.SAFE_TO_ZERO,
-                f"Used only as upper bits in PIECE, return type is {return_bit_width}bit"
-            )
-        
-        # 条件式でのみ使用されている場合
-        if usage.in_condition and not usage.in_return_value:
-            if usage.in_piece_upper:
-                return (
-                    ConstraintRecommendation.SAFE_TO_ZERO,
-                    f"Used in condition as PIECE upper bits, represents 32-bit comparison"
+        for param in parameters:
+            param_storage_dict = param.get("storage")
+            if param_storage_dict is None:
+                continue
+            
+            param_storage_info = self._dict_to_storage_info(param_storage_dict)
+            if param_storage_info is None or not param_storage_info.is_register:
+                continue
+            
+            param_name = param.get('name', 'unknown')
+            self._debug_print(f"  Checking against param '{param_name}': "
+                            f"reg={param_storage_info.register_name}, "
+                            f"base={param_storage_info.base_register_name}, "
+                            f"offset={param_storage_info.bit_offset_in_base}bit, "
+                            f"size={param_storage_info.size_bits}bit")
+            
+            # 同一の親レジスタを共有するかチェック
+            if not var_storage.shares_base_register_with(param_storage_info):
+                self._debug_print(f"    -> Different base register")
+                continue
+            
+            # パラメータの型幅が親レジスタ幅より小さいかチェック
+            if param_storage_info.size_bits >= param_storage_info.base_register_size_bits:
+                self._debug_print(f"    -> Parameter occupies full register")
+                continue
+            
+            # 変数がパラメータの補完部分（上位ビット）かチェック
+            if var_storage.is_upper_bits_of(param_storage_info):
+                is_signed = param.get("is_signed", True)
+                ext_type = ExtensionType.SIGN_EXTEND if is_signed else ExtensionType.ZERO_EXTEND
+                
+                fragment_info = ParameterFragmentInfo(
+                    fragment_name=var_name,
+                    fragment_bit_width=var_bit_width,
+                    parent_param_name=param_name,
+                    parent_param_index=param.get("index", -1),
+                    parent_param_bit_width=param_storage_info.size_bits,
+                    extension_type=ext_type,
+                    bit_offset_in_base=var_storage.bit_offset_in_base,
+                    bit_length=var_storage.size_bits,
+                    base_register_name=var_storage.base_register_name or "",
+                    base_register_size_bits=var_storage.base_register_size_bits
+                )
+                
+                self._debug_print(f"  -> PARAMETER_FRAGMENT: parent={param_name}, "
+                                f"ext_type={ext_type.name}, "
+                                f"constraint: extract({var_storage.base_register_size_bits-1}, "
+                                f"{param_storage_info.size_bits})")
+                
+                return ExtraVariableAnalysis(
+                    name=var_name,
+                    bit_width=var_bit_width,
+                    classification=VariableClassification.PARAMETER_FRAGMENT,
+                    fragment_info=fragment_info,
+                    reason=fragment_info.get_reason_string()
                 )
             else:
-                return (
-                    ConstraintRecommendation.NEEDS_MANUAL_REVIEW,
-                    f"Used in condition but not as PIECE upper bits"
-                )
+                self._debug_print(f"    -> Not a complement (overlapping or non-adjacent)")
         
-        # その他のケースは安全でない
-        return (
-            ConstraintRecommendation.UNSAFE,
-            f"Variable may affect return value"
+        self._debug_print(f"  -> INDEPENDENT_INPUT: No matching parameter found")
+        return ExtraVariableAnalysis(
+            name=var_name,
+            bit_width=var_bit_width,
+            classification=VariableClassification.INDEPENDENT_INPUT,
+            reason="Register-based but no matching parameter fragment"
+        )
+    
+    def _dict_to_storage_info(self, storage_dict: Dict) -> Optional[StorageInfo]:
+        """辞書からStorageInfoを作成"""
+        if not storage_dict:
+            return None
+        
+        return StorageInfo(
+            is_register=storage_dict.get("is_register", False),
+            space_name=storage_dict.get("space_name", ""),
+            offset=storage_dict.get("offset", 0),
+            size=storage_dict.get("size", 0),
+            size_bits=storage_dict.get("size_bits", 0),
+            register_name=storage_dict.get("register_name"),
+            base_register_name=storage_dict.get("base_register_name"),
+            base_register_offset=storage_dict.get("base_register_offset", 0),
+            base_register_size=storage_dict.get("base_register_size", 0),
+            base_register_size_bits=storage_dict.get("base_register_size_bits", 0),
+            bit_offset_in_base=storage_dict.get("bit_offset_in_base", 0)
         )
     
     def analyze_all_extra_variables(
@@ -288,32 +277,73 @@ class VariableAnalyzer:
         Returns:
             変数名 -> 分析結果 のマッピング
         """
-        # 全変数を収集
-        all_vars: Set[str] = set()
+        # 全変数とストレージ情報を収集
+        all_vars_with_storage: Dict[str, Optional[StorageInfo]] = {}
         var_sizes: Dict[str, int] = {}
         
         for ret in analysis.returns:
-            if hasattr(ret.value, 'get_all_variables'):
-                vars_in_expr = ret.value.get_all_variables()
-                all_vars.update(vars_in_expr)
+            if hasattr(ret.value, 'get_all_variables_with_storage'):
+                vars_in_expr = ret.value.get_all_variables_with_storage()
+                for name, storage in vars_in_expr.items():
+                    if name not in all_vars_with_storage:
+                        all_vars_with_storage[name] = storage
                 self._collect_variable_sizes(ret.value, var_sizes)
             
             for cond in ret.conditions:
-                if hasattr(cond, 'get_all_variables'):
-                    vars_in_cond = cond.get_all_variables()
-                    all_vars.update(vars_in_cond)
+                if hasattr(cond, 'get_all_variables_with_storage'):
+                    vars_in_cond = cond.get_all_variables_with_storage()
+                    for name, storage in vars_in_cond.items():
+                        if name not in all_vars_with_storage:
+                            all_vars_with_storage[name] = storage
                     if hasattr(cond, 'expression'):
                         self._collect_variable_sizes(cond.expression, var_sizes)
         
         # パラメータ以外の変数を抽出
-        extra_var_names = all_vars - param_names
+        extra_var_names = set(all_vars_with_storage.keys()) - param_names
+        
+        self._debug_print(f"Found {len(extra_var_names)} extra variables: {extra_var_names}")
+
+        # === デバッグ: ストレージ情報の確認 ===
+        if self.debug:
+            print("\n" + "=" * 60)
+            print("[DEBUG] Variable Storage Information")
+            print("=" * 60)
+            for name in extra_var_names:
+                storage = all_vars_with_storage.get(name)
+                print(f"  Variable: {name}")
+                if storage is None:
+                    print(f"    -> StorageInfo: None (NOT COLLECTED)")
+                else:
+                    print(f"    -> is_register: {storage.is_register}")
+                    print(f"    -> register_name: {storage.register_name}")
+                    print(f"    -> base_register_name: {storage.base_register_name}")
+                    print(f"    -> bit_offset_in_base: {storage.bit_offset_in_base}")
+                    print(f"    -> size_bits: {storage.size_bits}")
+                    print(f"    -> base_register_size_bits: {storage.base_register_size_bits}")
+            
+            print("\n[DEBUG] Parameter Storage Information")
+            for param in analysis.parameters:
+                print(f"  Parameter: {param.get('name')}")
+                storage = param.get('storage')
+                if storage is None:
+                    print(f"    -> storage: None")
+                else:
+                    print(f"    -> is_register: {storage.get('is_register')}")
+                    print(f"    -> register_name: {storage.get('register_name')}")
+                    print(f"    -> base_register_name: {storage.get('base_register_name')}")
+                    print(f"    -> bit_offset_in_base: {storage.get('bit_offset_in_base')}")
+                    print(f"    -> size_bits: {storage.get('size_bits')}")
+                    print(f"    -> base_register_size_bits: {storage.get('base_register_size_bits')}")
+            print("=" * 60 + "\n")
         
         # 各変数を分析
         results = {}
         for var_name in sorted(extra_var_names):
+            var_storage = all_vars_with_storage.get(var_name)
             bit_width = var_sizes.get(var_name, 32)
-            results[var_name] = self.analyze_extra_variable(
-                var_name, bit_width, analysis, return_bit_width
+            
+            results[var_name] = self.classify_variable_by_storage(
+                var_name, var_storage, bit_width, analysis.parameters
             )
         
         return results
@@ -340,19 +370,32 @@ class VariableAnalyzer:
                     self._collect_variable_sizes(val, var_sizes)
 
 
-def get_safe_zero_constraints(
-    analyses: Dict[str, ExtraVariableAnalysis]
-) -> List[str]:
+def get_parameter_fragment_constraints(
+    analyses: Dict[str, ExtraVariableAnalysis],
+    suffix: str
+) -> Tuple[List[str], List[str]]:
     """
-    安全に0制約できる変数名のリストを取得
+    パラメータ断片のSMT制約を生成
     
     Args:
         analyses: 変数名 -> 分析結果 のマッピング
+        suffix: SMT変数名のサフィックス（"_1" or "_2"）
     
     Returns:
-        安全に0制約できる変数名のリスト
+        (制約行のリスト, 制約された変数名のリスト)
     """
-    return [
-        name for name, analysis in analyses.items()
-        if analysis.can_safely_constrain_to_zero()
-    ]
+    lines = []
+    constrained_vars = []
+    
+    for name, analysis in analyses.items():
+        if analysis.is_parameter_fragment() and analysis.fragment_info:
+            fragment_smt = f"{name}{suffix}"
+            param_smt = f"{analysis.fragment_info.parent_param_name}{suffix}"
+            
+            constraint = analysis.get_smt_constraint(fragment_smt, param_smt)
+            if constraint:
+                lines.append(f"; {name}: {analysis.reason}")
+                lines.append(constraint)
+                constrained_vars.append(fragment_smt)
+    
+    return lines, constrained_vars
