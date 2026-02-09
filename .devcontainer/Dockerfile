@@ -3,8 +3,11 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# 基本的な依存パッケージのインストール
+# software-properties-common をインストールして PPA を追加
 RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:ubuntu-toolchain-r/test -y \
+    && apt-get update && apt-get install -y \
     wget \
     unzip \
     curl \
@@ -13,8 +16,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     python3-dev \
-    gcc \
-    g++ \
+    gcc-13 \
+    g++-13 \
     make \
     ca-certificates \
     gnupg \
@@ -37,6 +40,12 @@ RUN apt-get update && apt-get install -y \
     binutils-aarch64-linux-gnu \
     binutils-mips64-linux-gnuabi64 \
     && rm -rf /var/lib/apt/lists/*
+
+# GCC 13 をデフォルトに設定
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-13 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-13 100
 
 # Eclipse Temurin JDK 21 のインストール
 RUN mkdir -p /etc/apt/keyrings && \
@@ -69,8 +78,6 @@ RUN python3 -m pip install --upgrade pip && \
     pyghidra \
     ipython \
     z3-solver
-    # pyboolector \
-    # cvc5
 
 WORKDIR /workspace
 
