@@ -1,29 +1,58 @@
 function_tracer_pcode/
-├── __init__.py
-├── main.py                 # エントリーポイント
-├── settings.py             # 設定ファイル
-├── expression.py           # 式の表現クラス
-├── pcode_tracer.py         # P-codeトレースロジック
-├── condition_tracker.py    # 条件分岐追跡
-├── condition_simplifier.py # 条件の簡略化・矛盾検出
-├── phi_handler.py          # PHI処理専用モジュール
-├── expression_expander.py  # PHIの展開モジュール
-├── return_analyzer.py      # Return解析メイン
-├── output_formatter.py     # 出力フォーマッタ
-├── smt/
+├── __init__.py                        # パッケージエントリーポイント
+│
+├── cli/                               # CLI層 - コマンドライン実行の管理
 │   ├── __init__.py
-│   ├── solver_interface.py    # SMTソルバーの抽象インターフェース
-│   ├── solver_z3.py           # Z3実装
-│   ├── solver_boolector.py    # Boolector実装（使用していない）
-│   ├── solver_yices2.py       # Yices2実装（使用していない）
-│   ├── solver_cvc5.py         # CVC5実装（使用していない）
-│   └── parallel_runner.py     # 並列実行管理
-├── equivalence/
+│   └── main.py                        # メインエントリーポイント（引数解析、等価性判定実行）
+│
+├── config/                            # 設定層 - グローバル設定の管理
 │   ├── __init__.py
-│   ├── checker.py             # 等価性判定メインロジック
-│   ├── formula_builder.py     # SMT式構築
-│   ├── type_fixer.py          # 型修正モジュール
-│   ├── variable_analyzer.py   # 追加変数の分析
-│   ├── expression_rewriter.py # 複雑な式を、等価な単純な形式に変換
-│   └── counterexample.py      # 反例フォーマット
-└── main.py                     # main
+│   └── settings.py                    # 設定値（デバッグモード、出力形式、トレース深度等）
+│
+├── core/                              # コア機能層 - Ghidra解析の中核処理
+│   ├── __init__.py
+│   ├── analyzer.py                    # Return解析メイン（関数の戻り値と引数を解析）
+│   ├── tracer.py                      # P-codeトレースロジック（変数の定義を遡る）
+│   ├── phi_resolver.py                # PHI（MULTIEQUAL）処理専用モジュール
+│   └── condition/                     # 条件処理サブモジュール
+│       ├── __init__.py
+│       ├── tracker.py                 # 条件分岐の追跡（各returnに至る条件を収集）
+│       └── simplifier.py              # 条件の簡略化・矛盾検出（冗長な条件を削除）
+│
+├── model/                             # データモデル層 - データ構造の定義
+│   ├── __init__.py
+│   ├── expression.py                  # 式の表現クラス（Expression, Condition, ExpressionType）
+│   ├── storage.py                     # ストレージ情報（レジスタ/メモリ位置の追跡）
+│   ├── analysis.py                    # 解析結果（ReturnInfo, FunctionReturnAnalysis）
+│   └── signature.py                   # 関数シグネチャ（引数・戻り値の型情報）
+│
+├── transform/                         # 式変換層 - 式の変形・最適化
+│   ├── __init__.py
+│   ├── expander.py                    # PHI展開（条件分岐を全パターン展開）
+│   └── rewriter.py                    # 式リライト（複雑な式を等価な単純形式に変換）
+│
+├── equivalence/                       # 等価性判定層 - SMTベースの同値性判定
+│   ├── __init__.py
+│   ├── checker.py                     # 等価性判定メインロジック（リトライ・型修正統合）
+│   ├── result.py                      # 判定結果（EquivalenceResult, RewriteInfo）
+│   ├── type_fixer.py                  # 型修正モジュール（Ghidraの型誤認識を補正）
+│   ├── counterexample.py              # 反例フォーマット（非等価時の具体例を整形）
+│   └── formula/                       # SMT式構築サブモジュール
+│       ├── __init__.py
+│       ├── builder.py                 # SMT式構築（関数の振る舞いをSMT-LIBに変換）
+│       └── variable.py                # 追加変数の分析（パラメータ断片の検出と制約生成）
+│
+├── smt/                               # SMTソルバー層 - 充足可能性判定
+│   ├── __init__.py
+│   ├── interface.py                   # SMTソルバーの抽象インターフェース
+│   ├── parallel.py                    # 並列実行管理（複数ソルバーを同時実行）
+│   └── solvers/                       # ソルバー実装サブモジュール
+│       ├── __init__.py
+│       ├── z3.py                      # Z3実装（主に使用）
+│       ├── cvc5.py                    # CVC5実装（現在未使用で、不要）
+│       ├── yices2.py                  # Yices2実装（現在未使用で、不要）
+│       └── boolector.py               # Boolector実装（現在未使用で、不要）
+│
+└── io/                                # 入出力層 - 結果の整形・出力
+    ├── __init__.py
+    └── formatter.py                   # 出力フォーマッタ（text/json/smt形式対応）

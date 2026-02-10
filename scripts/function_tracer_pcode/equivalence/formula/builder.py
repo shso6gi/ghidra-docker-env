@@ -5,9 +5,8 @@ from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass
 import re
 
-from ..return_analyzer import FunctionReturnAnalysis, ReturnInfo
-from ..expression import Expression, ExpressionType
-from .variable_analyzer import (
+from ...model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from .variable import (
     VariableAnalyzer, 
     ExtraVariableAnalysis, 
     VariableClassification,

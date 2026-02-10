@@ -3,7 +3,7 @@
 
 import json
 from typing import List, Optional, Dict
-from .return_analyzer import FunctionReturnAnalysis, ReturnInfo
+from ..model import FunctionReturnAnalysis, ReturnInfo
 
 
 class OutputFormatter:
@@ -52,7 +52,7 @@ class OutputFormatter:
     @classmethod
     def format_text(cls, analysis: 'FunctionReturnAnalysis') -> str:
         """テキスト形式でフォーマット"""
-        from .condition_simplifier import ConditionSimplifier
+        from ..core.condition.simplifier import ConditionSimplifier
         
         lines = []
         lines.append("-" * 70)

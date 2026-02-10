@@ -127,3 +127,5 @@ class SMTSolver(ABC):
             status=SolverStatus.TIMEOUT,
             elapsed_time=elapsed
         )
+    
+SolverInterface = SMTSolver  # 後方互換性のためのエイリアス

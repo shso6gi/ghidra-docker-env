@@ -4,7 +4,7 @@
 import time
 from typing import Optional, Dict, Any, Tuple, Callable
 
-from .solver_interface import SMTSolver, SolverResult, SolverStatus
+from ..interface import SMTSolver, SolverResult, SolverStatus
 
 
 class Z3Solver(SMTSolver):

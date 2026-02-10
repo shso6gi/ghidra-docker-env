@@ -2,7 +2,7 @@
 """条件の簡略化・矛盾検出モジュール"""
 
 from typing import List, Dict, Set, Optional, Tuple
-from .expression import Expression, Condition, ExpressionType
+from ...model import Expression, Condition, ExpressionType
 
 
 class ConditionSimplifier:

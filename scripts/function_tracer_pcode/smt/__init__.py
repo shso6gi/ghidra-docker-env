@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""SMTソルバーモジュール"""
+"""SMTソルバーパッケージ"""
 
-from .solver_interface import SMTSolver, SolverResult, SolverStatus
-from .parallel_runner import ParallelSolverRunner
+from .interface import SolverInterface, SMTSolver, SolverStatus, SolverResult
+from .parallel import ParallelSolverRunner, ParallelResult
 
 __all__ = [
-    'SMTSolver',
-    'SolverResult', 
-    'SolverStatus',
-    'ParallelSolverRunner',
+    "SolverInterface",
+    "SMTSolver",
+    "SolverStatus",
+    "SolverResult",
+    "ParallelSolverRunner",
+    "ParallelResult",
 ]

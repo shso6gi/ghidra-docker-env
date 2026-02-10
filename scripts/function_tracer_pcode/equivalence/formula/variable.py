@@ -12,8 +12,7 @@ from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum, auto
 
-from ..expression import Expression, ExpressionType, Condition, StorageInfo
-from ..return_analyzer import FunctionReturnAnalysis
+from ...model import Expression, ExpressionType, Condition, StorageInfo, FunctionReturnAnalysis
 
 
 class VariableClassification(Enum):

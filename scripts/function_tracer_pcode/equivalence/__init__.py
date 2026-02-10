@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """等価性判定パッケージ"""
-from .checker import EquivalenceChecker, EquivalenceResult, FunctionSignature
-from .formula_builder import (
+from .checker import EquivalenceChecker
+from .result import EquivalenceResult, RewriteInfo
+from .formula import (
     FormulaBuilder, 
     FormulaBuilderResult,
     ParameterInfo,
     ExtraVariableInfo,
     ParameterPair,
-)
-from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
-from .counterexample import CounterexampleFormatter, FormattedCounterexample
-from .variable_analyzer import (
     VariableAnalyzer,
     ExtraVariableAnalysis,
     VariableClassification,
@@ -18,7 +15,9 @@ from .variable_analyzer import (
     ParameterFragmentInfo,
     get_parameter_fragment_constraints,
 )
-from .expression_rewriter import (
+from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from .counterexample import CounterexampleFormatter, FormattedCounterexample
+from ..transform import (
     ExpressionRewriter,
     RewriteRule,
     RewriteResult,
@@ -31,21 +30,13 @@ __all__ = [
     # Checker
     "EquivalenceChecker",
     "EquivalenceResult",
-    "FunctionSignature",
-
+    "RewriteInfo",
     # Formula Builder
     "FormulaBuilder",
     "FormulaBuilderResult",
     "ParameterInfo",
     "ExtraVariableInfo",
     "ParameterPair",
-    # Type Fixer
-    "TypeFixer",
-    "TypeFixerConfig",
-    "TypeFixResult",
-    # Counterexample
-    "CounterexampleFormatter",
-    "FormattedCounterexample",
     # Variable Analyzer
     'VariableAnalyzer',
     'ExtraVariableAnalysis',
@@ -53,12 +44,18 @@ __all__ = [
     'ExtensionType',
     'ParameterFragmentInfo',
     'get_parameter_fragment_constraints',
-    
-    # Rewriter
-    "ExpressionRewriter",
-    "RewriteRule",
-    "RewriteResult",
-    "ModuloExpansionRule",
-    "ModuloToExpansionRule",
-    "rewrite_analysis_returns",
+    # Type Fixer
+    "TypeFixer",
+    "TypeFixerConfig",
+    "TypeFixResult",
+    # Counterexample
+    "CounterexampleFormatter",
+    "FormattedCounterexample",
+    # Expression Rewriter
+    'ExpressionRewriter',
+    'RewriteRule',
+    'RewriteResult',
+    'ModuloExpansionRule',
+    'ModuloToExpansionRule',
+    'rewrite_analysis_returns',
 ]

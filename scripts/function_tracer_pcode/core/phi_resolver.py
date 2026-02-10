@@ -2,8 +2,8 @@
 """PHI（MULTIEQUAL）の処理専用モジュール"""
 
 from typing import List, Optional, Set, Dict, Any
-from .expression import Expression, Condition, ExpressionType
-from .condition_simplifier import ConditionSimplifier
+from ..model import Expression, Condition, ExpressionType
+from .condition import ConditionSimplifier
 
 
 class ExpandedBranch:

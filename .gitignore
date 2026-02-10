@@ -12,3 +12,5 @@ targets/**/*.sh
 solver_boolector.py
 solver_yices2.py
 solver_cvc5.py
+*.txt
+*.log

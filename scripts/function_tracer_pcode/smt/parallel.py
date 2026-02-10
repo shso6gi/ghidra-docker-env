@@ -7,11 +7,11 @@ import inspect
 from typing import List, Optional, Dict, Any, Type
 from dataclasses import dataclass
 
-from .solver_interface import SMTSolver, SolverResult, SolverStatus
-from .solver_z3 import Z3Solver
-from .solver_boolector import BoolectorSolver
-from .solver_yices2 import Yices2Solver
-from .solver_cvc5 import CVC5Solver
+from .interface import SMTSolver, SolverResult, SolverStatus
+from .solvers.z3 import Z3Solver
+from .solvers.boolector import BoolectorSolver
+from .solvers.yices2 import Yices2Solver
+from .solvers.cvc5 import CVC5Solver
 
 
 @dataclass

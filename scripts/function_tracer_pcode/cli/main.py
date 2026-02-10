@@ -11,15 +11,15 @@ import tempfile
 from typing import List, Optional
 from pathlib import Path
 
-from .settings import (
+from ..config import (
     IN_GHIDRA,
     GHIDRA_INSTALL_DIR,
     TARGET_FUNCTIONS,
     OUTPUT_FILE,
     OUTPUT_FORMAT,
 )
-from .return_analyzer import ReturnAnalyzer
-from .output_formatter import OutputFormatter, output_result, write_to_file
+from ..core import ReturnAnalyzer
+from ..io import OutputFormatter, output_result, write_to_file
 
 
 def parse_arguments():
@@ -237,7 +237,7 @@ def analyze_and_output(
     const_format: str = "dec"
 ):
     """関数を解析して結果を出力"""
-    from .expression import Expression
+    from ..model import Expression
     
     Expression.set_constant_format(const_format)
     
@@ -274,7 +274,7 @@ def analyze_and_output(
 def run_equivalence_check(args):
     """等価性判定を実行"""
     import pyghidra
-    from .equivalence import EquivalenceChecker, TypeFixerConfig
+    from ..equivalence import EquivalenceChecker, TypeFixerConfig
     
     binary1_path, binary2_path = args.equiv
     function_names = get_target_functions(args)
@@ -396,7 +396,7 @@ def run_equivalence_check(args):
 
 def run_ghidra_mode(args=None):
     """Ghidraスクリプトモードで実行"""
-    from .expression import Expression
+    from ..model import Expression
     
     current_program = getCurrentProgram()  # type: ignore[name-defined]
     
@@ -456,7 +456,7 @@ def run_ghidra_mode(args=None):
 def run_pyghidra_mode(args):
     """PyGhidraモードで実行"""
     import pyghidra
-    from .expression import Expression
+    from ..model import Expression
     
     # 等価性判定モードの場合
     if args.equiv:

@@ -2,7 +2,7 @@
 """条件分岐の追跡"""
 
 from typing import Dict, List, Optional, Set, Any
-from .expression import Expression, Condition
+from ...model import Expression, Condition
 
 
 class BasicBlockInfo:
@@ -140,7 +140,7 @@ class ConditionTracker:
     
     def get_path_conditions_to_block(self, target_block: BasicBlockInfo) -> List[Condition]:
         """エントリーからターゲットブロックまでのパス条件を取得（有効なパスのみ）"""
-        from .condition_simplifier import ConditionSimplifier
+        from .simplifier import ConditionSimplifier
         
         if self.entry_block is None:
             return []
@@ -186,7 +186,7 @@ class ConditionTracker:
     
     def get_all_valid_paths_to_block(self, target_block: BasicBlockInfo) -> List[List[Condition]]:
         """エントリーからターゲットブロックまでの全ての有効なパスを取得"""
-        from .condition_simplifier import ConditionSimplifier
+        from .simplifier import ConditionSimplifier
         
         if self.entry_block is None:
             return []

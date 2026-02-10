@@ -17,8 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
-    from ..expression import Expression
-    from ..return_analyzer import FunctionReturnAnalysis, ReturnInfo
+    from ..model import Expression, ReturnInfo, FunctionReturnAnalysis
 
 
 @dataclass
@@ -99,7 +98,7 @@ class ModuloExpansionRule(RewriteRule):
             SUB(a, MULT(b', DIV(a', b)))
             where a == a' and b == b' (乗算の順序が逆)
         """
-        from ..expression import ExpressionType
+        from ..model import ExpressionType
         
         # トップレベルがSUBかチェック
         if expr.expr_type != ExpressionType.BINARY_OP:
@@ -148,7 +147,7 @@ class ModuloExpansionRule(RewriteRule):
         return True
     
     def _extract_div_and_operand(self, mult_expr: 'Expression') -> Tuple[Optional['Expression'], Optional['Expression']]:
-        from ..expression import ExpressionType
+        from ..model import ExpressionType
 
         for i, op in enumerate(mult_expr.operands):
             if (
@@ -176,7 +175,7 @@ class ModuloExpansionRule(RewriteRule):
         """
         (a - ((a / b) * b)) を (a % b) に変換
         """
-        from ..expression import Expression
+        from ..model import Expression
         
         a = expr.operands[0]
         mult_expr = expr.operands[1]
@@ -224,7 +223,7 @@ class ModuloToExpansionRule(RewriteRule):
     
     def matches(self, expr: 'Expression') -> bool:
         """剰余演算かチェック"""
-        from ..expression import ExpressionType
+        from ..model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -241,7 +240,7 @@ class ModuloToExpansionRule(RewriteRule):
         """
         (a % b) を (a - ((a / b) * b)) に変換
         """
-        from ..expression import Expression
+        from ..model import Expression
         
         a = expr.operands[0]
         b = expr.operands[1]
@@ -386,7 +385,7 @@ class ExpressionRewriter:
     
     def _rewrite_children(self, expr: 'Expression', depth: int) -> 'Expression':
         """子要素をリライトして新しい式を返す"""
-        from ..expression import Expression, ExpressionType
+        from ..model import Expression, ExpressionType
         
         if expr.expr_type == ExpressionType.BINARY_OP:
             if expr.operands and len(expr.operands) >= 2:
@@ -482,7 +481,7 @@ def rewrite_analysis_returns(
     Returns:
         (リライトされた解析結果, 各return値のリライト結果リスト)
     """
-    from ..return_analyzer import FunctionReturnAnalysis, ReturnInfo
+    from ..model import ReturnInfo, FunctionReturnAnalysis
     
     rewrite_results = []
     new_returns = []

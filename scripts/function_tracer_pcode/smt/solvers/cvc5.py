@@ -7,7 +7,7 @@ import time
 import re
 from typing import Optional, Dict, Any, Tuple, List, TYPE_CHECKING
 
-from .solver_interface import SMTSolver, SolverResult, SolverStatus
+from ..interface import SMTSolver, SolverResult, SolverStatus
 
 # 型チェック時のみインポート
 if TYPE_CHECKING:

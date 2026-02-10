@@ -2,8 +2,8 @@
 """P-codeトレースロジック"""
 
 from typing import Dict, List, Optional, Set, Tuple, Any
-from .expression import Expression, ExpressionType, Condition, StorageInfo
-from .settings import MAX_TRACE_DEPTH, DEBUG_MODE
+from ..model import Expression, ExpressionType, Condition, StorageInfo
+from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 
 
 class VarnodeKey:
