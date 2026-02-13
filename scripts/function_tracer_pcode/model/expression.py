@@ -825,3 +825,10 @@ class Condition:
     def get_all_variables_with_storage(self) -> Dict[str, Optional[StorageInfo]]:
         """条件式に含まれる全ての変数名とストレージ情報を取得"""
         return self.expression.get_all_variables_with_storage()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """辞書形式に変換"""
+        return {
+            "expression": self.expression.to_dict(),
+            "negated": self.negated,
+        }

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""型修正モジュール - 等価性判定のリトライ時に使用"""
+"""型修正モジュール - 等価性判定のリトライ時に使用（統合版）"""
 
 from typing import List, Set, Optional, Tuple, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -19,6 +19,7 @@ class TypeFixerConfig:
     Attributes:
         target_patterns: 修正対象とする型名のパターン（小文字で比較）
         replacement_type_name: 置換先の型名（ログ用）
+        unsigned_to_signed_map: unsigned型からsigned型へのマッピング
     """
     target_patterns: Set[str] = field(default_factory=lambda: {
         "longlong",
@@ -33,6 +34,20 @@ class TypeFixerConfig:
     })
     replacement_type_name: str = "int"
     
+    # 符号性修正用: unsigned型 → signed型 のマッピング
+    unsigned_to_signed_map: Dict[str, str] = field(default_factory=lambda: {
+        "ulong": "long",
+        "ulonglong": "longlong",
+        "unsigned long": "long",
+        "unsigned long long": "long long",
+        "uint": "int",
+        "unsigned int": "int",
+        "ushort": "short",
+        "unsigned short": "short",
+        "uchar": "char",
+        "unsigned char": "char",
+    })
+    
     def add_pattern(self, pattern: str) -> None:
         """修正対象パターンを追加"""
         self.target_patterns.add(pattern.lower())
@@ -44,11 +59,35 @@ class TypeFixerConfig:
     def set_patterns(self, patterns: Set[str]) -> None:
         """修正対象パターンを置き換え"""
         self.target_patterns = {p.lower() for p in patterns}
+    
+    def get_signed_type_for(self, unsigned_type: str) -> Optional[str]:
+        """unsigned型に対応するsigned型を取得"""
+        if unsigned_type is None:
+            return None
+        
+        type_lower = unsigned_type.lower().strip()
+        
+        # 完全一致を優先
+        if type_lower in self.unsigned_to_signed_map:
+            return self.unsigned_to_signed_map[type_lower]
+        
+        # 部分一致
+        for unsigned_pattern, signed_type in self.unsigned_to_signed_map.items():
+            if unsigned_pattern in type_lower:
+                return signed_type
+        
+        return None
 
 
 class TypeFixer:
     """
     関数の型を修正するクラス
+    
+    機能:
+    1. パターンマッチによる型修正（undefined → int, longlong → int 等）
+    2. 符号性推定に基づく型修正（ulong → long 等）
+    
+    両方とも fix_function_signature を使用して統一的に処理します。
     """
     
     def __init__(
@@ -62,6 +101,8 @@ class TypeFixer:
         self.debug = debug
         # プログラム固有のint型をキャッシュ
         self._cached_int_type = None
+        # 型キャッシュ
+        self._type_cache: Dict[str, Any] = {}
     
     def _debug_print(self, msg: str):
         if self.debug:
@@ -100,8 +141,61 @@ class TypeFixer:
         self._debug_print(f"Using program-specific int type: {int_type}")
         return int_type
     
+    def _resolve_program_type_by_name(self, type_name: str):
+        """
+        型名からGhidraのDataTypeを解決（キャッシュ付き）
+        
+        Args:
+            type_name: 型名（"long", "int", "short" 等）
+        
+        Returns:
+            DataTypeオブジェクト、見つからなければNone
+        """
+        if type_name is None:
+            return None
+        
+        if type_name in self._type_cache:
+            return self._type_cache[type_name]
+        
+        from ghidra.program.model.data import (  # type: ignore[import]
+            IntegerDataType,
+            LongDataType,
+            ShortDataType,
+            CharDataType,
+            LongLongDataType,
+        )
+        
+        dtm = self.program.getDataTypeManager()
+        
+        # まずプログラム固有の型を検索
+        program_type = dtm.getDataType(f"/{type_name}")
+        if program_type is not None:
+            self._type_cache[type_name] = program_type
+            self._debug_print(f"Found program-specific type: {type_name} -> {program_type}")
+            return program_type
+        
+        # ビルトイン型にフォールバック
+        builtin_map = {
+            "int": IntegerDataType.dataType,
+            "long": LongDataType.dataType,
+            "short": ShortDataType.dataType,
+            "char": CharDataType.dataType,
+            "longlong": LongLongDataType.dataType,
+            "long long": LongLongDataType.dataType,
+        }
+        
+        type_lower = type_name.lower().strip()
+        if type_lower in builtin_map:
+            result = builtin_map[type_lower]
+            self._type_cache[type_name] = result
+            self._debug_print(f"Using builtin type for '{type_name}': {result}")
+            return result
+        
+        self._debug_print(f"Type '{type_name}' not found")
+        return None
+    
     def _should_fix_type(self, type_str: Optional[str]) -> bool:
-        """型を修正すべきか判定"""
+        """型を修正すべきか判定（パターンマッチ）"""
         if type_str is None:
             return False
         
@@ -110,6 +204,34 @@ class TypeFixer:
         for pattern in self.config.target_patterns:
             if pattern in type_lower:
                 self._debug_print(f"Type '{type_str}' matches pattern '{pattern}'")
+                return True
+        
+        return False
+    
+    def _is_unsigned_type(self, type_str: Optional[str]) -> bool:
+        """型がunsigned型かどうかを判定"""
+        if type_str is None:
+            return False
+        
+        type_lower = type_str.lower().strip()
+        
+        # 明示的なunsignedパターン
+        unsigned_indicators = [
+            "unsigned",
+            "ulong",
+            "uint",
+            "ushort",
+            "uchar",
+            "ubyte",
+        ]
+        
+        for indicator in unsigned_indicators:
+            if indicator in type_lower:
+                return True
+        
+        # "u" で始まる型名（ulong, uint等）- ただし "undefined" は除外
+        if type_lower.startswith("u") and len(type_lower) > 1:
+            if not type_lower.startswith("undefined"):
                 return True
         
         return False
@@ -183,6 +305,47 @@ class TypeFixer:
             f"-> needs_fix={needs_fix}"
         )
         return needs_fix
+    
+    def check_return_type_needs_signedness_fix(
+        self,
+        return_type_str: Optional[str],
+        signedness_result: Optional['SignednessResult'] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        戻り値の型が符号性修正を必要とするかチェック
+        
+        Args:
+            return_type_str: 戻り値の型名
+            signedness_result: 符号性推定結果
+        
+        Returns:
+            (修正が必要か, 修正後の型名)
+        """
+        if signedness_result is None:
+            return False, None
+        
+        # 推定がsignedでない場合は修正不要
+        if not signedness_result.is_signed():
+            return False, None
+        
+        if return_type_str is None:
+            return False, None
+        
+        # unsigned型でない場合は修正不要
+        if not self._is_unsigned_type(return_type_str):
+            return False, None
+        
+        # 対応するsigned型を取得
+        signed_type = self.config.get_signed_type_for(return_type_str)
+        if signed_type is None:
+            self._debug_print(f"No signed type mapping for '{return_type_str}'")
+            return False, None
+        
+        self._debug_print(
+            f"Return type '{return_type_str}' needs signedness fix -> '{signed_type}' "
+            f"(evidence: {signedness_result.opcode_counts})"
+        )
+        return True, signed_type
     
     def check_param_types_need_fix(self, function) -> List[int]:
         """修正対象の引数インデックスのリストを返す"""
@@ -266,7 +429,8 @@ class TypeFixer:
         function,
         param_info: List[Dict[str, Any]],
         fix_return_type: bool = True,
-        fix_param_types: bool = True
+        fix_param_types: bool = True,
+        override_return_type_name: Optional[str] = None
     ) -> Tuple[bool, bool]:
         """
         関数のシグネチャをアトミックに修正（戻り値と引数）
@@ -279,8 +443,9 @@ class TypeFixer:
             param_info: 引数情報のリスト
                 [{"name": str, "data_type": str, "data_type_obj": DataType, "size": int}, ...]
                 ※ "data_type_obj" にDataTypeオブジェクトを渡すことを推奨
-            fix_return_type: 戻り値の型を修正するか
+            fix_return_type: 戻り値の型を修正するか（パターンマッチ）
             fix_param_types: 引数の型を修正するか
+            override_return_type_name: 戻り値の型を指定した型名で上書き（符号性修正用）
         
         Returns:
             (戻り値を修正したか, 引数を修正したか) のタプル
@@ -304,17 +469,36 @@ class TypeFixer:
         # 戻り値の型を決定
         current_return_type = function.getReturnType()
         current_return_type_str = str(current_return_type) if current_return_type else ""
+        new_return_type = current_return_type
         
-        if fix_return_type and self._should_fix_type(current_return_type_str):
-            new_return_type = self._get_replacement_data_type()
-            # 実際に変更があるか確認
-            if not self._is_type_equivalent(current_return_type, new_return_type):
-                return_fixed = True
-                self._debug_print(f"Will fix return type: '{current_return_type_str}' -> 'int'")
+        # 1. override_return_type_name が指定されている場合（符号性修正）
+        if override_return_type_name is not None:
+            override_type = self._resolve_program_type_by_name(override_return_type_name)
+            if override_type is not None:
+                if not self._is_type_equivalent(current_return_type, override_type):
+                    new_return_type = override_type
+                    return_fixed = True
+                    self._debug_print(
+                        f"Will fix return type (override): "
+                        f"'{current_return_type_str}' -> '{override_return_type_name}'"
+                    )
+                else:
+                    self._debug_print(
+                        f"Return type already matches override type '{override_return_type_name}'"
+                    )
             else:
-                new_return_type = current_return_type
-        else:
-            new_return_type = current_return_type
+                self._debug_print(f"Could not resolve override type '{override_return_type_name}'")
+        
+        # 2. パターンマッチによる修正（overrideが指定されていない場合のみ）
+        elif fix_return_type and self._should_fix_type(current_return_type_str):
+            replacement_type = self._get_replacement_data_type()
+            if not self._is_type_equivalent(current_return_type, replacement_type):
+                new_return_type = replacement_type
+                return_fixed = True
+                self._debug_print(
+                    f"Will fix return type (pattern): "
+                    f"'{current_return_type_str}' -> 'int'"
+                )
         
         return_param = ReturnParameterImpl(new_return_type, self.program)
         
@@ -411,7 +595,8 @@ class TypeFixer:
         function_name: str,
         param_info: List[Dict[str, Any]],
         fix_return_type: bool = True,
-        fix_param_types: bool = True
+        fix_param_types: bool = True,
+        override_return_type_name: Optional[str] = None
     ) -> Tuple[bool, bool]:
         """
         関数名を指定してシグネチャを修正
@@ -419,8 +604,9 @@ class TypeFixer:
         Args:
             function_name: 関数名
             param_info: 引数情報のリスト
-            fix_return_type: 戻り値の型を修正するか
+            fix_return_type: 戻り値の型を修正するか（パターンマッチ）
             fix_param_types: 引数の型を修正するか
+            override_return_type_name: 戻り値の型を指定した型名で上書き（符号性修正用）
         
         Returns:
             (戻り値を修正したか, 引数を修正したか) のタプル
@@ -431,7 +617,8 @@ class TypeFixer:
             return (False, False)
         
         return self.fix_function_signature(
-            function, param_info, fix_return_type, fix_param_types
+            function, param_info, fix_return_type, fix_param_types,
+            override_return_type_name=override_return_type_name
         )
     
     # 以下は後方互換性のために残す
@@ -485,18 +672,39 @@ class TypeFixResult:
     """型修正の結果を保持するクラス"""
     
     def __init__(self):
+        # パターンマッチによる修正
         self.return_type_fixed_binary1: bool = False
         self.return_type_fixed_binary2: bool = False
         self.param_types_fixed_binary1: bool = False
         self.param_types_fixed_binary2: bool = False
         self.retry_phase: str = "none"
+        
+        # 符号性に基づく修正
+        self.signedness_fixed_binary1: bool = False
+        self.signedness_fixed_binary2: bool = False
+        self.inferred_signedness_binary1: Optional[str] = None
+        self.inferred_signedness_binary2: Optional[str] = None
+        self.original_type_binary1: Optional[str] = None
+        self.original_type_binary2: Optional[str] = None
+        self.fixed_type_binary1: Optional[str] = None
+        self.fixed_type_binary2: Optional[str] = None
     
     def any_fix_applied(self) -> bool:
+        """何らかの修正が適用されたか"""
         return (
             self.return_type_fixed_binary1 or
             self.return_type_fixed_binary2 or
             self.param_types_fixed_binary1 or
-            self.param_types_fixed_binary2
+            self.param_types_fixed_binary2 or
+            self.signedness_fixed_binary1 or
+            self.signedness_fixed_binary2
+        )
+    
+    def any_signedness_fix_applied(self) -> bool:
+        """符号性修正が適用されたか"""
+        return (
+            self.signedness_fixed_binary1 or
+            self.signedness_fixed_binary2
         )
     
     def to_dict(self) -> dict:
@@ -506,6 +714,14 @@ class TypeFixResult:
             "param_types_fixed_binary1": self.param_types_fixed_binary1,
             "param_types_fixed_binary2": self.param_types_fixed_binary2,
             "retry_phase": self.retry_phase,
+            "signedness_fixed_binary1": self.signedness_fixed_binary1,
+            "signedness_fixed_binary2": self.signedness_fixed_binary2,
+            "inferred_signedness_binary1": self.inferred_signedness_binary1,
+            "inferred_signedness_binary2": self.inferred_signedness_binary2,
+            "original_type_binary1": self.original_type_binary1,
+            "original_type_binary2": self.original_type_binary2,
+            "fixed_type_binary1": self.fixed_type_binary1,
+            "fixed_type_binary2": self.fixed_type_binary2,
         }
     
     def __str__(self) -> str:
@@ -518,7 +734,20 @@ class TypeFixResult:
             parts.append("param_types_fixed(binary1)")
         if self.param_types_fixed_binary2:
             parts.append("param_types_fixed(binary2)")
+        if self.signedness_fixed_binary1:
+            orig = self.original_type_binary1 or "?"
+            fixed = self.fixed_type_binary1 or "?"
+            parts.append(f"signedness_fixed(binary1: {orig} -> {fixed})")
+        if self.signedness_fixed_binary2:
+            orig = self.original_type_binary2 or "?"
+            fixed = self.fixed_type_binary2 or "?"
+            parts.append(f"signedness_fixed(binary2: {orig} -> {fixed})")
         
         if not parts:
             return "No type fixes applied"
         return f"Type fixes: {', '.join(parts)} (phase: {self.retry_phase})"
+
+
+# 型ヒント用のインポート（循環参照を避けるため末尾に配置）
+if TYPE_CHECKING:
+    from ..model.analysis import SignednessResult

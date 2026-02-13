@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""等価性判定メインロジック（リライト機能統合版）"""
+"""等価性判定メインロジック（Phase 1 符号性対応版）"""
 
 from typing import Optional, Dict, Any, List, Tuple
 import time
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
+from ..model.analysis import SignednessResult
 from ..smt import ParallelSolverRunner, ParallelResult, SolverStatus
 from .formula import FormulaBuilder
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
@@ -276,9 +277,9 @@ class EquivalenceChecker:
         
         型修正リトライが有効な場合のフロー:
         1. Phase 0: 型修正なしで等価性判定
-        2. Phase 1: 非等価またはタイムアウトの場合、戻り値の型を修正してリトライ
-        3. Phase 2: それでも非等価またはタイムアウトの場合、引数の型も修正してリトライ
-        4. 最終結果: それでも非等価の場合は反例を表示、タイムアウトの場合はその旨を表示
+        2. Phase 1: 符号性推定に基づく型修正（ulong → long 等）
+        3. Phase 2: パターンマッチに基づく型修正（undefined → int 等）
+        4. Phase 3: 引数の型も修正
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -328,14 +329,106 @@ class EquivalenceChecker:
             return result
         
         self._debug_print(f"Phase 0: {retry_reason} - preparing for type fix retry")
-        
+
         # ============================================
-        # デコンパイル結果から取得した型情報を使用して判定
+        # TypeFixerを準備
         # ============================================
         type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
         type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
         
-        # デコンパイル結果から戻り値の型を取得して判定
+        # ============================================
+        # Phase 1: 符号性に基づく型修正
+        # ============================================
+        signedness_fix_applied = False
+
+        if analysis1 and analysis1.signedness_result:
+            type_fix_result.inferred_signedness_binary1 = analysis1.signedness_result.signedness
+            
+            if analysis1.should_fix_return_to_signed():
+                self._debug_print("=" * 60)
+                self._debug_print("Phase 1: Signedness-based type fix for Binary 1")
+                self._debug_print("=" * 60)
+                
+                original_type = analysis1.return_type
+                signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
+                
+                if signed_type:
+                    # ★ 重要: fix_function_signature_by_name を使用（undefinedと同じ方法）
+                    # override_return_type_name で戻り値の型を指定
+                    params1 = analysis1.parameters if analysis1 else []
+                    ret_fixed, _ = type_fixer1.fix_function_signature_by_name(
+                        function_name1,
+                        params1,
+                        fix_return_type=False,  # パターンマッチは使わない
+                        fix_param_types=False,
+                        override_return_type_name=signed_type  # 符号性修正用
+                    )
+                    if ret_fixed:
+                        type_fix_result.signedness_fixed_binary1 = True
+                        type_fix_result.original_type_binary1 = original_type
+                        type_fix_result.fixed_type_binary1 = signed_type
+                        signedness_fix_applied = True
+                        self._debug_print(f"Binary 1: {original_type} -> {signed_type} (signedness fix)")
+
+        if analysis2 and analysis2.signedness_result:
+            type_fix_result.inferred_signedness_binary2 = analysis2.signedness_result.signedness
+            
+            if analysis2.should_fix_return_to_signed():
+                self._debug_print("=" * 60)
+                self._debug_print("Phase 1: Signedness-based type fix for Binary 2")
+                self._debug_print("=" * 60)
+                
+                original_type = analysis2.return_type
+                signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
+                
+                if signed_type:
+                    params2 = analysis2.parameters if analysis2 else []
+                    ret_fixed, _ = type_fixer2.fix_function_signature_by_name(
+                        function_name2,
+                        params2,
+                        fix_return_type=False,
+                        fix_param_types=False,
+                        override_return_type_name=signed_type
+                    )
+                    if ret_fixed:
+                        type_fix_result.signedness_fixed_binary2 = True
+                        type_fix_result.original_type_binary2 = original_type
+                        type_fix_result.fixed_type_binary2 = signed_type
+                        signedness_fix_applied = True
+                        self._debug_print(f"Binary 2: {original_type} -> {signed_type} (signedness fix)")
+        
+        # 符号性修正が適用された場合、再チェック
+        if signedness_fix_applied:
+            type_fix_result.retry_phase = "signedness_fix"
+            
+            result = self._analyze_and_check(
+                program1, program2,
+                function_name1, function_name2,
+                decompile_timeout, save_formula,
+                binary1_name, binary2_name,
+                type_fix_result=type_fix_result,
+                retry_count=1,
+                original_signature1=original_signature1,
+                original_signature2=original_signature2
+            )
+            
+            if result.is_equivalent is True:
+                self._debug_print("Phase 1: EQUIVALENT after signedness fix")
+                result.total_time = time.time() - start_time
+                return result
+            
+            should_retry = self._should_retry(result)
+            retry_reason = self._get_retry_reason(result)
+            self._debug_print(f"Phase 1 result: {retry_reason}")
+            
+            if not should_retry:
+                result.total_time = time.time() - start_time
+                return result
+        
+        # ============================================
+        # Phase 2: パターンマッチに基づく戻り値の型修正
+        # ============================================
+        # デコンパイル結果から取得した型情報を使用して判定
         ret_needs_fix1 = self._should_fix_return_type_from_analysis(analysis1)
         ret_needs_fix2 = self._should_fix_return_type_from_analysis(analysis2)
         
@@ -346,21 +439,12 @@ class EquivalenceChecker:
         param_needs_fix1 = self._should_fix_params_from_analysis(analysis1)
         param_needs_fix2 = self._should_fix_params_from_analysis(analysis2)
         
-        self._debug_print(f"Binary 1 '{function_name1}' - return needs fix: {ret_needs_fix1} (type: {analysis1.return_type if analysis1 else 'N/A'}), params need fix: {param_needs_fix1}")
-        self._debug_print(f"Binary 2 '{function_name2}' - return needs fix: {ret_needs_fix2} (type: {analysis2.return_type if analysis2 else 'N/A'}), params need fix: {param_needs_fix2}")
+        self._debug_print(f"Binary 1 - return needs pattern fix: {ret_needs_fix1}, params need fix: {param_needs_fix1}")
+        self._debug_print(f"Binary 2 - return needs pattern fix: {ret_needs_fix2}, params need fix: {param_needs_fix2}")
         
-        # 型修正が不要な場合はPhase 0の結果を返す
-        if not (ret_needs_fix1 or ret_needs_fix2 or param_needs_fix1 or param_needs_fix2):
-            self._debug_print("No type fix needed for either binary - returning Phase 0 result")
-            result.total_time = time.time() - start_time
-            return result
-        
-        # ============================================
-        # Phase 1: 戻り値の型を修正してリトライ
-        # ============================================
         if ret_needs_fix1 or ret_needs_fix2:
             self._debug_print("=" * 60)
-            self._debug_print("Phase 1: Fixing return types only")
+            self._debug_print("Phase 2: Pattern-based return type fix")
             self._debug_print("=" * 60)
             type_fix_result.retry_phase = "return_type_fix"
             
@@ -384,48 +468,41 @@ class EquivalenceChecker:
                 type_fix_result.return_type_fixed_binary2 = ret_fixed2
                 self._debug_print(f"Binary 2 return type fixed: {ret_fixed2}")
             
-            # 再解析と等価性判定（オリジナルシグネチャを引き継ぐ）
+            # 再解析と等価性判定
             result = self._analyze_and_check(
                 program1, program2,
                 function_name1, function_name2,
                 decompile_timeout, save_formula,
                 binary1_name, binary2_name,
                 type_fix_result=type_fix_result,
-                retry_count=1,
+                retry_count=2,
                 original_signature1=original_signature1,
                 original_signature2=original_signature2
             )
             
-            # 等価の場合は終了
             if result.is_equivalent is True:
-                self._debug_print("Phase 1: EQUIVALENT after return type fix")
+                self._debug_print("Phase 2: EQUIVALENT after return type fix")
                 result.total_time = time.time() - start_time
                 return result
             
-            # リトライ判定
             should_retry = self._should_retry(result)
             retry_reason = self._get_retry_reason(result)
-            self._debug_print(f"Phase 1 result: {retry_reason}")
+            self._debug_print(f"Phase 2 result: {retry_reason}")
             
             if not should_retry:
-                self._debug_print("Phase 1: Critical error - cannot continue to Phase 2")
                 result.total_time = time.time() - start_time
                 return result
-            
-            self._debug_print(f"Phase 1: {retry_reason} - will try Phase 2")
-        else:
-            self._debug_print("Phase 1: Skipped - no return type fix needed")
         
         # ============================================
-        # Phase 2: 引数の型も修正してリトライ
+        # Phase 3: 引数の型も修正
         # ============================================
         if param_needs_fix1 or param_needs_fix2:
             self._debug_print("=" * 60)
-            self._debug_print("Phase 2: Fixing parameter types")
+            self._debug_print("Phase 3: Parameter type fix")
             self._debug_print("=" * 60)
             type_fix_result.retry_phase = "param_type_fix"
             
-            # 戻り値修正後の状態で再度パラメータ情報を取得
+            # 修正後の状態で再度パラメータ情報を取得
             params1_updated = self._get_params_via_decompile(program1, function_name1, decompile_timeout)
             params2_updated = self._get_params_via_decompile(program2, function_name2, decompile_timeout)
             
@@ -449,29 +526,26 @@ class EquivalenceChecker:
                 type_fix_result.param_types_fixed_binary2 = param_fixed2
                 self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
             
-            # 再解析と等価性判定（オリジナルシグネチャを引き継ぐ）
+            # 最終チェック
             result = self._analyze_and_check(
                 program1, program2,
                 function_name1, function_name2,
                 decompile_timeout, save_formula,
                 binary1_name, binary2_name,
                 type_fix_result=type_fix_result,
-                retry_count=2,
+                retry_count=3,
                 original_signature1=original_signature1,
                 original_signature2=original_signature2
             )
             
-            # 結果のログ出力
             if result.is_equivalent is True:
-                self._debug_print("Phase 2: EQUIVALENT after parameter type fix")
+                self._debug_print("Phase 3: EQUIVALENT after parameter type fix")
             elif result.is_equivalent is False:
-                self._debug_print("Phase 2: NOT EQUIVALENT - returning final result with counterexample")
+                self._debug_print("Phase 3: NOT EQUIVALENT - final result")
             elif result.is_timeout():
-                self._debug_print("Phase 2: TIMEOUT - returning final result")
+                self._debug_print("Phase 3: TIMEOUT - final result")
             else:
-                self._debug_print("Phase 2: UNKNOWN - returning final result")
-        else:
-            self._debug_print("Phase 2: Skipped - no parameter type fix needed")
+                self._debug_print("Phase 3: UNKNOWN - final result")
         
         # ============================================
         # 最終結果
@@ -487,15 +561,24 @@ class EquivalenceChecker:
         self,
         analysis: Optional['FunctionReturnAnalysis']
     ) -> bool:
-        """デコンパイル結果の戻り値の型が修正対象かチェック"""
+        """
+        デコンパイル結果の戻り値の型が修正対象かチェック（パターンマッチ）
+        
+        注意: 符号性に基づく修正は別途Phase 1で行う
+        """
         if analysis is None or analysis.return_type is None:
+            return False
+        
+        # 既に符号性修正が適用されている場合はスキップ
+        # (signedness_resultがsignedで、型がunsignedの場合はPhase 1で処理済み)
+        if analysis.should_fix_return_to_signed():
             return False
         
         type_str = analysis.return_type.lower().strip()
         
         for pattern in self.type_fixer_config.target_patterns:
             if pattern in type_str:
-                self._debug_print(f"Return type '{analysis.return_type}' matches pattern '{pattern}' (from decompile)")
+                self._debug_print(f"Return type '{analysis.return_type}' matches pattern '{pattern}'")
                 return True
         
         return False
@@ -509,7 +592,6 @@ class EquivalenceChecker:
             return False
         
         for param in analysis.parameters:
-            # data_type_obj があればそれを優先
             raw_dt = param.get("data_type_obj")
             if raw_dt is not None and hasattr(raw_dt, 'getName'):
                 type_str = str(raw_dt).lower().strip()
@@ -518,7 +600,7 @@ class EquivalenceChecker:
             
             for pattern in self.type_fixer_config.target_patterns:
                 if pattern in type_str:
-                    self._debug_print(f"Param type '{type_str}' matches pattern '{pattern}' (from decompile)")
+                    self._debug_print(f"Param type '{type_str}' matches pattern '{pattern}'")
                     return True
         
         return False
@@ -537,7 +619,7 @@ class EquivalenceChecker:
         retry_count: int = 0,
         original_signature1: Optional[FunctionSignature] = None,
         original_signature2: Optional[FunctionSignature] = None
-    ) -> tuple:
+    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
         """
         関数を解析して等価性をチェック（解析結果も返す版）
         
@@ -625,73 +707,18 @@ class EquivalenceChecker:
         binary2_name: str,
         type_fix_result: Optional[TypeFixResult] = None,
         retry_count: int = 0,
-        capture_signature: bool = False,
         original_signature1: Optional[FunctionSignature] = None,
         original_signature2: Optional[FunctionSignature] = None
     ) -> EquivalenceResult:
         """関数を解析して等価性をチェック（内部メソッド）"""
-        from ..core import ReturnAnalyzer
-        
-        start_time = time.time()
-        
-        # 関数1を解析
-        self._debug_print(f"Analyzing function '{function_name1}' in {binary1_name}...")
-        analyzer1 = ReturnAnalyzer(program1, debug=self.debug)
-        try:
-            analysis1 = analyzer1.analyze_function_by_name(function_name1, decompile_timeout)
-            if analysis1 is None:
-                return EquivalenceResult(
-                    is_equivalent=None,
-                    function1_name=function_name1,
-                    function2_name=function_name2,
-                    binary1_name=binary1_name,
-                    binary2_name=binary2_name,
-                    solver_results=ParallelResult(results=[]),
-                    total_time=time.time() - start_time,
-                    error_message=f"Function '{function_name1}' not found in {binary1_name}",
-                    type_fix_result=type_fix_result,
-                    retry_count=retry_count,
-                    function1_signature=original_signature1,
-                    function2_signature=original_signature2
-                )
-        finally:
-            analyzer1.dispose()
-        
-        # 関数2を解析
-        self._debug_print(f"Analyzing function '{function_name2}' in {binary2_name}...")
-        analyzer2 = ReturnAnalyzer(program2, debug=self.debug)
-        try:
-            analysis2 = analyzer2.analyze_function_by_name(function_name2, decompile_timeout)
-            if analysis2 is None:
-                return EquivalenceResult(
-                    is_equivalent=None,
-                    function1_name=function_name1,
-                    function2_name=function_name2,
-                    binary1_name=binary1_name,
-                    binary2_name=binary2_name,
-                    solver_results=ParallelResult(results=[]),
-                    total_time=time.time() - start_time,
-                    error_message=f"Function '{function_name2}' not found in {binary2_name}",
-                    type_fix_result=type_fix_result,
-                    retry_count=retry_count,
-                    function1_signature=original_signature1,
-                    function2_signature=original_signature2
-                )
-        finally:
-            analyzer2.dispose()
-        
-        # シグネチャをキャプチャする場合（初回解析時）
-        if capture_signature:
-            original_signature1 = FunctionSignature.from_analysis(analysis1)
-            original_signature2 = FunctionSignature.from_analysis(analysis2)
-        
-        self._debug_print("Running equivalence check...")
-        return self.check(
-            analysis1, analysis2,
+        _, _, result = self._analyze_and_check_with_analysis(
+            program1, program2,
+            function_name1, function_name2,
+            decompile_timeout, save_formula,
             binary1_name, binary2_name,
-            save_formula,
             type_fix_result=type_fix_result,
             retry_count=retry_count,
             original_signature1=original_signature1,
             original_signature2=original_signature2
         )
+        return result

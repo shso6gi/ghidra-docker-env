@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Return解析メインモジュール"""
+"""Return解析メインモジュール（符号性検出統合版）"""
 
 from typing import List, Dict, Optional, Any
-from ..model import Expression, ExpressionType, Condition, ReturnInfo, FunctionReturnAnalysis
+
+from ..model.expression import Expression, ExpressionType, Condition
+from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
+from .signedness import SignednessDetector
 
 
 class ReturnAnalyzer:
@@ -59,6 +62,14 @@ class ReturnAnalyzer:
         return_type = self._get_return_type(high_function)
         self._debug_print(f"Return type: {return_type}")
         
+        # === Phase 1: 符号性検出 ===
+        signedness_result = self._detect_signedness(high_function)
+        if signedness_result:
+            self._debug_print(f"Inferred signedness: {signedness_result.signedness}")
+            if self.debug:
+                self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
+                self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
+        
         return_infos = []
         return_ops = tracer.find_return_ops()
         
@@ -74,8 +85,27 @@ class ReturnAnalyzer:
             entry_point=str(function.getEntryPoint()),
             parameters=parameters,
             returns=return_infos,
-            return_type=return_type
+            return_type=return_type,
+            signedness_result=signedness_result
         )
+    
+    def _detect_signedness(self, high_function) -> Optional[SignednessResult]:
+        """
+        Phase 1: P-code証拠から符号性を推定
+        
+        Args:
+            high_function: GhidraのHighFunctionオブジェクト
+        
+        Returns:
+            SignednessResult: 推定結果（エラー時はNone）
+        """
+        try:
+            detector = SignednessDetector(high_function, debug=self.debug)
+            evidence = detector.detect()
+            return SignednessResult.from_evidence(evidence)
+        except Exception as e:
+            self._debug_print(f"Signedness detection failed: {e}")
+            return None
     
     def _get_return_type(self, high_function) -> Optional[str]:
         """戻り値の型を取得"""
@@ -101,7 +131,7 @@ class ReturnAnalyzer:
                     param_info = {
                         "name": sym.getName(),
                         "data_type": str(data_type) if data_type else None,
-                        "data_type_obj": data_type,  # 生のDataTypeオブジェクトを保持
+                        "data_type_obj": data_type,
                         "size": sym.getSize(),
                         "is_signed": self._is_signed_type(data_type),
                         "storage": self._get_storage_info(sym),
@@ -125,7 +155,7 @@ class ReturnAnalyzer:
     def _is_signed_type(self, data_type) -> bool:
         """データ型が符号付きかどうかを判定"""
         if data_type is None:
-            return True  # デフォルトは符号付き
+            return True
         
         type_name = str(data_type).lower()
         
