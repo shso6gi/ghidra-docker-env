@@ -32,6 +32,8 @@ class SignednessResult:
     signedness: str = "unknown"  # "signed", "unsigned", "unknown"
     evidence_summary: Dict[str, int] = field(default_factory=dict)
     opcode_counts: Dict[str, int] = field(default_factory=dict)
+    excluded_fastpath_count: int = 0
+    excluded_opcode_counts: Dict[str, int] = field(default_factory=dict)
     
     def is_signed(self) -> bool:
         return self.signedness == "signed"
@@ -53,19 +55,25 @@ class SignednessResult:
         return self.is_signed()
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "signedness": self.signedness,
             "evidence_summary": self.evidence_summary,
             "opcode_counts": self.opcode_counts,
         }
+        if self.excluded_fastpath_count > 0:
+            result["excluded_fastpath_count"] = self.excluded_fastpath_count
+            result["excluded_opcode_counts"] = self.excluded_opcode_counts
+        return result
     
     @classmethod
     def from_evidence(cls, evidence: 'SignednessEvidence') -> 'SignednessResult':
-        """SignednessEvidenceから生成"""
+        """SignednessEvidenceから生成（Phase 2対応）"""
         return cls(
             signedness=evidence.result.value,
             evidence_summary=evidence.get_summary(),
             opcode_counts=evidence.get_opcode_counts(),
+            excluded_fastpath_count=len(evidence.excluded_fastpath),
+            excluded_opcode_counts=evidence.get_excluded_opcode_counts(),
         )
 
 @dataclass
