@@ -10,10 +10,12 @@ function_tracer_pcode/
 │   └── settings.py                    # 設定値（デバッグモード、出力形式、トレース深度等）
 │
 ├── core/                              # コア機能層 - Ghidra解析の中核処理
-│   ├── signedness/                    # 新規: 符号性推定サブモジュール
+│   ├── signedness/                    # 符号性推定サブモジュール
 │   │   ├── __init__.py
 │   │   ├── evidence.py                # 証拠データモデル
-│   │   └── detector.py                # 符号性検出ロジック
+│   │   ├── detector.py                # 符号性検出ロジック
+│   │   ├── fastpath.py                # fast-path 検出専用モジュール
+│   │   └── varnode_analyzer.py        # Varnode 解析ユーティリティ
 │   ├── __init__.py
 │   ├── analyzer.py                    # Return解析メイン（関数の戻り値と引数を解析）
 │   ├── tracer.py                      # P-codeトレースロジック（変数の定義を遡る）

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""符号性証拠データモデル"""
+"""符号性証拠データモデル（Phase 2対応）"""
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, FrozenSet
 
 
 class SignednessType(Enum):
@@ -44,8 +44,12 @@ OPCODE_EVIDENCE_MAP: Dict[str, EvidenceCategory] = {
     "INT_ZEXT": EvidenceCategory.IGNORED,
 }
 
-# Phase 2: fast-path 除外対象のオペコード
-FASTPATH_UNSIGNED_OPCODES = frozenset({"INT_DIV", "INT_REM", "INT_RIGHT"})
+# fast-path 除外対象のオペコード（FastPathDetector.TARGET_OPCODESと同期）
+FASTPATH_UNSIGNED_OPCODES: FrozenSet[str] = frozenset({
+    "INT_DIV", 
+    "INT_REM", 
+    "INT_RIGHT"
+})
 
 
 @dataclass
@@ -55,16 +59,17 @@ class PcodeEvidence:
     category: EvidenceCategory
     address: Optional[str] = None
     context: Optional[str] = None  # 追加コンテキスト情報
-    excluded: bool = False  # Phase 2: fast-path として除外されたか
-    exclusion_reason: Optional[str] = None  # Phase 2: 除外理由
+    excluded: bool = False  # fast-path として除外されたか
+    exclusion_reason: Optional[str] = None  # 除外理由
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "opcode": self.opcode,
             "category": self.category.value,
             "address": self.address,
-            "context": self.context,
         }
+        if self.context:
+            result["context"] = self.context
         if self.excluded:
             result["excluded"] = True
             result["exclusion_reason"] = self.exclusion_reason
@@ -81,7 +86,7 @@ class SignednessEvidence:
     unsigned: List[PcodeEvidence] = field(default_factory=list)
     ignored: List[PcodeEvidence] = field(default_factory=list)
     
-    # Phase 2: fast-path として除外された証拠
+    # fast-path として除外された証拠
     excluded_fastpath: List[PcodeEvidence] = field(default_factory=list)
     
     # 判定結果
@@ -99,13 +104,7 @@ class SignednessEvidence:
             self.ignored.append(evidence)
     
     def add_excluded_fastpath(self, evidence: PcodeEvidence, reason: str) -> None:
-        """
-        Phase 2: fast-path として除外された証拠を追加
-        
-        Args:
-            evidence: 除外する証拠
-            reason: 除外理由
-        """
+        """fast-path として除外された証拠を追加"""
         evidence.excluded = True
         evidence.exclusion_reason = reason
         self.excluded_fastpath.append(evidence)
@@ -122,8 +121,6 @@ class SignednessEvidence:
         if len(self.signed_strong) > 0:
             self.result = SignednessType.SIGNED
         elif len(self.unsigned) > 0:
-            # Phase 2: unsigned証拠があっても、除外されていないものがあるか確認
-            # unsigned リストには除外されていない証拠のみ追加されるので、そのまま使用
             self.result = SignednessType.UNSIGNED
         else:
             self.result = SignednessType.UNKNOWN
@@ -141,7 +138,7 @@ class SignednessEvidence:
         }
     
     def get_opcode_counts(self) -> Dict[str, int]:
-        """オペコード別の件数を取得"""
+        """オペコード別の件数を取得（除外分は含まない）"""
         counts: Dict[str, int] = {}
         
         all_evidences = (
@@ -156,7 +153,7 @@ class SignednessEvidence:
         return counts
     
     def get_excluded_opcode_counts(self) -> Dict[str, int]:
-        """Phase 2: 除外されたオペコード別の件数を取得"""
+        """除外されたオペコード別の件数を取得"""
         counts: Dict[str, int] = {}
         for ev in self.excluded_fastpath:
             counts[ev.opcode] = counts.get(ev.opcode, 0) + 1
@@ -181,7 +178,6 @@ class SignednessEvidence:
             "unsigned": [e.to_dict() for e in self.unsigned],
         }
         
-        # Phase 2: 除外情報を追加
         if self.excluded_fastpath:
             result["excluded_fastpath"] = [e.to_dict() for e in self.excluded_fastpath]
             result["excluded_opcode_counts"] = self.get_excluded_opcode_counts()
@@ -209,7 +205,6 @@ class SignednessEvidence:
             for ev in self.unsigned:
                 lines.append(f"    - {ev.opcode} at {ev.address}")
         
-        # Phase 2: 除外された証拠
         if self.excluded_fastpath:
             lines.append("  Excluded Fast-path Evidence:")
             for ev in self.excluded_fastpath:
