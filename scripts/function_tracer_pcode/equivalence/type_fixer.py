@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""型修正モジュール - 等価性判定のリトライ時に使用（統合版）"""
+"""型修正モジュール - 等価性判定のリトライ時に使用（統合版 + MIPS64 ABI対応）"""
 
 from typing import List, Set, Optional, Tuple, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -22,15 +22,11 @@ class TypeFixerConfig:
         unsigned_to_signed_map: unsigned型からsigned型へのマッピング
     """
     target_patterns: Set[str] = field(default_factory=lambda: {
-        "longlong",
-        "long long", 
         "undefined",
         "undefined1",
         "undefined2",
         "undefined4",
         "undefined8",
-        "ulong",
-        "long"
     })
     replacement_type_name: str = "int"
     
@@ -86,8 +82,9 @@ class TypeFixer:
     機能:
     1. パターンマッチによる型修正（undefined → int, longlong → int 等）
     2. 符号性推定に基づく型修正（ulong → long 等）
+    3. MIPS64 ABI修正（long → int への強制ダウンキャスト）
     
-    両方とも fix_function_signature を使用して統一的に処理します。
+    全て updateFunction() を使用してアトミックに更新します。
     """
     
     def __init__(
@@ -146,7 +143,7 @@ class TypeFixer:
         型名からGhidraのDataTypeを解決（キャッシュ付き）
         
         Args:
-            type_name: 型名（"long", "int", "short" 等）
+            type_name: 型名（"long", "int", "short", "uint" 等）
         
         Returns:
             DataTypeオブジェクト、見つからなければNone
@@ -159,10 +156,15 @@ class TypeFixer:
         
         from ghidra.program.model.data import (  # type: ignore[import]
             IntegerDataType,
+            UnsignedIntegerDataType,
             LongDataType,
+            UnsignedLongDataType,
             ShortDataType,
+            UnsignedShortDataType,
             CharDataType,
+            UnsignedCharDataType,
             LongLongDataType,
+            UnsignedLongLongDataType,
         )
         
         dtm = self.program.getDataTypeManager()
@@ -177,11 +179,21 @@ class TypeFixer:
         # ビルトイン型にフォールバック
         builtin_map = {
             "int": IntegerDataType.dataType,
+            "uint": UnsignedIntegerDataType.dataType,
+            "unsigned int": UnsignedIntegerDataType.dataType,
             "long": LongDataType.dataType,
+            "ulong": UnsignedLongDataType.dataType,
+            "unsigned long": UnsignedLongDataType.dataType,
             "short": ShortDataType.dataType,
+            "ushort": UnsignedShortDataType.dataType,
+            "unsigned short": UnsignedShortDataType.dataType,
             "char": CharDataType.dataType,
+            "uchar": UnsignedCharDataType.dataType,
+            "unsigned char": UnsignedCharDataType.dataType,
             "longlong": LongLongDataType.dataType,
             "long long": LongLongDataType.dataType,
+            "ulonglong": UnsignedLongLongDataType.dataType,
+            "unsigned long long": UnsignedLongLongDataType.dataType,
         }
         
         type_lower = type_name.lower().strip()
@@ -430,13 +442,14 @@ class TypeFixer:
         param_info: List[Dict[str, Any]],
         fix_return_type: bool = True,
         fix_param_types: bool = True,
-        override_return_type_name: Optional[str] = None
+        override_return_type_name: Optional[str] = None,
+        override_param_type_names: Optional[Dict[int, str]] = None
     ) -> Tuple[bool, bool]:
         """
-        関数のシグネチャをアトミックに修正（戻り値と引数）
+        関数のシグネチャをupdateFunction()でアトミックに修正（戻り値と引数）
         
-        updateFunctionによる一括アトミック更新を使用し、
-        DataTypeオブジェクトを可能な限り維持します。
+        ★重要: 全ての型修正（undefined修正、符号性修正、MIPS64 ABI修正）で
+        updateFunction()を使用した一括アトミック更新を行います。
         
         Args:
             function: Ghidra Function オブジェクト
@@ -444,8 +457,9 @@ class TypeFixer:
                 [{"name": str, "data_type": str, "data_type_obj": DataType, "size": int}, ...]
                 ※ "data_type_obj" にDataTypeオブジェクトを渡すことを推奨
             fix_return_type: 戻り値の型を修正するか（パターンマッチ）
-            fix_param_types: 引数の型を修正するか
+            fix_param_types: 引数の型を修正するか（パターンマッチ）
             override_return_type_name: 戻り値の型を指定した型名で上書き（符号性修正用）
+            override_param_type_names: 引数の型を index -> 型名 で強制上書き（MIPS64 ABI修正用）
         
         Returns:
             (戻り値を修正したか, 引数を修正したか) のタプル
@@ -466,7 +480,9 @@ class TypeFixer:
         calling_convention = function.getCallingConventionName()
         self._debug_print(f"Current calling convention: {calling_convention}")
         
+        # ============================================
         # 戻り値の型を決定
+        # ============================================
         current_return_type = function.getReturnType()
         current_return_type_str = str(current_return_type) if current_return_type else ""
         new_return_type = current_return_type
@@ -502,7 +518,9 @@ class TypeFixer:
         
         return_param = ReturnParameterImpl(new_return_type, self.program)
         
+        # ============================================
         # パラメータを構築
+        # ============================================
         new_params = ArrayList()
         
         self._debug_print(f"Building params from {len(param_info)} param info entries")
@@ -517,20 +535,63 @@ class TypeFixer:
                 # 後方互換性：オブジェクトがない場合はキー "data_type" の文字列を見る
                 raw_dt = info.get("data_type")
             
+            # 現在の型を文字列で取得（デバッグログ用）
+            if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                current_type_str = str(raw_dt)
+            else:
+                current_type_str = str(raw_dt) if raw_dt else "undefined"
+            
             # 型修復判定
             final_dt = None
-            type_str = ""
+            param_was_fixed = False
             
-            # raw_dt が DataType オブジェクトの場合
-            if raw_dt is not None and hasattr(raw_dt, 'getName'):
+            # ============================================
+            # 優先度1: override_param_type_names による強制上書き（MIPS64 ABI修正等）
+            # ============================================
+            if override_param_type_names is not None and i in override_param_type_names:
+                override_type_name = override_param_type_names[i]
+                override_type = self._resolve_program_type_by_name(override_type_name)
+                
+                if override_type is not None:
+                    final_dt = override_type
+                    
+                    # 型が異なる場合のみ「修正した」とマーク
+                    if not self._is_type_equivalent(
+                        raw_dt if hasattr(raw_dt, 'getName') else None, 
+                        override_type
+                    ):
+                        param_was_fixed = True
+                        self._debug_print(
+                            f"Param {i} '{param_name}': '{current_type_str}' -> '{override_type_name}' "
+                            f"(override - MIPS64 ABI fix)"
+                        )
+                    else:
+                        self._debug_print(
+                            f"Param {i} '{param_name}': already '{override_type_name}' (no change)"
+                        )
+                else:
+                    self._debug_print(
+                        f"Param {i} '{param_name}': could not resolve override type '{override_type_name}'"
+                    )
+                    # フォールバック: 元の型を使用
+                    if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                        final_dt = raw_dt
+                    else:
+                        final_dt = self._resolve_data_type(str(raw_dt) if raw_dt else "int")
+            
+            # ============================================
+            # 優先度2: パターンマッチによる修正（undefined修正等）
+            # ============================================
+            elif raw_dt is not None and hasattr(raw_dt, 'getName'):
+                # DataTypeオブジェクトの場合
                 type_str = str(raw_dt)
                 if fix_param_types and self._should_fix_type(type_str):
                     new_dt = self._get_replacement_data_type()
                     if not self._is_type_equivalent(raw_dt, new_dt):
                         final_dt = new_dt
-                        params_fixed = True
+                        param_was_fixed = True
                         self._debug_print(
-                            f"Param {i} '{param_name}': '{type_str}' -> 'int' (fixed)"
+                            f"Param {i} '{param_name}': '{type_str}' -> 'int' (pattern match)"
                         )
                     else:
                         final_dt = raw_dt
@@ -540,14 +601,16 @@ class TypeFixer:
                         f"Param {i} '{param_name}': '{type_str}' (preserved)"
                     )
             
-            # raw_dt が文字列、または None の場合（フォールバック）
+            # ============================================
+            # 優先度3: 文字列からの型解決（フォールバック）
+            # ============================================
             else:
                 type_str = str(raw_dt) if raw_dt else "undefined"
                 if fix_param_types and self._should_fix_type(type_str):
                     final_dt = self._get_replacement_data_type()
-                    params_fixed = True
+                    param_was_fixed = True
                     self._debug_print(
-                        f"Param {i} '{param_name}': '{type_str}' -> 'int' (fixed from string)"
+                        f"Param {i} '{param_name}': '{type_str}' -> 'int' (pattern match from string)"
                     )
                 else:
                     final_dt = self._resolve_data_type(type_str)
@@ -555,6 +618,11 @@ class TypeFixer:
                         f"Param {i} '{param_name}': '{type_str}' -> '{final_dt}' (resolved)"
                     )
             
+            # パラメータが修正された場合はフラグをセット
+            if param_was_fixed:
+                params_fixed = True
+            
+            # ParameterImplを作成してリストに追加
             param_impl = ParameterImpl(
                 param_name,
                 final_dt,
@@ -564,8 +632,18 @@ class TypeFixer:
         
         self._debug_print(f"Total params to set: {new_params.size()}")
         
-        # 変更がある場合のみ更新（アトミック更新）
-        if return_fixed or params_fixed or new_params.size() > 0:
+        # ============================================
+        # updateFunction() でアトミックに更新
+        # ============================================
+        # 変更がある場合、または強制的に更新する必要がある場合
+        needs_update = (
+            return_fixed or 
+            params_fixed or 
+            new_params.size() > 0 or
+            override_param_type_names is not None  # override指定時は必ず更新
+        )
+        
+        if needs_update:
             with self._transaction(f"Fix function signature of {function_name}"):
                 self._debug_print("Calling updateFunction (Atomic Update)...")
                 try:
@@ -577,14 +655,13 @@ class TypeFixer:
                         True,  # force: 競合があっても強制適用
                         SourceType.USER_DEFINED
                     )
+                    self._debug_print(
+                        f"Successfully updated function '{function_name}' via updateFunction(): "
+                        f"return_fixed={return_fixed}, params_fixed={params_fixed}"
+                    )
                 except Exception as e:
                     self._debug_print(f"Error updating function {function_name}: {e}")
                     raise
-            
-            self._debug_print(
-                f"Fixed function signature of '{function_name}': "
-                f"return_fixed={return_fixed}, params_fixed={params_fixed}"
-            )
         else:
             self._debug_print(f"No changes needed for '{function_name}'")
         
@@ -596,17 +673,21 @@ class TypeFixer:
         param_info: List[Dict[str, Any]],
         fix_return_type: bool = True,
         fix_param_types: bool = True,
-        override_return_type_name: Optional[str] = None
+        override_return_type_name: Optional[str] = None,
+        override_param_type_names: Optional[Dict[int, str]] = None
     ) -> Tuple[bool, bool]:
         """
         関数名を指定してシグネチャを修正
+        
+        内部で updateFunction() を使用してアトミックに更新します。
         
         Args:
             function_name: 関数名
             param_info: 引数情報のリスト
             fix_return_type: 戻り値の型を修正するか（パターンマッチ）
-            fix_param_types: 引数の型を修正するか
+            fix_param_types: 引数の型を修正するか（パターンマッチ）
             override_return_type_name: 戻り値の型を指定した型名で上書き（符号性修正用）
+            override_param_type_names: 引数の型を index -> 型名 で強制上書き（MIPS64 ABI修正用）
         
         Returns:
             (戻り値を修正したか, 引数を修正したか) のタプル
@@ -618,7 +699,8 @@ class TypeFixer:
         
         return self.fix_function_signature(
             function, param_info, fix_return_type, fix_param_types,
-            override_return_type_name=override_return_type_name
+            override_return_type_name=override_return_type_name,
+            override_param_type_names=override_param_type_names
         )
     
     # 以下は後方互換性のために残す
@@ -688,6 +770,12 @@ class TypeFixResult:
         self.original_type_binary2: Optional[str] = None
         self.fixed_type_binary1: Optional[str] = None
         self.fixed_type_binary2: Optional[str] = None
+        
+        # MIPS64 ABI修正（NEW）
+        self.mips64_abi_fixed_binary1: bool = False
+        self.mips64_abi_fixed_binary2: bool = False
+        self.mips64_abi_override_map_binary1: Optional[Dict[int, str]] = None
+        self.mips64_abi_override_map_binary2: Optional[Dict[int, str]] = None
     
     def any_fix_applied(self) -> bool:
         """何らかの修正が適用されたか"""
@@ -697,7 +785,9 @@ class TypeFixResult:
             self.param_types_fixed_binary1 or
             self.param_types_fixed_binary2 or
             self.signedness_fixed_binary1 or
-            self.signedness_fixed_binary2
+            self.signedness_fixed_binary2 or
+            self.mips64_abi_fixed_binary1 or
+            self.mips64_abi_fixed_binary2
         )
     
     def any_signedness_fix_applied(self) -> bool:
@@ -707,8 +797,15 @@ class TypeFixResult:
             self.signedness_fixed_binary2
         )
     
+    def any_mips64_abi_fix_applied(self) -> bool:
+        """MIPS64 ABI修正が適用されたか"""
+        return (
+            self.mips64_abi_fixed_binary1 or
+            self.mips64_abi_fixed_binary2
+        )
+    
     def to_dict(self) -> dict:
-        return {
+        result = {
             "return_type_fixed_binary1": self.return_type_fixed_binary1,
             "return_type_fixed_binary2": self.return_type_fixed_binary2,
             "param_types_fixed_binary1": self.param_types_fixed_binary1,
@@ -722,7 +819,16 @@ class TypeFixResult:
             "original_type_binary2": self.original_type_binary2,
             "fixed_type_binary1": self.fixed_type_binary1,
             "fixed_type_binary2": self.fixed_type_binary2,
+            "mips64_abi_fixed_binary1": self.mips64_abi_fixed_binary1,
+            "mips64_abi_fixed_binary2": self.mips64_abi_fixed_binary2,
         }
+        
+        if self.mips64_abi_override_map_binary1:
+            result["mips64_abi_override_map_binary1"] = self.mips64_abi_override_map_binary1
+        if self.mips64_abi_override_map_binary2:
+            result["mips64_abi_override_map_binary2"] = self.mips64_abi_override_map_binary2
+        
+        return result
     
     def __str__(self) -> str:
         parts = []
@@ -742,6 +848,10 @@ class TypeFixResult:
             orig = self.original_type_binary2 or "?"
             fixed = self.fixed_type_binary2 or "?"
             parts.append(f"signedness_fixed(binary2: {orig} -> {fixed})")
+        if self.mips64_abi_fixed_binary1:
+            parts.append(f"mips64_abi_fixed(binary1: {self.mips64_abi_override_map_binary1})")
+        if self.mips64_abi_fixed_binary2:
+            parts.append(f"mips64_abi_fixed(binary2: {self.mips64_abi_override_map_binary2})")
         
         if not parts:
             return "No type fixes applied"
