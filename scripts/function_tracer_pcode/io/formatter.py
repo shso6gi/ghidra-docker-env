@@ -67,6 +67,10 @@ class OutputFormatter:
                 lines.append(f"  {dtype} {name}")
         else:
             lines.append("  (none)")
+
+        lines.append("\n[Return Type]")
+        return_type = analysis.return_type if analysis.return_type else "unknown"
+        lines.append(f"  {return_type}")
         
         lines.append("\n[Return Values]")
         if analysis.returns:
