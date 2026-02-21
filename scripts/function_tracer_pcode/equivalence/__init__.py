@@ -1,61 +1,35 @@
 # -*- coding: utf-8 -*-
-"""等価性判定パッケージ"""
+"""等価性判定モジュール"""
+
 from .checker import EquivalenceChecker
 from .result import EquivalenceResult, RewriteInfo
-from .formula import (
-    FormulaBuilder, 
-    FormulaBuilderResult,
-    ParameterInfo,
-    ExtraVariableInfo,
-    ParameterPair,
-    VariableAnalyzer,
-    ExtraVariableAnalysis,
-    VariableClassification,
-    ExtensionType,
-    ParameterFragmentInfo,
-    get_parameter_fragment_constraints,
-)
 from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
-from ..transform import (
-    ExpressionRewriter,
-    RewriteRule,
-    RewriteResult,
-    ModuloExpansionRule,
-    ModuloToExpansionRule,
-    rewrite_analysis_returns,
+from .arch_detector import ArchitectureDetector
+from .mips64_handler import MIPS64Handler
+from .phase_handler import PhaseHandler, PhaseContext
+from .type_helpers import (
+    is_long_type,
+    is_int_type,
+    is_unsigned_type,
+    get_type_name_from_param
 )
 
 __all__ = [
-    # Checker
     "EquivalenceChecker",
     "EquivalenceResult",
     "RewriteInfo",
-    # Formula Builder
-    "FormulaBuilder",
-    "FormulaBuilderResult",
-    "ParameterInfo",
-    "ExtraVariableInfo",
-    "ParameterPair",
-    # Variable Analyzer
-    'VariableAnalyzer',
-    'ExtraVariableAnalysis',
-    'VariableClassification',
-    'ExtensionType',
-    'ParameterFragmentInfo',
-    'get_parameter_fragment_constraints',
-    # Type Fixer
     "TypeFixer",
     "TypeFixerConfig",
     "TypeFixResult",
-    # Counterexample
     "CounterexampleFormatter",
     "FormattedCounterexample",
-    # Expression Rewriter
-    'ExpressionRewriter',
-    'RewriteRule',
-    'RewriteResult',
-    'ModuloExpansionRule',
-    'ModuloToExpansionRule',
-    'rewrite_analysis_returns',
+    "ArchitectureDetector",
+    "MIPS64Handler",
+    "PhaseHandler",
+    "PhaseContext",
+    "is_long_type",
+    "is_int_type",
+    "is_unsigned_type",
+    "get_type_name_from_param",
 ]

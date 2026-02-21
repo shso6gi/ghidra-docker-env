@@ -43,6 +43,10 @@ function_tracer_pcode/
 │   ├── result.py                      # 判定結果（EquivalenceResult, RewriteInfo）
 │   ├── type_fixer.py                  # 型修正モジュール（Ghidraの型誤認識を補正）
 │   ├── counterexample.py              # 反例フォーマット（非等価時の具体例を整形）
+│   ├── arch_detector.py               # アーキテクチャ検出
+│   ├── type_helpers.py                # 型判定ヘルパー
+│   ├── mips64_handler.py              # MIPS64 ABI処理
+│   ├── phase_handler.py               # Phase管理
 │   └── formula/                       # SMT式構築サブモジュール
 │       ├── __init__.py
 │       ├── builder.py                 # SMT式構築（関数の振る舞いをSMT-LIBに変換）
