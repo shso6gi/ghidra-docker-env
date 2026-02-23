@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """等価性判定結果のデータモデル"""
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from ..model import FunctionSignature
@@ -74,6 +74,7 @@ class EquivalenceResult:
     function2_signature: Optional[FunctionSignature] = None
     constrained_fragments: List[str] = field(default_factory=list)
     rewrite_info: Optional[RewriteInfo] = None
+    mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None  # 追加
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""

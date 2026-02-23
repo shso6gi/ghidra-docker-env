@@ -527,7 +527,11 @@ class FormulaBuilder:
         return_var_name: str,
         param_infos: List[ParameterInfo]
     ) -> List[str]:
-        """return値の定義を構築"""
+        """
+        return値の定義を構築
+        
+        全てのreturn定義の条件を反映したite式を生成
+        """
         lines = []
         
         return_size = self._get_return_size(analysis)
@@ -557,7 +561,7 @@ class FormulaBuilder:
             })
         
         if return_defs:
-            unified_return = self._build_ite_expression(return_defs)
+            unified_return = self._build_ite_expression(return_defs, return_size)
         else:
             unified_return = f"(_ bv0 {return_size})"
         
@@ -581,24 +585,125 @@ class FormulaBuilder:
         
         return result
     
-    def _build_ite_expression(self, return_defs: List[dict]) -> str:
-        """ite式を構築"""
+    def _build_ite_expression(self, return_defs: List[dict], return_size: int) -> str:
+        """
+        ite式を構築（全ての条件を反映）
+        
+        Args:
+            return_defs: 条件と値のペアのリスト
+            return_size: 戻り値のビット幅
+        
+        Returns:
+            SMT-LIBのite式
+        
+        修正内容:
+            - 全てのreturn定義の条件を必ず反映
+            - どの条件にも該当しない場合のデフォルト値を追加
+        """
         if not return_defs:
-            return "(_ bv0 32)"
+            return f"(_ bv0 {return_size})"
         
-        if len(return_defs) == 1:
-            return return_defs[0]["value"]
+        # デフォルト値（どの条件にも該当しない場合）
+        default_value = f"(_ bv0 {return_size})"
         
-        result = return_defs[-1]["value"]
+        # 逆順にite式を構築（最後の条件から順に）
+        result = default_value
         
-        for i in range(len(return_defs) - 2, -1, -1):
+        for i in range(len(return_defs) - 1, -1, -1):
             ret_def = return_defs[i]
             cond = ret_def["condition"]
             value = ret_def["value"]
             
             if cond == "true":
+                # 無条件の場合、これが最終的な値になる
+                # ただし、これより前の条件がある場合は、それらを優先
                 result = value
             else:
+                # 条件付きの場合、ite式を構築
                 result = f"(ite {cond} {value} {result})"
         
         return result
+    
+def build_with_abi_constraints(
+    self,
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    abi_constraints: Dict[str, Tuple[str, int]],
+    func1_suffix: str = "_1",
+    func2_suffix: str = "_2"
+) -> str:
+    """
+    ABI整合制約を追加したSMT式を構築
+    
+    Args:
+        analysis1, analysis2: 各バイナリの関数解析結果
+        abi_constraints: {"param0_1": ("signed", 32), ...}
+            - key: 64bitパラメータ名
+            - value: (signedness, narrow_bits) タプル
+        func1_suffix, func2_suffix: サフィックス
+    
+    Returns:
+        SMT-LIB script
+    """
+    # 通常のSMT式を構築
+    result = self.build_equivalence_formula_extended(
+        analysis1, analysis2, func1_suffix, func2_suffix
+    )
+    base_formula = result.formula
+    
+    # 制約を生成
+    constraint_lines = []
+    constraint_lines.append("; " + "-" * 40)
+    constraint_lines.append("; MIPS64 ABI constraints (sign/zero extension)")
+    constraint_lines.append("; " + "-" * 40)
+    
+    for param_wide, (signedness, narrow_bits) in abi_constraints.items():
+        # 対応する狭いパラメータ名を推定
+        # param0_1 -> param0_2 など
+        if param_wide.endswith(func1_suffix):
+            param_narrow = param_wide.replace(func1_suffix, func2_suffix)
+        elif param_wide.endswith(func2_suffix):
+            param_narrow = param_wide.replace(func2_suffix, func1_suffix)
+        else:
+            self._debug_print(f"Warning: Cannot determine narrow param for {param_wide}")
+            continue
+        
+        # 拡張ビット数
+        extend_bits = 64 - narrow_bits
+        
+        # 制約を生成
+        if signedness == "signed":
+            constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {param_narrow})))"
+            comment = f"; {param_wide} must be sign-extension of {param_narrow}"
+        else:
+            constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {param_narrow})))"
+            comment = f"; {param_wide} must be zero-extension of {param_narrow}"
+        
+        constraint_lines.append(comment)
+        constraint_lines.append(constraint)
+    
+    constraint_lines.append("")
+    
+    # SMT式に挿入（(check-sat)の直前）
+    lines = base_formula.split('\n')
+    insert_pos = -1
+    for i in range(len(lines) - 1, -1, -1):
+        if '(check-sat)' in lines[i]:
+            insert_pos = i
+            break
+    
+    if insert_pos >= 0:
+        lines = lines[:insert_pos] + constraint_lines + lines[insert_pos:]
+    else:
+        # (check-sat)が見つからない場合は末尾に追加
+        self._debug_print("Warning: (check-sat) not found, appending constraints at end")
+        # (get-model)の前に挿入
+        for i in range(len(lines) - 1, -1, -1):
+            if '(get-model)' in lines[i]:
+                lines = lines[:i] + constraint_lines + lines[i:]
+                break
+        else:
+            # それもない場合は末尾
+            lines.extend(constraint_lines)
+    
+    return '\n'.join(lines)

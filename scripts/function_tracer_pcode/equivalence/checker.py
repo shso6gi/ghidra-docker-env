@@ -125,7 +125,7 @@ class EquivalenceChecker:
         2. Phase 1: 符号性推定に基づく型修正
         3. Phase 2: パターンマッチに基づく型修正
         4. Phase 3: 引数の型も修正
-        5. Phase 4: MIPS64 ABI param fix
+        5. Phase 4: MIPS64 ABI Retry (偽反例検出→制約付き再solve)
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -232,18 +232,44 @@ class EquivalenceChecker:
                 return result
         
         # ============================================
-        # Phase 4: MIPS64 ABI param fix
+        # Phase 4-A: MIPS64 ABI param fix (conservative)
         # ============================================
-        if result.is_equivalent is False and self.phase_handler.run_phase4_mips64_fix(
+        if self.phase_handler.run_phase4_mips64_fix(
             ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
         ):
             type_fix_result.retry_phase = "mips64_abi_fix"
             result = self._run_check_after_phase(ctx, retry_count=4)
             
             if result.is_equivalent is True:
-                self._debug_print("Phase 4: EQUIVALENT after MIPS64 ABI fix")
-            elif result.is_equivalent is False:
-                self._debug_print("Phase 4: Still NOT EQUIVALENT after MIPS64 ABI fix")
+                self._debug_print("Phase 4-A: EQUIVALENT after MIPS64 ABI fix")
+                result.total_time = time.time() - start_time
+                return result
+            
+            if not self.phase_handler.should_retry(result):
+                result.total_time = time.time() - start_time
+                return result
+        
+        # ============================================
+        # Phase 4-B: MIPS64 ABI Retry (spurious counterexample detection)
+        # ============================================
+        if result.is_equivalent is False:
+            abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
+            
+            if abi_constraints:
+                self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
+                type_fix_result.retry_phase = "mips64_abi_retry"
+                
+                # ABI整合制約を追加してSMT再生成
+                result = self._retry_with_abi_constraints(
+                    ctx, abi_constraints, retry_count=4
+                )
+                
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
+                elif result.is_equivalent is False:
+                    self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
+            else:
+                self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
         
         # ============================================
         # 最終結果
@@ -254,6 +280,128 @@ class EquivalenceChecker:
         
         result.total_time = time.time() - start_time
         return result
+    
+    def _retry_with_abi_constraints(
+        self,
+        ctx: PhaseContext,
+        abi_constraints: Dict[str, Tuple[str, int]],
+        retry_count: int
+    ) -> EquivalenceResult:
+        """ABI整合制約を追加してリトライ"""
+        start_time = time.time()
+        
+        if ctx.analysis1 is None or ctx.analysis2 is None:
+            return self._create_error_result(
+                ctx.analysis1 or FunctionReturnAnalysis(ctx.function_name1, "", [], []),
+                ctx.analysis2 or FunctionReturnAnalysis(ctx.function_name2, "", [], []),
+                ctx.binary1_name,
+                ctx.binary2_name,
+                "Analysis not available for ABI retry",
+                start_time,
+                ctx.type_fix_result,
+                retry_count,
+                ctx.original_signature1,
+                ctx.original_signature2
+            )
+        
+        try:
+            # リライトを適用
+            analysis1, analysis2, rewrite_info = self._apply_rewrite(
+                ctx.analysis1, ctx.analysis2
+            )
+            
+            # 通常のSMT式を構築
+            smt_formula, return_var1, return_var2 = (
+                self.formula_builder.build_equivalence_formula(analysis1, analysis2)
+            )
+            
+            # ABI整合制約を手動で追加
+            constraint_lines = []
+            for param_name, (signedness, narrow_bits) in abi_constraints.items():
+                if signedness == "signed":
+                    # 符号拡張: ((_ sign_extend X) ((_ extract N 0) param))
+                    extend_bits = 64 - narrow_bits
+                    constraint_lines.append(
+                        f"(assert (= {param_name} "
+                        f"((_ sign_extend {extend_bits}) "
+                        f"((_ extract {narrow_bits - 1} 0) {param_name}))))"
+                    )
+                else:
+                    # ゼロ拡張: ((_ zero_extend X) ((_ extract N 0) param))
+                    extend_bits = 64 - narrow_bits
+                    constraint_lines.append(
+                        f"(assert (= {param_name} "
+                        f"((_ zero_extend {extend_bits}) "
+                        f"((_ extract {narrow_bits - 1} 0) {param_name}))))"
+                    )
+            
+            # SMT式に制約を挿入 (check-sat の前に)
+            if constraint_lines:
+                parts = smt_formula.rsplit("(check-sat)", 1)
+                if len(parts) == 2:
+                    constraints_str = "\n".join(constraint_lines)
+                    smt_formula = parts[0] + "\n" + constraints_str + "\n(check-sat)" + parts[1]
+                else:
+                    # check-satが見つからない場合は末尾に追加
+                    constraints_str = "\n".join(constraint_lines)
+                    smt_formula = smt_formula + "\n" + constraints_str
+            
+            if self.debug:
+                print("\n" + "=" * 60)
+                print("Generated SMT formula with ABI constraints:")
+                print("=" * 60)
+                print(smt_formula)
+                print("=" * 60 + "\n")
+            
+            # 再solve
+            if self.debug:
+                parallel_result = self.solver_runner.run_sequential(smt_formula)
+            else:
+                parallel_result = self.solver_runner.run_parallel(smt_formula)
+            
+            total_time = time.time() - start_time
+            
+            # 反例取得
+            counterexample = None
+            if parallel_result.is_equivalent is False:
+                raw_model = parallel_result.get_counterexample()
+                if raw_model:
+                    counterexample = self._format_counterexample(
+                        raw_model, analysis1, analysis2, return_var1, return_var2
+                    )
+            
+            return EquivalenceResult(
+                is_equivalent=parallel_result.is_equivalent,
+                function1_name=ctx.function_name1,
+                function2_name=ctx.function_name2,
+                binary1_name=ctx.binary1_name,
+                binary2_name=ctx.binary2_name,
+                solver_results=parallel_result,
+                counterexample=counterexample,
+                smt_formula=smt_formula if ctx.save_formula else None,
+                total_time=total_time,
+                type_fix_result=ctx.type_fix_result,
+                retry_count=retry_count,
+                function1_signature=ctx.original_signature1,
+                function2_signature=ctx.original_signature2,
+                constrained_fragments=list(abi_constraints.keys()),
+                rewrite_info=rewrite_info,
+                mips64_abi_constraints=abi_constraints
+            )
+        
+        except Exception as e:
+            self._debug_print(f"Exception in ABI retry: {e}")
+            if self.debug:
+                import traceback
+                print(traceback.format_exc())
+            
+            return self._create_error_result(
+                ctx.analysis1, ctx.analysis2,
+                ctx.binary1_name, ctx.binary2_name,
+                str(e), start_time,
+                ctx.type_fix_result, retry_count,
+                ctx.original_signature1, ctx.original_signature2
+            )
     
     def _run_check_after_phase(
         self,
