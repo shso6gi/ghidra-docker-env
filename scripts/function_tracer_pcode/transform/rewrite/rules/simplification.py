@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from .base import RewriteRule
 
 if TYPE_CHECKING:
-    from ...model import Expression
+    from ....model import Expression
 
 
 class DivSimplificationRule(RewriteRule):
@@ -23,7 +23,7 @@ class DivSimplificationRule(RewriteRule):
         self.all_div_ops = frozenset(["INT_DIV", "DIV", "INT_SDIV", "SDIV"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -39,7 +39,7 @@ class DivSimplificationRule(RewriteRule):
         return right.value == 1 or right.value == -1
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         divisor = expr.operands[1].value

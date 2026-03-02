@@ -9,7 +9,7 @@ from typing import List, TYPE_CHECKING
 from .base import RewriteRule
 
 if TYPE_CHECKING:
-    from ...model import Expression
+    from ....model import Expression
 
 
 class CommutativeNormalizationRule(RewriteRule):
@@ -48,7 +48,7 @@ class CommutativeNormalizationRule(RewriteRule):
         )
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -60,7 +60,7 @@ class CommutativeNormalizationRule(RewriteRule):
         return True
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         if expr.operator is None:
             return expr
@@ -100,7 +100,7 @@ class CommutativeNormalizationRule(RewriteRule):
     
     def _flatten(self, expr: 'Expression', target_op: str) -> List['Expression']:
         """同じ演算子のネストをフラット化"""
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return [expr]
@@ -143,7 +143,7 @@ class ShiftConstantNormalizationRule(RewriteRule):
         )
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -161,7 +161,7 @@ class ShiftConstantNormalizationRule(RewriteRule):
         return left.size != right.size
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         if expr.operator is None:
             return expr

@@ -3,7 +3,7 @@
 
 from typing import List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType
-from ..core.condition import ConditionSimplifier
+from ..analysis.condition import ConditionSimplifier
 
 
 class ExpandedValue:

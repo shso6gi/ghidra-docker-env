@@ -9,7 +9,7 @@ from .base import RewriteRule
 from ..magic_division import MagicConstants, is_power_of_two, log2_exact
 
 if TYPE_CHECKING:
-    from ...model import Expression
+    from ....model import Expression
 
 
 class DivByConstantRuleBase(RewriteRule):
@@ -21,7 +21,7 @@ class DivByConstantRuleBase(RewriteRule):
         self.div_ops = frozenset(["INT_SDIV", "SDIV"]) if signed else frozenset(["INT_DIV", "DIV"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -75,7 +75,7 @@ class SignedDivBy3Rule(RewriteRule):
         self.div_ops = frozenset(["INT_SDIV", "SDIV"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -91,7 +91,7 @@ class SignedDivBy3Rule(RewriteRule):
         return right.value == 3
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         n_bits = x.get_bit_width()
@@ -152,7 +152,7 @@ class UnsignedDivBy3Rule(RewriteRule):
         self.div_ops = frozenset(["INT_DIV", "DIV"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -168,7 +168,7 @@ class UnsignedDivBy3Rule(RewriteRule):
         return right.value == 3
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         n_bits = x.get_bit_width()
@@ -232,7 +232,7 @@ class DivByPowerOfTwoUnsignedRule(DivByConstantRuleBase):
         return is_power_of_two(divisor)
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         divisor = expr.operands[1].value
@@ -271,7 +271,7 @@ class DivByPowerOfTwoSignedRule(DivByConstantRuleBase):
         return is_power_of_two(abs(divisor))
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         divisor = expr.operands[1].value
@@ -334,7 +334,7 @@ class RemByPowerOfTwoUnsignedRule(RewriteRule):
         self.rem_ops = frozenset(["INT_REM", "REM"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -354,7 +354,7 @@ class RemByPowerOfTwoUnsignedRule(RewriteRule):
         return is_power_of_two(divisor)
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         divisor = expr.operands[1].value
@@ -383,7 +383,7 @@ class RemByPowerOfTwoSignedRule(RewriteRule):
         self.rem_ops = frozenset(["INT_SREM", "SREM"])
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -403,7 +403,7 @@ class RemByPowerOfTwoSignedRule(RewriteRule):
         return is_power_of_two(abs(divisor))
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         x = expr.operands[0]
         d = expr.operands[1]

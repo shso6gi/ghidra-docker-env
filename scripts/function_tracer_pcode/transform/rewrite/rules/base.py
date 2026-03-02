@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
-    from ...model import Expression
+    from ....model import Expression
 
 
 @dataclass

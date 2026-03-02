@@ -18,7 +18,7 @@ from ..config import (
     OUTPUT_FILE,
     OUTPUT_FORMAT,
 )
-from ..core import ReturnAnalyzer
+from ..analysis import ReturnAnalyzer
 from ..io import OutputFormatter, output_result, write_to_file
 
 

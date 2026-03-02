@@ -1,4 +1,20 @@
 function_tracer_pcode/
+├── analysis/                          # 解析レイヤ
+│   ├── __init__.py
+│   ├── analyzer.py                    # Return解析メイン（関数の戻り値と引数を解析）
+│   ├── tracer.py                      # P-codeトレースロジック（変数の定義を遡る）
+│   ├── phi_resolver.py                # PHI（MULTIEQUAL）処理専用モジュール
+│   ├── condition/                     # 条件処理サブモジュール
+│   │   ├── __init__.py
+│   │   ├── tracker.py                 # 条件分岐の追跡（各returnに至る条件を収集）
+│   │   └── simplifier.py              # 条件の簡略化・矛盾検出（冗長な条件を削除）
+│   └── signedness/
+│       ├── __init__.py
+│       ├── evidence.py                # 証拠データモデル
+│       ├── detector.py                # 符号性検出ロジック
+│       ├── fastpath.py                # fast-path 検出専用モジュール
+│       └── varnode_analyzer.py        # Varnode 解析ユーティリティ
+│
 ├── __init__.py                        # パッケージエントリーポイント
 │
 ├── cli/                               # CLI層 - コマンドライン実行の管理
@@ -8,22 +24,6 @@ function_tracer_pcode/
 ├── config/                            # 設定層 - グローバル設定の管理
 │   ├── __init__.py
 │   └── settings.py                    # 設定値（デバッグモード、出力形式、トレース深度等）
-│
-├── core/                              # コア機能層 - Ghidra解析の中核処理
-│   ├── signedness/                    # 符号性推定サブモジュール
-│   │   ├── __init__.py
-│   │   ├── evidence.py                # 証拠データモデル
-│   │   ├── detector.py                # 符号性検出ロジック
-│   │   ├── fastpath.py                # fast-path 検出専用モジュール
-│   │   └── varnode_analyzer.py        # Varnode 解析ユーティリティ
-│   ├── __init__.py
-│   ├── analyzer.py                    # Return解析メイン（関数の戻り値と引数を解析）
-│   ├── tracer.py                      # P-codeトレースロジック（変数の定義を遡る）
-│   ├── phi_resolver.py                # PHI（MULTIEQUAL）処理専用モジュール
-│   └── condition/                     # 条件処理サブモジュール
-│       ├── __init__.py
-│       ├── tracker.py                 # 条件分岐の追跡（各returnに至る条件を収集）
-│       └── simplifier.py              # 条件の簡略化・矛盾検出（冗長な条件を削除）
 │
 ├── model/                             # データモデル層 - データ構造の定義
 │   ├── __init__.py

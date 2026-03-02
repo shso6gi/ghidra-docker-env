@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .expression import Expression, Condition
-    from ..core.signedness import SignednessEvidence
+    from ..analysis.signedness import SignednessEvidence
 
 
 @dataclass

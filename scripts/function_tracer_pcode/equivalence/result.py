@@ -8,7 +8,7 @@ from ..model import FunctionSignature
 from ..smt import ParallelResult, SolverStatus
 from .counterexample import FormattedCounterexample
 from .type_fixer import TypeFixResult
-from ..transform.rewriter import RewriteResult
+from ..transform.rewrite.rules import RewriteResult
 
 
 @dataclass

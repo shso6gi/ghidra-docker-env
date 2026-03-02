@@ -2,8 +2,8 @@
 """式変換・展開モジュール"""
 
 from .expander import ExpressionExpander
-from .magic_division import MagicDivisionCalculator, MagicConstants
-from .rewriter import ExpressionRewriter, rewrite_analysis_returns
+from .rewrite.magic_division import MagicDivisionCalculator, MagicConstants
+from .rewrite import ExpressionRewriter, rewrite_analysis_returns
 
 __all__ = [
     "ExpressionExpander",

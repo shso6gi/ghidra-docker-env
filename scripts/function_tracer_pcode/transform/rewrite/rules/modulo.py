@@ -5,7 +5,7 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from .base import RewriteRule
 
 if TYPE_CHECKING:
-    from ...model import Expression
+    from ....model import Expression
 
 
 class ModuloExpansionRule(RewriteRule):
@@ -38,7 +38,7 @@ class ModuloExpansionRule(RewriteRule):
         self.sub_ops = frozenset({"INT_SUB", "SUB", "-"})
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -75,7 +75,7 @@ class ModuloExpansionRule(RewriteRule):
         return True
     
     def _extract_div_and_operand(self, mult_expr: 'Expression') -> Tuple[Optional['Expression'], Optional['Expression']]:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         for i, op in enumerate(mult_expr.operands):
             if (
@@ -93,7 +93,7 @@ class ModuloExpansionRule(RewriteRule):
             return expr1.to_string() == expr2.to_string()
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         a = expr.operands[0]
         mult_expr = expr.operands[1]
@@ -137,7 +137,7 @@ class ModuloToExpansionRule(RewriteRule):
         self.all_mod_ops = self.signed_mod_ops | self.unsigned_mod_ops
     
     def matches(self, expr: 'Expression') -> bool:
-        from ...model import ExpressionType
+        from ....model import ExpressionType
         
         if expr.expr_type != ExpressionType.BINARY_OP:
             return False
@@ -149,7 +149,7 @@ class ModuloToExpansionRule(RewriteRule):
         return True
     
     def apply(self, expr: 'Expression') -> 'Expression':
-        from ...model import Expression
+        from ....model import Expression
         
         a = expr.operands[0]
         b = expr.operands[1]

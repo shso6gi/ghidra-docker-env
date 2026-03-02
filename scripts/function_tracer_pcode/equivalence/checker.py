@@ -11,7 +11,7 @@ from .counterexample import CounterexampleFormatter
 from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
 from .phase_handler import PhaseHandler, PhaseContext
-from ..transform import ExpressionRewriter, rewrite_analysis_returns
+from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 
 
 class EquivalenceChecker:
@@ -92,7 +92,7 @@ class EquivalenceChecker:
         timeout: int
     ) -> List[Dict[str, Any]]:
         """デコンパイルして引数情報を取得"""
-        from ..core import ReturnAnalyzer
+        from ..analysis import ReturnAnalyzer
         
         self._debug_print(f"Getting params via decompile for '{function_name}'")
         
@@ -562,7 +562,7 @@ class EquivalenceChecker:
         retry_count: int = 0
     ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
         """関数を解析して等価性をチェック（解析結果も返す版）"""
-        from ..core import ReturnAnalyzer
+        from ..analysis import ReturnAnalyzer
         
         start_time = time.time()
         

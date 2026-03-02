@@ -34,7 +34,7 @@ from .rules import (
 )
 
 if TYPE_CHECKING:
-    from ..model import Expression, ReturnInfo, FunctionReturnAnalysis
+    from ...model import Expression, ReturnInfo, FunctionReturnAnalysis
 
 
 class ExpressionRewriter:
@@ -211,7 +211,7 @@ class ExpressionRewriter:
     
     def _rewrite_children(self, expr: 'Expression', depth: int) -> 'Expression':
         """子要素をリライトして新しい式を返す"""
-        from ..model import Expression, ExpressionType
+        from ...model import Expression, ExpressionType
         
         if expr.expr_type == ExpressionType.BINARY_OP:
             if expr.operands and len(expr.operands) >= 2:
@@ -305,7 +305,7 @@ def rewrite_analysis_returns(
     Returns:
         (リライトされた解析結果, 各return値のリライト結果リスト)
     """
-    from ..model import ReturnInfo, FunctionReturnAnalysis
+    from ...model import ReturnInfo, FunctionReturnAnalysis
     
     rewrite_results = []
     new_returns = []

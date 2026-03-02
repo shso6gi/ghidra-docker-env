@@ -52,7 +52,7 @@ class OutputFormatter:
     @classmethod
     def format_text(cls, analysis: 'FunctionReturnAnalysis') -> str:
         """テキスト形式でフォーマット"""
-        from ..core.condition.simplifier import ConditionSimplifier
+        from ..analysis.condition.simplifier import ConditionSimplifier
         
         lines = []
         lines.append("-" * 70)
