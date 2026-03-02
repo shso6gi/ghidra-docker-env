@@ -82,3 +82,5 @@ RUN python3 -m pip install --upgrade pip && \
 WORKDIR /workspace
 
 CMD ["/bin/bash"]
+
+ENV JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
