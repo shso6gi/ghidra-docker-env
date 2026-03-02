@@ -36,6 +36,10 @@ class ReturnAnalyzer:
             self._decompiler = None
     
     def analyze_function(self, function, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
+         # デバッグフラグを ConditionSimplifier に伝播
+        from .condition import ConditionSimplifier
+        ConditionSimplifier.DEBUG = self.debug
+        
         self._debug_print("=" * 60)
         self._debug_print(f"Analyzing function: {function.getName()}")
         self._debug_print("=" * 60)

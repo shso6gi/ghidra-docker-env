@@ -157,30 +157,35 @@ class ConditionTracker:
             visited=set()
         )
         
-        if self.debug and all_paths:
+        if self.debug:
             self._debug_print(f"Paths to block {target_block.index}:")
             for i, path in enumerate(all_paths):
                 conds = [c.to_string() for c in path]
                 self._debug_print(f"  Path {i}: {conds}")
         
-        # 矛盾しないパスをフィルタリング
+        # 矛盾しないパスをフィルタリング（詳細ログ付き）
         valid_paths = []
-        for path in all_paths:
-            if not ConditionSimplifier.is_contradiction(path):
+        for i, path in enumerate(all_paths):
+            self._debug_print(f"  Checking path {i} for contradictions...")
+            is_contradictory = ConditionSimplifier.is_contradiction(path)
+            if not is_contradictory:
                 valid_paths.append(path)
-            elif self.debug:
-                self._debug_print(f"  -> Path filtered (contradiction)")
+                self._debug_print(f"    -> Path {i} is VALID", 1)
+            else:
+                self._debug_print(f"    -> Path {i} is CONTRADICTORY (filtered)", 1)
         
         # 有効なパスがあればそれを返す
         if valid_paths:
             # 最も条件が少ないパスを選択
             best_path = min(valid_paths, key=len)
             if self.debug:
-                self._debug_print(f"  Selected valid path: {[c.to_string() for c in best_path]}")
+                best_conds = [c.to_string() for c in best_path]
+                self._debug_print(f"  Selected valid path ({len(best_path)} conditions): {best_conds}")
             return best_path
         
         # 有効なパスがない場合は最初のパスを返す（フォールバック）
         if all_paths:
+            self._debug_print(f"  WARNING: No valid paths, using first path as fallback")
             return all_paths[0]
         return []
     

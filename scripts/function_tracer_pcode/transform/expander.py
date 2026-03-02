@@ -114,7 +114,7 @@ class ExpressionExpander:
         for i in range(num_inputs):
             input_varnode = multiequal_op.getInput(i)
             
-            self._debug_print(f"  Input[{i}]", depth)
+            self._debug_print(f"  Input[{i}] ----", depth)
             
             # 入力エッジの条件を収集
             input_conditions: List[Condition] = []
@@ -124,28 +124,41 @@ class ExpressionExpander:
                 if in_block:
                     in_block_info = self.condition_tracker.get_block_by_hash(in_block)
                     if in_block_info:
+                        # パス条件を取得
                         path_conds = self.condition_tracker.get_path_conditions_to_block(in_block_info)
+                        self._debug_print(f"    Path conditions to block {in_block_info.index}:", depth)
+                        for pc in path_conds:
+                            self._debug_print(f"      - {pc.to_string()}", depth)
                         input_conditions.extend(path_conds)
                         
+                        # エッジ条件を取得
                         edge_cond = self._get_edge_condition(in_block_info, phi_parent)
                         if edge_cond:
+                            self._debug_print(f"    Edge condition: {edge_cond.to_string()}", depth)
                             input_conditions.append(edge_cond)
+                        else:
+                            self._debug_print(f"    Edge condition: None", depth)
                         
+                        # 最終的な条件セットを表示
                         if self.debug:
-                            cond_strs = [c.to_string() for c in input_conditions]
-                            self._debug_print(f"    conditions: {cond_strs}", depth)
+                            self._debug_print(f"    Final input_conditions ({len(input_conditions)}):", depth)
+                            for ic in input_conditions:
+                                self._debug_print(f"      - {ic.to_string()}", depth)
             
+            # 矛盾チェック（詳細ログは ConditionSimplifier 側で出力される）
             if ConditionSimplifier.is_contradiction(input_conditions):
-                self._debug_print(f"    -> contradictory, skip", depth)
+                self._debug_print(f"    -> SKIP (contradictory conditions)", depth)
                 continue
             
-            # 入力を再帰的に展開（重要：_expand_input_varnodeを使う）
+            # 入力を再帰的に展開
             expanded_inputs = self._expand_input_varnode(input_varnode, input_conditions, depth + 1)
             
             for ev in expanded_inputs:
                 if ev.is_valid():
                     self._debug_print(f"    -> valid: {ev.value.to_string()}", depth)
                     all_expanded.append(ev)
+                else:
+                    self._debug_print(f"    -> invalid (contradictory)", depth)
         
         if all_expanded:
             merged = self._merge_expanded_values(all_expanded)
