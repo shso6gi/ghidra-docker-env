@@ -2,21 +2,14 @@
 """式変換・展開モジュール"""
 
 from .expander import ExpressionExpander
-from .rewriter import (
-    ExpressionRewriter,
-    RewriteRule,
-    RewriteResult,
-    ModuloExpansionRule,
-    ModuloToExpansionRule,
-    rewrite_analysis_returns,
-)
+from .magic_division import MagicDivisionCalculator, MagicConstants
+from .rewriter import ExpressionRewriter, rewrite_analysis_returns
 
 __all__ = [
     "ExpressionExpander",
     "ExpressionRewriter",
-    "RewriteRule",
-    "RewriteResult",
-    "ModuloExpansionRule",
-    "ModuloToExpansionRule",
-    "rewrite_analysis_returns",
+    'MagicDivisionCalculator',
+    'MagicConstants',
+    'ExpressionRewriter',
+    'rewrite_analysis_returns',
 ]

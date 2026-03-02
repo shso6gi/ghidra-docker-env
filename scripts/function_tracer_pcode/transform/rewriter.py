@@ -5,6 +5,9 @@ SMTソルバーがタイムアウトする複雑な式を、等価な単純な�
 
 主なリライトルール:
 1. 剰余展開: (a - ((a / b) * b)) → (a % b)
+2. Magic number変換: x / 3 → magic multiplication
+3. Power-of-two最適化: x / 2^k → x >> k
+4. 正規化: 可換演算のソート、型統一
 
 リライト条件の妥当性:
 - 整数除算の定義より: a = (a / b) * b + (a % b)
@@ -12,259 +15,26 @@ SMTソルバーがタイムアウトする複雑な式を、等価な単純な�
 - 符号付き/符号なしの区別を保持
 """
 
-from typing import Optional, List, Tuple, TYPE_CHECKING
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from .magic_division import MagicDivisionCalculator, is_power_of_two, log2_exact, MagicConstants
+from typing import List, Tuple, TYPE_CHECKING
+
+from .rules import (
+    RewriteResult,
+    RewriteRule,
+    ModuloExpansionRule,
+    ModuloToExpansionRule,
+    DivSimplificationRule,
+    SignedDivBy3Rule,
+    UnsignedDivBy3Rule,
+    DivByPowerOfTwoUnsignedRule,
+    DivByPowerOfTwoSignedRule,
+    RemByPowerOfTwoUnsignedRule,
+    RemByPowerOfTwoSignedRule,
+    CommutativeNormalizationRule,
+    ShiftConstantNormalizationRule,
+)
 
 if TYPE_CHECKING:
     from ..model import Expression, ReturnInfo, FunctionReturnAnalysis
-
-
-@dataclass
-class RewriteResult:
-    """リライト結果"""
-    expression: 'Expression'
-    was_rewritten: bool
-    history: List[Tuple[str, str, str]] = field(default_factory=list)
-    
-    def get_summary(self) -> str:
-        """リライトの概要を取得"""
-        if not self.was_rewritten:
-            return "No rewrite applied"
-        
-        lines = [f"Applied {len(self.history)} rewrite(s):"]
-        for rule_name, before, after in self.history:
-            lines.append(f"  [{rule_name}] {before} -> {after}")
-        return "\n".join(lines)
-
-
-class RewriteRule(ABC):
-    """リライトルールの抽象基底クラス"""
-    
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
-    
-    @abstractmethod
-    def matches(self, expr: 'Expression') -> bool:
-        """式がこのルールにマッチするかチェック"""
-        pass
-    
-    @abstractmethod
-    def apply(self, expr: 'Expression') -> 'Expression':
-        """ルールを適用して新しい式を返す"""
-        pass
-
-
-class ModuloExpansionRule(RewriteRule):
-    """
-    剰余の展開形式を剰余演算子に変換するルール
-    
-    パターン: (a - ((a / b) * b))
-    変換先: (a % b)
-    
-    数学的根拠:
-        整数除算の定義より、a = (a / b) * b + (a % b)
-        したがって、a % b = a - (a / b) * b
-    
-    注意点:
-        - 符号付き除算(SDIV/INT_SDIV)の場合は符号付き剰余(SREM/INT_SREM)に変換
-        - 符号なし除算(DIV/INT_DIV)の場合は符号なし剰余(REM/INT_REM)に変換
-        - オーバーフローの挙動は除算と剰余で一致するため変換は安全
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "modulo_expansion",
-            "Convert (a - ((a / b) * b)) to (a % b)"
-        )
-        
-        # 演算子のグループ
-        self.signed_div_ops = frozenset({"INT_SDIV", "SDIV", "//"})
-        self.unsigned_div_ops = frozenset({"INT_DIV", "DIV", "/"})
-        self.all_div_ops = self.signed_div_ops | self.unsigned_div_ops
-        self.mult_ops = frozenset({"INT_MULT", "MULT", "*"})
-        self.sub_ops = frozenset({"INT_SUB", "SUB", "-"})
-    
-    def matches(self, expr: 'Expression') -> bool:
-        """
-        パターンにマッチするかチェック
-        
-        期待される構造:
-            SUB(a, MULT(DIV(a', b), b'))
-            where a == a' and b == b'
-        
-        または:
-            SUB(a, MULT(b', DIV(a', b)))
-            where a == a' and b == b' (乗算の順序が逆)
-        """
-        from ..model import ExpressionType
-        
-        # トップレベルがSUBかチェック
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-
-        if expr.operator is None or expr.operator not in self.sub_ops:
-            return False
-        
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        a = expr.operands[0]
-        mult_expr = expr.operands[1]
-        
-        # 第2オペランドがMULTかチェック
-        if mult_expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-
-        if mult_expr.operator is None or mult_expr.operator not in self.mult_ops:
-            return False
-        
-        if not mult_expr.operands or len(mult_expr.operands) != 2:
-            return False
-        
-        # MULT内から除算式とbを抽出
-        # パターン1: MULT(DIV(a, b), b) 
-        # パターン2: MULT(b, DIV(a, b))
-        div_expr, b_in_mult = self._extract_div_and_operand(mult_expr)
-        
-        if div_expr is None or b_in_mult is None:
-            return False
-        
-        if not div_expr.operands or len(div_expr.operands) != 2:
-            return False
-        
-        a_in_div = div_expr.operands[0]
-        b_in_div = div_expr.operands[1]
-        
-        # a == a_in_div かつ b_in_mult == b_in_div かチェック
-        if not self._expressions_structurally_equal(a, a_in_div):
-            return False
-        
-        if not self._expressions_structurally_equal(b_in_mult, b_in_div):
-            return False
-        
-        return True
-    
-    def _extract_div_and_operand(self, mult_expr: 'Expression') -> Tuple[Optional['Expression'], Optional['Expression']]:
-        from ..model import ExpressionType
-
-        for i, op in enumerate(mult_expr.operands):
-            if (
-                op.expr_type == ExpressionType.BINARY_OP
-                and op.operator is not None
-                and op.operator in self.all_div_ops
-            ):
-                return op, mult_expr.operands[1 - i]
-
-        return None, None
-    
-    def _expressions_structurally_equal(self, expr1: 'Expression', expr2: 'Expression') -> bool:
-        """
-        2つの式が構造的に等しいかチェック
-        
-        SMT表現で比較することで、変数名や演算子の表記ゆれを吸収
-        """
-        try:
-            return expr1.to_smt() == expr2.to_smt()
-        except:
-            # フォールバック: 文字列表現で比較
-            return expr1.to_string() == expr2.to_string()
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        """
-        (a - ((a / b) * b)) を (a % b) に変換
-        """
-        from ..model import Expression
-        
-        a = expr.operands[0]
-        mult_expr = expr.operands[1]
-        
-        # div_exprとbを抽出
-        div_expr, b = self._extract_div_and_operand(mult_expr)
-        
-        # 符号付き除算かどうかで剰余演算子を決定
-        if div_expr is None or b is None or div_expr.operator is None:
-            return expr
-
-        if div_expr.operator in self.signed_div_ops:
-            mod_operator = "INT_SREM"
-        else:
-            mod_operator = "INT_REM"
-        
-        # 新しい剰余式を作成
-        result = Expression.binary_op(mod_operator, a, b)
-        result.size = expr.size if hasattr(expr, 'size') else 4
-        return result
-
-
-class ModuloToExpansionRule(RewriteRule):
-    """
-    剰余演算子を展開形式に変換するルール（逆方向）
-    
-    パターン: (a % b) または INT_SREM(a, b) / INT_REM(a, b)
-    変換先: (a - ((a / b) * b))
-    
-    用途: G3形式をG1形式に変換する場合に使用
-    
-    注意: 通常はModuloExpansionRule（逆方向）を使用するため、
-          このルールはデフォルトでは無効
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "modulo_to_expansion",
-            "Convert (a % b) to (a - ((a / b) * b))"
-        )
-        
-        self.signed_mod_ops = frozenset({"INT_SREM", "SREM"})
-        self.unsigned_mod_ops = frozenset({"INT_REM", "REM", "%"})
-        self.all_mod_ops = self.signed_mod_ops | self.unsigned_mod_ops
-    
-    def matches(self, expr: 'Expression') -> bool:
-        """剰余演算かチェック"""
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        
-        if expr.operator not in self.all_mod_ops:
-            return False
-        
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        return True
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        """
-        (a % b) を (a - ((a / b) * b)) に変換
-        """
-        from ..model import Expression
-        
-        a = expr.operands[0]
-        b = expr.operands[1]
-        
-        # 符号付きかどうかで除算演算子を決定
-        if expr.operator in self.signed_mod_ops:
-            div_operator = "INT_SDIV"
-        else:
-            div_operator = "INT_DIV"
-        
-        # (a / b)
-        div_expr = Expression.binary_op(div_operator, a, b)
-        div_expr.size = expr.size if hasattr(expr, 'size') else 4
-        
-        # (a / b) * b
-        mult_expr = Expression.binary_op("INT_MULT", div_expr, b)
-        mult_expr.size = expr.size if hasattr(expr, 'size') else 4
-        
-        # a - ((a / b) * b)
-        result = Expression.binary_op("INT_SUB", a, mult_expr)
-        result.size = expr.size if hasattr(expr, 'size') else 4
-        
-        return result
 
 
 class ExpressionRewriter:
@@ -313,28 +83,37 @@ class ExpressionRewriter:
         self.rules.clear()
         
         if direction == self.NORMALIZE_TO_MODULO:
-            # 優先順位: 簡約 → /3最適化 → power-of-two → 剰余展開
+            # 優先順位:
+            # 1. シフト定数正規化（最優先：後続ルールに影響）
+            # 2. 簡約
+            # 3. /3最適化（magic number変換）
+            # 4. power-of-two最適化
+            # 5. 剰余展開
+            # 6. 可換演算正規化（最後：全体を整える）
+            self.rules.append(ShiftConstantNormalizationRule())
             self.rules.append(DivSimplificationRule())
-            # Magic number変換（/3専用）を最優先
             self.rules.append(SignedDivBy3Rule())
             self.rules.append(UnsignedDivBy3Rule())
-            # Power-of-two変換
             self.rules.append(DivByPowerOfTwoUnsignedRule())
             self.rules.append(DivByPowerOfTwoSignedRule())
             self.rules.append(RemByPowerOfTwoUnsignedRule())
             self.rules.append(RemByPowerOfTwoSignedRule())
-            # 剰余展開
             self.rules.append(ModuloExpansionRule())
+            self.rules.append(CommutativeNormalizationRule())
         elif direction == self.NORMALIZE_TO_EXPANSION:
+            self.rules.append(ShiftConstantNormalizationRule())
             self.rules.append(ModuloToExpansionRule())
+            self.rules.append(CommutativeNormalizationRule())
         else:
             # デフォルト
+            self.rules.append(ShiftConstantNormalizationRule())
             self.rules.append(DivSimplificationRule())
             self.rules.append(SignedDivBy3Rule())
             self.rules.append(UnsignedDivBy3Rule())
             self.rules.append(DivByPowerOfTwoUnsignedRule())
             self.rules.append(DivByPowerOfTwoSignedRule())
             self.rules.append(ModuloExpansionRule())
+            self.rules.append(CommutativeNormalizationRule())
     
     def _debug_print(self, msg: str):
         if self.debug:
@@ -411,7 +190,6 @@ class ExpressionRewriter:
                 
                 # 変更があった場合のみ新しい式を作成
                 if new_left is not expr.operands[0] or new_right is not expr.operands[1]:
-                    # operatorがNoneでないことをチェック
                     if not hasattr(expr, 'operator') or expr.operator is None:
                         return expr
                     result = Expression.binary_op(expr.operator, new_left, new_right)
@@ -445,7 +223,6 @@ class ExpressionRewriter:
                 new_operands = [self._rewrite_recursive(op, depth + 1) for op in expr.operands]
                 
                 if any(new_op is not old_op for new_op, old_op in zip(new_operands, expr.operands)):
-                    # PHI式を再構築
                     if hasattr(expr, 'phi_branches') and getattr(expr, 'phi_branches', None):
                         phi_branches = getattr(expr, 'phi_branches', [])
                         new_branches = list(
@@ -526,493 +303,3 @@ def rewrite_analysis_returns(
     )
     
     return new_analysis, rewrite_results
-
-class DivByConstantRuleBase(RewriteRule):
-    """定数除算リライトの基底クラス"""
-    
-    def __init__(self, name: str, description: str, signed: bool):
-        super().__init__(name, description)
-        self.signed = signed
-        self.div_ops = frozenset(["INT_SDIV", "SDIV"]) if signed else frozenset(["INT_DIV", "DIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.div_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        # 右オペランドが定数かチェック
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        divisor = right.value
-        
-        # 0除算は対象外
-        if divisor == 0:
-            return False
-        
-        # 1, -1は簡約ルールで処理
-        if divisor == 1 or divisor == -1:
-            return False
-        
-        return True
-    
-    def _get_divisor_and_bits(self, expr: 'Expression') -> Tuple[int, int]:
-        """除数とビット幅を取得"""
-        divisor = expr.operands[1].value
-        n_bits = expr.operands[0].get_bit_width()
-        return divisor, n_bits
-
-
-class DivByPowerOfTwoUnsignedRule(DivByConstantRuleBase):
-    """
-    unsigned除算 x / 2^k → x >> k
-    
-    厳密性: logical shiftは常に正しい
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "div_pow2_unsigned",
-            "Convert x / 2^k to x >> k (unsigned)",
-            signed=False
-        )
-        self.signed = False
-        self.div_ops = frozenset(["INT_DIV", "DIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        if not super().matches(expr):
-            return False
-        
-        divisor = expr.operands[1].value
-        return is_power_of_two(divisor)
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        divisor = expr.operands[1].value
-        k = log2_exact(divisor)
-        
-        # x >> k (logical shift)
-        shift_amount = Expression.constant(k, size=x.size)
-        result = Expression.binary_op("INT_RIGHT", x, shift_amount)
-        result.size = x.size
-        
-        return result
-
-
-class DivByPowerOfTwoSignedRule(DivByConstantRuleBase):
-    """
-    signed除算 x sdiv 2^k → (x + bias) >> k
-    
-    bias = (x >> (n-1)) & (2^k - 1)
-    
-    これはround-to-zeroを実現する標準的な変換
-    
-    厳密性: x >= 0 なら bias=0、x < 0 なら bias=(2^k - 1)
-           これにより0方向への丸めが保証される
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "div_pow2_signed",
-            "Convert x sdiv 2^k to (x + bias) >> k (signed)",
-            signed=False
-        )
-        self.signed = True
-        self.div_ops = frozenset(["INT_SDIV", "SDIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        if not super().matches(expr):
-            return False
-        
-        divisor = expr.operands[1].value
-        # 負の2の累乗も処理
-        return is_power_of_two(abs(divisor))
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        divisor = expr.operands[1].value
-        n_bits = x.get_bit_width()
-        
-        # 負の除数の場合
-        if divisor < 0:
-            # x sdiv (-2^k) = -(x sdiv 2^k)
-            k = log2_exact(abs(divisor))
-            
-            # bias = (x >> (n-1)) & (2^k - 1)
-            sign_shift = Expression.constant(n_bits - 1, size=x.size)
-            sign_bit_ext = Expression.binary_op("INT_SRIGHT", x, sign_shift)
-            sign_bit_ext.size = x.size
-            
-            mask = Expression.constant((1 << k) - 1, size=x.size)
-            bias = Expression.binary_op("INT_AND", sign_bit_ext, mask)
-            bias.size = x.size
-            
-            # x + bias
-            x_plus_bias = Expression.binary_op("INT_ADD", x, bias)
-            x_plus_bias.size = x.size
-            
-            # >> k (arithmetic shift)
-            shift_amount = Expression.constant(k, size=x.size)
-            shifted = Expression.binary_op("INT_SRIGHT", x_plus_bias, shift_amount)
-            shifted.size = x.size
-            
-            # 2の補数（negate）
-            result = Expression.unary_op("INT_2COMP", shifted)
-            result.size = x.size
-            
-            return result
-        
-        else:
-            k = log2_exact(divisor)
-            
-            # bias = (x >> (n-1)) & (2^k - 1)
-            sign_shift = Expression.constant(n_bits - 1, size=x.size)
-            sign_bit_ext = Expression.binary_op("INT_SRIGHT", x, sign_shift)
-            sign_bit_ext.size = x.size
-            
-            mask = Expression.constant((1 << k) - 1, size=x.size)
-            bias = Expression.binary_op("INT_AND", sign_bit_ext, mask)
-            bias.size = x.size
-            
-            # x + bias
-            x_plus_bias = Expression.binary_op("INT_ADD", x, bias)
-            x_plus_bias.size = x.size
-            
-            # >> k (arithmetic shift)
-            shift_amount = Expression.constant(k, size=x.size)
-            result = Expression.binary_op("INT_SRIGHT", x_plus_bias, shift_amount)
-            result.size = x.size
-            
-            return result
-
-
-class DivSimplificationRule(RewriteRule):
-    """
-    除算の簡約
-    - x / 1 → x
-    - x / -1 → -x
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "div_simplification",
-            "Simplify x/1 and x/(-1)"
-        )
-        self.all_div_ops = frozenset(["INT_DIV", "DIV", "INT_SDIV", "SDIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.all_div_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        return right.value == 1 or right.value == -1
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        divisor = expr.operands[1].value
-        
-        if divisor == 1:
-            return x
-        else:  # divisor == -1
-            result = Expression.unary_op("INT_2COMP", x)
-            result.size = x.size
-            return result
-
-
-class RemByPowerOfTwoUnsignedRule(RewriteRule):
-    """
-    unsigned余り x % 2^k → x & (2^k - 1)
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "rem_pow2_unsigned",
-            "Convert x % 2^k to x & (2^k - 1) (unsigned)"
-        )
-        self.rem_ops = frozenset(["INT_REM", "REM"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.rem_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        divisor = right.value
-        if divisor <= 0:
-            return False
-        
-        return is_power_of_two(divisor)
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        divisor = expr.operands[1].value
-        
-        mask = Expression.constant(divisor - 1, size=x.size)
-        result = Expression.binary_op("INT_AND", x, mask)
-        result.size = x.size
-        
-        return result
-
-
-class RemByPowerOfTwoSignedRule(RewriteRule):
-    """
-    signed余り x srem 2^k の変換
-    
-    srem は x - (x sdiv d) * d で定義される
-    x sdiv 2^k は既に他のルールで変換されるので、
-    ここでは展開形に戻してから除算を置換
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "rem_pow2_signed",
-            "Convert x srem 2^k using expansion (signed)"
-        )
-        self.rem_ops = frozenset(["INT_SREM", "SREM"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.rem_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        divisor = right.value
-        if divisor == 0:
-            return False
-        
-        return is_power_of_two(abs(divisor))
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        d = expr.operands[1]
-        
-        # x - (x sdiv d) * d
-        div_expr = Expression.binary_op("INT_SDIV", x, d)
-        div_expr.size = x.size
-        
-        mult_expr = Expression.binary_op("INT_MULT", div_expr, d)
-        mult_expr.size = x.size
-        
-        result = Expression.binary_op("INT_SUB", x, mult_expr)
-        result.size = x.size
-        
-        # この結果は次のリライトパスでdiv_exprが変換される
-        return result
-    
-class SignedDivBy3Rule(RewriteRule):
-    """
-    signed除算 x sdiv 3 のmagic number変換
-    
-    アルゴリズム（clangと同一）:
-        sum = (a + b + c)
-        mulhi = upper64(sign_extend(sum, 128) * sign_extend(m, 128))
-        result = mulhi - (mulhi >> 63)
-    
-    where:
-        m = 0x5555555555555556 (magic multiplier for /3)
-    
-    BV意味論の厳密性:
-        - mulhi抽出は SUBPIECE で厳密に実装
-        - 符号補正 (mulhi >> 63) は負数の丸め補正
-        - clangが生成するコードと完全一致
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "sdiv_by_3_magic",
-            "Convert x sdiv 3 to magic multiplication (clang-compatible)"
-        )
-        self.div_ops = frozenset(["INT_SDIV", "SDIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.div_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        # 右オペランドが定数3かチェック
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        return right.value == 3
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        n_bits = x.get_bit_width()
-        n_bytes = x.size
-        
-        # 64-bitと32-bitのみサポート
-        if n_bits == 64:
-            magic_info = MagicConstants.SIGNED_64_DIV_3
-        elif n_bits == 32:
-            magic_info = MagicConstants.SIGNED_32_DIV_3
-        else:
-            # 他のビット幅は未サポート（そのまま返す）
-            return expr
-        
-        # magic multiplierを定数として作成（unsigned表現）
-        m_unsigned = magic_info['multiplier_unsigned']
-        m_const = Expression.constant(m_unsigned, size=n_bytes)
-        
-        # === mulhi の計算 ===
-        # 1. x を 2n-bit に sign-extend
-        x_ext = Expression.unary_op("INT_SEXT", x)
-        x_ext.size = n_bytes * 2  # 重要！128bit = 16 bytes
-        
-        # 2. m を 2n-bit に sign-extend
-        m_ext = Expression.unary_op("INT_SEXT", m_const)
-        m_ext.size = n_bytes * 2
-        
-        # 3. 乗算（128-bit結果）
-        prod = Expression.binary_op("INT_MULT", x_ext, m_ext)
-        prod.size = n_bytes * 2
-        
-        # 4. 上位n-bit抽出（SUBPIECE(prod, n_bytes)）
-        # SUBPIECE(prod, 8) = bits [127:64]
-        offset = Expression.constant(n_bytes, size=n_bytes)
-        mulhi = Expression.binary_op("SUBPIECE", prod, offset)
-        mulhi.size = n_bytes  # 重要！64bit = 8 bytes
-        
-        # === 符号補正 ===
-        # 5. mulhi >> (n-1) : 符号ビットを全体に伝播
-        # これは負数の場合の丸め補正
-        sign_shift = Expression.constant(n_bits - 1, size=n_bytes)
-        sign_correction = Expression.binary_op("INT_SRIGHT", mulhi, sign_shift)
-        sign_correction.size = n_bytes
-        
-        # 6. mulhi - sign_correction
-        result = Expression.binary_op("INT_SUB", mulhi, sign_correction)
-        result.size = n_bytes
-        
-        return result
-
-
-class UnsignedDivBy3Rule(RewriteRule):
-    """
-    unsigned除算 x udiv 3 のmagic number変換
-    
-    アルゴリズム:
-        mulhi = upper64(zero_extend(x, 128) * zero_extend(m, 128))
-        result = mulhi >> 1
-    
-    where:
-        m = 0xAAAAAAAAAAAAAAAB, shift = 1
-    """
-    
-    def __init__(self):
-        super().__init__(
-            "udiv_by_3_magic",
-            "Convert x udiv 3 to magic multiplication"
-        )
-        self.div_ops = frozenset(["INT_DIV", "DIV"])
-    
-    def matches(self, expr: 'Expression') -> bool:
-        from ..model import ExpressionType
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-        if expr.operator not in self.div_ops:
-            return False
-        if not expr.operands or len(expr.operands) != 2:
-            return False
-        
-        right = expr.operands[1]
-        if right.expr_type != ExpressionType.CONSTANT:
-            return False
-        
-        return right.value == 3
-    
-    def apply(self, expr: 'Expression') -> 'Expression':
-        from ..model import Expression
-        
-        x = expr.operands[0]
-        n_bits = x.get_bit_width()
-        n_bytes = x.size
-        
-        # 64-bit unsigned /3: m = 0xAAAAAAAAAAAAAAAB, shift = 1
-        # 32-bit unsigned /3: m = 0xAAAAAAAB, shift = 1
-        if n_bits == 64:
-            m_value = 0xAAAAAAAAAAAAAAAB
-            shift = 1
-        elif n_bits == 32:
-            m_value = 0xAAAAAAAB
-            shift = 1
-        else:
-            return expr
-        
-        m_const = Expression.constant(m_value, size=n_bytes)
-        
-        # 1. x を 2n-bit に zero-extend
-        x_ext = Expression.unary_op("INT_ZEXT", x)
-        x_ext.size = n_bytes * 2
-        
-        # 2. m を 2n-bit に zero-extend
-        m_ext = Expression.unary_op("INT_ZEXT", m_const)
-        m_ext.size = n_bytes * 2
-        
-        # 3. 乗算
-        prod = Expression.binary_op("INT_MULT", x_ext, m_ext)
-        prod.size = n_bytes * 2
-        
-        # 4. 上位n-bit抽出
-        offset = Expression.constant(n_bytes, size=n_bytes)
-        mulhi = Expression.binary_op("SUBPIECE", prod, offset)
-        mulhi.size = n_bytes
-        
-        # 5. 右シフト
-        if shift > 0:
-            shift_amount = Expression.constant(shift, size=n_bytes)
-            result = Expression.binary_op("INT_RIGHT", mulhi, shift_amount)
-            result.size = n_bytes
-        else:
-            result = mulhi
-        
-        return result

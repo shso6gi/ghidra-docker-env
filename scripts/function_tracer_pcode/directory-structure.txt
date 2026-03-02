@@ -35,7 +35,14 @@ function_tracer_pcode/
 ├── transform/                         # 式変換層 - 式の変形・最適化
 │   ├── __init__.py
 │   ├── expander.py                    # PHI展開（条件分岐を全パターン展開）
-│   └── rewriter.py                    # 式リライト（複雑な式を等価な単純形式に変換）
+│   ├── rewriter.py                    # 式リライト（複雑な式を等価な単純形式に変換、メインエントリーポイント）
+│   └── rules/                         # リライトルール
+│       ├── __init__.py                # ルールのエクスポート
+│       ├── base.py                    # 基底クラスとデータ構造
+│       ├── modulo.py                  # 剰余関連のルール
+│       ├── division.py                # 除算最適化ルール
+│       ├── simplification.py          # 簡約ルール
+│       └── normalization.py           # 正規化ルール
 │
 ├── equivalence/                       # 等価性判定層 - SMTベースの同値性判定
 │   ├── __init__.py
