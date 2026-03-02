@@ -8,9 +8,9 @@ from ..model import FunctionReturnAnalysis, FunctionSignature
 from ..smt import ParallelSolverRunner, ParallelResult
 from .formula import FormulaBuilder
 from .counterexample import CounterexampleFormatter
-from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
-from .phase_handler import PhaseHandler, PhaseContext
+from .phases.handler import PhaseHandler, PhaseContext
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 
 

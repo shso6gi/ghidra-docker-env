@@ -5,11 +5,11 @@ from typing import Optional, Tuple, List, Dict, Any, Callable
 from dataclasses import dataclass
 import time
 
-from ..model import FunctionReturnAnalysis, FunctionSignature
-from .result import EquivalenceResult
-from .type_fixer import TypeFixer, TypeFixerConfig, TypeFixResult
-from .arch_detector import ArchitectureDetector
-from .mips64_handler import MIPS64Handler
+from ...model import FunctionReturnAnalysis, FunctionSignature
+from ..result import EquivalenceResult
+from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from ..arch.detector import ArchitectureDetector
+from ..arch.mips64 import MIPS64Handler
 
 
 @dataclass

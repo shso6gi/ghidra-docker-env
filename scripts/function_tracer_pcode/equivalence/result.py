@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from ..model import FunctionSignature
 from ..smt import ParallelResult, SolverStatus
 from .counterexample import FormattedCounterexample
-from .type_fixer import TypeFixResult
+from .typing.fixer import TypeFixResult
 from ..transform.rewrite.rules import RewriteResult
 
 

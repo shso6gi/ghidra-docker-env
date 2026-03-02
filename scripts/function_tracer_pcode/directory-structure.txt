@@ -45,19 +45,25 @@ function_tracer_pcode/
 │       └── normalization.py           # 正規化ルール
 │
 ├── equivalence/                       # 等価性判定層 - SMTベースの同値性判定
-│   ├── __init__.py
-│   ├── checker.py                     # 等価性判定メインロジック（リトライ・型修正統合）
-│   ├── result.py                      # 判定結果（EquivalenceResult, RewriteInfo）
-│   ├── type_fixer.py                  # 型修正モジュール（Ghidraの型誤認識を補正）
-│   ├── counterexample.py              # 反例フォーマット（非等価時の具体例を整形）
-│   ├── arch_detector.py               # アーキテクチャ検出
-│   ├── type_helpers.py                # 型判定ヘルパー
-│   ├── mips64_handler.py              # MIPS64 ABI処理
-│   ├── phase_handler.py               # Phase管理
-│   └── formula/                       # SMT式構築サブモジュール
+│   ├── __init__.py                    # 公開APIエクスポート（更新）
+│   ├── checker.py                     # メインロジック（import修正）# 等価性判定メインロジック（リトライ・型修正統合）
+│   ├── result.py                      # 結果モデル（import修正）# 判定結果（EquivalenceResult, RewriteInfo）
+│   ├── counterexample.py              # 現状維持# 反例フォーマット（非等価時の具体例を整形）
+│   ├── arch/                          # アーキテクチャ検出・ABI関連
+│   │   ├── __init__.py
+│   │   ├── detector.py
+│   │   └── mips64.py
+│   ├── typing/                        # 型補正・型ヘルパ
+│   │   ├── __init__.py
+│   │   ├── fixer.py
+│   │   └── helpers.py
+│   ├── phases/                        # Phase管理
+│   │   ├── __init__.py
+│   │   └── handler.py
+│   └── formula/
 │       ├── __init__.py
-│       ├── builder.py                 # SMT式構築（関数の振る舞いをSMT-LIBに変換）
-│       └── variable.py                # 追加変数の分析（パラメータ断片の検出と制約生成）
+│       ├── builder.py                 #  SMT式構築（関数の振る舞いをSMT-LIBに変換）
+│       └── variable.py                #  追加変数の分析（パラメータ断片の検出と制約生成）
 │
 ├── smt/                               # SMTソルバー層 - 充足可能性判定
 │   ├── __init__.py

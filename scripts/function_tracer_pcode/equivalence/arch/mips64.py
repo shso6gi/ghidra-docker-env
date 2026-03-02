@@ -2,7 +2,7 @@
 """MIPS64 ABI処理モジュール"""
 
 from typing import Dict, List, Optional, Tuple, Any
-from ..model import FunctionReturnAnalysis, Expression, ExpressionType
+from ...model import FunctionReturnAnalysis, Expression, ExpressionType
 
 
 class MIPS64Handler:

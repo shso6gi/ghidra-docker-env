@@ -860,4 +860,4 @@ class TypeFixResult:
 
 # 型ヒント用のインポート（循環参照を避けるため末尾に配置）
 if TYPE_CHECKING:
-    from ..model.analysis import SignednessResult
+    from ...model.analysis import SignednessResult
