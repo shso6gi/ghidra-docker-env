@@ -74,6 +74,7 @@ class ExpressionRewriter:
         self.direction = direction
         self.rules: List[RewriteRule] = []
         self._rewrite_history: List[Tuple[str, str, str]] = []
+        self._noop_count: int = 0  # no-op カウンタ（デバッグ用）
         
         # 方向に応じたルールを設定
         self._setup_rules(direction)
@@ -134,6 +135,7 @@ class ExpressionRewriter:
             RewriteResult: リライト結果
         """
         self._rewrite_history.clear()
+        self._noop_count = 0  # カウンタをリセット
         
         self._debug_print(f"Starting rewrite of: {expr.to_string()}")
         
@@ -145,6 +147,10 @@ class ExpressionRewriter:
             self._debug_print(f"Rewrite complete: {rewritten.to_string()}")
         else:
             self._debug_print("No rewrite applied")
+        
+        # デバッグモードで no-op 統計を報告
+        if self.debug and self._noop_count > 0:
+            self._debug_print(f"Total no-op rules skipped: {self._noop_count}")
         
         return RewriteResult(
             expression=rewritten,
@@ -164,8 +170,32 @@ class ExpressionRewriter:
         # 次にルールを適用
         for rule in self.rules:
             if rule.matches(new_expr):
-                before_str = new_expr.to_string()
                 rewritten = rule.apply(new_expr)
+                
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # no-op チェック：同一オブジェクト参照なら変更なし
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 背景：
+                #   - ほとんどのルールは「変更不要なら元のexprを返す」設計
+                #   - to_string()比較は危険（内部属性sizeなどが反映されない）
+                #   - オブジェクト参照による判定が最も安全で高速
+                # 
+                # 例：
+                #   CommutativeNormalizationRule.apply():
+                #     if sorted_operands == operands:
+                #         return expr  # ← 同一オブジェクトを返す
+                # 
+                # 注意：
+                #   ShiftConstantNormalizationRuleなど、内部属性だけを変えるルールは
+                #   新しいExpressionオブジェクトを作るため、is チェックで False になり
+                #   正しく適用される
+                if rewritten is new_expr:
+                    self._noop_count += 1
+                    # no-op の場合は文字列化もログ出力もスキップ（高速化）
+                    continue
+                
+                # 実際に変更があった場合のみ文字列化してログ出力＆履歴追加
+                before_str = new_expr.to_string()
                 after_str = rewritten.to_string()
                 
                 self._debug_print(f"Rule '{rule.name}' matched at depth {depth}")
