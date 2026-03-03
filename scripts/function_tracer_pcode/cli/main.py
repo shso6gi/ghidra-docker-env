@@ -195,6 +195,26 @@ def parse_arguments():
         help="等価性判定戦略 (monolithic: 単一の大きなite式, pairwise: 分岐ペア分割) デフォルト: pairwise"
     )
 
+    parser.add_argument(
+        "--pairwise-timeout",
+        type=int,
+        default=5,
+        help="Pairwise戦略の各クエリのタイムアウト（秒）デフォルト: 5"
+    )
+
+    parser.add_argument(
+        "--pairwise-timeout-hard",
+        type=int,
+        default=30,
+        help="Pairwise戦略の難しいクエリの再試行タイムアウト（秒）デフォルト: 30"
+    )
+
+    parser.add_argument(
+        "--pairwise-save-unknown",
+        action="store_true",
+        help="Pairwise戦略でUNKNOWNになったクエリを/tmpに保存する"
+    )
+
     return parser.parse_args()
 
 
@@ -325,6 +345,11 @@ def run_equivalence_check(args):
     
     # 戦略設定を取得
     strategy = getattr(args, 'strategy', 'pairwise')
+
+    # Pairwise戦略のパラメータを取得
+    pairwise_timeout = getattr(args, 'pairwise_timeout', 5)
+    pairwise_timeout_hard = getattr(args, 'pairwise_timeout_hard', 30)
+    pairwise_save_unknown = getattr(args, 'pairwise_save_unknown', False)
     
     # 等価性チェッカーを初期化
     checker = EquivalenceChecker(
@@ -333,7 +358,10 @@ def run_equivalence_check(args):
         type_fixer_config=type_fixer_config,
         enable_rewrite=enable_rewrite,
         rewrite_direction=rewrite_direction,
-        strategy=strategy
+        strategy=strategy,
+        pairwise_timeout=pairwise_timeout,
+        pairwise_timeout_hard=pairwise_timeout_hard,
+        pairwise_save_unknown=pairwise_save_unknown
     )
     
     # 利用可能なソルバーを表示

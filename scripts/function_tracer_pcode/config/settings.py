@@ -37,3 +37,9 @@ EQUIVALENCE_CHECK_STRATEGY = "pairwise"
 
 # Pairwise戦略の各クエリのタイムアウト（秒）
 PAIRWISE_PER_QUERY_TIMEOUT = 5
+
+# Pairwise戦略の難しいクエリの再試行タイムアウト（秒）
+PAIRWISE_PER_QUERY_TIMEOUT_HARD = 30
+
+# UNKNOWNクエリを保存するか
+PAIRWISE_SAVE_UNKNOWN_QUERIES = False

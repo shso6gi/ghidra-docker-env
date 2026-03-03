@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Pairwise戦略（分岐ペア分割方式）"""
+"""Pairwise戦略（分岐ペア分割方式・二段階チェック対応）"""
 
 from typing import List, Dict, Any, Optional, Tuple
 import time
+import os
 
 from ...model import FunctionReturnAnalysis, ReturnInfo, Condition
 from ...smt import ParallelResult, SolverResult, SolverStatus
@@ -54,7 +55,7 @@ class ReturnCase:
         cond_strs = []
         for c in self.conditions[:3]:  # 最初の3つ
             cond_str = str(c)
-            if cond_str:  # Noneや空文字列でない場合のみ追加
+            if cond_str:
                 cond_strs.append(cond_str)
         
         if not cond_strs:
@@ -65,20 +66,22 @@ class ReturnCase:
 
 class PairwiseStrategy(CheckStrategy):
     """
-    Pairwise戦略（分岐ペア分割方式）
+    Pairwise戦略（分岐ペア分割方式・二段階チェック）
     
-    関数1のN個のReturnInfoと関数2のM個のReturnInfoの全ペア(i,j)に対して、
-    小さなSMTクエリを生成・実行:
-        C1_i ∧ C2_j ∧ (V1_i ≠ V2_j)
-    
-    - 1つでもSATなら即座に NOT EQUIVALENT
-    - 全ペアUNSATなら EQUIVALENT
-    - unknownが混じれば TIMEOUT
+    各ペア(i,j)に対して：
+    1. Stage 1: 条件のみチェック（C1_i ∧ C2_j）
+       - UNSAT → 到達不能なのでペア自体をUNSAT扱い
+       - SAT → Stage 2へ
+    2. Stage 2: 値不等式を追加してチェック（C1_i ∧ C2_j ∧ V1_i≠V2_j）
+       - タイムアウトをhard timeoutに延長可能
     """
     
     def __init__(self, formula_builder, solver_runner, debug: bool = False):
         super().__init__(formula_builder, solver_runner, debug)
-        self.per_query_timeout = 5  # 各クエリのタイムアウト（秒）
+        self.per_query_timeout = 5  # Stage 1のタイムアウト（秒）
+        self.per_query_timeout_hard = 30  # Stage 2のhard timeout（秒）
+        self.save_unknown_queries = False  # UNKNOWNクエリを保存するか
+        self.unknown_query_dir = "/tmp"  # 保存先ディレクトリ
     
     def check(
         self,
@@ -86,7 +89,7 @@ class PairwiseStrategy(CheckStrategy):
         analysis2: FunctionReturnAnalysis,
         save_formula: bool = False
     ) -> StrategyResult:
-        """等価性をチェック（pairwise方式）"""
+        """等価性をチェック（pairwise方式・二段階チェック）"""
         start_time = time.time()
         
         # ReturnInfoを抽出
@@ -96,11 +99,12 @@ class PairwiseStrategy(CheckStrategy):
         total_pairs = len(cases1) * len(cases2)
         
         self._debug_print("=" * 60)
-        self._debug_print("Pairwise strategy:")
+        self._debug_print("Pairwise strategy (two-stage check):")
         self._debug_print(f"  Function 1: {len(cases1)} return cases")
         self._debug_print(f"  Function 2: {len(cases2)} return cases")
         self._debug_print(f"  Total pairs to check: {total_pairs}")
-        self._debug_print(f"  Per-query timeout: {self.per_query_timeout}s")
+        self._debug_print(f"  Per-query timeout (stage1): {self.per_query_timeout}s")
+        self._debug_print(f"  Per-query timeout (stage2 hard): {self.per_query_timeout_hard}s")
         self._debug_print("=" * 60)
         
         if total_pairs == 0:
@@ -132,18 +136,15 @@ class PairwiseStrategy(CheckStrategy):
             for j, case2 in enumerate(cases2):
                 pair_id = f"({i},{j})"
                 
-                # クエリ生成
-                query = self._build_pair_query(
+                # 二段階チェック実行
+                result = self._solve_query_twostage(
                     base_ctx, case1, case2,
                     param_replace_fn1, param_replace_fn2,
                     pair_id
                 )
                 
-                if save_formula:
-                    last_formula = query
-                
-                # ソルバー実行（タイムアウトを短く）
-                result = self._solve_query(query, pair_id)
+                if save_formula and result.last_query:
+                    last_formula = result.last_query
                 
                 if result.is_equivalent is False:
                     # SAT: 反例発見 → 即座に終了
@@ -176,7 +177,7 @@ class PairwiseStrategy(CheckStrategy):
                 elif result.is_equivalent is None:
                     # UNKNOWN/TIMEOUT
                     unknown_count += 1
-                    self._debug_print(f"  Pair {pair_id}: UNKNOWN/TIMEOUT")
+                    self._debug_print(f"  Pair {pair_id}: final result UNKNOWN/TIMEOUT")
             
             # 早期終了チェック
             if sat_count > 0:
@@ -219,7 +220,7 @@ class PairwiseStrategy(CheckStrategy):
             solver_results=aggregate_result,
             smt_formula=last_formula if save_formula else None,
             counterexample_raw=counterexample_raw,
-            return_var1="return_1",  # pairwiseでは実際には使わないが互換性のため
+            return_var1="return_1",
             return_var2="return_2",
             constrained_fragments=base_ctx.get('constrained_fragments', []),
             total_pairs=total_pairs,
@@ -229,6 +230,185 @@ class PairwiseStrategy(CheckStrategy):
             error_pairs=error_count,
             sat_pair_info=sat_pair_info
         )
+    
+    def _solve_query_twostage(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str
+    ) -> 'QueryResult':
+        """
+        二段階チェック：
+        1. Stage 1: 条件のみチェック（C1_i ∧ C2_j）
+           - UNSAT → 到達不能なのでペア自体をUNSAT扱い
+           - SAT → Stage 2へ
+        2. Stage 2: 値不等式を追加してチェック（C1_i ∧ C2_j ∧ V1_i≠V2_j）
+           - hard timeout で再試行
+        """
+        # Stage 1: 条件のみチェック
+        cond_query = self._build_condition_only_query(
+            base_ctx, case1, case2,
+            param_replace_fn1, param_replace_fn2,
+            pair_id
+        )
+        
+        stage1_result = self._solve_query_internal(
+            cond_query, pair_id, stage="conds-only", use_hard_timeout=False
+        )
+        
+        if stage1_result.is_equivalent is True:
+            # UNSAT: 条件が矛盾 → 到達不能なのでペア自体をUNSAT扱い
+            self._debug_print(f"  Pair {pair_id} stage1(conds-only): UNSAT (unreachable) - skip value check")
+            stage1_result.last_query = cond_query
+            return stage1_result
+        
+        if stage1_result.is_equivalent is False:
+            # SAT: 条件が充足可能 → Stage 2へ
+            self._debug_print(f"  Pair {pair_id} stage1(conds-only): SAT - proceed to value check")
+        else:
+            # UNKNOWN: 条件チェックで不明 → とりあえずStage 2へ
+            self._debug_print(f"  Pair {pair_id} stage1(conds-only): UNKNOWN - proceed to value check")
+        
+        # Stage 2: 値不等式を追加して再チェック
+        full_query = self._build_pair_query(
+            base_ctx, case1, case2,
+            param_replace_fn1, param_replace_fn2,
+            pair_id
+        )
+        
+        stage2_result = self._solve_query_internal(
+            full_query, pair_id, stage="with-ineq", use_hard_timeout=True
+        )
+        
+        stage2_result.last_query = full_query
+        return stage2_result
+    
+    def _solve_query_internal(
+        self,
+        query: str,
+        pair_id: str,
+        stage: str = "full",
+        use_hard_timeout: bool = False
+    ) -> 'QueryResult':
+        """
+        内部用：クエリを実行
+        
+        Args:
+            query: SMTクエリ
+            pair_id: ペアID
+            stage: ステージ名（ログ用）
+            use_hard_timeout: hard timeout を使うか
+        """
+        # タイムアウトを設定
+        old_timeout = self.solver_runner.timeout
+        if use_hard_timeout:
+            timeout = self.per_query_timeout_hard
+        else:
+            timeout = self.per_query_timeout
+        
+        self.solver_runner.timeout = timeout
+        
+        try:
+            parallel_result = self.solver_runner.run_sequential(query)
+            
+            counterexample_raw = None
+            if parallel_result.is_equivalent is False:
+                counterexample_raw = parallel_result.get_counterexample()
+            
+            # ログ出力
+            if parallel_result.is_equivalent is True:
+                result_str = "UNSAT"
+            elif parallel_result.is_equivalent is False:
+                result_str = "SAT"
+            else:
+                result_str = "UNKNOWN/TIMEOUT"
+            
+            elapsed = parallel_result.results[0].elapsed_time if parallel_result.results else 0.0
+            self._debug_print(f"  Pair {pair_id} {stage}: {result_str} (t={elapsed:.3f}s)")
+            
+            # UNKNOWNクエリを保存
+            if self.save_unknown_queries and parallel_result.is_equivalent is None:
+                self._save_unknown_query(query, pair_id, stage)
+            
+            return QueryResult(
+                is_equivalent=parallel_result.is_equivalent,
+                counterexample_raw=counterexample_raw
+            )
+        
+        finally:
+            self.solver_runner.timeout = old_timeout
+    
+    def _build_condition_only_query(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str
+    ) -> str:
+        """
+        条件のみのSMTクエリを構築（値不等式なし）
+        
+        構成:
+        1. 共通ヘッダ
+        2. case1の条件 (C1_i)
+        3. case2の条件 (C2_j)
+        4. check-sat
+        """
+        lines = []
+        
+        # ヘッダー
+        lines.append("; " + "=" * 60)
+        lines.append(f"; Pairwise Query (Conditions Only): Pair {pair_id}")
+        lines.append(f"; Case1[{case1.index}]: {case1.get_condition_summary()}")
+        lines.append(f"; Case2[{case2.index}]: {case2.get_condition_summary()}")
+        lines.append("; " + "=" * 60)
+        lines.append("")
+        lines.append("(set-logic QF_BV)")
+        lines.append("")
+        
+        # 共通部分
+        lines.extend(base_ctx['header_lines'])
+        
+        # Case1の条件
+        conds1_smt = case1.get_conditions_smt(param_replace_fn1)
+        if conds1_smt:
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Case1[{case1.index}] conditions")
+            lines.append("; " + "-" * 40)
+            for cond_str in conds1_smt:
+                lines.append(f"(assert {cond_str})")
+            lines.append("")
+        
+        # Case2の条件
+        conds2_smt = case2.get_conditions_smt(param_replace_fn2)
+        if conds2_smt:
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Case2[{case2.index}] conditions")
+            lines.append("; " + "-" * 40)
+            for cond_str in conds2_smt:
+                lines.append(f"(assert {cond_str})")
+            lines.append("")
+        
+        lines.append("(check-sat)")
+        
+        return "\n".join(lines)
+    
+    def _save_unknown_query(self, query: str, pair_id: str, stage: str) -> None:
+        """UNKNOWNクエリをファイルに保存"""
+        filename = f"unknown_query_{pair_id.replace(',', '_').replace('(', '').replace(')', '')}_{stage}.smt2"
+        filepath = os.path.join(self.unknown_query_dir, filename)
+        
+        try:
+            with open(filepath, 'w') as f:
+                f.write(query)
+            self._debug_print(f"  Saved unknown query to: {filepath}")
+        except Exception as e:
+            self._debug_print(f"  Failed to save unknown query: {e}")
     
     def _extract_return_cases(
         self,
@@ -270,19 +450,7 @@ class PairwiseStrategy(CheckStrategy):
         param_replace_fn2,
         pair_id: str
     ) -> str:
-        """
-        ペア(i,j)用のSMTクエリを構築
-        
-        構成:
-        1. 共通ヘッダ（set-logic, パラメータ宣言）
-        2. パラメータ等価制約
-        3. UB除外制約
-        4. 追加変数制約
-        5. case1の条件 (C1_i)
-        6. case2の条件 (C2_j)
-        7. 値の非等価 (V1_i ≠ V2_j)
-        8. check-sat, get-model
-        """
+        """ペア(i,j)用のSMTクエリを構築（値不等式含む）"""
         lines = []
         
         # ヘッダー
@@ -347,43 +515,13 @@ class PairwiseStrategy(CheckStrategy):
         
         return "\n".join(lines)
     
-    def _solve_query(self, query: str, pair_id: str) -> 'QueryResult':
-        """
-        クエリをソルバーで実行
-        
-        Returns:
-            QueryResult (簡易版の結果)
-        """
-        # タイムアウトを短く設定
-        old_timeout = self.solver_runner.timeout
-        self.solver_runner.timeout = self.per_query_timeout
-        
-        try:
-            # 並列実行は不要（クエリが小さいので）
-            parallel_result = self.solver_runner.run_sequential(query)
-            
-            counterexample_raw = None
-            if parallel_result.is_equivalent is False:
-                counterexample_raw = parallel_result.get_counterexample()
-            
-            return QueryResult(
-                is_equivalent=parallel_result.is_equivalent,
-                counterexample_raw=counterexample_raw
-            )
-        
-        finally:
-            self.solver_runner.timeout = old_timeout
-    
     def _create_aggregate_result(
         self,
         is_equivalent: Optional[bool],
         elapsed_time: float,
         counterexample_raw: Optional[Dict]
     ) -> ParallelResult:
-        """
-        Pairwise結果を集約してParallelResultを作成
-        """
-        # 簡易的な SolverResult を作成
+        """Pairwise結果を集約してParallelResultを作成"""
         status_map = {
             True: SolverStatus.UNSAT,
             False: SolverStatus.SAT,
@@ -423,3 +561,4 @@ class QueryResult:
     ):
         self.is_equivalent = is_equivalent
         self.counterexample_raw = counterexample_raw
+        self.last_query: Optional[str] = None

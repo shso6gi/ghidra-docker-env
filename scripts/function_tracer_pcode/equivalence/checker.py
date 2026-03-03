@@ -13,6 +13,7 @@ from .result import EquivalenceResult, RewriteInfo
 from .phases.handler import PhaseHandler, PhaseContext
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies import create_strategy
+from .strategies.pairwise import PairwiseStrategy
 
 
 class EquivalenceChecker:
@@ -25,7 +26,10 @@ class EquivalenceChecker:
         type_fixer_config: Optional[TypeFixerConfig] = None,
         enable_rewrite: bool = True,
         rewrite_direction: str = "to_modulo",
-        strategy: str = "pairwise"
+        strategy: str = "pairwise",
+        pairwise_timeout: int = 5,
+        pairwise_timeout_hard: int = 30,
+        pairwise_save_unknown: bool = False
     ):
         """
         Args:
@@ -48,6 +52,10 @@ class EquivalenceChecker:
         self.check_strategy = create_strategy(
             strategy, self.formula_builder, self.solver_runner, debug=debug
         )
+        if strategy == "pairwise" and isinstance(self.check_strategy, PairwiseStrategy):
+            self.check_strategy.per_query_timeout = pairwise_timeout
+            self.check_strategy.per_query_timeout_hard = pairwise_timeout_hard
+            self.check_strategy.save_unknown_queries = pairwise_save_unknown
 
     def _debug_print(self, msg: str):
         if self.debug:

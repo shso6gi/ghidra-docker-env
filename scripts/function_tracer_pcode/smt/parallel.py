@@ -130,9 +130,12 @@ class ParallelSolverRunner:
         """単一ソルバーで実行"""
         import sys
         
+        # タイムアウトを動的に設定（重要：ここで反映される）
+        solver.set_timeout(self.timeout)
+        
         # 即座にフラッシュして出力
         if self.debug:
-            print(f"[ParallelRunner] >>> Starting {solver.name}...", flush=True)
+            print(f"[ParallelRunner] >>> Starting {solver.name} (timeout={self.timeout}s)...", flush=True)
             sys.stdout.flush()
         
         try:

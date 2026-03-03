@@ -21,6 +21,15 @@ class Z3Solver(SMTSolver):
     def name(self) -> str:
         return "Z3"
     
+    def set_timeout(self, timeout: int) -> None:
+        """タイムアウトを動的に設定"""
+        self.timeout = timeout
+        self._debug_print(f"Timeout updated to {timeout}s")
+        # 既存のソルバーインスタンスがあればそちらも更新
+        if self._solver is not None:
+            self._solver.set("timeout", timeout * 1000)
+            self._debug_print(f"Z3 solver timeout set to {timeout * 1000}ms")
+    
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[Z3 DEBUG] {msg}")
@@ -43,6 +52,7 @@ class Z3Solver(SMTSolver):
     ) -> SolverResult:
         import sys
         self._debug_print("=== Z3 check_equivalence_direct START ===")
+        self._debug_print(f"Current timeout: {self.timeout}s")
         
         if not self.is_available():
             return self._create_error_result("Z3 is not available")
@@ -57,6 +67,7 @@ class Z3Solver(SMTSolver):
             solver = z3.Solver()
             self._solver = solver
             self._solver.set("timeout", self.timeout * 1000)  # ミリ秒
+            self._debug_print(f"Z3 timeout set to {self.timeout * 1000}ms")
             
             # SMT-LIBスクリプトをパース
             try:

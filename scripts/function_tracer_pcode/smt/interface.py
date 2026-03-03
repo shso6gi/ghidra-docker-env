@@ -62,6 +62,18 @@ class SMTSolver(ABC):
         """ソルバー名を返す"""
         pass
     
+    def set_timeout(self, timeout: int) -> None:
+        """
+        タイムアウトを動的に設定
+        
+        Args:
+            timeout: タイムアウト（秒）
+        
+        Note:
+            サブクラスでオーバーライドして、ソルバー固有の設定も更新すること
+        """
+        self.timeout = timeout
+    
     @abstractmethod
     def check_availability(self) -> Tuple[bool, str]:
         """
@@ -127,5 +139,5 @@ class SMTSolver(ABC):
             status=SolverStatus.TIMEOUT,
             elapsed_time=elapsed
         )
-    
+
 SolverInterface = SMTSolver  # 後方互換性のためのエイリアス
