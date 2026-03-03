@@ -188,6 +188,13 @@ def parse_arguments():
         help="リライト方向 (to_modulo: 展開形式→剰余演算子, to_expansion: 剰余演算子→展開形式)"
     )
 
+    parser.add_argument(
+        "--strategy",
+        choices=["monolithic", "pairwise"],
+        default="pairwise",
+        help="等価性判定戦略 (monolithic: 単一の大きなite式, pairwise: 分岐ペア分割) デフォルト: pairwise"
+    )
+
     return parser.parse_args()
 
 
@@ -291,6 +298,9 @@ def run_equivalence_check(args):
     
     # 型修正リトライオプションを取得
     retry_with_type_fix = getattr(args, 'retry_with_int', False)
+
+    # 戦略設定を取得（表示用）
+    strategy = getattr(args, 'strategy', 'pairwise')
     
     if not args.quiet:
         print(f"等価性判定モード")
@@ -298,6 +308,7 @@ def run_equivalence_check(args):
         print(f"  Binary 2: {binary2_path}")
         print(f"  Function 1: {func_name1}")
         print(f"  Function 2: {func_name2}")
+        print(f"  Strategy: {strategy}")
         print(f"  Timeout: {args.equiv_timeout}秒")
         print(f"  Retry with int type fix: {'enabled' if retry_with_type_fix else 'disabled'}")
         print()
@@ -312,13 +323,17 @@ def run_equivalence_check(args):
     enable_rewrite = not getattr(args, 'no_rewrite', False)
     rewrite_direction = getattr(args, 'rewrite_direction', 'to_modulo')
     
+    # 戦略設定を取得
+    strategy = getattr(args, 'strategy', 'pairwise')
+    
     # 等価性チェッカーを初期化
     checker = EquivalenceChecker(
         timeout=args.equiv_timeout,
         debug=args.debug,
         type_fixer_config=type_fixer_config,
         enable_rewrite=enable_rewrite,
-        rewrite_direction=rewrite_direction
+        rewrite_direction=rewrite_direction,
+        strategy=strategy
     )
     
     # 利用可能なソルバーを表示

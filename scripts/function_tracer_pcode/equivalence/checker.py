@@ -12,6 +12,7 @@ from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
 from .phases.handler import PhaseHandler, PhaseContext
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
+from .strategies import create_strategy
 
 
 class EquivalenceChecker:
@@ -23,7 +24,8 @@ class EquivalenceChecker:
         debug: bool = False,
         type_fixer_config: Optional[TypeFixerConfig] = None,
         enable_rewrite: bool = True,
-        rewrite_direction: str = "to_modulo"
+        rewrite_direction: str = "to_modulo",
+        strategy: str = "pairwise"
     ):
         """
         Args:
@@ -32,16 +34,21 @@ class EquivalenceChecker:
             type_fixer_config: 型修正の設定
             enable_rewrite: 式のリライトを有効にする
             rewrite_direction: リライト方向 ("to_modulo" or "to_expansion")
+            strategy: 判定戦略 ("monolithic" or "pairwise")
         """
         self.timeout = timeout
         self.debug = debug
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
         self.enable_rewrite = enable_rewrite
         self.rewrite_direction = rewrite_direction
+        self.strategy_name = strategy
         self.formula_builder = FormulaBuilder(debug=debug)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
         self.phase_handler = PhaseHandler(self.type_fixer_config, debug=debug)
-    
+        self.check_strategy = create_strategy(
+            strategy, self.formula_builder, self.solver_runner, debug=debug
+        )
+
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[EquivalenceChecker] {msg}")
@@ -450,66 +457,56 @@ class EquivalenceChecker:
             original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
-            formula_result = self.formula_builder.build_equivalence_formula_extended(
-                analysis1, analysis2
-            )
-            constrained_fragments = formula_result.param_fragment_constrained
-            
             # リライトを適用
             analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
             
-            smt_formula, return_var1, return_var2 = (
-                self.formula_builder.build_equivalence_formula(analysis1, analysis2)
-            )
+            # 戦略を使用してチェック
+            self._debug_print(f"Using strategy: {self.strategy_name}")
+            strategy_result = self.check_strategy.check(analysis1, analysis2, save_formula)
             
-            if self.debug:
+            if self.debug and strategy_result.smt_formula:
                 print("\n" + "=" * 60)
                 print("Generated SMT formula:")
                 print("=" * 60)
-                print(smt_formula)
+                print(strategy_result.smt_formula)
                 print("=" * 60 + "\n")
-            
-            available_solvers = self.solver_runner.get_available_solvers()
-            if not available_solvers:
-                return self._create_error_result(
-                    analysis1, analysis2, binary1_name, binary2_name,
-                    "No SMT solvers available", start_time,
-                    type_fix_result, retry_count,
-                    original_signature1, original_signature2
-                )
-            
-            if self.debug:
-                print(f"Available solvers: {available_solvers}")
-                parallel_result = self.solver_runner.run_sequential(smt_formula)
-            else:
-                parallel_result = self.solver_runner.run_parallel(smt_formula)
             
             total_time = time.time() - start_time
             
+            # 反例をフォーマット
             counterexample = None
-            if parallel_result.is_equivalent is False:
-                raw_model = parallel_result.get_counterexample()
-                if raw_model:
-                    counterexample = self._format_counterexample(
-                        raw_model, analysis1, analysis2, return_var1, return_var2
-                    )
+            if strategy_result.is_equivalent is False and strategy_result.counterexample_raw:
+                counterexample = self._format_counterexample(
+                    strategy_result.counterexample_raw,
+                    analysis1, analysis2,
+                    strategy_result.return_var1 or "return_1",
+                    strategy_result.return_var2 or "return_2"
+                )
             
             return EquivalenceResult(
-                is_equivalent=parallel_result.is_equivalent,
+                is_equivalent=strategy_result.is_equivalent,
                 function1_name=analysis1.function_name,
                 function2_name=analysis2.function_name,
                 binary1_name=binary1_name,
                 binary2_name=binary2_name,
-                solver_results=parallel_result,
+                solver_results=strategy_result.solver_results,
                 counterexample=counterexample,
-                smt_formula=smt_formula if save_formula else None,
+                smt_formula=strategy_result.smt_formula if save_formula else None,
                 total_time=total_time,
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
                 function1_signature=original_signature1,
                 function2_signature=original_signature2,
-                constrained_fragments=constrained_fragments,
-                rewrite_info=rewrite_info
+                constrained_fragments=strategy_result.constrained_fragments,
+                rewrite_info=rewrite_info,
+                pairwise_stats={
+                    'total_pairs': strategy_result.total_pairs,
+                    'unsat_pairs': strategy_result.unsat_pairs,
+                    'sat_pairs': strategy_result.sat_pairs,
+                    'unknown_pairs': strategy_result.unknown_pairs,
+                    'error_pairs': strategy_result.error_pairs,
+                } if strategy_result.total_pairs > 0 else None,
+                sat_pair_info=strategy_result.sat_pair_info
             )
         
         except Exception as e:

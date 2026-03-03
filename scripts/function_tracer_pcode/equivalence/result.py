@@ -74,7 +74,9 @@ class EquivalenceResult:
     function2_signature: Optional[FunctionSignature] = None
     constrained_fragments: List[str] = field(default_factory=list)
     rewrite_info: Optional[RewriteInfo] = None
-    mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None  # 追加
+    mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
+    pairwise_stats: Optional[Dict[str, int]] = None
+    sat_pair_info: Optional[Dict[str, Any]] = None
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -116,6 +118,8 @@ class EquivalenceResult:
             "is_timeout": self.is_timeout(),
             "constrained_fragments": self.constrained_fragments,
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
+            "pairwise_stats": self.pairwise_stats,
+            "sat_pair_info": self.sat_pair_info,
         }
     
     def to_string(self, verbose: bool = False) -> str:
@@ -138,6 +142,23 @@ class EquivalenceResult:
         if self.function2_signature:
             lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
         
+        lines.append("")
+
+        # Pairwise統計情報を追加
+        if self.pairwise_stats:
+            lines.append("")
+            lines.append("Pairwise Statistics:")
+            stats = self.pairwise_stats
+            lines.append(f"  Total pairs: {stats['total_pairs']}")
+            lines.append(f"  UNSAT: {stats['unsat_pairs']}, SAT: {stats['sat_pairs']}, "
+                        f"UNKNOWN: {stats['unknown_pairs']}, ERROR: {stats['error_pairs']}")
+            
+            if self.sat_pair_info:
+                info = self.sat_pair_info
+                lines.append(f"  First SAT pair: ({info['i']}, {info['j']})")
+                lines.append(f"    Case1: {info['case1_summary']}")
+                lines.append(f"    Case2: {info['case2_summary']}")
+                
         lines.append("")
         
         # パラメータ断片として制約された変数を表示

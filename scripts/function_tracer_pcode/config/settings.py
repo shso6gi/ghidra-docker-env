@@ -31,3 +31,9 @@ MAX_TRACE_DEPTH = 100
 
 # デバッグモード
 DEBUG_MODE = False  # Trueにするとデバッグ出力が有効になる
+
+# 等価性判定戦略: "monolithic" (単一の大きなite式) or "pairwise" (分岐ペア分割)
+EQUIVALENCE_CHECK_STRATEGY = "pairwise"
+
+# Pairwise戦略の各クエリのタイムアウト（秒）
+PAIRWISE_PER_QUERY_TIMEOUT = 5
