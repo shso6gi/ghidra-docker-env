@@ -72,6 +72,7 @@ function_tracer_pcode/
 │   └── formula/
 │       ├── __init__.py
 │       ├── builder.py                 #  SMT式構築（関数の振る舞いをSMT-LIBに変換）
+│       ├── symbol_replace.py          #  シンボル名置換ユーティリティ
 │       └── variable.py                #  追加変数の分析（パラメータ断片の検出と制約生成）
 │
 ├── smt/                               # SMTソルバー層 - 充足可能性判定

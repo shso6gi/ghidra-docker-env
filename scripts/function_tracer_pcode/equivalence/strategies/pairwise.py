@@ -8,6 +8,7 @@ import os
 from ...model import FunctionReturnAnalysis, ReturnInfo, Condition
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
+from ..formula.symbol_replace import build_symbol_replacer
 
 
 class ReturnCase:
@@ -114,13 +115,30 @@ class PairwiseStrategy(CheckStrategy):
         # 共通SMT部分を生成
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
         
-        # パラメータ置換関数を作成
-        param_replace_fn1 = self._create_param_replacer(
-            base_ctx['params1'], analysis1.function_name
+        # シンボル置換関数を作成（params + extra_vars の両方を含む）
+        # 修正: _create_param_replacer() -> build_symbol_replacer()
+        symbol_replace_fn1 = build_symbol_replacer(
+            base_ctx['params1'],
+            base_ctx.get('extra_vars1', [])
         )
-        param_replace_fn2 = self._create_param_replacer(
-            base_ctx['params2'], analysis2.function_name
+        symbol_replace_fn2 = build_symbol_replacer(
+            base_ctx['params2'],
+            base_ctx.get('extra_vars2', [])
         )
+        
+        # デバッグ: 置換対象シンボルを表示
+        if self.debug:
+            self._debug_print("Symbol replacement mapping:")
+            self._debug_print("  Function 1:")
+            for p in base_ctx['params1']:
+                self._debug_print(f"    {p.original_name} -> {p.smt_name}")
+            for v in base_ctx.get('extra_vars1', []):
+                self._debug_print(f"    {v.original_name} -> {v.smt_name}")
+            self._debug_print("  Function 2:")
+            for p in base_ctx['params2']:
+                self._debug_print(f"    {p.original_name} -> {p.smt_name}")
+            for v in base_ctx.get('extra_vars2', []):
+                self._debug_print(f"    {v.original_name} -> {v.smt_name}")
         
         # ペアごとにチェック
         unsat_count = 0
@@ -137,9 +155,10 @@ class PairwiseStrategy(CheckStrategy):
                 pair_id = f"({i},{j})"
                 
                 # 二段階チェック実行
+                # 修正: param_replace_fn -> symbol_replace_fn
                 result = self._solve_query_twostage(
                     base_ctx, case1, case2,
-                    param_replace_fn1, param_replace_fn2,
+                    symbol_replace_fn1, symbol_replace_fn2,
                     pair_id
                 )
                 
@@ -154,8 +173,8 @@ class PairwiseStrategy(CheckStrategy):
                         'j': j,
                         'case1_summary': case1.get_condition_summary(),
                         'case2_summary': case2.get_condition_summary(),
-                        'value1': case1.get_value_smt(param_replace_fn1),
-                        'value2': case2.get_value_smt(param_replace_fn2),
+                        'value1': case1.get_value_smt(symbol_replace_fn1),
+                        'value2': case2.get_value_smt(symbol_replace_fn2),
                     }
                     counterexample_raw = result.counterexample_raw
                     
@@ -468,15 +487,7 @@ class PairwiseStrategy(CheckStrategy):
         stage: str = "full",
         use_hard_timeout: bool = False
     ) -> 'QueryResult':
-        """
-        内部用：クエリを実行
-        
-        Args:
-            query: SMTクエリ
-            pair_id: ペアID
-            stage: ステージ名（ログ用）
-            use_hard_timeout: hard timeout を使うか
-        """
+        """内部用：クエリを実行"""
         # タイムアウトを設定
         old_timeout = self.solver_runner.timeout
         if use_hard_timeout:
@@ -503,6 +514,36 @@ class PairwiseStrategy(CheckStrategy):
             
             elapsed = parallel_result.results[0].elapsed_time if parallel_result.results else 0.0
             self._debug_print(f"  Pair {pair_id} {stage}: {result_str} (t={elapsed:.3f}s)")
+            
+            # === 追加: エラーハンドリング ===
+            if parallel_result.results:
+                from ...smt import SolverStatus
+                for solver_result in parallel_result.results:
+                    if solver_result.status == SolverStatus.ERROR:
+                        error_msg = solver_result.error_message or ""
+                        self._debug_print(f"  Solver error: {error_msg}")
+                        
+                        # パースエラーの場合、未知シンボルを抽出
+                        if "unknown constant" in error_msg:
+                            import re
+                            match = re.search(r'unknown constant (\w+)', error_msg)
+                            if match:
+                                unknown_sym = match.group(1)
+                                self._debug_print(f"  !!! Unknown symbol detected: '{unknown_sym}'")
+                                self._debug_print(f"  This symbol should have been replaced during symbol mapping.")
+                                
+                                # デバッグ用：クエリの一部を表示
+                                if self.debug:
+                                    lines = query.split('\n')
+                                    for i, line in enumerate(lines):
+                                        if unknown_sym in line:
+                                            start = max(0, i - 2)
+                                            end = min(len(lines), i + 3)
+                                            self._debug_print(f"  Context (lines {start}-{end}):")
+                                            for j in range(start, end):
+                                                marker = " >>> " if j == i else "     "
+                                                self._debug_print(f"{marker}{lines[j]}")
+            # === エラーハンドリング終了 ===
             
             # UNKNOWNクエリを保存
             if self.save_unknown_queries and parallel_result.is_equivalent is None:
@@ -599,22 +640,6 @@ class PairwiseStrategy(CheckStrategy):
                 return_info=ret_info
             ))
         return cases
-    
-    def _create_param_replacer(self, params_info: List, func_name: str):
-        """パラメータ名を置換する関数を作成"""
-        import re
-        
-        def replacer(smt_expr: str) -> str:
-            result = smt_expr
-            # params_info は ParameterInfo のリスト
-            # original_name -> smt_name に置換
-            sorted_params = sorted(params_info, key=lambda p: -len(p.original_name))
-            for param in sorted_params:
-                pattern = r'\b' + re.escape(param.original_name) + r'\b'
-                result = re.sub(pattern, param.smt_name, result)
-            return result
-        
-        return replacer
     
     def _build_pair_query(
         self,
