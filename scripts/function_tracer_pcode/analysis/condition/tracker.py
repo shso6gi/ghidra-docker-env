@@ -48,6 +48,10 @@ class BasicBlockInfo:
 class ConditionTracker:
     """条件分岐を追跡"""
     
+    # クラス定数：パス展開の上限設定
+    MAX_VALID_PATHS = 8  # 1つのブロックへの最大有効パス数
+    MAX_CONDITIONS_PER_PATH = 20  # 1パスあたりの最大条件数
+    
     def __init__(self, tracer):
         self.tracer = tracer
         self.high_function = tracer.high_function
@@ -139,7 +143,12 @@ class ConditionTracker:
         return self.block_by_index.get(index)
     
     def get_path_conditions_to_block(self, target_block: BasicBlockInfo) -> List[Condition]:
-        """エントリーからターゲットブロックまでのパス条件を取得（有効なパスのみ）"""
+        """
+        エントリーからターゲットブロックまでのパス条件を取得（単一パス）
+        
+        有効なパスの中で最も条件が少ないものを返す。
+        複数パスが必要な場合は get_all_valid_paths_to_block() を使用すること。
+        """
         from .simplifier import ConditionSimplifier
         
         if self.entry_block is None:
@@ -158,40 +167,62 @@ class ConditionTracker:
         )
         
         if self.debug:
-            self._debug_print(f"Paths to block {target_block.index}:")
-            for i, path in enumerate(all_paths):
-                conds = [c.to_string() for c in path]
-                self._debug_print(f"  Path {i}: {conds}")
+            self._debug_print(f"get_path_conditions_to_block for block {target_block.index}:")
+            self._debug_print(f"  Found {len(all_paths)} total paths", 1)
         
         # 矛盾しないパスをフィルタリング（詳細ログ付き）
         valid_paths = []
         for i, path in enumerate(all_paths):
-            self._debug_print(f"  Checking path {i} for contradictions...")
+            if self.debug:
+                self._debug_print(f"  Checking path {i} for contradictions...", 1)
             is_contradictory = ConditionSimplifier.is_contradiction(path)
             if not is_contradictory:
                 valid_paths.append(path)
-                self._debug_print(f"    -> Path {i} is VALID", 1)
+                if self.debug:
+                    self._debug_print(f"    -> Path {i} is VALID", 2)
             else:
-                self._debug_print(f"    -> Path {i} is CONTRADICTORY (filtered)", 1)
+                if self.debug:
+                    self._debug_print(f"    -> Path {i} is CONTRADICTORY (filtered)", 2)
         
         # 有効なパスがあればそれを返す
         if valid_paths:
             # 最も条件が少ないパスを選択
             best_path = min(valid_paths, key=len)
             if self.debug:
-                best_conds = [c.to_string() for c in best_path]
-                self._debug_print(f"  Selected valid path ({len(best_path)} conditions): {best_conds}")
+                best_conds = [ConditionSimplifier.get_simplified_condition_string(c) for c in best_path]
+                self._debug_print(f"  Selected valid path ({len(best_path)} conditions): {best_conds}", 1)
             return best_path
         
         # 有効なパスがない場合は最初のパスを返す（フォールバック）
         if all_paths:
-            self._debug_print(f"  WARNING: No valid paths, using first path as fallback")
+            if self.debug:
+                self._debug_print(f"  WARNING: No valid paths, using first path as fallback", 1)
             return all_paths[0]
         return []
     
-    def get_all_valid_paths_to_block(self, target_block: BasicBlockInfo) -> List[List[Condition]]:
-        """エントリーからターゲットブロックまでの全ての有効なパスを取得"""
+    def get_all_valid_paths_to_block(
+        self, 
+        target_block: BasicBlockInfo,
+        limit_paths: Optional[int] = None
+    ) -> List[List[Condition]]:
+        """
+        エントリーからターゲットブロックまでの全ての有効なパスを取得
+        
+        Args:
+            target_block: 目標ブロック
+            limit_paths: パス数の上限（Noneの場合はMAX_VALID_PATHSを使用）
+        
+        Returns:
+            有効なパスのリスト（各パスは条件のリスト）
+            パス爆発を防ぐため、以下のフィルタリングを適用：
+            1. 矛盾する条件を含むパスを除外
+            2. 条件数が多すぎるパスを除外
+            3. 短い順にソートして上位N件を返す
+        """
         from .simplifier import ConditionSimplifier
+        
+        if limit_paths is None:
+            limit_paths = self.MAX_VALID_PATHS
         
         if self.entry_block is None:
             return []
@@ -208,8 +239,50 @@ class ConditionTracker:
             visited=set()
         )
         
-        # 矛盾しないパスのみ返す
-        valid_paths = [p for p in all_paths if not ConditionSimplifier.is_contradiction(p)]
+        self._debug_print(f"get_all_valid_paths_to_block for block {target_block.index}:")
+        self._debug_print(f"  Found {len(all_paths)} total paths", 1)
+        
+        # Step 1: 矛盾しないパスのみ
+        valid_paths = []
+        for i, path in enumerate(all_paths):
+            if not ConditionSimplifier.is_contradiction(path):
+                valid_paths.append(path)
+            elif self.debug:
+                self._debug_print(f"  Path {i} rejected (contradiction)", 2)
+        
+        self._debug_print(f"  {len(valid_paths)} paths are valid (non-contradictory)", 1)
+        
+        # Step 2: 条件数が多すぎるパスを除外
+        filtered_paths = []
+        for path in valid_paths:
+            if len(path) <= self.MAX_CONDITIONS_PER_PATH:
+                filtered_paths.append(path)
+            elif self.debug:
+                self._debug_print(f"  Path with {len(path)} conditions rejected (exceeds limit {self.MAX_CONDITIONS_PER_PATH})", 2)
+        
+        valid_paths = filtered_paths
+        self._debug_print(f"  {len(valid_paths)} paths remain after condition limit filter", 1)
+        
+        if not valid_paths:
+            self._debug_print(f"  WARNING: No valid paths found!", 1)
+            return []
+        
+        # Step 3: 短い順にソート（条件が少ない = よりシンプル）
+        valid_paths = sorted(valid_paths, key=len)
+        
+        # Step 4: パス数制限
+        if len(valid_paths) > limit_paths:
+            self._debug_print(f"  Limiting to {limit_paths} paths (shortest first)", 1)
+            valid_paths = valid_paths[:limit_paths]
+        
+        # デバッグ出力
+        if self.debug:
+            self._debug_print(f"  Returning {len(valid_paths)} valid paths:", 1)
+            for i, path in enumerate(valid_paths):
+                conds = [ConditionSimplifier.get_simplified_condition_string(c) 
+                        for c in path]
+                self._debug_print(f"    Path {i} ({len(path)} conditions): {conds}", 2)
+        
         return valid_paths
     
     def _find_paths_with_conditions(

@@ -1,0 +1,410 @@
+# -*- coding: utf-8 -*-
+"""条件の正規化モジュール（Expression構造ベース改善版）"""
+
+from typing import Tuple, Optional
+from ...model import Expression, Condition, ExpressionType
+
+
+class ConditionNormalizer:
+    """
+    条件を正規化（canonical form）に変換するクラス
+    
+    否定を含む条件を正しく処理し、比較演算の場合はオペランド順序も考慮する。
+    Expression構造を直接解析することで、より正確な正規化を実現。
+    """
+    
+    @staticmethod
+    def normalize(condition: Condition) -> Tuple[str, str, str, bool]:
+        """
+        条件を正規形に変換（表示用）
+        
+        Returns:
+            (left_operand, operator, right_operand, is_positive)
+            
+        Examples:
+            (param_1 < 0, negated=False) -> ("param_1", "INT_SLESS", "0", True)
+            (param_1 < 0, negated=True) -> ("0", "INT_SLESSEQUAL", "param_1", True)
+        """
+        expr = condition.expression
+        negated = condition.negated
+        
+        # 二重否定とBOOL_NEGATEの解消
+        while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
+            negated = not negated
+            if expr.operands:
+                expr = expr.operands[0]
+            else:
+                break
+        
+        # 二項比較演算の場合
+        if expr.expr_type == ExpressionType.BINARY_OP:
+            op = expr.operator
+            
+            if op in ("INT_EQUAL", "INT_NOTEQUAL"):
+                # 等価性比較：否定で反転
+                left = expr.operands[0].to_string() if expr.operands else ""
+                right = expr.operands[1].to_string() if len(expr.operands) > 1 else ""
+                
+                if negated:
+                    # not (a == b) -> (a != b)
+                    # not (a != b) -> (a == b)
+                    if op == "INT_EQUAL":
+                        return (left, "INT_NOTEQUAL", right, True)
+                    else:
+                        return (left, "INT_EQUAL", right, True)
+                else:
+                    return (left, op, right, True)
+            
+            elif op in ("INT_LESS", "INT_SLESS", "INT_LESSEQUAL", "INT_SLESSEQUAL"):
+                # 不等式比較：否定でswapと演算子変換
+                left = expr.operands[0].to_string() if expr.operands else ""
+                right = expr.operands[1].to_string() if len(expr.operands) > 1 else ""
+                
+                if negated:
+                    # not (a < b) -> (a >= b) = (b <= a) with swap
+                    # not (a <= b) -> (a > b) = (b < a) with swap
+                    swapped_left = right
+                    swapped_right = left
+                    new_op = ConditionNormalizer._negate_comparison_op(op)
+                    return (swapped_left, new_op, swapped_right, True)
+                else:
+                    return (left, op, right, True)
+        
+        # その他の場合は文字列として返す
+        return (expr.to_string(), "", "", not negated)
+    
+    @staticmethod
+    def normalize_for_contradiction(condition: Condition) -> Tuple[str, str, str, bool]:
+        """
+        矛盾判定専用の正規化（Expression構造ベース改善版）
+        
+        同じ (left, op, right) に対して polarity (True/False) で表現することで、
+        swap型の矛盾を確実に検出できるようにする。
+        
+        改善点：
+        1. (-x) == 0 ↔ x == 0 の正規化（BitVec意味論）
+        2. Expression構造を直接見る定数判定
+        3. より正確なswap判定
+        
+        Returns:
+            (left_operand, operator, right_operand, polarity)
+            
+        Examples:
+            (param_1 < 0, negated=False) 
+                -> ("param_1", "INT_SLESS", "0", True)
+            
+            (param_1 < 0, negated=True) = (param_1 >= 0)
+                -> ("param_1", "INT_SLESS", "0", False)
+            
+            ((-param_2) == 0, negated=False)
+                -> ("param_2", "INT_EQUAL", "0", True)  # INT_2COMP を剥がす
+            
+            (param_2 != 0, negated=False)
+                -> ("param_2", "INT_EQUAL", "0", False)  # INT_EQUAL に統一
+        """
+        expr = condition.expression
+        negated = condition.negated
+        
+        # 二重否定とBOOL_NEGATEの解消
+        while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
+            negated = not negated
+            if expr.operands:
+                expr = expr.operands[0]
+            else:
+                break
+        
+        if expr.expr_type == ExpressionType.BINARY_OP:
+            op = expr.operator
+            left_expr = expr.operands[0] if expr.operands else None
+            right_expr = expr.operands[1] if len(expr.operands) > 1 else None
+            
+            # 等価性比較
+            if op in ("INT_EQUAL", "INT_NOTEQUAL"):
+                # ★★★ 改善1: (-x) == 0 ↔ x == 0 の正規化 ★★★
+                normalized_left, normalized_right = ConditionNormalizer._normalize_zero_comparison(
+                    left_expr, right_expr
+                )
+                
+                left_str = normalized_left.to_string() if normalized_left else ""
+                right_str = normalized_right.to_string() if normalized_right else ""
+                
+                # 左右を辞書順にソート（順序依存性を排除）
+                if ConditionNormalizer._should_swap_operands(normalized_left, normalized_right):
+                    left_str, right_str = right_str, left_str
+                
+                # INT_EQUAL に統一
+                if op == "INT_EQUAL":
+                    polarity = not negated
+                else:  # INT_NOTEQUAL は INT_EQUAL の否定
+                    polarity = negated
+                
+                return (left_str, "INT_EQUAL", right_str, polarity)
+            
+            # 不等式比較
+            elif op in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
+                left_str = left_expr.to_string() if left_expr else ""
+                right_str = right_expr.to_string() if right_expr else ""
+                
+                # ★★★ 改善2: Expression構造ベースのswap判定 ★★★
+                need_swap = ConditionNormalizer._should_swap_operands(left_expr, right_expr)
+                
+                if need_swap:
+                    # swap してオペランドを入れ替え
+                    left_str, right_str = right_str, left_str
+                    new_op, final_negated = ConditionNormalizer._swap_comparison(op, negated)
+                else:
+                    new_op = op
+                    final_negated = negated
+                
+                polarity = not final_negated
+                return (left_str, new_op, right_str, polarity)
+        
+        # その他の場合
+        return (expr.to_string(), "", "", not negated)
+    
+    @staticmethod
+    def _normalize_zero_comparison(
+        left_expr: Optional[Expression],
+        right_expr: Optional[Expression]
+    ) -> Tuple[Optional[Expression], Optional[Expression]]:
+        """
+        0との比較において、(-x) を x に正規化
+        
+        BitVec意味論では (-x) == 0 ⟺ x == 0 が成り立つため、
+        INT_2COMP や INT_NEGATE を剥がすことができる。
+        
+        Args:
+            left_expr: 左辺のExpression
+            right_expr: 右辺のExpression
+        
+        Returns:
+            正規化された (left_expr, right_expr)
+        
+        Examples:
+            (INT_2COMP(param_2), 0) -> (param_2, 0)
+            (0, INT_2COMP(param_2)) -> (0, param_2)
+        """
+        if not left_expr or not right_expr:
+            return (left_expr, right_expr)
+        
+        # 右辺が0の場合、左辺の INT_2COMP/INT_NEGATE を剥がす
+        if ConditionNormalizer._is_zero(right_expr):
+            if left_expr.expr_type == ExpressionType.UNARY_OP:
+                if left_expr.operator in ("INT_2COMP", "INT_NEGATE"):
+                    # (-x) == 0 → x == 0
+                    if left_expr.operands:
+                        return (left_expr.operands[0], right_expr)
+        
+        # 左辺が0の場合、右辺の INT_2COMP/INT_NEGATE を剥がす
+        if ConditionNormalizer._is_zero(left_expr):
+            if right_expr.expr_type == ExpressionType.UNARY_OP:
+                if right_expr.operator in ("INT_2COMP", "INT_NEGATE"):
+                    # 0 == (-x) → 0 == x
+                    if right_expr.operands:
+                        return (left_expr, right_expr.operands[0])
+        
+        return (left_expr, right_expr)
+    
+    @staticmethod
+    def _is_zero(expr: Optional[Expression]) -> bool:
+        """
+        Expressionが0を表すかチェック（構造ベース）
+        
+        Args:
+            expr: チェック対象のExpression
+        
+        Returns:
+            0の場合True
+        """
+        if not expr:
+            return False
+        
+        if expr.expr_type == ExpressionType.LITERAL:
+            # リテラルの場合、値をチェック
+            try:
+                value = int(expr.value, 0)  # 0プレフィックスで基数自動判定
+                return value == 0
+            except (ValueError, TypeError, AttributeError):
+                pass
+        
+        return False
+    
+    @staticmethod
+    def _should_swap_operands(
+        left_expr: Optional[Expression],
+        right_expr: Optional[Expression]
+    ) -> bool:
+        """
+        オペランドをswapすべきかどうか判定（Expression構造ベース）
+        
+        方針：
+        1. 変数を左に、定数を右に配置
+        2. 両方変数または両方定数の場合、文字列の辞書順で決定
+        
+        Args:
+            left_expr: 左辺のExpression
+            right_expr: 右辺のExpression
+        
+        Returns:
+            swapすべき場合True
+        """
+        if not left_expr or not right_expr:
+            return False
+        
+        left_is_const = ConditionNormalizer._is_constant_expr(left_expr)
+        right_is_const = ConditionNormalizer._is_constant_expr(right_expr)
+        
+        # 左が定数で右が変数 → swap
+        if left_is_const and not right_is_const:
+            return True
+        # 左が変数で右が定数 → swap不要
+        if not left_is_const and right_is_const:
+            return False
+        
+        # 両方変数または両方定数の場合、辞書順で小さい方を左に
+        left_str = left_expr.to_string()
+        right_str = right_expr.to_string()
+        return left_str > right_str
+    
+    @staticmethod
+    def _is_constant_expr(expr: Expression) -> bool:
+        """
+        Expressionが定数かどうか判定（構造ベース）
+        
+        Args:
+            expr: チェック対象のExpression
+        
+        Returns:
+            定数の場合True
+        """
+        if expr.expr_type == ExpressionType.LITERAL:
+            return True
+        
+        # INT_2COMP や INT_NEGATE の内部が定数の場合も定数扱い
+        if expr.expr_type == ExpressionType.UNARY_OP:
+            if expr.operator in ("INT_2COMP", "INT_NEGATE"):
+                if expr.operands:
+                    return ConditionNormalizer._is_constant_expr(expr.operands[0])
+        
+        return False
+    
+    @staticmethod
+    def _swap_comparison(op: str, negated: bool) -> Tuple[str, bool]:
+        """
+        比較演算子を swap する
+        
+        a op b (negated) を b op' a (final_negated) に変換
+        
+        変換規則：
+        - (a < b) → (b > a) = not (b <= a)
+        - (a <= b) → (b >= a) = not (b < a)
+        - not (a < b) = (a >= b) → (b <= a)
+        - not (a <= b) = (a > b) → (b < a)
+        
+        Returns:
+            (new_op, final_negated)
+        """
+        if op == "INT_SLESS":
+            # a < b → b > a = not (b <= a)
+            # not (a < b) → b <= a
+            return ("INT_SLESSEQUAL", negated)
+        elif op == "INT_SLESSEQUAL":
+            # a <= b → b >= a = not (b < a)
+            # not (a <= b) → b < a
+            return ("INT_SLESS", negated)
+        elif op == "INT_LESS":
+            # unsigned版
+            return ("INT_LESSEQUAL", negated)
+        elif op == "INT_LESSEQUAL":
+            # unsigned版
+            return ("INT_LESS", negated)
+        else:
+            return (op, negated)
+    
+    @staticmethod
+    def _negate_comparison_op(op: str) -> str:
+        """
+        比較演算子の否定を返す（swap前提、表示用）
+        
+        not (a < b) = (a >= b) = (b <= a) → swap後は <=
+        not (a <= b) = (a > b) = (b < a) → swap後は <
+        """
+        negation_map = {
+            # not (a < b) = (b <= a)
+            "INT_LESS": "INT_LESSEQUAL",
+            "INT_SLESS": "INT_SLESSEQUAL",
+            # not (a <= b) = (b < a)
+            "INT_LESSEQUAL": "INT_LESS",
+            "INT_SLESSEQUAL": "INT_SLESS",
+        }
+        return negation_map.get(op, op)
+    
+    @staticmethod
+    def get_simplified_string(condition: Condition) -> str:
+        """
+        条件を簡略化した文字列で返す（表示用）
+        
+        Examples:
+            (param_1 < 0, negated=False) -> "(param_1 < 0)"
+            (param_1 < 0, negated=True) -> "(param_1 >= 0)" = "(0 <= param_1)"
+        """
+        left, op, right, is_positive = ConditionNormalizer.normalize(condition)
+        
+        if op:
+            op_str = ConditionNormalizer._operator_to_symbol(op)
+            if is_positive:
+                return f"({left} {op_str} {right})"
+            else:
+                return f"(not ({left} {op_str} {right}))"
+        else:
+            if is_positive:
+                return left
+            else:
+                return f"(not {left})"
+    
+    @staticmethod
+    def _operator_to_symbol(op: str) -> str:
+        """演算子をシンボルに変換"""
+        symbols = {
+            "INT_EQUAL": "==",
+            "INT_NOTEQUAL": "!=",
+            "INT_LESS": "<",
+            "INT_SLESS": "<",
+            "INT_LESSEQUAL": "<=",
+            "INT_SLESSEQUAL": "<=",
+        }
+        return symbols.get(op, op)
+    
+    @staticmethod
+    def are_equivalent(cond1: Condition, cond2: Condition) -> bool:
+        """
+        2つの条件が等価かチェック
+        
+        Examples:
+            (param_1 < 0, negated=True) と (param_1 >= 0, negated=False) は等価
+        """
+        norm1 = ConditionNormalizer.normalize_for_contradiction(cond1)
+        norm2 = ConditionNormalizer.normalize_for_contradiction(cond2)
+        
+        return norm1 == norm2
+    
+    @staticmethod
+    def are_contradictory(cond1: Condition, cond2: Condition) -> bool:
+        """
+        2つの条件が矛盾するかチェック
+        
+        Examples:
+            (param_1 == 0) と (param_1 != 0) は矛盾
+            (param_1 < 0) と (param_1 >= 0) は矛盾
+            (param_1 < 0) と (0 <= param_1) は矛盾
+            (param_2 != 0) と ((-param_2) == 0) は矛盾
+        """
+        left1, op1, right1, pol1 = ConditionNormalizer.normalize_for_contradiction(cond1)
+        left2, op2, right2, pol2 = ConditionNormalizer.normalize_for_contradiction(cond2)
+        
+        # 同じ (left, op, right) で polarity が異なる場合は矛盾
+        if left1 == left2 and op1 == op2 and right1 == right2:
+            if pol1 != pol2:
+                return True
+        
+        return False

@@ -19,6 +19,7 @@ class ExpressionType(Enum):
     MEMORY = auto()
     PHI = auto()
     UNKNOWN = auto()
+    LITERAL = auto()
 
 
 

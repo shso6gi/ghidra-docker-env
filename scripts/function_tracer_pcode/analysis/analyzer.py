@@ -35,6 +35,113 @@ class ReturnAnalyzer:
             self._decompiler.dispose()
             self._decompiler = None
     
+    def _dump_return_infos(self, analysis: FunctionReturnAnalysis):
+        """
+        ReturnInfo一覧をダンプ（デバッグ用）
+        
+        各ReturnInfoについて以下を出力：
+        - branch_index（分岐識別子）
+        - address（アドレス）
+        - value（式の文字列表現とSMT表現）
+        - conditions（簡約後の条件リスト）
+        """
+        if not self.debug:
+            return
+        
+        self._debug_print("=" * 60)
+        self._debug_print(f"ReturnInfo dump for {analysis.function_name}")
+        self._debug_print(f"Total return candidates: {len(analysis.returns)}")
+        self._debug_print("=" * 60)
+        
+        for i, ret_info in enumerate(analysis.returns):
+            self._debug_print(f"[{i}] branch_index={ret_info.branch_index}")
+            self._debug_print(f"    address: {ret_info.address}", 1)
+            
+            # 値の文字列表現
+            try:
+                value_str = ret_info.value.to_string()
+                self._debug_print(f"    value: {value_str}", 1)
+            except Exception as e:
+                self._debug_print(f"    value: (error converting to string: {e})", 1)
+            
+            # SMT表現（エラー時はスキップ）- 引数なし
+            try:
+                smt_str = ret_info.value.to_smt()
+                # 長すぎる場合は切り詰め
+                if len(smt_str) > 300:
+                    smt_str = smt_str[:300] + "..."
+                self._debug_print(f"    smt: {smt_str}", 1)
+            except Exception as e:
+                self._debug_print(f"    smt: (error: {e})", 1)
+            
+            # 条件リスト（簡約版）
+            if ret_info.conditions:
+                try:
+                    cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) 
+                                for c in ret_info.conditions]
+                    self._debug_print(f"    conditions({len(ret_info.conditions)}): {cond_strs}", 1)
+                except Exception as e:
+                    self._debug_print(f"    conditions: (error: {e})", 1)
+            else:
+                self._debug_print(f"    conditions: (unconditional/always)", 1)
+        
+        self._debug_print("=" * 60)
+        
+        # 条件カバレッジの簡易チェック
+        self._check_condition_coverage(analysis)
+    
+    def _check_condition_coverage(self, analysis: FunctionReturnAnalysis):
+        """
+        条件カバレッジの簡易チェック
+        
+        各パラメータについて、正・負・ゼロのケースが存在するかをヒューリスティックに確認
+        """
+        if not self.debug or not analysis.returns:
+            return
+        
+        self._debug_print("Condition coverage check:")
+        
+        # パラメータ名を収集
+        param_names = [p.get('name', f'param_{i}') for i, p in enumerate(analysis.parameters)]
+        
+        if not param_names:
+            return
+        
+        # 各パラメータについて、どのような条件が存在するか確認
+        for param_name in param_names:
+            has_zero_check = False
+            has_positive_check = False
+            has_negative_check = False
+            
+            for ret_info in analysis.returns:
+                for cond in ret_info.conditions:
+                    cond_str = cond.expression.to_string()
+                    
+                    # パラメータが条件に含まれるか
+                    if param_name in cond_str:
+                        # ゼロチェック
+                        if "== 0" in cond_str or "!= 0" in cond_str:
+                            has_zero_check = True
+                        
+                        # 符号チェック
+                        if "< 0" in cond_str or "<= 0" in cond_str:
+                            has_negative_check = True
+                        if "> 0" in cond_str or ">= 0" in cond_str:
+                            has_positive_check = True
+            
+            coverage_info = []
+            if has_zero_check:
+                coverage_info.append("zero")
+            if has_positive_check:
+                coverage_info.append("positive")
+            if has_negative_check:
+                coverage_info.append("negative")
+            
+            if coverage_info:
+                self._debug_print(f"  {param_name}: {', '.join(coverage_info)} checks found", 1)
+            else:
+                self._debug_print(f"  {param_name}: no explicit checks", 1)
+    
     def analyze_function(self, function, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
@@ -84,7 +191,7 @@ class ReturnAnalyzer:
             infos = self._analyze_return_op(return_op, tracer, condition_tracker, i)
             return_infos.extend(infos)
         
-        return FunctionReturnAnalysis(
+        result = FunctionReturnAnalysis(
             function_name=function.getName(),
             entry_point=str(function.getEntryPoint()),
             parameters=parameters,
@@ -92,6 +199,11 @@ class ReturnAnalyzer:
             return_type=return_type,
             signedness_result=signedness_result
         )
+        
+        # デバッグダンプ（解析結果の可視化）
+        self._dump_return_infos(result)
+        
+        return result
     
     def _detect_signedness(self, high_function) -> Optional[SignednessResult]:
         """
@@ -286,15 +398,16 @@ class ReturnAnalyzer:
         has_multiequal = self._contains_multiequal(return_varnode)
         
         if has_multiequal:
-            self._debug_print("Return value contains MULTIEQUAL - conditions from PHI")
+            self._debug_print("Return value contains MULTIEQUAL - using PHI-based expansion")
             expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
+            # PHI内部で複数パスを考慮
             expanded_values = expander.expand_from_varnode(return_varnode, [])
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
             expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
             expanded_values = expander.expand_from_varnode(return_varnode, path_conditions)
         
-        self._debug_print(f"Expanded to {len(expanded_values)} values")
+        self._debug_print(f"Expanded to {len(expanded_values)} candidate(s)")
         
         results = []
         for i, ev in enumerate(expanded_values):
@@ -317,7 +430,7 @@ class ReturnAnalyzer:
             ))
         
         if not results:
-            self._debug_print("No valid expansions, falling back to simple trace")
+            self._debug_print("WARNING: No valid expansions, falling back to simple trace")
             value = tracer.trace_varnode(return_varnode, use_cache=False)
             simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
             return [ReturnInfo(

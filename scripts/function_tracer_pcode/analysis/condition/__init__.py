@@ -3,9 +3,11 @@
 
 from .tracker import ConditionTracker, BasicBlockInfo
 from .simplifier import ConditionSimplifier
+from .normalizer import ConditionNormalizer
 
 __all__ = [
-    'ConditionTracker',
-    'BasicBlockInfo',
-    'ConditionSimplifier',
+    "ConditionTracker",
+    "BasicBlockInfo",
+    "ConditionSimplifier",
+    "ConditionNormalizer",
 ]

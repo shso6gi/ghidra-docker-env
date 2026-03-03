@@ -6,6 +6,7 @@ function_tracer_pcode/
 │   ├── phi_resolver.py                # PHI（MULTIEQUAL）処理専用モジュール
 │   ├── condition/                     # 条件処理サブモジュール
 │   │   ├── __init__.py
+│   │   ├── normalizer.py              # 条件の正規化モジュール（Expression構造ベース改善版）
 │   │   ├── tracker.py                 # 条件分岐の追跡（各returnに至る条件を収集）
 │   │   └── simplifier.py              # 条件の簡略化・矛盾検出（冗長な条件を削除）
 │   └── signedness/

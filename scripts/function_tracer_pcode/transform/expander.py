@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""式木全体のPHI展開モジュール"""
+"""式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from typing import List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType
-from ..analysis.condition import ConditionSimplifier
+from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 
 
 class ExpandedValue:
@@ -17,6 +17,23 @@ class ExpandedValue:
         """条件が矛盾していないかチェック"""
         return not ConditionSimplifier.is_contradiction(self.conditions)
     
+    def get_condition_signature(self) -> str:
+        """
+        条件のシグネチャを取得（重複排除用）
+        
+        条件を正規化して、ソート済みの文字列として返す
+        """
+        canonical_strs = []
+        for cond in self.conditions:
+            canonical = ConditionNormalizer.normalize(cond)
+            # (left, op, right, pos) をタプル文字列化
+            canonical_str = f"{canonical[0]}|{canonical[1]}|{canonical[2]}|{canonical[3]}"
+            canonical_strs.append(canonical_str)
+        
+        # ソートして順序に依存しないようにする
+        canonical_strs.sort()
+        return ";;".join(canonical_strs)
+    
     def __repr__(self):
         conds = [c.to_string() for c in self.conditions]
         return f"ExpandedValue(value={self.value.to_string()}, conds={conds})"
@@ -26,6 +43,9 @@ class ExpressionExpander:
     """
     式木全体を展開し、PHIノードを解決する
     """
+    
+    # 展開の上限設定
+    MAX_CASES_PER_MULTIEQUAL = 16  # 1つのMULTIEQUALから生成する最大ケース数
     
     def __init__(self, tracer, condition_tracker, debug: bool = False):
         self.tracer = tracer
@@ -97,9 +117,14 @@ class ExpressionExpander:
         multiequal_op,
         depth: int
     ) -> List[ExpandedValue]:
-        """MULTIEQUAL展開の内部処理"""
-        self._debug_print(f"MULTIEQUAL expansion", depth)
+        """
+        MULTIEQUAL展開の内部処理（網羅性改善版）
         
+        各MULTIEQUAL入力について、前任ブロックへの全有効パスを列挙し、
+        それぞれを別の展開値として扱う。
+        
+        重要：値だけでなく条件も含めて重複排除を行う。
+        """
         phi_parent = multiequal_op.getParent()
         if not phi_parent:
             return [ExpandedValue(Expression.unknown("phi_no_parent"), [])]
@@ -107,65 +132,179 @@ class ExpressionExpander:
         num_inputs = multiequal_op.getNumInputs()
         in_size = phi_parent.getInSize()
         
-        self._debug_print(f"  inputs={num_inputs}, in_edges={in_size}", depth)
+        self._debug_print("=" * 50, depth)
+        self._debug_print(f"MULTIEQUAL expansion: inputs={num_inputs}, in_edges={in_size}", depth)
+        self._debug_print("=" * 50, depth)
         
         all_expanded: List[ExpandedValue] = []
         
         for i in range(num_inputs):
             input_varnode = multiequal_op.getInput(i)
             
-            self._debug_print(f"  Input[{i}] ----", depth)
+            self._debug_print(f"Input[{i}] ----", depth)
             
-            # 入力エッジの条件を収集
-            input_conditions: List[Condition] = []
-            
-            if i < in_size:
-                in_block = phi_parent.getIn(i)
-                if in_block:
-                    in_block_info = self.condition_tracker.get_block_by_hash(in_block)
-                    if in_block_info:
-                        # パス条件を取得
-                        path_conds = self.condition_tracker.get_path_conditions_to_block(in_block_info)
-                        self._debug_print(f"    Path conditions to block {in_block_info.index}:", depth)
-                        for pc in path_conds:
-                            self._debug_print(f"      - {pc.to_string()}", depth)
-                        input_conditions.extend(path_conds)
-                        
-                        # エッジ条件を取得
-                        edge_cond = self._get_edge_condition(in_block_info, phi_parent)
-                        if edge_cond:
-                            self._debug_print(f"    Edge condition: {edge_cond.to_string()}", depth)
-                            input_conditions.append(edge_cond)
-                        else:
-                            self._debug_print(f"    Edge condition: None", depth)
-                        
-                        # 最終的な条件セットを表示
-                        if self.debug:
-                            self._debug_print(f"    Final input_conditions ({len(input_conditions)}):", depth)
-                            for ic in input_conditions:
-                                self._debug_print(f"      - {ic.to_string()}", depth)
-            
-            # 矛盾チェック（詳細ログは ConditionSimplifier 側で出力される）
-            if ConditionSimplifier.is_contradiction(input_conditions):
-                self._debug_print(f"    -> SKIP (contradictory conditions)", depth)
+            # 前任ブロック情報を取得
+            if i >= in_size:
+                self._debug_print(f"  No corresponding in_edge (i={i} >= in_size={in_size})", depth + 1)
                 continue
             
-            # 入力を再帰的に展開
-            expanded_inputs = self._expand_input_varnode(input_varnode, input_conditions, depth + 1)
+            in_block = phi_parent.getIn(i)
+            if not in_block:
+                self._debug_print(f"  in_block is None", depth + 1)
+                continue
             
-            for ev in expanded_inputs:
-                if ev.is_valid():
-                    self._debug_print(f"    -> valid: {ev.value.to_string()}", depth)
-                    all_expanded.append(ev)
-                else:
-                    self._debug_print(f"    -> invalid (contradictory)", depth)
+            in_block_info = self.condition_tracker.get_block_by_hash(in_block)
+            if not in_block_info:
+                self._debug_print(f"  in_block_info not found", depth + 1)
+                continue
+            
+            self._debug_print(f"  pred_block: index={in_block_info.index}", depth + 1)
+            
+            # 値をトレース（デバッグ用）
+            try:
+                traced_value = self.tracer.trace_varnode(input_varnode, depth + 1, use_cache=False)
+                value_str = traced_value.to_string()
+                self._debug_print(f"  traced_value: {value_str}", depth + 1)
+                
+                # SMT表現も取得（エラー時はスキップ）
+                try:
+                    smt_str = traced_value.to_smt()
+                    if len(smt_str) > 100:
+                        smt_str = smt_str[:100] + "..."
+                    self._debug_print(f"  traced_smt: {smt_str}", depth + 1)
+                except Exception as e:
+                    self._debug_print(f"  traced_smt: (error: {e})", depth + 1)
+            except Exception as e:
+                self._debug_print(f"  traced_value: (error: {e})", depth + 1)
+            
+            # ★★★ 改善点：全有効パスを取得 ★★★
+            all_valid_paths = self.condition_tracker.get_all_valid_paths_to_block(
+                target_block=in_block_info
+            )
+            
+            self._debug_print(f"  valid_paths: {len(all_valid_paths)}", depth + 1)
+            
+            # エッジ条件を取得（共通）
+            edge_cond = self._get_edge_condition(in_block_info, phi_parent)
+            if edge_cond:
+                edge_str = ConditionNormalizer.get_simplified_string(edge_cond)
+                self._debug_print(f"  edge_condition: {edge_str}", depth + 1)
+            
+            # 各パスについて展開
+            cases_emitted = 0
+            for path_idx, path_conditions in enumerate(all_valid_paths):
+                # パス条件 + エッジ条件を結合
+                input_conditions = path_conditions.copy()
+                if edge_cond:
+                    input_conditions.append(edge_cond)
+                
+                if self.debug:
+                    self._debug_print(f"  Path[{path_idx}]: {len(path_conditions)} condition(s)", depth + 1)
+                    for pc in path_conditions:
+                        pc_str = ConditionNormalizer.get_simplified_string(pc)
+                        self._debug_print(f"    - {pc_str}", depth + 2)
+                
+                # 矛盾チェック
+                if ConditionSimplifier.is_contradiction(input_conditions):
+                    self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
+                    continue
+                
+                # 入力を再帰的に展開
+                expanded_inputs = self._expand_input_varnode(
+                    input_varnode, 
+                    input_conditions, 
+                    depth + 1
+                )
+                
+                for ev in expanded_inputs:
+                    if ev.is_valid():
+                        all_expanded.append(ev)
+                        cases_emitted += 1
+                        if self.debug:
+                            val_str = ev.value.to_string()
+                            if len(val_str) > 80:
+                                val_str = val_str[:80] + "..."
+                            self._debug_print(
+                                f"  Path[{path_idx}] -> EMIT: {val_str}",
+                                depth + 1
+                            )
+                    else:
+                        self._debug_print(
+                            f"  Path[{path_idx}] -> SKIP (invalid after expansion)",
+                            depth + 1
+                        )
+            
+            self._debug_print(f"  cases_emitted: {cases_emitted}", depth + 1)
         
         if all_expanded:
-            merged = self._merge_expanded_values(all_expanded)
-            self._debug_print(f"  MULTIEQUAL -> {len(merged)} branches", depth)
+            # ★★★ 改善点：値と条件の両方を考慮して重複排除 ★★★
+            merged = self._deduplicate_expanded_values(all_expanded, depth)
+            self._debug_print("=" * 50, depth)
+            self._debug_print(f"MULTIEQUAL -> {len(merged)} branches (after dedup)", depth)
+            self._debug_print("=" * 50, depth)
             return merged
         
+        self._debug_print("=" * 50, depth)
+        self._debug_print(f"MULTIEQUAL -> 0 branches (no valid branches)", depth)
+        self._debug_print("=" * 50, depth)
         return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), [])]
+    
+    def _deduplicate_expanded_values(
+        self, 
+        values: List[ExpandedValue],
+        depth: int
+    ) -> List[ExpandedValue]:
+        """
+        展開値の重複排除（値と条件の両方を考慮）
+        
+        Args:
+            values: 展開値のリスト
+            depth: デバッグ用の深さ
+        
+        Returns:
+            重複排除後のリスト（上限あり）
+        """
+        if not values:
+            return []
+        
+        self._debug_print(f"Deduplicating {len(values)} expanded values...", depth)
+        
+        # (value_smt, condition_signature) でグループ化
+        groups: Dict[Tuple[str, str], List[ExpandedValue]] = {}
+        
+        for ev in values:
+            try:
+                value_smt = ev.value.to_smt()
+            except:
+                value_smt = ev.value.to_string()
+            
+            cond_sig = ev.get_condition_signature()
+            key = (value_smt, cond_sig)
+            
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(ev)
+        
+        self._debug_print(f"  Grouped into {len(groups)} unique (value, condition) pairs", depth)
+        
+        # 各グループから代表を1つ選ぶ（条件が最も短いもの）
+        result = []
+        for key, group in groups.items():
+            best = min(group, key=lambda e: len(e.conditions))
+            result.append(best)
+        
+        # 上限チェック
+        if len(result) > self.MAX_CASES_PER_MULTIEQUAL:
+            self._debug_print(
+                f"  WARNING: Too many cases ({len(result)}), limiting to {self.MAX_CASES_PER_MULTIEQUAL}",
+                depth
+            )
+            # 条件が短い順にソート
+            result = sorted(result, key=lambda e: len(e.conditions))
+            result = result[:self.MAX_CASES_PER_MULTIEQUAL]
+        
+        self._debug_print(f"  Final result: {len(result)} unique cases", depth)
+        return result
     
     def _expand_input_varnode(
         self,
@@ -415,22 +554,3 @@ class ExpressionExpander:
             return Condition(from_block_info.branch_condition, negated=True)
         
         return None
-    
-    def _merge_expanded_values(self, values: List[ExpandedValue]) -> List[ExpandedValue]:
-        """同じ値を持つ展開結果をマージ"""
-        if not values:
-            return []
-        
-        groups: Dict[str, List[ExpandedValue]] = {}
-        for ev in values:
-            val_str = ev.value.to_string()
-            if val_str not in groups:
-                groups[val_str] = []
-            groups[val_str].append(ev)
-        
-        result = []
-        for val_str, group in groups.items():
-            best = min(group, key=lambda e: len(e.conditions))
-            result.append(best)
-        
-        return result
