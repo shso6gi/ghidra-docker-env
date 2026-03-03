@@ -247,6 +247,9 @@ class PairwiseStrategy(CheckStrategy):
            - SAT → Stage 2へ
         2. Stage 2: 値不等式を追加してチェック（C1_i ∧ C2_j ∧ V1_i≠V2_j）
            - hard timeout で再試行
+        3. Stage 3 (NEW): Stage 2が unknown の場合、正規化してSMTで比較
+           - 正規化後が等価なら UNSAT 扱い
+           - 正規化後も非等価なら反例として SAT
         """
         # Stage 1: 条件のみチェック
         cond_query = self._build_condition_only_query(
@@ -284,7 +287,132 @@ class PairwiseStrategy(CheckStrategy):
         )
         
         stage2_result.last_query = full_query
+        
+        # Stage 3 (NEW): unknown の場合のみ正規化を試行
+        if stage2_result.is_equivalent is None:
+            norm_result = self._try_normalization_equivalence(
+                base_ctx,  # 追加
+                case1, case2,
+                param_replace_fn1, param_replace_fn2,
+                pair_id
+            )
+            
+            # 正規化で確定した場合はその結果を返す
+            if norm_result.is_equivalent is True:
+                # UNSAT: 正規化後は等価
+                norm_result.last_query = full_query
+                return norm_result
+            elif norm_result.is_equivalent is False:
+                # SAT: 正規化後も非等価（反例発見）
+                norm_result.last_query = full_query
+                return norm_result
+            # UNKNOWN の場合は stage2_result をそのまま使う
+        
         return stage2_result
+    
+    def _try_normalization_equivalence(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str
+    ) -> 'QueryResult':
+        """
+        正規化して値式をSMTで比較
+        
+        Stage 2 で unknown になったペアに対してのみ適用。
+        正規化後の式がSMT的に等価なら、UNSAT 扱いに格上げする。
+        
+        サフィックス（_1/_2）は維持したまま、base_ctx のパラメータ同一制約
+        （param_1_1 = param_1_2 など）を利用して等価性を判定する。
+        
+        Args:
+            base_ctx: 共通SMT部分（param宣言・制約など）
+            case1, case2: 比較対象のケース
+            param_replace_fn1, param_replace_fn2: パラメータ置換関数
+            pair_id: ペアID（ログ用）
+        
+        Returns:
+            QueryResult: 正規化結果
+                - is_equivalent=True: 正規化後は等価（UNSAT）
+                - is_equivalent=False: 正規化後も非等価（SAT、反例あり）
+                - is_equivalent=None: 不明（UNKNOWN）
+        """
+        from ..normalize import normalize_expression
+        
+        # 元の式
+        value1_orig = case1.value_expr
+        value2_orig = case2.value_expr
+        
+        # 正規化を適用
+        value1_norm = normalize_expression(value1_orig)
+        value2_norm = normalize_expression(value2_orig)
+        
+        # SMT文字列化（パラメータ名を置換）
+        value1_smt_orig = param_replace_fn1(value1_orig.to_smt())
+        value2_smt_orig = param_replace_fn2(value2_orig.to_smt())
+        value1_smt_norm = param_replace_fn1(value1_norm.to_smt())
+        value2_smt_norm = param_replace_fn2(value2_norm.to_smt())
+        
+        # ログ出力（詳細）
+        self._debug_print(f"  Pair {pair_id} normalization attempt:")
+        self._debug_print(f"    Original 1: {value1_smt_orig[:200]}")
+        self._debug_print(f"    Original 2: {value2_smt_orig[:200]}")
+        
+        # 正規化で変更があったかチェック
+        changed1 = value1_smt_orig != value1_smt_norm
+        changed2 = value2_smt_orig != value2_smt_norm
+        
+        if changed1:
+            self._debug_print(f"    Normalized 1: {value1_smt_norm[:200]}")
+        else:
+            self._debug_print(f"    Normalized 1: (no change)")
+        
+        if changed2:
+            self._debug_print(f"    Normalized 2: {value2_smt_norm[:200]}")
+        else:
+            self._debug_print(f"    Normalized 2: (no change)")
+        
+        # 正規化で変更がなければスキップ（最適化）
+        if not changed1 and not changed2:
+            self._debug_print(f"    No normalization applied -> remain UNKNOWN")
+            return QueryResult(is_equivalent=None)
+        
+        # SMTクエリで等価性を確認
+        norm_query = self._build_normalized_inequality_query(
+            base_ctx, case1, case2,
+            param_replace_fn1, param_replace_fn2,
+            value1_smt_norm, value2_smt_norm,
+            pair_id
+        )
+        
+        # ソルバー実行（短いタイムアウト：正規化後は簡単なはず）
+        norm_result = self._solve_query_internal(
+            norm_query, pair_id, stage="norm-ineq", use_hard_timeout=False
+        )
+        
+        # 結果判定
+        if norm_result.is_equivalent is True:
+            # UNSAT: 正規化後は等価 → ペアをUNSAT扱い
+            self._debug_print(f"    Normalized inequality: UNSAT -> values are equivalent")
+            self._debug_print(f"  Pair {pair_id} normalization: values became equivalent -> UNSAT")
+            return QueryResult(is_equivalent=True)
+        
+        elif norm_result.is_equivalent is False:
+            # SAT: 正規化後も非等価 → 反例あり
+            self._debug_print(f"    Normalized inequality: SAT -> genuine counterexample found")
+            self._debug_print(f"  Pair {pair_id} normalization: found counterexample -> NOT EQUIVALENT")
+            return QueryResult(
+                is_equivalent=False,
+                counterexample_raw=norm_result.counterexample_raw
+            )
+        
+        else:
+            # UNKNOWN: 正規化後もタイムアウト
+            self._debug_print(f"    Normalized inequality: UNKNOWN -> remain UNKNOWN")
+            return QueryResult(is_equivalent=None)
     
     def _solve_query_internal(
         self,
@@ -508,6 +636,99 @@ class PairwiseStrategy(CheckStrategy):
                 lines.append(f"(assert (not (= {value1_smt} ((_ extract {overlap - 1} 0) {value2_smt}))))")
             else:
                 lines.append(f"(assert (not (= ((_ extract {overlap - 1} 0) {value1_smt}) {value2_smt})))")
+        
+        lines.append("")
+        lines.append("(check-sat)")
+        lines.append("(get-model)")
+        
+        return "\n".join(lines)
+    
+    def _build_normalized_inequality_query(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        value1_smt_norm: str,
+        value2_smt_norm: str,
+        pair_id: str
+    ) -> str:
+        """
+        正規化後の値不等式クエリを構築
+        
+        構成:
+        1. base_ctx['header_lines'] (param宣言・param同一制約・UB制約など)
+        2. case1の条件（param_*_1 側）
+        3. case2の条件（param_*_2 側）
+        4. 正規化後の値の不等式 (not (= norm1 norm2))
+        5. check-sat, get-model
+        
+        base_ctx に含まれる param_1_1 = param_1_2 などの制約により、
+        サフィックス違いでも「同じ入力」として扱われる。
+        
+        Args:
+            base_ctx: 共通SMT部分
+            case1, case2: 比較対象のケース
+            param_replace_fn1, param_replace_fn2: パラメータ置換関数
+            value1_smt_norm, value2_smt_norm: 正規化後のSMT式（パラメータ名置換済み）
+            pair_id: ペアID
+        
+        Returns:
+            SMTクエリ文字列
+        """
+        lines = []
+        
+        # ヘッダー
+        lines.append("; " + "=" * 60)
+        lines.append(f"; Normalized Inequality Query: Pair {pair_id}")
+        lines.append(f"; Check if normalized values are equivalent under base constraints")
+        lines.append("; " + "=" * 60)
+        lines.append("")
+        lines.append("(set-logic QF_BV)")
+        lines.append("")
+        
+        # 共通部分（param宣言・param同一制約・UB制約など）
+        lines.extend(base_ctx['header_lines'])
+        
+        # Case1の条件
+        conds1_smt = case1.get_conditions_smt(param_replace_fn1)
+        if conds1_smt:
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Case1[{case1.index}] conditions")
+            lines.append("; " + "-" * 40)
+            for cond_str in conds1_smt:
+                lines.append(f"(assert {cond_str})")
+            lines.append("")
+        
+        # Case2の条件
+        conds2_smt = case2.get_conditions_smt(param_replace_fn2)
+        if conds2_smt:
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Case2[{case2.index}] conditions")
+            lines.append("; " + "-" * 40)
+            for cond_str in conds2_smt:
+                lines.append(f"(assert {cond_str})")
+            lines.append("")
+        
+        # 正規化後の値の不等式
+        lines.append("; " + "-" * 40)
+        lines.append("; Normalized value inequality")
+        lines.append("; (param_*_1 and param_*_2 are constrained to be equal by base_ctx)")
+        lines.append("; " + "-" * 40)
+        
+        return_size1 = base_ctx.get('return_size1', 32)
+        return_size2 = base_ctx.get('return_size2', 32)
+        
+        if return_size1 == return_size2:
+            lines.append(f"(assert (not (= {value1_smt_norm} {value2_smt_norm})))")
+        else:
+            # サイズが異なる場合は重複部分を比較
+            overlap = min(return_size1, return_size2)
+            if return_size1 < return_size2:
+                lines.append(f"(assert (not (= {value1_smt_norm} ((_ extract {overlap - 1} 0) {value2_smt_norm}))))")
+            else:
+                lines.append(f"(assert (not (= ((_ extract {overlap - 1} 0) {value1_smt_norm}) {value2_smt_norm})))")
         
         lines.append("")
         lines.append("(check-sat)")
