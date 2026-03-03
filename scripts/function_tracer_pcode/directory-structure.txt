@@ -55,6 +55,7 @@ function_tracer_pcode/
 │   │   └── mips64.py
 │   ├── typing/                        # 型補正・型ヘルパ
 │   │   ├── __init__.py
+│   │   ├── signedness_param_fix.py    # 引数符号性推定の専用モジュール
 │   │   ├── fixer.py
 │   │   └── helpers.py
 │   ├── phases/                        # Phase管理

@@ -8,6 +8,7 @@ import time
 from ...model import FunctionReturnAnalysis, FunctionSignature
 from ..result import EquivalenceResult
 from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from ..typing.signedness_param_fix import ParamSignednessFixer
 from ..arch.detector import ArchitectureDetector
 from ..arch.mips64 import MIPS64Handler
 
@@ -42,6 +43,7 @@ class PhaseHandler:
         self.debug = debug
         self.arch_detector = ArchitectureDetector(debug=debug)
         self.mips64_handler = MIPS64Handler(debug=debug)
+        self.param_signedness_fixer = ParamSignednessFixer(type_fixer_config, debug=debug)
     
     def _debug_print(self, msg: str):
         if self.debug:
@@ -190,6 +192,120 @@ class PhaseHandler:
         
         return signedness_fix_applied
     
+    # ===== Phase 1.5: 引数の符号性修正（NEW）=====
+    
+    def run_phase1_5_param_signedness_fix(
+        self,
+        ctx: PhaseContext,
+        type_fixer1: TypeFixer,
+        type_fixer2: TypeFixer,
+        get_params_func: Callable
+    ) -> bool:
+        """
+        Phase 1.5: 引数の符号性に基づく型修正
+        
+        Returns:
+            True: 修正が適用された
+            False: 修正なし
+        """
+        param_signedness_fix_applied = False
+        
+        # Binary 1の引数符号性チェック
+        if ctx.analysis1:
+            override_map1 = self.param_signedness_fixer.detect_param_signedness_mismatch(
+                ctx.analysis1
+            )
+            
+            if override_map1:
+                self._debug_print("=" * 60)
+                self._debug_print("Phase 1.5: Param signedness fix for Binary 1")
+                self._debug_print("=" * 60)
+                
+                # 最新のparam情報を取得
+                params1_updated = get_params_func(
+                    ctx.program1, ctx.function_name1, ctx.decompile_timeout
+                )
+                
+                # 型修正を適用
+                _, param_fixed = type_fixer1.fix_function_signature_by_name(
+                    ctx.function_name1,
+                    params1_updated,
+                    fix_return_type=False,
+                    fix_param_types=False,
+                    override_param_type_names=override_map1
+                )
+                
+                if param_fixed:
+                    ctx.type_fix_result.param_signedness_fixed_binary1 = True
+                    ctx.type_fix_result.param_signedness_override_map_binary1 = override_map1
+                    param_signedness_fix_applied = True
+                    
+                    # 修正内容をログ出力
+                    for param_idx, new_type in override_map1.items():
+                        param_info = params1_updated[param_idx] if param_idx < len(params1_updated) else {}
+                        param_name = param_info.get("name", f"param_{param_idx}")
+                        
+                        # 元の型を取得
+                        raw_dt = param_info.get("data_type_obj")
+                        if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                            old_type = str(raw_dt)
+                        else:
+                            old_type = param_info.get("data_type", "?")
+                        
+                        self._debug_print(
+                            f"Binary 1: param[{param_idx}] '{param_name}': "
+                            f"{old_type} -> {new_type} (param signedness fix)"
+                        )
+        
+        # Binary 2の引数符号性チェック
+        if ctx.analysis2:
+            override_map2 = self.param_signedness_fixer.detect_param_signedness_mismatch(
+                ctx.analysis2
+            )
+            
+            if override_map2:
+                self._debug_print("=" * 60)
+                self._debug_print("Phase 1.5: Param signedness fix for Binary 2")
+                self._debug_print("=" * 60)
+                
+                # 最新のparam情報を取得
+                params2_updated = get_params_func(
+                    ctx.program2, ctx.function_name2, ctx.decompile_timeout
+                )
+                
+                # 型修正を適用
+                _, param_fixed = type_fixer2.fix_function_signature_by_name(
+                    ctx.function_name2,
+                    params2_updated,
+                    fix_return_type=False,
+                    fix_param_types=False,
+                    override_param_type_names=override_map2
+                )
+                
+                if param_fixed:
+                    ctx.type_fix_result.param_signedness_fixed_binary2 = True
+                    ctx.type_fix_result.param_signedness_override_map_binary2 = override_map2
+                    param_signedness_fix_applied = True
+                    
+                    # 修正内容をログ出力
+                    for param_idx, new_type in override_map2.items():
+                        param_info = params2_updated[param_idx] if param_idx < len(params2_updated) else {}
+                        param_name = param_info.get("name", f"param_{param_idx}")
+                        
+                        # 元の型を取得
+                        raw_dt = param_info.get("data_type_obj")
+                        if raw_dt is not None and hasattr(raw_dt, 'getName'):
+                            old_type = str(raw_dt)
+                        else:
+                            old_type = param_info.get("data_type", "?")
+                        
+                        self._debug_print(
+                            f"Binary 2: param[{param_idx}] '{param_name}': "
+                            f"{old_type} -> {new_type} (param signedness fix)"
+                        )
+        
+        return param_signedness_fix_applied
+
     def run_phase2_return_type_fix(
         self,
         ctx: PhaseContext,

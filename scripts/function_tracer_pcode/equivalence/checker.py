@@ -182,7 +182,7 @@ class EquivalenceChecker:
         type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
         
         # ============================================
-        # Phase 1: 符号性に基づく型修正
+        # Phase 1: 符号性に基づく型修正（戻り値）
         # ============================================
         if self.phase_handler.run_phase1_signedness_fix(ctx, type_fixer1, type_fixer2):
             type_fix_result.retry_phase = "signedness_fix"
@@ -198,11 +198,29 @@ class EquivalenceChecker:
                 return result
         
         # ============================================
+        # Phase 1.5: 引数の符号性に基づく型修正
+        # ============================================
+        if self.phase_handler.run_phase1_5_param_signedness_fix(
+            ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
+        ):
+            type_fix_result.retry_phase = "param_signedness_fix"
+            result = self._run_check_after_phase(ctx, retry_count=2)
+            
+            if result.is_equivalent is True:
+                self._debug_print("Phase 1.5: EQUIVALENT after param signedness fix")
+                result.total_time = time.time() - start_time
+                return result
+            
+            if not self.phase_handler.should_retry(result):
+                result.total_time = time.time() - start_time
+                return result
+        
+        # ============================================
         # Phase 2: パターンマッチに基づく戻り値の型修正
         # ============================================
         if self.phase_handler.run_phase2_return_type_fix(ctx, type_fixer1, type_fixer2):
             type_fix_result.retry_phase = "return_type_fix"
-            result = self._run_check_after_phase(ctx, retry_count=2)
+            result = self._run_check_after_phase(ctx, retry_count=3)
             
             if result.is_equivalent is True:
                 self._debug_print("Phase 2: EQUIVALENT after return type fix")
@@ -220,7 +238,7 @@ class EquivalenceChecker:
             ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
         ):
             type_fix_result.retry_phase = "param_type_fix"
-            result = self._run_check_after_phase(ctx, retry_count=3)
+            result = self._run_check_after_phase(ctx, retry_count=4)
             
             if result.is_equivalent is True:
                 self._debug_print("Phase 3: EQUIVALENT after parameter type fix")
@@ -238,7 +256,7 @@ class EquivalenceChecker:
             ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
         ):
             type_fix_result.retry_phase = "mips64_abi_fix"
-            result = self._run_check_after_phase(ctx, retry_count=4)
+            result = self._run_check_after_phase(ctx, retry_count=5)
             
             if result.is_equivalent is True:
                 self._debug_print("Phase 4-A: EQUIVALENT after MIPS64 ABI fix")
@@ -261,7 +279,7 @@ class EquivalenceChecker:
                 
                 # ABI整合制約を追加してSMT再生成
                 result = self._retry_with_abi_constraints(
-                    ctx, abi_constraints, retry_count=4
+                    ctx, abi_constraints, retry_count=5
                 )
                 
                 if result.is_equivalent is True:

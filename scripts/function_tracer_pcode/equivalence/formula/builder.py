@@ -13,6 +13,8 @@ from .variable import (
     get_parameter_fragment_constraints
 )
 
+from ..ub.constraints import UbConstraintBuilder
+
 
 @dataclass
 class ParameterInfo:
@@ -71,9 +73,16 @@ class FormulaBuilderResult:
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, exclude_ub: bool = True):  # 変更
+        """
+        Args:
+            debug: デバッグ出力を有効にする
+            exclude_ub: UB（未定義動作）除外制約を追加する
+        """
         self.debug = debug
+        self.exclude_ub = exclude_ub  # NEW
         self.variable_analyzer = VariableAnalyzer(debug=debug)
+        self.ub_constraint_builder = UbConstraintBuilder(debug=debug)  # NEW
     
     def build_equivalence_formula(
         self,
@@ -179,6 +188,17 @@ class FormulaBuilder:
             # 後方互換性のため constrained_fragments にも追加
             constrained_fragments.extend(constrained_vars)
         
+        # ============================================
+        # UB（未定義動作）除外制約
+        # ============================================
+        if self.exclude_ub:
+            ub_lines = self._build_ub_constraints_section(
+                analysis1, analysis2,
+                params1, params2
+            )
+            if ub_lines:
+                lines.extend(ub_lines)
+        
         # 全変数の情報を統合（パラメータ + 追加変数）
         all_vars1 = self._merge_param_and_extra_vars(params1, extra_vars1)
         all_vars2 = self._merge_param_and_extra_vars(params2, extra_vars2)
@@ -217,6 +237,57 @@ class FormulaBuilder:
             constrained_fragments=constrained_fragments,
             param_fragment_constrained=param_fragment_constrained
         )
+    
+    # ============================================
+    # NEW: UB制約セクション構築
+    # ============================================
+    def _build_ub_constraints_section(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo]
+    ) -> List[str]:
+        """
+        UB除外制約セクションを構築
+        
+        Args:
+            analysis1, analysis2: 各関数の解析結果
+            params1, params2: パラメータ情報
+        
+        Returns:
+            SMT-LIB形式の制約行のリスト
+        """
+        lines = []
+        
+        # 関数1のUB制約を生成
+        ub1_constraints = self.ub_constraint_builder.build_constraints(
+            analysis1, params1
+        )
+        
+        # 関数2のUB制約を生成
+        ub2_constraints = self.ub_constraint_builder.build_constraints(
+            analysis2, params2
+        )
+        
+        # 制約がある場合のみセクションを追加
+        if ub1_constraints or ub2_constraints:
+            lines.append("; " + "-" * 40)
+            lines.append("; UB Exclusion Constraints (C semantics)")
+            lines.append("; Exclude undefined behavior inputs")
+            lines.append("; " + "-" * 40)
+            
+            if ub1_constraints:
+                lines.append(f"; Function 1: {analysis1.function_name}")
+                lines.extend(ub1_constraints)
+            
+            if ub2_constraints:
+                lines.append(f"; Function 2: {analysis2.function_name}")
+                lines.extend(ub2_constraints)
+            
+            lines.append("")
+        
+        return lines
     
     def _build_extra_variable_infos(
         self,
@@ -624,86 +695,88 @@ class FormulaBuilder:
         
         return result
     
-def build_with_abi_constraints(
-    self,
-    analysis1: FunctionReturnAnalysis,
-    analysis2: FunctionReturnAnalysis,
-    abi_constraints: Dict[str, Tuple[str, int]],
-    func1_suffix: str = "_1",
-    func2_suffix: str = "_2"
-) -> str:
-    """
-    ABI整合制約を追加したSMT式を構築
-    
-    Args:
-        analysis1, analysis2: 各バイナリの関数解析結果
-        abi_constraints: {"param0_1": ("signed", 32), ...}
-            - key: 64bitパラメータ名
-            - value: (signedness, narrow_bits) タプル
-        func1_suffix, func2_suffix: サフィックス
-    
-    Returns:
-        SMT-LIB script
-    """
-    # 通常のSMT式を構築
-    result = self.build_equivalence_formula_extended(
-        analysis1, analysis2, func1_suffix, func2_suffix
-    )
-    base_formula = result.formula
-    
-    # 制約を生成
-    constraint_lines = []
-    constraint_lines.append("; " + "-" * 40)
-    constraint_lines.append("; MIPS64 ABI constraints (sign/zero extension)")
-    constraint_lines.append("; " + "-" * 40)
-    
-    for param_wide, (signedness, narrow_bits) in abi_constraints.items():
-        # 対応する狭いパラメータ名を推定
-        # param0_1 -> param0_2 など
-        if param_wide.endswith(func1_suffix):
-            param_narrow = param_wide.replace(func1_suffix, func2_suffix)
-        elif param_wide.endswith(func2_suffix):
-            param_narrow = param_wide.replace(func2_suffix, func1_suffix)
-        else:
-            self._debug_print(f"Warning: Cannot determine narrow param for {param_wide}")
-            continue
+    def build_with_abi_constraints(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        abi_constraints: Dict[str, Tuple[str, int]],
+        func1_suffix: str = "_1",
+        func2_suffix: str = "_2"
+    ) -> str:
+        """
+        ABI整合制約を追加したSMT式を構築
         
-        # 拡張ビット数
-        extend_bits = 64 - narrow_bits
+        Args:
+            analysis1, analysis2: 各バイナリの関数解析結果
+            abi_constraints: {"param0_1": ("signed", 32), ...}
+                - key: 64bitパラメータ名
+                - value: (signedness, narrow_bits) タプル
+            func1_suffix, func2_suffix: サフィックス
         
-        # 制約を生成
-        if signedness == "signed":
-            constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {param_narrow})))"
-            comment = f"; {param_wide} must be sign-extension of {param_narrow}"
-        else:
-            constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {param_narrow})))"
-            comment = f"; {param_wide} must be zero-extension of {param_narrow}"
+        Returns:
+            SMT-LIB script
+        """
+        # 通常のSMT式を構築（UB制約も含む）
+        result = self.build_equivalence_formula_extended(
+            analysis1, analysis2, func1_suffix, func2_suffix
+        )
+        base_formula = result.formula
         
-        constraint_lines.append(comment)
-        constraint_lines.append(constraint)
-    
-    constraint_lines.append("")
-    
-    # SMT式に挿入（(check-sat)の直前）
-    lines = base_formula.split('\n')
-    insert_pos = -1
-    for i in range(len(lines) - 1, -1, -1):
-        if '(check-sat)' in lines[i]:
-            insert_pos = i
-            break
-    
-    if insert_pos >= 0:
-        lines = lines[:insert_pos] + constraint_lines + lines[insert_pos:]
-    else:
-        # (check-sat)が見つからない場合は末尾に追加
-        self._debug_print("Warning: (check-sat) not found, appending constraints at end")
-        # (get-model)の前に挿入
+        # ABI制約を生成
+        constraint_lines = []
+        constraint_lines.append("; " + "-" * 40)
+        constraint_lines.append("; MIPS64 ABI constraints (sign/zero extension)")
+        constraint_lines.append("; " + "-" * 40)
+        
+        for param_wide, (signedness, narrow_bits) in abi_constraints.items():
+            # 対応する狭いパラメータ名を推定
+            # param0_1 -> param0_2 など
+            if param_wide.endswith(func1_suffix):
+                param_narrow = param_wide.replace(func1_suffix, func2_suffix)
+            elif param_wide.endswith(func2_suffix):
+                param_narrow = param_wide.replace(func2_suffix, func1_suffix)
+            else:
+                if self.debug:
+                    print(f"[FormulaBuilder] Warning: Cannot determine narrow param for {param_wide}")
+                continue
+            
+            # 拡張ビット数
+            extend_bits = 64 - narrow_bits
+            
+            # 制約を生成
+            if signedness == "signed":
+                constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {param_narrow})))"
+                comment = f"; {param_wide} must be sign-extension of {param_narrow}"
+            else:
+                constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {param_narrow})))"
+                comment = f"; {param_wide} must be zero-extension of {param_narrow}"
+            
+            constraint_lines.append(comment)
+            constraint_lines.append(constraint)
+        
+        constraint_lines.append("")
+        
+        # SMT式に挿入（(check-sat)の直前）
+        lines = base_formula.split('\n')
+        insert_pos = -1
         for i in range(len(lines) - 1, -1, -1):
-            if '(get-model)' in lines[i]:
-                lines = lines[:i] + constraint_lines + lines[i:]
+            if '(check-sat)' in lines[i]:
+                insert_pos = i
                 break
+        
+        if insert_pos >= 0:
+            lines = lines[:insert_pos] + constraint_lines + lines[insert_pos:]
         else:
-            # それもない場合は末尾
-            lines.extend(constraint_lines)
-    
-    return '\n'.join(lines)
+            # (check-sat)が見つからない場合は末尾に追加
+            if self.debug:
+                print("[FormulaBuilder] Warning: (check-sat) not found, appending constraints at end")
+            # (get-model)の前に挿入
+            for i in range(len(lines) - 1, -1, -1):
+                if '(get-model)' in lines[i]:
+                    lines = lines[:i] + constraint_lines + lines[i:]
+                    break
+            else:
+                # それもない場合は末尾
+                lines.extend(constraint_lines)
+        
+        return '\n'.join(lines)

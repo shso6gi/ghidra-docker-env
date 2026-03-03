@@ -761,7 +761,7 @@ class TypeFixResult:
         self.param_types_fixed_binary2: bool = False
         self.retry_phase: str = "none"
         
-        # 符号性に基づく修正
+        # 符号性に基づく修正（戻り値）
         self.signedness_fixed_binary1: bool = False
         self.signedness_fixed_binary2: bool = False
         self.inferred_signedness_binary1: Optional[str] = None
@@ -771,7 +771,13 @@ class TypeFixResult:
         self.fixed_type_binary1: Optional[str] = None
         self.fixed_type_binary2: Optional[str] = None
         
-        # MIPS64 ABI修正（NEW）
+        # Phase 1.5: 引数の符号性修正
+        self.param_signedness_fixed_binary1: bool = False
+        self.param_signedness_fixed_binary2: bool = False
+        self.param_signedness_override_map_binary1: Optional[Dict[int, str]] = None
+        self.param_signedness_override_map_binary2: Optional[Dict[int, str]] = None
+        
+        # MIPS64 ABI修正
         self.mips64_abi_fixed_binary1: bool = False
         self.mips64_abi_fixed_binary2: bool = False
         self.mips64_abi_override_map_binary1: Optional[Dict[int, str]] = None
@@ -786,15 +792,24 @@ class TypeFixResult:
             self.param_types_fixed_binary2 or
             self.signedness_fixed_binary1 or
             self.signedness_fixed_binary2 or
+            self.param_signedness_fixed_binary1 or
+            self.param_signedness_fixed_binary2 or
             self.mips64_abi_fixed_binary1 or
             self.mips64_abi_fixed_binary2
         )
     
     def any_signedness_fix_applied(self) -> bool:
-        """符号性修正が適用されたか"""
+        """符号性修正が適用されたか（戻り値）"""
         return (
             self.signedness_fixed_binary1 or
             self.signedness_fixed_binary2
+        )
+    
+    def any_param_signedness_fix_applied(self) -> bool:
+        """引数の符号性修正が適用されたか（NEW）"""
+        return (
+            self.param_signedness_fixed_binary1 or
+            self.param_signedness_fixed_binary2
         )
     
     def any_mips64_abi_fix_applied(self) -> bool:
@@ -819,10 +834,16 @@ class TypeFixResult:
             "original_type_binary2": self.original_type_binary2,
             "fixed_type_binary1": self.fixed_type_binary1,
             "fixed_type_binary2": self.fixed_type_binary2,
+            "param_signedness_fixed_binary1": self.param_signedness_fixed_binary1,
+            "param_signedness_fixed_binary2": self.param_signedness_fixed_binary2,
             "mips64_abi_fixed_binary1": self.mips64_abi_fixed_binary1,
             "mips64_abi_fixed_binary2": self.mips64_abi_fixed_binary2,
         }
         
+        if self.param_signedness_override_map_binary1:
+            result["param_signedness_override_map_binary1"] = self.param_signedness_override_map_binary1
+        if self.param_signedness_override_map_binary2:
+            result["param_signedness_override_map_binary2"] = self.param_signedness_override_map_binary2
         if self.mips64_abi_override_map_binary1:
             result["mips64_abi_override_map_binary1"] = self.mips64_abi_override_map_binary1
         if self.mips64_abi_override_map_binary2:
@@ -848,6 +869,10 @@ class TypeFixResult:
             orig = self.original_type_binary2 or "?"
             fixed = self.fixed_type_binary2 or "?"
             parts.append(f"signedness_fixed(binary2: {orig} -> {fixed})")
+        if self.param_signedness_fixed_binary1:
+            parts.append(f"param_signedness_fixed(binary1: {self.param_signedness_override_map_binary1})")
+        if self.param_signedness_fixed_binary2:
+            parts.append(f"param_signedness_fixed(binary2: {self.param_signedness_override_map_binary2})")
         if self.mips64_abi_fixed_binary1:
             parts.append(f"mips64_abi_fixed(binary1: {self.mips64_abi_override_map_binary1})")
         if self.mips64_abi_fixed_binary2:
