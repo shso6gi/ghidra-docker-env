@@ -465,13 +465,18 @@ class PairwiseStrategy(CheckStrategy):
                 case2_conds_smt,
                 self.solver_runner,
                 norm_context,
-                param_replace_fn1  # 追加: function1側の置換関数
+                param_replace_fn1
             )
             
             if value1_norm_phase2 is not value1_norm:
                 if self.debug:
                     self._debug_print(f"  Value1: Phase 2 applied transformations")
                 value1_norm = value1_norm_phase2
+                
+                # Phase 2 後に Phase 1 を再適用（UDIV→SDIV後に他のルールが適用可能になる）
+                if self.debug:
+                    self._debug_print(f"  Value1: Re-applying Phase 1 after Phase 2...")
+                value1_norm = normalize_expression(value1_norm, norm_context)
         
         # value2 にUDIVが残っているか検査
         if contains_udiv(value2_norm):
@@ -485,13 +490,18 @@ class PairwiseStrategy(CheckStrategy):
                 case2_conds_smt,
                 self.solver_runner,
                 norm_context,
-                param_replace_fn2  # 追加: function2側の置換関数
+                param_replace_fn2
             )
             
             if value2_norm_phase2 is not value2_norm:
                 if self.debug:
                     self._debug_print(f"  Value2: Phase 2 applied transformations")
                 value2_norm = value2_norm_phase2
+                
+                # Phase 2 後に Phase 1 を再適用（UDIV→SDIV後に他のルールが適用可能になる）
+                if self.debug:
+                    self._debug_print(f"  Value2: Re-applying Phase 1 after Phase 2...")
+                value2_norm = normalize_expression(value2_norm, norm_context)
         
         # ============================================
         # 正規化結果の評価とSMT比較
@@ -534,6 +544,31 @@ class PairwiseStrategy(CheckStrategy):
         if not changed1 and not changed2:
             self._debug_print(f"    No normalization applied -> remain UNKNOWN")
             return QueryResult(is_equivalent=None)
+        
+        # ============================================
+        # Stage 3 ショートカット: 構造的同一性チェック
+        # ============================================
+        from ..normalize import are_structurally_equivalent, get_structural_summary
+        
+        is_struct_eq, struct_reason = are_structurally_equivalent(
+            value1_norm,
+            value2_norm,
+            debug=self.debug
+        )
+        
+        if is_struct_eq:
+            # 構造的に同一 → param制約により値は一致 → UNSAT
+            self._debug_print(f"    *** STRUCTURAL SHORTCUT ACTIVATED ***")
+            # ... 省略（既存のまま）...
+            return QueryResult(is_equivalent=True)
+        
+        # ショートカット不発 → 診断ログを出力
+        if self.debug:
+            self._debug_print(f"    Structural shortcut not applicable:")
+            self._debug_print(f"      Structure1: {get_structural_summary(value1_norm, max_depth=5)}")
+            self._debug_print(f"      Structure2: {get_structural_summary(value2_norm, max_depth=5)}")
+            self._debug_print(f"      Reason: {struct_reason}")
+            self._debug_print(f"    → Proceeding to SMT solver (norm-ineq)")
         
         # SMTクエリで等価性を確認
         norm_query = self._build_normalized_inequality_query(

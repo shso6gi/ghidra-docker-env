@@ -50,12 +50,17 @@ function_tracer_pcode/
 │   ├── checker.py                     # メインロジック（import修正）# 等価性判定メインロジック（リトライ・型修正統合）
 │   ├── result.py                      # 結果モデル（import修正）# 判定結果（EquivalenceResult, RewriteInfo）
 │   ├── counterexample.py              # 現状維持# 反例フォーマット（非等価時の具体例を整形）
-│   │   ├── normalize/
+│   ├── normalize/
 │   │   ├── __init__.py
 │   │   ├── core.py                    # 正規化メインロジック
 │   │   ├── negation.py                # 否定関連ルール
 │   │   ├── context.py                 # 正規化コンテキスト（安全性チェック・監査用）
 │   │   ├── policy.py                  # 正規化ポリシー（MIN除外制約の解析など）
+│   │   ├── division_signedness_guarded.py
+│   │   ├── division_signedness.py
+│   │   ├── facts.py
+│   │   ├── guard_prover.py
+│   │   ├── structural.py              # 構造的同一性チェック
 │   │   └── division.py                # 除算関連ルール
 │   ├── arch/                          # アーキテクチャ検出・ABI関連
 │   │   ├── __init__.py
