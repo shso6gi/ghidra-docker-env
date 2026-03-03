@@ -9,6 +9,7 @@ from ...model import FunctionReturnAnalysis, ReturnInfo, Condition
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
 from ..formula.symbol_replace import build_symbol_replacer
+from ..normalize import SignFacts
 
 
 class ReturnCase:
@@ -341,27 +342,18 @@ class PairwiseStrategy(CheckStrategy):
         """
         正規化して値式をSMTで比較（安全性チェック付き）
         
-        Stage 2 で unknown になったペアに対してのみ適用。
-        正規化後の式がSMT的に等価なら、UNSAT 扱いに格上げする。
-        
-        安全性：
-        - MIN除外制約を持つパラメータのみdivision正規化を適用
-        - SMT変数名（param_*_1, param_*_2）を元名（param_*）に変換してチェック
-        - 適用されたルールを記録・監査
-        
-        Args:
-            base_ctx: 共通SMT部分（param宣言・制約など）
-            case1, case2: 比較対象のケース
-            param_replace_fn1, param_replace_fn2: パラメータ置換関数
-            pair_id: ペアID（ログ用）
-        
-        Returns:
-            QueryResult: 正規化結果
+        フロー:
+        1. Facts ベースの正規化を試行（Phase 1）
+        2. Phase 1の結果にUDIVが残っていれば、SMTガード証明ベースの正規化を試行（Phase 2）
+        3. 正規化後の式をSMTで比較
         """
         from ..normalize import (
             normalize_expression,
             NormalizationContext,
-            extract_min_excluded_params
+            extract_min_excluded_params,
+            extract_sign_facts,
+            normalize_udiv_with_guard,
+            contains_udiv  # 追加
         )
         
         # 元の式
@@ -391,22 +383,119 @@ class PairwiseStrategy(CheckStrategy):
             if smt_name in smt_to_original:
                 original_name = smt_to_original[smt_name]
                 min_excluded_original.add(original_name)
-                if self.debug:
-                    self._debug_print(f"  {smt_name} -> {original_name}")
         
         if self.debug and min_excluded_original:
             self._debug_print(f"MIN-excluded original vars: {min_excluded_original}")
         
+        # === Sign facts の抽出 ===
+        if self.debug:
+            self._debug_print(f"  Extracting sign facts from conditions...")
+        
+        facts1 = extract_sign_facts(case1.conditions, debug=self.debug)
+        facts2 = extract_sign_facts(case2.conditions, debug=self.debug)
+        
+        combined_facts = SignFacts()
+        combined_facts.merge(facts1)
+        combined_facts.merge(facts2)
+        
+        # SMT変数名を元名に変換
+        nonneg_original = set()
+        pos_original = set()
+        neg_original = set()
+        nonzero_original = set()
+        
+        for var_name in combined_facts.nonneg_vars:
+            nonneg_original.add(smt_to_original.get(var_name, var_name))
+        
+        for var_name in combined_facts.pos_vars:
+            pos_original.add(smt_to_original.get(var_name, var_name))
+        
+        for var_name in combined_facts.neg_vars:
+            neg_original.add(smt_to_original.get(var_name, var_name))
+        
+        for var_name in combined_facts.nonzero_vars:
+            nonzero_original.add(smt_to_original.get(var_name, var_name))
+        
+        if self.debug:
+            if nonneg_original:
+                self._debug_print(f"Sign facts: nonneg={nonneg_original}")
+            if pos_original:
+                self._debug_print(f"Sign facts: pos={pos_original}")
+            if neg_original:
+                self._debug_print(f"Sign facts: neg={neg_original}")
+            if nonzero_original:
+                self._debug_print(f"Sign facts: nonzero={nonzero_original}")
+        
         # 正規化コンテキストを作成（元のパラメータ名を使用）
         norm_context = NormalizationContext(
             debug=self.debug,
-            min_excluded_params=min_excluded_original,  # 変換後の元名を使用
-            allow_unsafe=False  # 安全性チェックを有効化
+            min_excluded_params=min_excluded_original,
+            nonneg_vars=nonneg_original,
+            pos_vars=pos_original,
+            neg_vars=neg_original,
+            nonzero_vars=nonzero_original,
+            allow_unsafe=False
         )
         
-        # 正規化を適用
+        # ============================================
+        # Phase 1: Facts ベースの正規化を試行
+        # ============================================
+        if self.debug:
+            self._debug_print(f"  Phase 1: Facts-based normalization...")
+        
         value1_norm = normalize_expression(value1_orig, norm_context)
         value2_norm = normalize_expression(value2_orig, norm_context)
+        
+        # ============================================
+        # Phase 2: UDIVが残っていればSMTガード証明を試行
+        # ============================================
+        # 条件SMTを事前に取得（Phase 2で使用）
+        case1_conds_smt = case1.get_conditions_smt(param_replace_fn1)
+        case2_conds_smt = case2.get_conditions_smt(param_replace_fn2)
+        
+        # value1 にUDIVが残っているか検査
+        if contains_udiv(value1_norm):
+            if self.debug:
+                self._debug_print(f"  Value1 contains UDIV after Phase 1, trying Phase 2 (SMT guard proof)...")
+            
+            value1_norm_phase2 = normalize_udiv_with_guard(
+                value1_norm,
+                base_ctx,
+                case1_conds_smt,
+                case2_conds_smt,
+                self.solver_runner,
+                norm_context,
+                param_replace_fn1  # 追加: function1側の置換関数
+            )
+            
+            if value1_norm_phase2 is not value1_norm:
+                if self.debug:
+                    self._debug_print(f"  Value1: Phase 2 applied transformations")
+                value1_norm = value1_norm_phase2
+        
+        # value2 にUDIVが残っているか検査
+        if contains_udiv(value2_norm):
+            if self.debug:
+                self._debug_print(f"  Value2 contains UDIV after Phase 1, trying Phase 2 (SMT guard proof)...")
+            
+            value2_norm_phase2 = normalize_udiv_with_guard(
+                value2_norm,
+                base_ctx,
+                case1_conds_smt,
+                case2_conds_smt,
+                self.solver_runner,
+                norm_context,
+                param_replace_fn2  # 追加: function2側の置換関数
+            )
+            
+            if value2_norm_phase2 is not value2_norm:
+                if self.debug:
+                    self._debug_print(f"  Value2: Phase 2 applied transformations")
+                value2_norm = value2_norm_phase2
+        
+        # ============================================
+        # 正規化結果の評価とSMT比較
+        # ============================================
         
         # SMT文字列化（パラメータ名を置換）
         value1_smt_orig = param_replace_fn1(value1_orig.to_smt())

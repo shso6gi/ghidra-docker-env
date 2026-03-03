@@ -5,6 +5,7 @@ from typing import Optional
 from ...model import Expression, ExpressionType
 from .negation import normalize_double_negation
 from .division import normalize_division_signs
+from .division_signedness import normalize_division_signedness
 from .context import NormalizationContext
 
 
@@ -19,6 +20,7 @@ def normalize_expression(
     1. 子要素の再帰的正規化（ボトムアップ）
     2. 二重否定の除去
     3. 除算の符号正規化（安全性チェック付き）
+    4. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
     
     Args:
         expr: 正規化対象の式
@@ -58,5 +60,10 @@ def normalize_expression(
     expr_before = expr
     expr = normalize_division_signs(expr, context)
     # ルール記録はnormalize_division_signs内で行われる
+    
+    # 3. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
+    expr_before = expr
+    expr = normalize_division_signedness(expr, context)
+    # ルール記録はnormalize_division_signedness内で行われる
     
     return expr

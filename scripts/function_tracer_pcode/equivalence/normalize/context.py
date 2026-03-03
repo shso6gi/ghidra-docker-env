@@ -23,17 +23,41 @@ class NormalizationContext:
     Attributes:
         debug: デバッグモード
         min_excluded_params: MIN除外制約があるパラメータ名のセット
+        nonneg_vars: 非負が保証される変数名のセット（0 <= x）
+        pos_vars: 正が保証される変数名のセット（0 < x）
+        neg_vars: 負が保証される変数名のセット（x < 0）
+        nonzero_vars: 非ゼロが保証される変数名のセット（x != 0）
         applied_rules: 適用されたルールのリスト（監査用）
         allow_unsafe: 安全性チェックを無視するか（デフォルト: False）
     """
     debug: bool = False
     min_excluded_params: Set[str] = field(default_factory=set)
+    nonneg_vars: Set[str] = field(default_factory=set)
+    pos_vars: Set[str] = field(default_factory=set)
+    neg_vars: Set[str] = field(default_factory=set)  # 追加
+    nonzero_vars: Set[str] = field(default_factory=set)
     applied_rules: List[AppliedRule] = field(default_factory=list)
     allow_unsafe: bool = False
     
     def is_min_excluded(self, param_name: str) -> bool:
         """パラメータがMIN除外制約を持つか確認"""
         return param_name in self.min_excluded_params
+    
+    def is_nonneg(self, var_name: str) -> bool:
+        """変数が非負か確認"""
+        return var_name in self.nonneg_vars or var_name in self.pos_vars
+    
+    def is_pos(self, var_name: str) -> bool:
+        """変数が正か確認"""
+        return var_name in self.pos_vars
+    
+    def is_neg(self, var_name: str) -> bool:
+        """変数が負か確認"""
+        return var_name in self.neg_vars
+    
+    def is_nonzero(self, var_name: str) -> bool:
+        """変数が非ゼロか確認"""
+        return var_name in self.nonzero_vars or var_name in self.pos_vars or var_name in self.neg_vars
     
     def record_rule(
         self,
