@@ -320,13 +320,15 @@ class PairwiseStrategy(CheckStrategy):
         pair_id: str
     ) -> 'QueryResult':
         """
-        正規化して値式をSMTで比較
+        正規化して値式をSMTで比較（安全性チェック付き）
         
         Stage 2 で unknown になったペアに対してのみ適用。
         正規化後の式がSMT的に等価なら、UNSAT 扱いに格上げする。
         
-        サフィックス（_1/_2）は維持したまま、base_ctx のパラメータ同一制約
-        （param_1_1 = param_1_2 など）を利用して等価性を判定する。
+        安全性：
+        - MIN除外制約を持つパラメータのみdivision正規化を適用
+        - SMT変数名（param_*_1, param_*_2）を元名（param_*）に変換してチェック
+        - 適用されたルールを記録・監査
         
         Args:
             base_ctx: 共通SMT部分（param宣言・制約など）
@@ -336,19 +338,56 @@ class PairwiseStrategy(CheckStrategy):
         
         Returns:
             QueryResult: 正規化結果
-                - is_equivalent=True: 正規化後は等価（UNSAT）
-                - is_equivalent=False: 正規化後も非等価（SAT、反例あり）
-                - is_equivalent=None: 不明（UNKNOWN）
         """
-        from ..normalize import normalize_expression
+        from ..normalize import (
+            normalize_expression,
+            NormalizationContext,
+            extract_min_excluded_params
+        )
         
         # 元の式
         value1_orig = case1.value_expr
         value2_orig = case2.value_expr
         
+        # MIN除外制約を解析（SMT変数名で取得）
+        header_lines = base_ctx.get('header_lines', [])
+        min_excluded_smt = extract_min_excluded_params(header_lines, debug=self.debug)
+        
+        if self.debug and min_excluded_smt:
+            self._debug_print(f"MIN-excluded SMT vars: {min_excluded_smt}")
+        
+        # SMT変数名 → 元のパラメータ名へのマッピングを構築
+        smt_to_original = {}
+        params1 = base_ctx.get('params1', [])
+        params2 = base_ctx.get('params2', [])
+        
+        for param_info in params1:
+            smt_to_original[param_info.smt_name] = param_info.original_name
+        for param_info in params2:
+            smt_to_original[param_info.smt_name] = param_info.original_name
+        
+        # MIN除外制約を元のパラメータ名に変換
+        min_excluded_original = set()
+        for smt_name in min_excluded_smt:
+            if smt_name in smt_to_original:
+                original_name = smt_to_original[smt_name]
+                min_excluded_original.add(original_name)
+                if self.debug:
+                    self._debug_print(f"  {smt_name} -> {original_name}")
+        
+        if self.debug and min_excluded_original:
+            self._debug_print(f"MIN-excluded original vars: {min_excluded_original}")
+        
+        # 正規化コンテキストを作成（元のパラメータ名を使用）
+        norm_context = NormalizationContext(
+            debug=self.debug,
+            min_excluded_params=min_excluded_original,  # 変換後の元名を使用
+            allow_unsafe=False  # 安全性チェックを有効化
+        )
+        
         # 正規化を適用
-        value1_norm = normalize_expression(value1_orig)
-        value2_norm = normalize_expression(value2_orig)
+        value1_norm = normalize_expression(value1_orig, norm_context)
+        value2_norm = normalize_expression(value2_orig, norm_context)
         
         # SMT文字列化（パラメータ名を置換）
         value1_smt_orig = param_replace_fn1(value1_orig.to_smt())
@@ -374,6 +413,14 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print(f"    Normalized 2: {value2_smt_norm[:200]}")
         else:
             self._debug_print(f"    Normalized 2: (no change)")
+        
+        # 適用されたルールをログ出力
+        if norm_context.applied_rules:
+            self._debug_print(f"    Applied rules:")
+            for rule in norm_context.applied_rules:
+                self._debug_print(f"      - {rule.rule_name}: {rule.reason}")
+        else:
+            self._debug_print(f"    No normalization rules applied")
         
         # 正規化で変更がなければスキップ（最適化）
         if not changed1 and not changed2:

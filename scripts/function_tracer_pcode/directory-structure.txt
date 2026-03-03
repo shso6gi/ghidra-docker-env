@@ -54,6 +54,8 @@ function_tracer_pcode/
 │   │   ├── __init__.py
 │   │   ├── core.py                    # 正規化メインロジック
 │   │   ├── negation.py                # 否定関連ルール
+│   │   ├── context.py                 # 正規化コンテキスト（安全性チェック・監査用）
+│   │   ├── policy.py                  # 正規化ポリシー（MIN除外制約の解析など）
 │   │   └── division.py                # 除算関連ルール
 │   ├── arch/                          # アーキテクチャ検出・ABI関連
 │   │   ├── __init__.py
