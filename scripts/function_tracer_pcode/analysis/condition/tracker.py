@@ -62,7 +62,14 @@ class ConditionTracker:
         self.block_by_index: Dict[int, BasicBlockInfo] = {}
         self.entry_block: Optional[BasicBlockInfo] = None
         
+        self._built = False
+
+    def build(self):
+        """ブロック情報を構築。tracer.phi_handler セット後に呼び出すこと。"""
+        if self._built:
+            return
         self._build_block_info()
+        self._built = True
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:

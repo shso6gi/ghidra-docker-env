@@ -547,10 +547,15 @@ class ExpressionExpander:
         true_index = true_out.getIndex() if true_out else -1
         false_index = false_out.getIndex() if false_out else -1
         
+        condition = None
         if to_index == true_index:
-            return Condition(from_block_info.branch_condition, negated=False)
+            condition = Condition(from_block_info.branch_condition, negated=False)
+        elif to_index == false_index:
+            condition = Condition(from_block_info.branch_condition, negated=True)
         
-        if to_index == false_index:
-            return Condition(from_block_info.branch_condition, negated=True)
-        
-        return None
+        if self.debug and condition:
+            cond_str = ConditionNormalizer.get_simplified_string(condition)
+            self._debug_print(
+                f"Edge: block {from_block_info.index} -> {to_index}: {cond_str}", 2
+            )
+        return condition

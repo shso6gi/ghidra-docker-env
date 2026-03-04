@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 """P-codeトレースロジック"""
 
-from typing import Dict, List, Optional, Set, Tuple, Any
+from __future__ import annotations
+from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
 from ..model import Expression, ExpressionType, Condition, StorageInfo
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
+from .debug.unknown_trace import (
+    UnknownTracker, UnknownEvent, UnknownReason,
+    VarnodeInfo, PcodeOpInfo
+)
 
+if TYPE_CHECKING:
+    from .phi_resolver import PhiHandler
 
 class VarnodeKey:
     """Varnodeを識別するためのキー"""
@@ -54,18 +61,26 @@ class PcodeTracer:
         # トレース中のスタック（循環検出用）
         self._trace_stack: Set[str] = set()
         
+        # Unknown発生追跡
+        self.unknown_tracker = UnknownTracker()
+        if debug:
+            self.unknown_tracker.enable()
+        
+        # PHI handler（analyzerから設定される）
+        self.phi_handler: Optional['PhiHandler'] = None
+        
         self._collect_debug_info()
     
     def _get_op_key(self, pcode_op) -> str:
-        """PcodeOpの一意なキーを生成（ハッシュ衝突を回避）"""
+        """PcodeOpの一意なキーを生成（同一seqnumの異なるopを区別）"""
         seq = pcode_op.getSeqnum()
         if seq:
-            # シーケンス番号を使用（アドレス + 順序で一意）
             target = seq.getTarget()
             order = seq.getOrder()
-            return f"{target}:{order}"
-        # フォールバック: ハッシュコードと基本情報の組み合わせ
-        return f"{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{pcode_op.getNumInputs()}"
+            obj_id = id(pcode_op)
+            return f"{target}:{order}:{obj_id}"
+        obj_id = id(pcode_op)
+        return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{obj_id}"
     
     def _collect_debug_info(self):
         """デバッグ用の情報を収集"""
@@ -93,6 +108,20 @@ class PcodeTracer:
         """キャッシュをクリア"""
         self._trace_cache.clear()
         self._trace_stack.clear()
+
+    def emit_unknown_event(self, reason, varnode=None, def_op=None,
+                           depth=0, note=None, context="tracer"):
+        """Unknown発生イベントを記録"""
+        event = UnknownEvent(
+            reason=UnknownReason.from_string(reason),
+            reason_str=reason, depth=depth,
+            varnode=VarnodeInfo.from_varnode(varnode),
+            def_op=PcodeOpInfo.from_pcodeop(def_op),
+            note=note, context=context
+        )
+        self.unknown_tracker.record(event)
+        if self.debug:
+            print(event.format_detail(indent=depth))
     
     def _get_storage_info_from_varnode(self, varnode) -> Optional[StorageInfo]:
         """VarnodeからStorageInfoを作成"""
@@ -157,9 +186,13 @@ class PcodeTracer:
             Expression: 展開された式
         """
         if varnode is None:
+            self.emit_unknown_event(reason="null", depth=depth,
+                                    note="Null varnode passed to trace_varnode")
             return Expression.unknown("null")
         
         if depth > MAX_TRACE_DEPTH:
+            self.emit_unknown_event(reason="max_depth_exceeded", varnode=varnode,
+                                    depth=depth, note=f"Exceeded {MAX_TRACE_DEPTH}")
             return Expression.unknown("max_depth_exceeded")
         
         if self.debug:
@@ -327,6 +360,8 @@ class PcodeTracer:
         if op_key in self._trace_stack:
             if self.debug:
                 print(f"  -> Circular reference detected (key={op_key})")
+            self.emit_unknown_event(reason="circular_reference", def_op=pcode_op,
+                                    depth=depth, note=f"Key {op_key} already in stack")
             return Expression.unknown("circular_reference")
         
         self._trace_stack.add(op_key)
@@ -433,17 +468,60 @@ class PcodeTracer:
         if mnemonic == "STORE":
             return Expression.unknown("store_no_output")
         
-        # MULTIEQUAL - PHIノードとしてマーク（PhiHandlerで処理）
+        # MULTIEQUAL - PhiHandlerで展開
         if mnemonic == "MULTIEQUAL":
             if self.debug:
-                print(f"\n{' ' * depth}  MULTIEQUAL detected - returning PHI marker")
-            # 出力サイズを取得
-            output = pcode_op.getOutput()
-            output_size = output.getSize() if output else 0
-            # PHIマーカーを返す（後でPhiHandlerで展開）
-            phi_expr = Expression.phi([("MULTIEQUAL_MARKER", pcode_op)])
-            phi_expr.size = output_size
-            return phi_expr
+                print(f"\n{' ' * depth}  MULTIEQUAL detected - expanding via PhiHandler")
+            
+            if self.phi_handler is None:
+                self.emit_unknown_event(
+                    reason="phi_no_handler", varnode=pcode_op.getOutput(),
+                    def_op=pcode_op, depth=depth, note="phi_handler is None"
+                )
+                if self.debug:
+                    raise RuntimeError("phi_handler is None")
+                return Expression.unknown("phi_no_handler_CRITICAL")
+            
+            try:
+                phi_branches = self.phi_handler.resolve_multiequal(pcode_op, depth)
+                
+                if not phi_branches:
+                    self.emit_unknown_event(
+                        reason="phi_no_branches", varnode=pcode_op.getOutput(),
+                        def_op=pcode_op, depth=depth,
+                        note="PhiHandler returned empty"
+                    )
+                    return Expression.unknown("phi_no_branches")
+                
+                if len(phi_branches) == 1:
+                    return phi_branches[0].value
+                
+                # 複数分岐 → PHI式構築
+                branches = []
+                for pb in phi_branches:
+                    all_conds = pb.get_all_conditions()
+                    if all_conds:
+                        combined_cond = Condition.combine_and(all_conds)
+                        branches.append((combined_cond, pb.value))
+                    else:
+                        branches.append((None, pb.value))
+                
+                output = pcode_op.getOutput()
+                phi_expr = Expression.phi(branches)
+                phi_expr.size = output.getSize() if output else 0
+                return phi_expr
+            
+            except Exception as e:
+                if self.debug:
+                    import traceback as tb
+                    tb.print_exc()
+                self.emit_unknown_event(
+                    reason="phi_expansion_error", varnode=pcode_op.getOutput(),
+                    def_op=pcode_op, depth=depth, note=str(e)
+                )
+                if self.debug:
+                    raise
+                return Expression.unknown(f"phi_error:{str(e)[:50]}")
         
         # CAST
         if mnemonic == "CAST":

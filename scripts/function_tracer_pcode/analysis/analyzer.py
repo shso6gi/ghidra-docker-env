@@ -163,8 +163,19 @@ class ReturnAnalyzer:
             self._debug_print("HighFunction is None!")
             return None
         
+        # Step 1: tracer作成
         tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        
+        # Step 2: condition_tracker作成（まだビルドしない）
         condition_tracker = ConditionTracker(tracer)
+        
+        # Step 3: phi_handler作成 → tracerに注入
+        from .phi_resolver import PhiHandler
+        phi_handler = PhiHandler(tracer, condition_tracker)
+        tracer.phi_handler = phi_handler
+        
+        # Step 4: ブロック情報構築（phi_handler準備後）
+        condition_tracker.build()
         
         parameters = self._collect_parameters(high_function)
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
@@ -202,6 +213,21 @@ class ReturnAnalyzer:
         
         # デバッグダンプ（解析結果の可視化）
         self._dump_return_infos(result)
+        
+        # Unknown発生サマリー
+        if self.debug:
+            print("\n" + "=" * 70)
+            print("UNKNOWN EVENTS SUMMARY")
+            print("=" * 70)
+            print(tracer.unknown_tracker.get_summary())
+            phi_events = tracer.unknown_tracker.filter_phi_related()
+            if phi_events:
+                print("\n--- PHI-related events ---")
+                for event in phi_events:
+                    print(event.format_detail(indent=0))
+        elif len(tracer.unknown_tracker.events) > 0:
+            print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
+            print(f"  Use --debug flag for detailed report")
         
         return result
     
