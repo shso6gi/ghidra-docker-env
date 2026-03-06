@@ -27,24 +27,17 @@ from scripts.function_tracer_pcode.model import (
 )
 from scripts.function_tracer_pcode.model.analysis import SignednessResult
 
-# ★ 追加: フィクスチャではない通常の関数として定義
+
+# ============================================================================
+# ★ [P3] Helper Functions (not fixtures) - IDE安全・再利用性向上
+# ============================================================================
+
 def load_golden_cases() -> List[Dict[str, Any]]:
     """ゴールデンケースをYAMLから読み込み（通常の関数）"""
     yaml_path = Path(__file__).parent / "fixtures" / "cases.yml"
     with open(yaml_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
     return data['test_cases']
-
-@pytest.fixture(scope="session")
-def golden_cases():
-    """ゴールデンケースをYAMLから読み込み（セッション全体で1回のみ）"""
-    return load_golden_cases()  # 通常の関数を呼び出す
-
-
-@pytest.fixture(scope="session")
-def golden_cases_by_id(golden_cases):
-    """★ [P3] ID検索用の辞書を提供（高速化）"""
-    return {case['id']: case for case in golden_cases}
 
 
 @dataclass
@@ -92,7 +85,10 @@ def create_mock_analysis(
     returns: Optional[List[ReturnInfo]] = None,
     signedness: Optional[str] = None
 ) -> FunctionReturnAnalysis:
-    """モック解析結果を作成"""
+    """モック解析結果を作成
+    
+    ★ [P1] 修正: パラメータ情報を正しく設定してP4B検証を可能にする
+    """
     if parameters is None:
         parameters = []
     
@@ -158,7 +154,33 @@ def create_mock_result(
     if error_message:
         result.error_message = error_message
     
+    # ★ [P1] 追加: counterexampleがあればFormattedCounterexampleも設定
+    if counterexample:
+        from scripts.function_tracer_pcode.equivalence.counterexample import FormattedCounterexample
+        result.counterexample = FormattedCounterexample(
+            parameters={k: hex(v) if isinstance(v, int) else str(v) for k, v in counterexample.items()},
+            return_value1=None,
+            return_value2=None,
+            raw_model=counterexample
+        )
+    
     return result
+
+
+# ============================================================================
+# ★ Pytest Fixtures
+# ============================================================================
+
+@pytest.fixture(scope="session")
+def golden_cases():
+    """ゴールデンケースをYAMLから読み込み（セッション全体で1回のみ）"""
+    return load_golden_cases()
+
+
+@pytest.fixture(scope="session")
+def golden_cases_by_id(golden_cases):
+    """★ [P3] ID検索用の辞書を提供（高速化）"""
+    return {case['id']: case for case in golden_cases}
 
 
 @pytest.fixture

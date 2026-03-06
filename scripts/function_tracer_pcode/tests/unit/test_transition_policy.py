@@ -82,14 +82,22 @@ class TestPhaseTransitionPolicy:
         """Phase 1: 符号性修正の実行条件"""
         handler = PhaseHandler(TypeFixerConfig(), debug=True)
         
+        # ★ [P1修正] unsigned型 + signed証拠 の組み合わせ
+        # should_fix_return_to_signed() は unsigned型のみを対象とする
         analysis = create_mock_analysis(
             function_name="test_func",
-            return_type="unsigned int",
+            return_type="unsigned int",  # ★ "undefined" から "unsigned int" に変更
             signedness="signed"
         )
         
-        assert analysis.should_fix_return_to_signed() is True
+        # Phase 1が実行されるかチェック
+        assert analysis.should_fix_return_to_signed() is True, (
+            f"Expected True for unsigned type with signed evidence, "
+            f"got return_type={analysis.return_type}, "
+            f"signedness={analysis.signedness_result.signedness if analysis.signedness_result else None}"
+        )
         
+        # TypeFixerをモック化
         type_fixer = Mock()
         type_fixer.fix_function_signature_by_name = Mock(return_value=(True, False))
         

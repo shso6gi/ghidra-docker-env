@@ -16,6 +16,7 @@ defaults:
 # - expected.final_verdict: EQUIVALENT | NOT_EQUIVALENT | UNKNOWN
 # - expected.allowed_recovery_phases: list of phase names that may run after phase0
 # - expected.required_stage_path: ordered stage checkpoints expected to run
+# - expected.phase4b_gate_allowed: true|false (P4B gate condition check)
 #
 # Stage names (pairwise):
 #   S1_CONDS_ONLY, S2_VALUE_INEQ, S3_NORMALIZE
@@ -139,6 +140,7 @@ test_cases:
         - "P4B_MIPS64_SPURIOUS"
       allowed_special_phases:
         - "P4B_MIPS64_SPURIOUS"
+      phase4b_gate_allowed: true
       required_stage_path:
         - "S1_CONDS_ONLY"
         - "S2_VALUE_INEQ"
