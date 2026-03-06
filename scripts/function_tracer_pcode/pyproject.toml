@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "function_tracer_pcode"
+version = "0.1.0"
+description = "Ghidra-based function equivalence checker"
+requires-python = ">=3.8"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["model*", "smt*", "equivalence*", "analysis*", "transform*", "io*", "cli*", "config*"]
+
+[tool.pytest.ini_options]
+# ★ 修正: 実際のテストパスを指定
+pythonpath = ["."]
+testpaths = ["scripts/function_tracer_pcode/tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "*/test_*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

@@ -1,0 +1,202 @@
+# -*- coding: utf-8 -*-
+"""Phase遷移ポリシーの回帰テスト"""
+
+import pytest
+from unittest.mock import Mock
+
+from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
+from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.smt import SolverStatus
+
+# ★ [P3] sys.path操作はconftest.pyで一元化されているため不要
+from conftest import create_mock_result, create_mock_analysis
+
+
+class TestPhaseTransitionPolicy:
+    """Phase遷移ルールのテスト"""
+    
+    def test_phase0_equivalent_stops_immediately(self):
+        """Phase 0でEQUIVALENT → 即終了（リトライなし）"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        result = create_mock_result(is_equivalent=True, solver_status=SolverStatus.UNSAT)
+        
+        should_retry = handler.should_retry(result)
+        assert should_retry is False, "UNSAT result should not trigger retry"
+        
+        reason = handler.get_retry_reason(result)
+        assert "EQUIVALENT" in reason or reason == "EQUIVALENT (no retry needed)"
+    
+    def test_phase0_sat_stops_immediately(self):
+        """★ [P1] Phase 0でSAT → 即終了（仕様に準拠）"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        result = create_mock_result(is_equivalent=False, solver_status=SolverStatus.SAT)
+        
+        # ★ 修正: SAT時は原則リトライ禁止（仕様に準拠）
+        should_retry = handler.should_retry(result)
+        assert should_retry is False, "SAT should stop retry immediately (spec compliance)"
+        
+        reason = handler.get_retry_reason(result)
+        assert "NOT EQUIVALENT" in reason or reason == "NOT EQUIVALENT"
+    
+    def test_phase0_unknown_allows_retry(self):
+        """Phase 0でUNKNOWN → リトライ許可"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        result = create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+        
+        should_retry = handler.should_retry(result)
+        assert should_retry is True, "UNKNOWN should trigger retry"
+        
+        reason = handler.get_retry_reason(result)
+        assert reason == "UNKNOWN"
+    
+    def test_phase0_timeout_allows_retry(self):
+        """Phase 0でTIMEOUT → リトライ許可"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        result = create_mock_result(is_equivalent=None, solver_status=SolverStatus.TIMEOUT)
+        
+        should_retry = handler.should_retry(result)
+        assert should_retry is True, "TIMEOUT should trigger retry"
+        
+        assert result.is_timeout() is True
+    
+    def test_critical_error_stops_retry(self):
+        """致命的エラー → リトライ禁止"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        result = create_mock_result(
+            is_equivalent=None,
+            error_message="Function 'test_func' not found in binary"
+        )
+        
+        has_error = result.has_critical_error()
+        assert has_error is True, "Function not found should be critical"
+        
+        should_retry = handler.should_retry(result)
+        assert should_retry is False, "Critical error should stop retry"
+    
+    def test_phase1_signedness_fix_execution(self, mock_program_x86):
+        """Phase 1: 符号性修正の実行条件"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="unsigned int",
+            signedness="signed"
+        )
+        
+        assert analysis.should_fix_return_to_signed() is True
+        
+        type_fixer = Mock()
+        type_fixer.fix_function_signature_by_name = Mock(return_value=(True, False))
+        
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="test_func",
+            function_name2="test_func",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=analysis,
+            analysis2=None
+        )
+        
+        applied = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
+        assert applied is True, "Signedness fix should be applied"
+        assert ctx.type_fix_result.signedness_fixed_binary1 is True
+    
+    def test_phase1_skipped_if_no_signedness_info(self, mock_program_x86):
+        """Phase 1: 符号性情報なし → スキップ"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="int"
+        )
+        
+        assert analysis.should_fix_return_to_signed() is False
+        
+        type_fixer = Mock()
+        
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="test_func",
+            function_name2="test_func",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=analysis,
+            analysis2=None
+        )
+        
+        applied = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
+        assert applied is False, "Phase 1 should be skipped"
+    
+    def test_phase2_pattern_match_execution(self, mock_program_x86):
+        """Phase 2: パターンマッチ型修正の実行条件"""
+        config = TypeFixerConfig()
+        handler = PhaseHandler(config, debug=True)
+        
+        analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined4"
+        )
+        
+        should_fix = handler.should_fix_return_type(analysis)
+        assert should_fix is True, "Pattern match should trigger fix"
+        
+        type_fixer = Mock()
+        type_fixer.fix_function_signature_by_name = Mock(return_value=(True, False))
+        
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="test_func",
+            function_name2="test_func",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=analysis,
+            analysis2=None
+        )
+        
+        applied = handler.run_phase2_return_type_fix(ctx, type_fixer, type_fixer)
+        assert applied is True
+        assert ctx.type_fix_result.return_type_fixed_binary1 is True
+    
+    def test_phase4a_mips64_condition(self, mock_program_mips64, mock_program_x86):
+        """Phase 4-A: MIPS64バイナリが含まれる場合のみ実行"""
+        handler = PhaseHandler(TypeFixerConfig(), debug=True)
+        
+        analysis_mips = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "long"}]
+        )
+        
+        analysis_x86 = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "int"}]
+        )
+        
+        should_apply = handler.mips64_handler.should_apply_fix(
+            True, False, analysis_mips, analysis_x86
+        )
+        
+        assert should_apply is not None
