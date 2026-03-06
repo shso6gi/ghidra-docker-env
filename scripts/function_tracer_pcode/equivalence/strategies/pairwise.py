@@ -9,7 +9,17 @@ from ...model import FunctionReturnAnalysis, ReturnInfo, Condition
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
 from ..formula.symbol_replace import build_symbol_replacer
-from ..normalize import SignFacts
+from ..normalize import (
+    SignFacts,
+    normalize_expression,
+    NormalizationContext,
+    extract_min_excluded_params,
+    extract_sign_facts,
+    normalize_udiv_with_guard,
+    contains_udiv,
+    are_structurally_equivalent,
+    get_structural_summary,
+)
 
 
 class ReturnCase:
@@ -345,17 +355,9 @@ class PairwiseStrategy(CheckStrategy):
         フロー:
         1. Facts ベースの正規化を試行（Phase 1）
         2. Phase 1の結果にUDIVが残っていれば、SMTガード証明ベースの正規化を試行（Phase 2）
-        3. 正規化後の式をSMTで比較
+        3. 構造一致チェック（ヒントとして使用）
+        4. **必ずSMTで最終確認**（構造一致時も含む）
         """
-        from ..normalize import (
-            normalize_expression,
-            NormalizationContext,
-            extract_min_excluded_params,
-            extract_sign_facts,
-            normalize_udiv_with_guard,
-            contains_udiv  # 追加
-        )
-        
         # 元の式
         value1_orig = case1.value_expr
         value2_orig = case2.value_expr
@@ -473,7 +475,7 @@ class PairwiseStrategy(CheckStrategy):
                     self._debug_print(f"  Value1: Phase 2 applied transformations")
                 value1_norm = value1_norm_phase2
                 
-                # Phase 2 後に Phase 1 を再適用（UDIV→SDIV後に他のルールが適用可能になる）
+                # Phase 2 後に Phase 1 を再適用
                 if self.debug:
                     self._debug_print(f"  Value1: Re-applying Phase 1 after Phase 2...")
                 value1_norm = normalize_expression(value1_norm, norm_context)
@@ -498,7 +500,7 @@ class PairwiseStrategy(CheckStrategy):
                     self._debug_print(f"  Value2: Phase 2 applied transformations")
                 value2_norm = value2_norm_phase2
                 
-                # Phase 2 後に Phase 1 を再適用（UDIV→SDIV後に他のルールが適用可能になる）
+                # Phase 2 後に Phase 1 を再適用
                 if self.debug:
                     self._debug_print(f"  Value2: Re-applying Phase 1 after Phase 2...")
                 value2_norm = normalize_expression(value2_norm, norm_context)
@@ -546,10 +548,8 @@ class PairwiseStrategy(CheckStrategy):
             return QueryResult(is_equivalent=None)
         
         # ============================================
-        # Stage 3 ショートカット: 構造的同一性チェック
+        # 構造的同一性チェック（ヒントとして使用）
         # ============================================
-        from ..normalize import are_structurally_equivalent, get_structural_summary
-        
         is_struct_eq, struct_reason = are_structurally_equivalent(
             value1_norm,
             value2_norm,
@@ -557,20 +557,23 @@ class PairwiseStrategy(CheckStrategy):
         )
         
         if is_struct_eq:
-            # 構造的に同一 → param制約により値は一致 → UNSAT
-            self._debug_print(f"    *** STRUCTURAL SHORTCUT ACTIVATED ***")
-            # ... 省略（既存のまま）...
-            return QueryResult(is_equivalent=True)
-        
-        # ショートカット不発 → 診断ログを出力
-        if self.debug:
-            self._debug_print(f"    Structural shortcut not applicable:")
-            self._debug_print(f"      Structure1: {get_structural_summary(value1_norm, max_depth=5)}")
-            self._debug_print(f"      Structure2: {get_structural_summary(value2_norm, max_depth=5)}")
+            # 構造一致検出 → ヒントとしてログ出力するが、SMT確認は必須
+            self._debug_print(f"    STRUCTURAL MATCH DETECTED, SMT CONFIRMATION REQUIRED")
             self._debug_print(f"      Reason: {struct_reason}")
-            self._debug_print(f"    → Proceeding to SMT solver (norm-ineq)")
+            self._debug_print(f"      Structure: {get_structural_summary(value1_norm, max_depth=5)}")
+        else:
+            # 構造不一致 → 診断ログを出力
+            if self.debug:
+                self._debug_print(f"    Structural match not detected:")
+                self._debug_print(f"      Structure1: {get_structural_summary(value1_norm, max_depth=5)}")
+                self._debug_print(f"      Structure2: {get_structural_summary(value2_norm, max_depth=5)}")
+                self._debug_print(f"      Reason: {struct_reason}")
         
-        # SMTクエリで等価性を確認
+        # ============================================
+        # SMTクエリで等価性を確認（構造一致時も含む）
+        # ============================================
+        self._debug_print(f"    Proceeding to SMT solver (norm-ineq)...")
+        
         norm_query = self._build_normalized_inequality_query(
             base_ctx, case1, case2,
             param_replace_fn1, param_replace_fn2,
@@ -587,12 +590,17 @@ class PairwiseStrategy(CheckStrategy):
         if norm_result.is_equivalent is True:
             # UNSAT: 正規化後は等価 → ペアをUNSAT扱い
             self._debug_print(f"    Normalized inequality: UNSAT -> values are equivalent")
+            if is_struct_eq:
+                self._debug_print(f"    (Structural match was confirmed by SMT)")
             self._debug_print(f"  Pair {pair_id} normalization: values became equivalent -> UNSAT")
             return QueryResult(is_equivalent=True)
         
         elif norm_result.is_equivalent is False:
             # SAT: 正規化後も非等価 → 反例あり
             self._debug_print(f"    Normalized inequality: SAT -> genuine counterexample found")
+            if is_struct_eq:
+                self._debug_print(f"    WARNING: Structural match detected but SMT found counterexample!")
+                self._debug_print(f"    This indicates the structural check may have false positives.")
             self._debug_print(f"  Pair {pair_id} normalization: found counterexample -> NOT EQUIVALENT")
             return QueryResult(
                 is_equivalent=False,
@@ -602,6 +610,8 @@ class PairwiseStrategy(CheckStrategy):
         else:
             # UNKNOWN: 正規化後もタイムアウト
             self._debug_print(f"    Normalized inequality: UNKNOWN -> remain UNKNOWN")
+            if is_struct_eq:
+                self._debug_print(f"    (Structural match detected but SMT solver timed out)")
             return QueryResult(is_equivalent=None)
     
     def _solve_query_internal(
