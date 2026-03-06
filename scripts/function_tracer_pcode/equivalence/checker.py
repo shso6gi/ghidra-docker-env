@@ -137,10 +137,13 @@ class EquivalenceChecker:
         
         型修正リトライが有効な場合のフロー:
         1. Phase 0: 型修正なしで等価性判定
+           - UNSAT → 即終了
+           - SAT → Phase 4-B (MIPS64偽反例retry) のみ試行
+           - UNKNOWN/TIMEOUT → 通常recovery phases へ進む
         2. Phase 1: 符号性推定に基づく型修正
         3. Phase 2: パターンマッチに基づく型修正
         4. Phase 3: 引数の型も修正
-        5. Phase 4: MIPS64 ABI Retry (偽反例検出→制約付き再solve)
+        5. Phase 4-A: MIPS64 ABI param fix (conservative)
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -179,11 +182,49 @@ class EquivalenceChecker:
         ctx.original_signature1 = result.function1_signature
         ctx.original_signature2 = result.function2_signature
         
+        # ============================================
+        # Phase 0 結果判定 & 分岐
+        # ============================================
+        
+        # UNSAT → 即終了
         if result.is_equivalent is True:
             self._debug_print("Phase 0: EQUIVALENT - No retry needed")
             result.total_time = time.time() - start_time
             return result
         
+        # critical error → 即終了
+        if result.has_critical_error():
+            self._debug_print(f"Phase 0: Critical error - {result.error_message}")
+            result.total_time = time.time() - start_time
+            return result
+        
+        # ============================================
+        # SAT → Phase 4-B (MIPS64偽反例retry) のみ試行
+        # ============================================
+        if result.is_equivalent is False:
+            self._debug_print("Phase 0: SAT - Checking for MIPS64 spurious counterexample only")
+            
+            # Phase 4-B (MIPS64 spurious counterexample retry) のみ試行
+            abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
+            
+            if abi_constraints:
+                self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
+                type_fix_result.retry_phase = "mips64_abi_retry"
+                result = self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=1)
+                
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
+                elif result.is_equivalent is False:
+                    self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
+            else:
+                self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
+            
+            result.total_time = time.time() - start_time
+            return result
+        
+        # ============================================
+        # UNKNOWN/TIMEOUT → 通常recovery phases へ進む
+        # ============================================
         should_retry = self.phase_handler.should_retry(result)
         retry_reason = self.phase_handler.get_retry_reason(result)
         self._debug_print(f"Phase 0 result: {retry_reason}")
@@ -281,28 +322,6 @@ class EquivalenceChecker:
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
                 return result
-        
-        # ============================================
-        # Phase 4-B: MIPS64 ABI Retry (spurious counterexample detection)
-        # ============================================
-        if result.is_equivalent is False:
-            abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
-            
-            if abi_constraints:
-                self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
-                type_fix_result.retry_phase = "mips64_abi_retry"
-                
-                # ABI整合制約を追加してSMT再生成
-                result = self._retry_with_abi_constraints(
-                    ctx, abi_constraints, retry_count=5
-                )
-                
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
-                elif result.is_equivalent is False:
-                    self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
-            else:
-                self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
         
         # ============================================
         # 最終結果

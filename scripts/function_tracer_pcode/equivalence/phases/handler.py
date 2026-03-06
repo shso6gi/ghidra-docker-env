@@ -50,11 +50,22 @@ class PhaseHandler:
             print(f"[PhaseHandler] {msg}")
     
     def should_retry(self, result: EquivalenceResult) -> bool:
-        """リトライすべきかどうかを判定"""
-        if result.is_equivalent is True:
+        """通常recovery継続可否を判定（UNKNOWN/TIMEOUTのみ許可）
+        
+        Returns:
+            True: UNKNOWN/TIMEOUT → 通常recovery phases (P1, P2, P3, P4-A) を試行可能
+            False: UNSAT/SAT/critical error → 通常recovery phases へ進まない
+        
+        Note:
+            SAT時の Phase 4-B (MIPS64 spurious) は should_run_phase4_retry() で別途判定
+        """
+        if result.is_equivalent is True:  # UNSAT
             return False
+        if result.is_equivalent is False:  # SAT
+            return False  # ★ SAT時は通常recoveryブロック（P4Bは別ゲート）
         if result.has_critical_error():
             return False
+        # UNKNOWN/TIMEOUT のみ True
         return True
     
     def get_retry_reason(self, result: EquivalenceResult) -> str:
@@ -499,7 +510,14 @@ class PhaseHandler:
         previous_result: EquivalenceResult,
         ctx: PhaseContext
     ) -> bool:
-        """Phase 4-B Retryを実行すべきかを判定"""
+        """Phase 4-B Retryを実行すべきかを判定
+        
+        SAT時の特別ゲート: MIPS64偽反例検出に限定
+        
+        Returns:
+            True: MIPS64 + SAT + counterexample + analysis揃い
+            False: 上記条件を満たさない
+        """
         # NOT EQUIVALENT (SAT) の場合のみ
         if previous_result.is_equivalent is not False:
             return False
