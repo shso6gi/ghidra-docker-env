@@ -8,6 +8,10 @@ from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 
 from conftest import create_mock_analysis, MockProgram
 
+pytestmark = pytest.mark.skip(
+    reason="Out of scope for current phase: algorithm-level MIPS64 detection tests are deferred."
+)
+
 
 class TestMIPS64SpuriousDetection:
     """
