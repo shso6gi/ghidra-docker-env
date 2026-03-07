@@ -122,6 +122,41 @@ class EquivalenceChecker:
         finally:
             analyzer.dispose()
     
+    def _try_phase4b_if_applicable(
+        self,
+        result: EquivalenceResult,
+        ctx: PhaseContext,
+        retry_count: int,
+        retry_with_type_fix: bool
+    ) -> Optional[EquivalenceResult]:
+        """SAT時にPhase 4-Bを試行すべきかチェックし、必要なら実行
+        
+        Args:
+            result: 現在の判定結果
+            ctx: Phaseコンテキスト
+            retry_count: リトライカウント（Phase 4-B実行時に使用）
+            retry_with_type_fix: 型修正リトライが有効か
+        
+        Returns:
+            - Phase 4-B実行した場合: 新しいEquivalenceResult
+            - Phase 4-B不要な場合: None
+        """
+        if not retry_with_type_fix:
+            return None
+        
+        if result.is_equivalent is not False:  # SAT でない
+            return None
+        
+        abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
+        
+        if not abi_constraints:
+            return None
+        
+        self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
+        ctx.type_fix_result.retry_phase = "mips64_abi_retry"
+        
+        return self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=retry_count)
+    
     def check_from_binaries(
         self,
         program1,
@@ -141,9 +176,12 @@ class EquivalenceChecker:
            - SAT → Phase 4-B (MIPS64偽反例retry) のみ試行
            - UNKNOWN/TIMEOUT → 通常recovery phases へ進む
         2. Phase 1: 符号性推定に基づく型修正
-        3. Phase 2: パターンマッチに基づく型修正
-        4. Phase 3: 引数の型も修正
-        5. Phase 4-A: MIPS64 ABI param fix (conservative)
+        3. Phase 1.5: 引数の符号性に基づく型修正
+        4. Phase 2: パターンマッチに基づく型修正
+        5. Phase 3: 引数の型も修正
+        6. Phase 4-A: MIPS64 ABI param fix (conservative)
+        
+        各recovery phase後もSAT時にPhase 4-Bを試行
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -204,20 +242,23 @@ class EquivalenceChecker:
         if result.is_equivalent is False:
             self._debug_print("Phase 0: SAT - Checking for MIPS64 spurious counterexample only")
             
-            # Phase 4-B (MIPS64 spurious counterexample retry) のみ試行
-            abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
-            
-            if abi_constraints:
-                self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
-                type_fix_result.retry_phase = "mips64_abi_retry"
-                result = self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=1)
+            # ★ retry_with_type_fix をチェック
+            if retry_with_type_fix:
+                abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
                 
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
-                elif result.is_equivalent is False:
-                    self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
+                if abi_constraints:
+                    self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
+                    ctx.type_fix_result.retry_phase = "mips64_abi_retry"
+                    result = self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=1)
+                    
+                    if result.is_equivalent is True:
+                        self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
+                    elif result.is_equivalent is False:
+                        self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
+                else:
+                    self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
             else:
-                self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
+                self._debug_print("Phase 4-B: Skipped (retry_with_type_fix=False)")
             
             result.total_time = time.time() - start_time
             return result
@@ -249,6 +290,16 @@ class EquivalenceChecker:
                 result.total_time = time.time() - start_time
                 return result
             
+            # ★ SAT 時に Phase 4-B を試行
+            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=2, retry_with_type_fix=retry_with_type_fix)
+            if phase4b_result is not None:
+                result = phase4b_result
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 1)")
+                    result.total_time = time.time() - start_time
+                    return result
+            
+            # ★ Phase 4-B でも解決しなかった、または UNKNOWN/TIMEOUT
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
                 return result
@@ -267,6 +318,15 @@ class EquivalenceChecker:
                 result.total_time = time.time() - start_time
                 return result
             
+            # ★ SAT 時に Phase 4-B を試行
+            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=3, retry_with_type_fix=retry_with_type_fix)
+            if phase4b_result is not None:
+                result = phase4b_result
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 1.5)")
+                    result.total_time = time.time() - start_time
+                    return result
+            
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
                 return result
@@ -282,6 +342,15 @@ class EquivalenceChecker:
                 self._debug_print("Phase 2: EQUIVALENT after return type fix")
                 result.total_time = time.time() - start_time
                 return result
+            
+            # ★ SAT 時に Phase 4-B を試行
+            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=4, retry_with_type_fix=retry_with_type_fix)
+            if phase4b_result is not None:
+                result = phase4b_result
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 2)")
+                    result.total_time = time.time() - start_time
+                    return result
             
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
@@ -301,6 +370,15 @@ class EquivalenceChecker:
                 result.total_time = time.time() - start_time
                 return result
             
+            # ★ SAT 時に Phase 4-B を試行
+            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=5, retry_with_type_fix=retry_with_type_fix)
+            if phase4b_result is not None:
+                result = phase4b_result
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 3)")
+                    result.total_time = time.time() - start_time
+                    return result
+            
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
                 return result
@@ -318,6 +396,15 @@ class EquivalenceChecker:
                 self._debug_print("Phase 4-A: EQUIVALENT after MIPS64 ABI fix")
                 result.total_time = time.time() - start_time
                 return result
+            
+            # ★ SAT 時に Phase 4-B を試行
+            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=6, retry_with_type_fix=retry_with_type_fix)
+            if phase4b_result is not None:
+                result = phase4b_result
+                if result.is_equivalent is True:
+                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 4-A)")
+                    result.total_time = time.time() - start_time
+                    return result
             
             if not self.phase_handler.should_retry(result):
                 result.total_time = time.time() - start_time
