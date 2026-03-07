@@ -472,3 +472,587 @@ class TestPhaseRetryGates:
                         assert result.is_equivalent is True
                         
                         print("\n[SPURIOUS DETECTION] _retry_with_abi_constraints was correctly called and resolved to EQUIVALENT")
+
+    def test_sat_after_recovery_skips_phase4b_when_retry_disabled(self, mock_program_mips64, mock_program_x86):
+        """★ [新規] retry_with_type_fix=False では recovery 後の SAT でも Phase 4-B をスキップ"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        mock_analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="unsigned int",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}],
+            signedness="signed"
+        )
+        
+        counterexample = {
+            "param_1_1": 0x0000000080000001,  # 偽反例パターン
+            "param_1_2": 0x80000001,
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.return_value = mock_analysis
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            call_count = [0]
+            
+            def mock_check_side_effect(*args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # Phase 0: UNKNOWN
+                    return create_mock_result(
+                        is_equivalent=None,
+                        solver_status=SolverStatus.UNKNOWN
+                    )
+                else:
+                    # 通常は Phase 0 終了後 → retry_with_type_fix=False なのでここに来ない
+                    raise Exception("Unexpected check call - retry should be disabled")
+            
+            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
+                # ★ retry_with_type_fix=False なので Phase 1 以降は実行されない
+                with patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_phase4b:
+                    result = checker.check_from_binaries(
+                        mock_program_mips64,
+                        mock_program_x86,
+                        "test_func",
+                        "test_func",
+                        retry_with_type_fix=False  # ★ リトライ無効
+                    )
+                    
+                    # Phase 0 の結果（UNKNOWN）がそのまま返る
+                    assert result.is_equivalent is None
+                    
+                    # Phase 4-B ゲートが呼ばれていないことを確認
+                    assert not mock_phase4b.called, \
+                        "Phase 4-B should NOT be called when retry_with_type_fix=False"
+                    
+                    print("\n[RETRY DISABLED] Phase 4-B was correctly skipped after Phase 0 UNKNOWN")
+
+
+    def test_sat_after_recovery_genuine_counterexample_stops(self, mock_program_mips64, mock_program_x86):
+        """★ [新規] recovery 後 SAT で偽反例ではない場合は NOT EQUIVALENT で終了"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        # サイズ不一致（MIPS64=64bit, x86=32bit）
+        mock_analysis_mips64 = create_mock_analysis(
+            function_name="test_func",
+            return_type="unsigned int",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}],
+            signedness="signed"
+        )
+        
+        mock_analysis_x86 = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        # ★ 正当な反例（符号拡張パターンに違反していない）
+        counterexample = {
+            "param_1_1": 0x0000000012345678,  # 正しいゼロ拡張
+            "param_1_2": 0x12345678,  # 下位32bit一致
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            analyzer_call_count = [0]
+            
+            def mock_analyze_side_effect(func_name, timeout):
+                analyzer_call_count[0] += 1
+                if analyzer_call_count[0] % 2 == 1:
+                    return mock_analysis_mips64
+                else:
+                    return mock_analysis_x86
+            
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = mock_analyze_side_effect
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            check_count = [0]
+            
+            def mock_check_side_effect(*args, **kwargs):
+                check_count[0] += 1
+                if check_count[0] == 1:
+                    # Phase 0: UNKNOWN
+                    return create_mock_result(
+                        is_equivalent=None,
+                        solver_status=SolverStatus.UNKNOWN
+                    )
+                elif check_count[0] == 2:
+                    # Phase 1 後: SAT with genuine counterexample
+                    return create_mock_result(
+                        is_equivalent=False,
+                        solver_status=SolverStatus.SAT,
+                        counterexample=counterexample
+                    )
+                else:
+                    raise Exception("Unexpected check call")
+            
+            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
+                with patch.object(checker.phase_handler, 'run_phase1_signedness_fix', return_value=True):
+                    with patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
+                        result = checker.check_from_binaries(
+                            mock_program_mips64,
+                            mock_program_x86,
+                            "test_func",
+                            "test_func",
+                            retry_with_type_fix=True
+                        )
+                        
+                        # 正当な反例 → _retry_with_abi_constraints は呼ばれない
+                        assert not mock_retry.called, \
+                            "_retry_with_abi_constraints should NOT be called for genuine counterexample"
+                        
+                        # NOT EQUIVALENT で終了
+                        assert result.is_equivalent is False
+                        
+                        print("\n[GENUINE] Correctly stopped as NOT EQUIVALENT (no spurious retry)")
+
+
+    def test_phase4b_after_phase2_recovery_sat(self, mock_program_mips64, mock_program_x86):
+        """★ [新規] Phase 2 (pattern-based fix) 後の SAT でも Phase 4-B ゲートを評価"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        # サイズ不一致
+        mock_analysis_mips64 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined4",  # Phase 2 トリガー
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
+        )
+        
+        mock_analysis_x86 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined4",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        counterexample = {
+            "param_1_1": 0x0000000080000001,  # 偽反例パターン
+            "param_1_2": 0x80000001,
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            analyzer_call_count = [0]
+            
+            def mock_analyze_side_effect(func_name, timeout):
+                analyzer_call_count[0] += 1
+                if analyzer_call_count[0] % 2 == 1:
+                    return mock_analysis_mips64
+                else:
+                    return mock_analysis_x86
+            
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = mock_analyze_side_effect
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            check_count = [0]
+            
+            def mock_check_side_effect(*args, **kwargs):
+                check_count[0] += 1
+                if check_count[0] == 1:
+                    # Phase 0: UNKNOWN
+                    return create_mock_result(
+                        is_equivalent=None,
+                        solver_status=SolverStatus.UNKNOWN
+                    )
+                elif check_count[0] == 2:
+                    # Phase 2 後: SAT with spurious counterexample
+                    return create_mock_result(
+                        is_equivalent=False,
+                        solver_status=SolverStatus.SAT,
+                        counterexample=counterexample
+                    )
+                else:
+                    raise Exception("Unexpected check call")
+            
+            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
+                # Phase 1 はスキップ、Phase 2 で型修正実行
+                with patch.object(checker.phase_handler, 'run_phase1_signedness_fix', return_value=False):
+                    with patch.object(checker.phase_handler, 'run_phase1_5_param_signedness_fix', return_value=False):
+                        with patch.object(checker.phase_handler, 'run_phase2_return_type_fix', return_value=True):
+                            with patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
+                                mock_retry.return_value = create_mock_result(
+                                    is_equivalent=True,
+                                    solver_status=SolverStatus.UNSAT
+                                )
+                                
+                                result = checker.check_from_binaries(
+                                    mock_program_mips64,
+                                    mock_program_x86,
+                                    "test_func",
+                                    "test_func",
+                                    retry_with_type_fix=True
+                                )
+                                
+                                # Phase 2 後の SAT でも Phase 4-B が呼ばれる
+                                assert mock_retry.called, \
+                                    "_retry_with_abi_constraints should be called after Phase 2 SAT with spurious counterexample"
+                                
+                                # ABI制約retryで EQUIVALENT
+                                assert result.is_equivalent is True
+                                
+                                print("\n[PHASE 2 SAT] Phase 4-B was correctly triggered after Phase 2 recovery SAT")
+
+
+class TestPhaseRetryGatesParametrized:
+    """★ Parametrized tests for recovery phase → SAT → Phase 4-B flow"""
+    
+    @pytest.mark.parametrize("phase_name,phase_mocks", [
+        pytest.param(
+            "Phase_1_signedness",
+            {"run_phase1_signedness_fix": True},
+            id="phase1_signedness"
+        ),
+        pytest.param(
+            "Phase_1_5_param_signedness",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": True},
+            id="phase1_5_param_signedness"
+        ),
+        pytest.param(
+            "Phase_2_pattern",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": True},
+            id="phase2_pattern"
+        ),
+        pytest.param(
+            "Phase_3_param_type",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": False, "run_phase3_param_type_fix": True},
+            id="phase3_param_type"
+        ),
+        pytest.param(
+            "Phase_4A_mips64_fix",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": False, "run_phase3_param_type_fix": False,
+             "run_phase4_mips64_fix": True},
+            id="phase4a_mips64_fix"
+        ),
+    ])
+    def test_recovery_sat_spurious_triggers_phase4b(
+        self, mock_program_mips64, mock_program_x86, phase_name, phase_mocks
+    ):
+        """★ 各recovery phase後のSAT（偽反例）でPhase 4-Bが呼ばれることを確認"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        mock_analysis_mips64 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined4",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
+        )
+        
+        mock_analysis_x86 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined4",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        counterexample = {
+            "param_1_1": 0x0000000080000001,
+            "param_1_2": 0x80000001,
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            analyzer_call_count = [0]
+            
+            def mock_analyze_side_effect(func_name, timeout):
+                analyzer_call_count[0] += 1
+                if analyzer_call_count[0] % 2 == 1:
+                    return mock_analysis_mips64
+                else:
+                    return mock_analysis_x86
+            
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = mock_analyze_side_effect
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            check_count = [0]
+            
+            def mock_check_side_effect(*args, **kwargs):
+                check_count[0] += 1
+                if check_count[0] == 1:
+                    return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+                elif check_count[0] == 2:
+                    return create_mock_result(
+                        is_equivalent=False,
+                        solver_status=SolverStatus.SAT,
+                        counterexample=counterexample
+                    )
+                else:
+                    raise Exception(f"Unexpected check call #{check_count[0]}")
+            
+            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
+                default_mocks = {
+                    "run_phase1_signedness_fix": False,
+                    "run_phase1_5_param_signedness_fix": False,
+                    "run_phase2_return_type_fix": False,
+                    "run_phase3_param_type_fix": False,
+                    "run_phase4_mips64_fix": False,
+                }
+                default_mocks.update(phase_mocks)
+                
+                patches = []
+                for method_name, return_value in default_mocks.items():
+                    p = patch.object(checker.phase_handler, method_name, return_value=return_value)
+                    patches.append(p)
+                
+                for p in patches:
+                    p.start()
+                
+                try:
+                    with patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
+                        mock_retry.return_value = create_mock_result(
+                            is_equivalent=True, solver_status=SolverStatus.UNSAT
+                        )
+                        
+                        result = checker.check_from_binaries(
+                            mock_program_mips64, mock_program_x86,
+                            "test_func", "test_func",
+                            retry_with_type_fix=True
+                        )
+                        
+                        assert mock_retry.called, \
+                            f"[{phase_name}] _retry_with_abi_constraints should be called for spurious counterexample"
+                        assert result.is_equivalent is True, \
+                            f"[{phase_name}] Should resolve to EQUIVALENT after ABI retry"
+                        
+                        print(f"\n[{phase_name}] Phase 4-B correctly triggered after recovery SAT (spurious)")
+                finally:
+                    for p in patches:
+                        p.stop()
+    
+    @pytest.mark.parametrize("phase_name,phase_mocks", [
+        pytest.param(
+            "Phase_1_signedness",
+            {"run_phase1_signedness_fix": True},
+            id="phase1_signedness"
+        ),
+        pytest.param(
+            "Phase_1_5_param_signedness",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": True},
+            id="phase1_5_param_signedness"
+        ),
+        pytest.param(
+            "Phase_2_pattern",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": True},
+            id="phase2_pattern"
+        ),
+        pytest.param(
+            "Phase_3_param_type",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": False, "run_phase3_param_type_fix": True},
+            id="phase3_param_type"
+        ),
+        pytest.param(
+            "Phase_4A_mips64_fix",
+            {"run_phase1_signedness_fix": False, "run_phase1_5_param_signedness_fix": False,
+             "run_phase2_return_type_fix": False, "run_phase3_param_type_fix": False,
+             "run_phase4_mips64_fix": True},
+            id="phase4a_mips64_fix"
+        ),
+    ])
+    def test_recovery_sat_genuine_stops_not_equivalent(
+        self, mock_program_mips64, mock_program_x86, phase_name, phase_mocks
+    ):
+        """★ 各recovery phase後のSAT（真性反例）でNOT EQUIVALENTで停止することを確認"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        mock_analysis_mips64 = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
+        )
+        
+        mock_analysis_x86 = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        counterexample = {
+            "param_1_1": 0x0000000012345678,
+            "param_1_2": 0x12345678,
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            analyzer_call_count = [0]
+            
+            def mock_analyze_side_effect(func_name, timeout):
+                analyzer_call_count[0] += 1
+                if analyzer_call_count[0] % 2 == 1:
+                    return mock_analysis_mips64
+                else:
+                    return mock_analysis_x86
+            
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = mock_analyze_side_effect
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            check_count = [0]
+            
+            def mock_check_side_effect(*args, **kwargs):
+                check_count[0] += 1
+                if check_count[0] == 1:
+                    return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+                elif check_count[0] == 2:
+                    return create_mock_result(
+                        is_equivalent=False,
+                        solver_status=SolverStatus.SAT,
+                        counterexample=counterexample
+                    )
+                else:
+                    raise Exception(f"Unexpected check call #{check_count[0]}")
+            
+            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
+                default_mocks = {
+                    "run_phase1_signedness_fix": False,
+                    "run_phase1_5_param_signedness_fix": False,
+                    "run_phase2_return_type_fix": False,
+                    "run_phase3_param_type_fix": False,
+                    "run_phase4_mips64_fix": False,
+                }
+                default_mocks.update(phase_mocks)
+                
+                patches = []
+                for method_name, return_value in default_mocks.items():
+                    p = patch.object(checker.phase_handler, method_name, return_value=return_value)
+                    patches.append(p)
+                
+                for p in patches:
+                    p.start()
+                
+                try:
+                    with patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
+                        result = checker.check_from_binaries(
+                            mock_program_mips64, mock_program_x86,
+                            "test_func", "test_func",
+                            retry_with_type_fix=True
+                        )
+                        
+                        assert not mock_retry.called, \
+                            f"[{phase_name}] _retry_with_abi_constraints should NOT be called for genuine counterexample"
+                        assert result.is_equivalent is False, \
+                            f"[{phase_name}] Should stop as NOT EQUIVALENT for genuine counterexample"
+                        
+                        print(f"\n[{phase_name}] Correctly stopped as NOT EQUIVALENT (genuine counterexample)")
+                finally:
+                    for p in patches:
+                        p.stop()
+
+
+class TestRetryDisabledEarlyExit:
+    """★ retry_with_type_fix=False の早期終了テスト（単発）"""
+    
+    def test_retry_disabled_exits_at_phase0_unknown(self, mock_program_mips64, mock_program_x86):
+        """retry_with_type_fix=False では Phase 0 UNKNOWN で即終了し、recovery に入らない"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        mock_analysis = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
+        )
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.return_value = mock_analysis
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            with patch.object(checker, 'check') as mock_check:
+                mock_check.return_value = create_mock_result(
+                    is_equivalent=None, solver_status=SolverStatus.UNKNOWN
+                )
+                
+                # recovery phases がモニタリングされていることを確認
+                with patch.object(checker.phase_handler, 'run_phase1_signedness_fix') as mock_p1, \
+                     patch.object(checker.phase_handler, 'run_phase1_5_param_signedness_fix') as mock_p1_5, \
+                     patch.object(checker.phase_handler, 'run_phase2_return_type_fix') as mock_p2, \
+                     patch.object(checker.phase_handler, 'run_phase3_param_type_fix') as mock_p3, \
+                     patch.object(checker.phase_handler, 'run_phase4_mips64_fix') as mock_p4a, \
+                     patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_p4b:
+                    
+                    result = checker.check_from_binaries(
+                        mock_program_mips64, mock_program_x86,
+                        "test_func", "test_func",
+                        retry_with_type_fix=False
+                    )
+                    
+                    # Phase 0 UNKNOWN でそのまま終了
+                    assert result.is_equivalent is None
+                    
+                    # recovery phases は一切呼ばれない
+                    assert not mock_p1.called, "Phase 1 should NOT be called"
+                    assert not mock_p1_5.called, "Phase 1.5 should NOT be called"
+                    assert not mock_p2.called, "Phase 2 should NOT be called"
+                    assert not mock_p3.called, "Phase 3 should NOT be called"
+                    assert not mock_p4a.called, "Phase 4-A should NOT be called"
+                    assert not mock_p4b.called, "Phase 4-B should NOT be called"
+                    
+                    print("\n[RETRY DISABLED] Correctly exited at Phase 0 UNKNOWN without entering recovery")
+    
+    def test_retry_disabled_exits_at_phase0_sat(self, mock_program_mips64, mock_program_x86):
+        """retry_with_type_fix=False では Phase 0 SAT で即終了し、Phase 4-B も実行しない"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+        
+        checker = EquivalenceChecker(debug=True)
+        
+        mock_analysis = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
+        )
+        
+        counterexample = {
+            "param_1_1": 0x0000000080000001,
+            "param_1_2": 0x80000001,
+        }
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.return_value = mock_analysis
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            with patch.object(checker, 'check') as mock_check:
+                mock_check.return_value = create_mock_result(
+                    is_equivalent=False,
+                    solver_status=SolverStatus.SAT,
+                    counterexample=counterexample
+                )
+                
+                with patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_p4b, \
+                     patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
+                    
+                    result = checker.check_from_binaries(
+                        mock_program_mips64, mock_program_x86,
+                        "test_func", "test_func",
+                        retry_with_type_fix=False
+                    )
+                    
+                    # Phase 0 SAT で終了
+                    assert result.is_equivalent is False
+                    
+                    # Phase 4-B も ABI retry も呼ばれない
+                    assert not mock_p4b.called, "Phase 4-B gate should NOT be called"
+                    assert not mock_retry.called, "_retry_with_abi_constraints should NOT be called"
+                    
+                    print("\n[RETRY DISABLED] Correctly exited at Phase 0 SAT without Phase 4-B")
