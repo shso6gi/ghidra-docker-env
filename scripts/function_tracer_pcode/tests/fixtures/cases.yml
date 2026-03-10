@@ -18,8 +18,8 @@ defaults:
 # - expected.required_stage_path: ordered stage checkpoints expected to run
 # - expected.phase4b_gate_allowed: true|false (P4B gate condition check)
 #
-# Stage names (pairwise):
-#   S1_CONDS_ONLY, S2_VALUE_INEQ, S3_NORMALIZE
+# Stage names (outer-level):
+#   S_PAIRWISE, S_MONOLITHIC_FALLBACK
 #
 # Phase names (pipeline-level):
 #   P0_BASE, P1_SIGNEDNESS, P2_PATTERN_INT, P4B_MIPS64_SPURIOUS
@@ -42,8 +42,7 @@ test_cases:
       stop_after_phase0: true
       allowed_recovery_phases: []
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
+        - "S_PAIRWISE"
 
   - id: "pairwise_not_equiv_first_sat"
     description: "First SAT pair yields a real counterexample; stop as NOT_EQUIVALENT."
@@ -62,8 +61,7 @@ test_cases:
       stop_after_phase0: true
       allowed_recovery_phases: []
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
+        - "S_PAIRWISE"
 
   - id: "pairwise_unknown_no_sat"
     description: "No SAT pair exists but at least one pair is UNKNOWN/TIMEOUT."
@@ -84,9 +82,8 @@ test_cases:
         - "P1_SIGNEDNESS"
         - "P2_PATTERN_INT"
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
+        - "S_MONOLITHIC_FALLBACK"
 
   - id: "structural_match_requires_smt_confirmation"
     description: "Structural match is only a hint; SMT confirmation remains mandatory."
@@ -102,9 +99,7 @@ test_cases:
       stop_after_phase0: true
       allowed_recovery_phases: []
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
 
   - id: "sat_does_not_enter_type_fix_by_default"
     description: "SAT should not enter generic type-fix recovery phases."
@@ -118,8 +113,7 @@ test_cases:
       allowed_recovery_phases: []
       allowed_special_phases: []
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
+        - "S_PAIRWISE"
 
   - id: "sat_mips64_spurious_allows_phase4b_only"
     description: "SAT with MIPS64 spurious pattern may enter only P4B retry path."
@@ -142,8 +136,7 @@ test_cases:
         - "P4B_MIPS64_SPURIOUS"
       phase4b_gate_allowed: true
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
+        - "S_PAIRWISE"
 
   - id: "unknown_allows_signedness_recovery"
     description: "UNKNOWN may enter signedness recovery first."
@@ -158,9 +151,8 @@ test_cases:
         - "P1_SIGNEDNESS"
         - "P2_PATTERN_INT"
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
+        - "S_MONOLITHIC_FALLBACK"
 
   - id: "timeout_allows_signedness_recovery"
     description: "TIMEOUT follows the same recovery gate as UNKNOWN."
@@ -175,9 +167,8 @@ test_cases:
         - "P1_SIGNEDNESS"
         - "P2_PATTERN_INT"
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
+        - "S_MONOLITHIC_FALLBACK"
 
   - id: "phase_sequence_unknown_to_signedness_equiv"
     description: "Pipeline recovers from UNKNOWN at phase0, then reaches EQUIVALENT in P1."
@@ -194,9 +185,8 @@ test_cases:
         - "P0_BASE"
         - "P1_SIGNEDNESS"
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
+        - "S_MONOLITHIC_FALLBACK"
 
   - id: "phase_sequence_unknown_to_pattern_int_equiv"
     description: "P1 does not resolve; P2 pattern-int repair resolves to EQUIVALENT."
@@ -215,6 +205,5 @@ test_cases:
         - "P1_SIGNEDNESS"
         - "P2_PATTERN_INT"
       required_stage_path:
-        - "S1_CONDS_ONLY"
-        - "S2_VALUE_INEQ"
-        - "S3_NORMALIZE"
+        - "S_PAIRWISE"
+        - "S_MONOLITHIC_FALLBACK"

@@ -149,17 +149,227 @@ class TestYAMLGoldenCases:
         for case in load_golden_cases()
         if 'required_stage_path' in case['expected']
     ], indirect=False)
-    def test_required_stage_path(self, case):
-        """★ Stage経路の仕様を文書化"""
+    def test_required_stage_path(self, case, solver_status_map, is_equiv_map):
+        """★ [P1/P2修正] Stage経路の実行時検証（本物のParallelResultを使用）"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+        from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+        from unittest.mock import Mock, patch
+        
         expected = case['expected']
-        stage_path = expected['required_stage_path']
+        required_stage_path = expected['required_stage_path']
         
         # Stage経路が定義されているケースでは、最低限のStageを通過する
-        assert len(stage_path) >= 1, \
+        assert len(required_stage_path) >= 1, \
             f"Case {case['id']}: required_stage_path must have at least one stage"
         
-        # S1_CONDS_ONLY は必ず最初
-        assert stage_path[0] == 'S1_CONDS_ONLY', \
-            f"Case {case['id']}: first stage must be S1_CONDS_ONLY"
+        # ★ [P2追加] 実際に checker を実行して stage_path を検証
+        checker = EquivalenceChecker(debug=True)
         
-        print(f"\n[STAGE PATH] Case {case['id']}: {' -> '.join(stage_path)}")
+        mock_analysis = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        phase0 = case['phase0']
+        status_str = phase0.get('status', 'UNKNOWN')
+        is_equiv = is_equiv_map[status_str]
+        status = solver_status_map[status_str]
+        
+        # ★ [P1修正] 本物の ParallelResult/SolverResult を作成する helper
+        def create_strategy_result(is_equiv, status, counterexample=None):
+            return StrategyResult(
+                is_equivalent=is_equiv,
+                solver_results=ParallelResult(results=[
+                    SolverResult(
+                        solver_name="test_solver",
+                        status=status,
+                        elapsed_time=0.1,
+                        model=counterexample
+                    )
+                ]),
+                smt_formula=None,
+                counterexample_raw=counterexample,
+                return_var1="return_1",
+                return_var2="return_2",
+                constrained_fragments=[],
+                total_pairs=4 if is_equiv is not None else 0,
+                unsat_pairs=4 if is_equiv is True else 0,
+                sat_pairs=1 if is_equiv is False else 0,
+                unknown_pairs=1 if is_equiv is None else 0,
+                error_pairs=0,
+                sat_pair_info={"i": 0, "j": 0} if is_equiv is False else None
+            )
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.return_value = mock_analysis
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            with patch.object(checker.pairwise_strategy, 'check') as mock_pairwise:
+                # ★ [P2追加] TIMEOUT 分岐を追加
+                result = None  # 初期化
+                
+                if status_str == "UNSAT":
+                    # S_PAIRWISE で UNSAT → 即終了
+                    mock_pairwise.return_value = create_strategy_result(
+                        is_equiv=True, status=SolverStatus.UNSAT
+                    )
+                    
+                    result = checker.check_from_binaries(
+                        MockProgram(name="binary1", architecture="x86:LE:64:default"),
+                        MockProgram(name="binary2", architecture="x86:LE:64:default"),
+                        "test_func",
+                        "test_func",
+                        retry_with_type_fix=False
+                    )
+                    
+                    # expected stage_path と比較
+                    assert result.stage_path == required_stage_path, \
+                        f"Case {case['id']}: expected stage_path={required_stage_path}, got {result.stage_path}"
+                
+                elif status_str == "SAT":
+                    # S_PAIRWISE で SAT → 即終了
+                    counterexample = phase0.get('counterexample', {"param_1_1": 1, "param_1_2": 2})
+                    mock_pairwise.return_value = create_strategy_result(
+                        is_equiv=False,
+                        status=SolverStatus.SAT,
+                        counterexample=counterexample
+                    )
+                    
+                    result = checker.check_from_binaries(
+                        MockProgram(name="binary1", architecture="x86:LE:64:default"),
+                        MockProgram(name="binary2", architecture="x86:LE:64:default"),
+                        "test_func",
+                        "test_func",
+                        retry_with_type_fix=False
+                    )
+                    
+                    # expected stage_path と比較
+                    assert result.stage_path == required_stage_path, \
+                        f"Case {case['id']}: expected stage_path={required_stage_path}, got {result.stage_path}"
+                
+                elif status_str in ("UNKNOWN", "TIMEOUT"):
+                    # S_PAIRWISE で UNKNOWN/TIMEOUT → S_MONOLITHIC_FALLBACK へ
+                    mock_pairwise.return_value = create_strategy_result(
+                        is_equiv=None, status=status
+                    )
+                    
+                    # monolithic も UNKNOWN/TIMEOUT を返す
+                    with patch.object(checker.monolithic_strategy, 'check') as mock_monolithic:
+                        mock_monolithic.return_value = create_strategy_result(
+                            is_equiv=None, status=status
+                        )
+                        
+                        result = checker.check_from_binaries(
+                            MockProgram(name="binary1", architecture="x86:LE:64:default"),
+                            MockProgram(name="binary2", architecture="x86:LE:64:default"),
+                            "test_func",
+                            "test_func",
+                            retry_with_type_fix=False
+                        )
+                        
+                        # expected stage_path と比較
+                        assert result.stage_path == required_stage_path, \
+                            f"Case {case['id']}: expected stage_path={required_stage_path}, got {result.stage_path}"
+                
+                else:
+                    pytest.fail(f"Case {case['id']}: Unknown status '{status_str}'")
+                
+                # ★ result が None でないことを確認
+                assert result is not None, f"Case {case['id']}: result should not be None"
+                
+                print(f"\n[STAGE PATH VERIFIED] Case {case['id']}: {result.stage_path}")
+
+
+class TestMonolithicStrategyBackwardCompatibility:
+    """strategy="monolithic" の後方互換性テスト"""
+    
+    def test_monolithic_strategy_skips_pairwise(self):
+        """★ [P2] strategy="monolithic" なら pairwise が呼ばれない"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+        from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+        from unittest.mock import Mock, patch
+        
+        # monolithic strategy で初期化
+        checker = EquivalenceChecker(strategy="monolithic", debug=True)
+        
+        # stage_plan が monolithic のみであることを確認
+        assert len(checker.stage_plan) == 1
+        assert checker.stage_plan[0].stage_id.value == "S_MONOLITHIC_FALLBACK"
+        assert checker.stage_plan[0].strategy == "monolithic"
+        
+        mock_analysis = create_mock_analysis(
+            function_name="test_func",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}]
+        )
+        
+        with patch('scripts.function_tracer_pcode.analysis.ReturnAnalyzer') as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.return_value = mock_analysis
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+            
+            # monolithic strategy の check をモック化
+            with patch.object(checker.monolithic_strategy, 'check') as mock_monolithic:
+                monolithic_result = StrategyResult(
+                    is_equivalent=True,
+                    solver_results=ParallelResult(results=[
+                        SolverResult(
+                            solver_name="monolithic",
+                            status=SolverStatus.UNSAT,
+                            elapsed_time=0.1
+                        )
+                    ]),
+                    smt_formula=None,
+                    counterexample_raw=None,
+                    return_var1="return_1",
+                    return_var2="return_2",
+                    constrained_fragments=[]
+                )
+                mock_monolithic.return_value = monolithic_result
+                
+                # pairwise strategy をモニタリング
+                with patch.object(checker.pairwise_strategy, 'check') as mock_pairwise:
+                    result = checker.check_from_binaries(
+                        MockProgram(name="binary1", architecture="x86:LE:64:default"),
+                        MockProgram(name="binary2", architecture="x86:LE:64:default"),
+                        "test_func",
+                        "test_func",
+                        retry_with_type_fix=False
+                    )
+                    
+                    # pairwise が呼ばれていないことを確認
+                    assert not mock_pairwise.called, \
+                        "Pairwise strategy should NOT be called when strategy='monolithic'"
+                    
+                    # monolithic が呼ばれたことを確認
+                    assert mock_monolithic.called, \
+                        "Monolithic strategy should be called when strategy='monolithic'"
+                    
+                    # stage_path が S_MONOLITHIC_FALLBACK のみであることを確認
+                    assert result.stage_path == ['S_MONOLITHIC_FALLBACK'], \
+                        f"Expected stage_path=['S_MONOLITHIC_FALLBACK'], got {result.stage_path}"
+                    
+                    # 結果が EQUIVALENT であることを確認
+                    assert result.is_equivalent is True
+                    
+                    print("\n[MONOLITHIC STRATEGY] Pairwise was correctly skipped, only monolithic was called")
+    
+    def test_pairwise_strategy_uses_two_stages(self):
+        """★ [P2] strategy="pairwise" なら 2-stage plan を使う"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        
+        # pairwise strategy で初期化
+        checker = EquivalenceChecker(strategy="pairwise", debug=True)
+        
+        # stage_plan が 2 つの stage を含むことを確認
+        assert len(checker.stage_plan) == 2
+        assert checker.stage_plan[0].stage_id.value == "S_PAIRWISE"
+        assert checker.stage_plan[0].strategy == "pairwise"
+        assert checker.stage_plan[1].stage_id.value == "S_MONOLITHIC_FALLBACK"
+        assert checker.stage_plan[1].strategy == "monolithic"
+        
+        print("\n[PAIRWISE STRATEGY] 2-stage plan (pairwise -> monolithic fallback) is configured")

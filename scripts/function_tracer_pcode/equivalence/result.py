@@ -77,6 +77,7 @@ class EquivalenceResult:
     mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
     pairwise_stats: Optional[Dict[str, int]] = None
     sat_pair_info: Optional[Dict[str, Any]] = None
+    stage_path: List[str] = field(default_factory=list)
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -120,6 +121,7 @@ class EquivalenceResult:
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
             "pairwise_stats": self.pairwise_stats,
             "sat_pair_info": self.sat_pair_info,
+            "stage_path": self.stage_path,
         }
     
     def to_string(self, verbose: bool = False) -> str:

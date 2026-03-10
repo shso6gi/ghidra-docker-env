@@ -474,7 +474,7 @@ class TestPhaseRetryGates:
                         print("\n[SPURIOUS DETECTION] _retry_with_abi_constraints was correctly called and resolved to EQUIVALENT")
 
     def test_sat_after_recovery_skips_phase4b_when_retry_disabled(self, mock_program_mips64, mock_program_x86):
-        """★ [新規] retry_with_type_fix=False では recovery 後の SAT でも Phase 4-B をスキップ"""
+        """★ [修正] retry_with_type_fix=False では Phase 0 内の stage fallback は許可、recovery 後の SAT でも Phase 4-B をスキップ"""
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
@@ -498,23 +498,61 @@ class TestPhaseRetryGates:
             mock_analyzer.dispose = Mock()
             mock_analyzer_class.return_value = mock_analyzer
             
-            call_count = [0]
-            
-            def mock_check_side_effect(*args, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    # Phase 0: UNKNOWN
-                    return create_mock_result(
-                        is_equivalent=None,
-                        solver_status=SolverStatus.UNKNOWN
-                    )
-                else:
-                    # 通常は Phase 0 終了後 → retry_with_type_fix=False なのでここに来ない
-                    raise Exception("Unexpected check call - retry should be disabled")
-            
-            with patch.object(checker, 'check', side_effect=mock_check_side_effect):
-                # ★ retry_with_type_fix=False なので Phase 1 以降は実行されない
-                with patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_phase4b:
+            # ★ [修正] pairwise で UNKNOWN → monolithic fallback へ進む → monolithic も UNKNOWN
+            with patch.object(checker.pairwise_strategy, 'check') as mock_pairwise, \
+                patch.object(checker.monolithic_strategy, 'check') as mock_monolithic:
+                
+                # pairwise: UNKNOWN
+                from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+                from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+                
+                pairwise_result = StrategyResult(
+                    is_equivalent=None,
+                    solver_results=ParallelResult(results=[
+                        SolverResult(
+                            solver_name="pairwise_aggregate",
+                            status=SolverStatus.UNKNOWN,
+                            elapsed_time=0.1
+                        )
+                    ]),
+                    smt_formula=None,
+                    counterexample_raw=None,
+                    return_var1="return_1",
+                    return_var2="return_2",
+                    constrained_fragments=[],
+                    total_pairs=4,
+                    unsat_pairs=2,
+                    sat_pairs=0,
+                    unknown_pairs=2
+                )
+                mock_pairwise.return_value = pairwise_result
+                
+                # monolithic: UNKNOWN
+                monolithic_result = StrategyResult(
+                    is_equivalent=None,
+                    solver_results=ParallelResult(results=[
+                        SolverResult(
+                            solver_name="monolithic",
+                            status=SolverStatus.UNKNOWN,
+                            elapsed_time=0.1
+                        )
+                    ]),
+                    smt_formula=None,
+                    counterexample_raw=None,
+                    return_var1="return_1",
+                    return_var2="return_2",
+                    constrained_fragments=[]
+                )
+                mock_monolithic.return_value = monolithic_result
+                
+                # ★ recovery phases をモニタリング
+                with patch.object(checker.phase_handler, 'run_phase1_signedness_fix') as mock_p1, \
+                    patch.object(checker.phase_handler, 'run_phase1_5_param_signedness_fix') as mock_p1_5, \
+                    patch.object(checker.phase_handler, 'run_phase2_return_type_fix') as mock_p2, \
+                    patch.object(checker.phase_handler, 'run_phase3_param_type_fix') as mock_p3, \
+                    patch.object(checker.phase_handler, 'run_phase4_mips64_fix') as mock_p4a, \
+                    patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_p4b:
+                    
                     result = checker.check_from_binaries(
                         mock_program_mips64,
                         mock_program_x86,
@@ -526,11 +564,19 @@ class TestPhaseRetryGates:
                     # Phase 0 の結果（UNKNOWN）がそのまま返る
                     assert result.is_equivalent is None
                     
-                    # Phase 4-B ゲートが呼ばれていないことを確認
-                    assert not mock_phase4b.called, \
-                        "Phase 4-B should NOT be called when retry_with_type_fix=False"
+                    # ★ [修正] recovery phase メソッドが呼ばれていないことを確認
+                    assert not mock_p1.called, "Phase 1 should NOT be called"
+                    assert not mock_p1_5.called, "Phase 1.5 should NOT be called"
+                    assert not mock_p2.called, "Phase 2 should NOT be called"
+                    assert not mock_p3.called, "Phase 3 should NOT be called"
+                    assert not mock_p4a.called, "Phase 4-A should NOT be called"
+                    assert not mock_p4b.called, "Phase 4-B should NOT be called"
                     
-                    print("\n[RETRY DISABLED] Phase 4-B was correctly skipped after Phase 0 UNKNOWN")
+                    # ★ [追加] Phase 0 内の stage fallback は許可されている
+                    assert mock_pairwise.called, "S_PAIRWISE should be called"
+                    assert mock_monolithic.called, "S_MONOLITHIC_FALLBACK should be called (Phase 0 stage fallback)"
+                    
+                    print("\n[RETRY DISABLED] Phase 0 stage fallback is allowed, but recovery phases are blocked")
 
 
     def test_sat_after_recovery_genuine_counterexample_stops(self, mock_program_mips64, mock_program_x86):

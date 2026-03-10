@@ -1,19 +1,49 @@
 # -*- coding: utf-8 -*-
-"""等価性判定メインロジック（リファクタリング版）"""
+"""等価性判定メインロジック（Stage/Phase ループ骨格版）"""
 
 from typing import Optional, Dict, Any, List, Tuple
+from enum import Enum
+from dataclasses import dataclass
 import time
 
 from ..model import FunctionReturnAnalysis, FunctionSignature
-from ..smt import ParallelSolverRunner, ParallelResult
+from ..smt import ParallelSolverRunner, ParallelResult, SolverResult, SolverStatus
 from .formula import FormulaBuilder
 from .counterexample import CounterexampleFormatter
 from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
-from .phases.handler import PhaseHandler, PhaseContext
+from .phases.handler import (
+    PhaseHandler, PhaseContext, PhaseID, PhaseSpec, DEFAULT_PHASE_PLAN
+)
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies import create_strategy
 from .strategies.pairwise import PairwiseStrategy
+from .strategies.monolithic import MonolithicStrategy
+
+
+# ============================================================================
+# Stage 定義（新フロー骨格）
+# ============================================================================
+
+class StageID(Enum):
+    """Stage識別子"""
+    S_PAIRWISE = "S_PAIRWISE"
+    S_MONOLITHIC_FALLBACK = "S_MONOLITHIC_FALLBACK"
+
+
+@dataclass
+class StageSpec:
+    """Stage仕様"""
+    stage_id: StageID
+    description: str
+    strategy: str  # "pairwise" or "monolithic"
+
+
+# デフォルトの Stage plan
+DEFAULT_STAGE_PLAN: List[StageSpec] = [
+    StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+    StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
+]
 
 
 class EquivalenceChecker:
@@ -38,7 +68,7 @@ class EquivalenceChecker:
             type_fixer_config: 型修正の設定
             enable_rewrite: 式のリライトを有効にする
             rewrite_direction: リライト方向 ("to_modulo" or "to_expansion")
-            strategy: 判定戦略 ("monolithic" or "pairwise")
+            strategy: 判定戦略 ("pairwise" or "monolithic")
         """
         self.timeout = timeout
         self.debug = debug
@@ -49,13 +79,35 @@ class EquivalenceChecker:
         self.formula_builder = FormulaBuilder(debug=debug)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
         self.phase_handler = PhaseHandler(self.type_fixer_config, debug=debug)
-        self.check_strategy = create_strategy(
-            strategy, self.formula_builder, self.solver_runner, debug=debug
+        
+        # 各 strategy の準備
+        self.pairwise_strategy = PairwiseStrategy(
+            self.formula_builder, self.solver_runner, debug=debug
         )
-        if strategy == "pairwise" and isinstance(self.check_strategy, PairwiseStrategy):
-            self.check_strategy.per_query_timeout = pairwise_timeout
-            self.check_strategy.per_query_timeout_hard = pairwise_timeout_hard
-            self.check_strategy.save_unknown_queries = pairwise_save_unknown
+        self.pairwise_strategy.per_query_timeout = pairwise_timeout
+        self.pairwise_strategy.per_query_timeout_hard = pairwise_timeout_hard
+        self.pairwise_strategy.save_unknown_queries = pairwise_save_unknown
+        
+        self.monolithic_strategy = MonolithicStrategy(
+            self.formula_builder, self.solver_runner, debug=debug
+        )
+        
+        # ★ [P2修正] strategy 引数に応じて stage_plan を切り替える
+        if strategy == "pairwise":
+            # pairwise -> monolithic fallback の 2-stage plan
+            self.stage_plan = [
+                StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+                StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
+            ]
+            self.check_strategy = self.pairwise_strategy
+        elif strategy == "monolithic":
+            # monolithic のみの 1-stage plan（後方互換性）
+            self.stage_plan = [
+                StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic strategy", strategy="monolithic"),
+            ]
+            self.check_strategy = self.monolithic_strategy
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
 
     def _debug_print(self, msg: str):
         if self.debug:
@@ -170,18 +222,19 @@ class EquivalenceChecker:
         """
         2つのバイナリから関数を解析して等価性を判定
         
-        型修正リトライが有効な場合のフロー:
-        1. Phase 0: 型修正なしで等価性判定
-           - UNSAT → 即終了
-           - SAT → Phase 4-B (MIPS64偽反例retry) のみ試行
-           - UNKNOWN/TIMEOUT → 通常recovery phases へ進む
-        2. Phase 1: 符号性推定に基づく型修正
-        3. Phase 1.5: 引数の符号性に基づく型修正
-        4. Phase 2: パターンマッチに基づく型修正
-        5. Phase 3: 引数の型も修正
-        6. Phase 4-A: MIPS64 ABI param fix (conservative)
-        
-        各recovery phase後もSAT時にPhase 4-Bを試行
+        新フロー（Stage/Phase ループ骨格）:
+        1. Phase plan を定義（デフォルト: P0_BASE -> P1_SIGNEDNESS -> P2_PATTERN_INT）
+        2. 各 Phase ごとに：
+           a. Phase を実行（型修正など、P0 は何もしない）
+           b. 必要に応じて再解析
+           c. **Stage plan を実行**（等価性判定）
+              - S_PAIRWISE: pairwise strategy
+              - S_MONOLITHIC_FALLBACK: UNKNOWN 時のみ monolithic fallback
+           d. 結果に応じた遷移判定：
+              - UNSAT → 即終了
+              - SAT → Phase 4-B（MIPS64 spurious）のみ許可、それ以外は即終了
+              - UNKNOWN/TIMEOUT → 次 Phase へ進む
+        3. Phase plan 完了後、Phase 4-A（MIPS64 conservative fix）を追加試行
         """
         start_time = time.time()
         binary1_name = program1.getName() if hasattr(program1, 'getName') else "binary1"
@@ -204,222 +257,196 @@ class EquivalenceChecker:
             original_signature2=None
         )
         
-        # ============================================
-        # Phase 0: 型修正なしで等価性判定
-        # ============================================
-        self._debug_print("=" * 60)
-        self._debug_print("Phase 0: Initial check without type fix")
-        self._debug_print("=" * 60)
-        type_fix_result.retry_phase = "initial"
-        
-        analysis1, analysis2, result = self._analyze_and_check_with_analysis(
-            ctx, retry_count=0
-        )
-        ctx.analysis1 = analysis1
-        ctx.analysis2 = analysis2
-        ctx.original_signature1 = result.function1_signature
-        ctx.original_signature2 = result.function2_signature
+        # TypeFixer を準備（Phase 1 以降で使用）
+        type_fixer1 = None
+        type_fixer2 = None
+        if retry_with_type_fix:
+            type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
+            type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
         
         # ============================================
-        # Phase 0 結果判定 & 分岐
+        # Phase Plan の定義
         # ============================================
-        
-        # UNSAT → 即終了
-        if result.is_equivalent is True:
-            self._debug_print("Phase 0: EQUIVALENT - No retry needed")
-            result.total_time = time.time() - start_time
-            return result
-        
-        # critical error → 即終了
-        if result.has_critical_error():
-            self._debug_print(f"Phase 0: Critical error - {result.error_message}")
-            result.total_time = time.time() - start_time
-            return result
+        phase_plan = DEFAULT_PHASE_PLAN.copy()
         
         # ============================================
-        # SAT → Phase 4-B (MIPS64偽反例retry) のみ試行
+        # Phase Loop
         # ============================================
-        if result.is_equivalent is False:
-            self._debug_print("Phase 0: SAT - Checking for MIPS64 spurious counterexample only")
+        result = None
+        retry_count = 0
+        first_phase = True
+        
+        for phase_idx, phase_spec in enumerate(phase_plan):
+            phase_id = phase_spec.phase_id
             
-            # ★ retry_with_type_fix をチェック
-            if retry_with_type_fix:
-                abi_constraints = self.phase_handler.run_phase4_mips64_retry(result, ctx)
+            self._debug_print("=" * 60)
+            self._debug_print(f"Phase {phase_id.value}: {phase_spec.description}")
+            self._debug_print("=" * 60)
+            
+            # ============================================
+            # Phase 実行（型修正など）
+            # ============================================
+            if first_phase:
+                # P0: 初回は解析から実行
+                first_phase = False
+                type_fix_result.retry_phase = "initial"
                 
-                if abi_constraints:
-                    self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
-                    ctx.type_fix_result.retry_phase = "mips64_abi_retry"
-                    result = self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=1)
-                    
-                    if result.is_equivalent is True:
-                        self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry")
-                    elif result.is_equivalent is False:
-                        self._debug_print("Phase 4-B: Still NOT EQUIVALENT after MIPS64 ABI retry (genuine counterexample)")
-                else:
-                    self._debug_print("Phase 4-B: No spurious counterexample detected (genuine NOT EQUIVALENT)")
+                analysis1, analysis2, result = self._analyze_and_check_with_analysis(
+                    ctx, retry_count=retry_count
+                )
+                ctx.analysis1 = analysis1
+                ctx.analysis2 = analysis2
+                ctx.original_signature1 = result.function1_signature
+                ctx.original_signature2 = result.function2_signature
+            
             else:
-                self._debug_print("Phase 4-B: Skipped (retry_with_type_fix=False)")
+                # P1, P2, ... は型修正を試行
+                if not retry_with_type_fix:
+                    self._debug_print(f"Stopping: retry_with_type_fix=False")
+                    break
+                
+                if type_fixer1 is None or type_fixer2 is None:
+                    self._debug_print(f"Stopping: type_fixer not available")
+                    break
+                
+                # Phase 実行
+                phase_result = self.phase_handler.execute_phase(
+                    phase_spec, ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
+                )
+                
+                if not phase_result.applied:
+                    self._debug_print(f"Phase {phase_id.value}: No changes applied, skipping recheck")
+                    continue  # 次 Phase へ
+                
+                # ★ [P1修正] 型修正が適用された → 再解析 & 再チェック & ctx 更新
+                retry_count += 1
+                type_fix_result.retry_phase = phase_result.retry_name
+                
+                analysis1, analysis2, result = self._analyze_and_check_with_analysis(
+                    ctx, retry_count=retry_count
+                )
+                
+                # ★ [P1修正] 再解析結果を ctx に戻す
+                ctx.analysis1 = analysis1
+                ctx.analysis2 = analysis2
             
-            result.total_time = time.time() - start_time
-            return result
-        
-        # ============================================
-        # UNKNOWN/TIMEOUT → 通常recovery phases へ進む
-        # ============================================
-        should_retry = self.phase_handler.should_retry(result)
-        retry_reason = self.phase_handler.get_retry_reason(result)
-        self._debug_print(f"Phase 0 result: {retry_reason}")
-        
-        if not should_retry or not retry_with_type_fix:
-            result.total_time = time.time() - start_time
-            return result
-        
-        # TypeFixerを準備
-        type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
-        type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
-        
-        # ============================================
-        # Phase 1: 符号性に基づく型修正（戻り値）
-        # ============================================
-        if self.phase_handler.run_phase1_signedness_fix(ctx, type_fixer1, type_fixer2):
-            type_fix_result.retry_phase = "signedness_fix"
-            result = self._run_check_after_phase(ctx, retry_count=1)
+            # ============================================
+            # 結果に応じた遷移判定
+            # ============================================
             
+            # UNSAT → 即終了
             if result.is_equivalent is True:
-                self._debug_print("Phase 1: EQUIVALENT after signedness fix")
+                self._debug_print(f"Phase {phase_id.value}: EQUIVALENT - stopping")
                 result.total_time = time.time() - start_time
                 return result
             
-            # ★ SAT 時に Phase 4-B を試行
-            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=2, retry_with_type_fix=retry_with_type_fix)
-            if phase4b_result is not None:
-                result = phase4b_result
+            # critical error → 即終了
+            if result.has_critical_error():
+                self._debug_print(f"Phase {phase_id.value}: Critical error - {result.error_message}")
+                result.total_time = time.time() - start_time
+                return result
+            
+            # ============================================
+            # SAT → Phase 4-B（MIPS64 偽反例対策）のみ試行
+            # ============================================
+            if result.is_equivalent is False:
+                self._debug_print(f"Phase {phase_id.value}: SAT - checking for Phase 4-B eligibility")
+                
+                if retry_with_type_fix:
+                    phase4b_result = self._try_phase4b_if_applicable(
+                        result, ctx, retry_count=retry_count + 1, retry_with_type_fix=True
+                    )
+                    
+                    if phase4b_result is not None:
+                        result = phase4b_result
+                        if result.is_equivalent is True:
+                            self._debug_print(
+                                f"Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from {phase_id.value})"
+                            )
+                            result.total_time = time.time() - start_time
+                            return result
+                else:
+                    self._debug_print(f"Phase 4-B: Skipped (retry_with_type_fix=False)")
+                
+                # SAT で終了
+                self._debug_print(f"Phase {phase_id.value}: NOT EQUIVALENT - stopping")
+                result.total_time = time.time() - start_time
+                return result
+            
+            # ============================================
+            # UNKNOWN/TIMEOUT → 次 Phase へ進むか判定
+            # ============================================
+            should_retry = self.phase_handler.should_retry(result)
+            retry_reason = self.phase_handler.get_retry_reason(result)
+            self._debug_print(f"Phase {phase_id.value} result: {retry_reason}")
+            
+            if not should_retry:
+                result.total_time = time.time() - start_time
+                return result
+            
+            self._debug_print(f"Proceeding to next phase ({retry_reason})")
+        
+        # ============================================
+        # Phase Plan 完了後、Phase 4-A を追加試行
+        # ============================================
+        if retry_with_type_fix and type_fixer1 and type_fixer2 and result is not None:
+            phase4a_spec = PhaseSpec(PhaseID.P4A_MIPS64_ABI, "MIPS64 ABI param fix (conservative)")
+            
+            self._debug_print("=" * 60)
+            self._debug_print(f"Phase {PhaseID.P4A_MIPS64_ABI.value}: {phase4a_spec.description}")
+            self._debug_print("=" * 60)
+            
+            phase_result = self.phase_handler.execute_phase(
+                phase4a_spec, ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
+            )
+            
+            if phase_result.applied:
+                retry_count += 1
+                type_fix_result.retry_phase = phase_result.retry_name
+                
+                # ★ [P1修正] 再解析結果を ctx に戻す
+                analysis1, analysis2, result = self._analyze_and_check_with_analysis(
+                    ctx, retry_count=retry_count
+                )
+                ctx.analysis1 = analysis1
+                ctx.analysis2 = analysis2
+                
                 if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 1)")
+                    self._debug_print(f"Phase {PhaseID.P4A_MIPS64_ABI.value}: EQUIVALENT")
                     result.total_time = time.time() - start_time
                     return result
-            
-            # ★ Phase 4-B でも解決しなかった、または UNKNOWN/TIMEOUT
-            if not self.phase_handler.should_retry(result):
-                result.total_time = time.time() - start_time
-                return result
-        
-        # ============================================
-        # Phase 1.5: 引数の符号性に基づく型修正
-        # ============================================
-        if self.phase_handler.run_phase1_5_param_signedness_fix(
-            ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
-        ):
-            type_fix_result.retry_phase = "param_signedness_fix"
-            result = self._run_check_after_phase(ctx, retry_count=2)
-            
-            if result.is_equivalent is True:
-                self._debug_print("Phase 1.5: EQUIVALENT after param signedness fix")
-                result.total_time = time.time() - start_time
-                return result
-            
-            # ★ SAT 時に Phase 4-B を試行
-            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=3, retry_with_type_fix=retry_with_type_fix)
-            if phase4b_result is not None:
-                result = phase4b_result
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 1.5)")
-                    result.total_time = time.time() - start_time
-                    return result
-            
-            if not self.phase_handler.should_retry(result):
-                result.total_time = time.time() - start_time
-                return result
-        
-        # ============================================
-        # Phase 2: パターンマッチに基づく戻り値の型修正
-        # ============================================
-        if self.phase_handler.run_phase2_return_type_fix(ctx, type_fixer1, type_fixer2):
-            type_fix_result.retry_phase = "return_type_fix"
-            result = self._run_check_after_phase(ctx, retry_count=3)
-            
-            if result.is_equivalent is True:
-                self._debug_print("Phase 2: EQUIVALENT after return type fix")
-                result.total_time = time.time() - start_time
-                return result
-            
-            # ★ SAT 時に Phase 4-B を試行
-            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=4, retry_with_type_fix=retry_with_type_fix)
-            if phase4b_result is not None:
-                result = phase4b_result
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 2)")
-                    result.total_time = time.time() - start_time
-                    return result
-            
-            if not self.phase_handler.should_retry(result):
-                result.total_time = time.time() - start_time
-                return result
-        
-        # ============================================
-        # Phase 3: 引数の型修正
-        # ============================================
-        if self.phase_handler.run_phase3_param_type_fix(
-            ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
-        ):
-            type_fix_result.retry_phase = "param_type_fix"
-            result = self._run_check_after_phase(ctx, retry_count=4)
-            
-            if result.is_equivalent is True:
-                self._debug_print("Phase 3: EQUIVALENT after parameter type fix")
-                result.total_time = time.time() - start_time
-                return result
-            
-            # ★ SAT 時に Phase 4-B を試行
-            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=5, retry_with_type_fix=retry_with_type_fix)
-            if phase4b_result is not None:
-                result = phase4b_result
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 3)")
-                    result.total_time = time.time() - start_time
-                    return result
-            
-            if not self.phase_handler.should_retry(result):
-                result.total_time = time.time() - start_time
-                return result
-        
-        # ============================================
-        # Phase 4-A: MIPS64 ABI param fix (conservative)
-        # ============================================
-        if self.phase_handler.run_phase4_mips64_fix(
-            ctx, type_fixer1, type_fixer2, self._get_params_via_decompile
-        ):
-            type_fix_result.retry_phase = "mips64_abi_fix"
-            result = self._run_check_after_phase(ctx, retry_count=5)
-            
-            if result.is_equivalent is True:
-                self._debug_print("Phase 4-A: EQUIVALENT after MIPS64 ABI fix")
-                result.total_time = time.time() - start_time
-                return result
-            
-            # ★ SAT 時に Phase 4-B を試行
-            phase4b_result = self._try_phase4b_if_applicable(result, ctx, retry_count=6, retry_with_type_fix=retry_with_type_fix)
-            if phase4b_result is not None:
-                result = phase4b_result
-                if result.is_equivalent is True:
-                    self._debug_print("Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 4-A)")
-                    result.total_time = time.time() - start_time
-                    return result
-            
-            if not self.phase_handler.should_retry(result):
-                result.total_time = time.time() - start_time
-                return result
+                
+                # SAT 時に Phase 4-B を試行
+                if result.is_equivalent is False and retry_with_type_fix:
+                    phase4b_result = self._try_phase4b_if_applicable(
+                        result, ctx, retry_count=retry_count + 1, retry_with_type_fix=True
+                    )
+                    if phase4b_result is not None:
+                        result = phase4b_result
+                        if result.is_equivalent is True:
+                            self._debug_print(
+                                f"Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 4-A)"
+                            )
+                            result.total_time = time.time() - start_time
+                            return result
         
         # ============================================
         # 最終結果
         # ============================================
         self._debug_print("=" * 60)
-        self._debug_print("Final Result")
+        self._debug_print("Final Result (end of phase plan)")
         self._debug_print("=" * 60)
         
+        if result is None:
+            raise RuntimeError(
+                "No phase was executed: phase_plan is empty or no result was produced"
+            )
+        
         result.total_time = time.time() - start_time
+        
         return result
     
+    # ★ [P3修正] _retry_with_abi_constraints の完全実装を復元
     def _retry_with_abi_constraints(
         self,
         ctx: PhaseContext,
@@ -523,7 +550,7 @@ class EquivalenceChecker:
                 retry_count=retry_count,
                 function1_signature=ctx.original_signature1,
                 function2_signature=ctx.original_signature2,
-                constrained_fragments=list(abi_constraints.keys()),
+                constrained_fragments=[],
                 rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints
             )
@@ -542,13 +569,92 @@ class EquivalenceChecker:
                 ctx.original_signature1, ctx.original_signature2
             )
     
-    def _run_check_after_phase(
+    # ★ [P2追加] Stage loop を実行
+    def _run_stage_plan(
         self,
-        ctx: PhaseContext,
-        retry_count: int
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        binary1_name: str,
+        binary2_name: str,
+        save_formula: bool,
+        type_fix_result: Optional[TypeFixResult],
+        retry_count: int,
+        original_signature1: Optional[FunctionSignature],
+        original_signature2: Optional[FunctionSignature]
     ) -> EquivalenceResult:
-        """Phase実行後の再チェック"""
-        return self._analyze_and_check(ctx, retry_count=retry_count)
+        """
+        Stage plan を実行
+        
+        デフォルトの Stage plan:
+        1. S_PAIRWISE: pairwise strategy で判定
+        2. S_MONOLITHIC_FALLBACK: UNKNOWN 時のみ monolithic fallback
+        
+        Returns:
+            最終的な EquivalenceResult
+        """
+        result = None
+        stage_path = []  # ★ [P2追加] 実際に通った stage を記録
+        
+        for stage_spec in self.stage_plan:
+            stage_id = stage_spec.stage_id
+            stage_path.append(stage_id.value)  # ★ 記録
+            
+            self._debug_print("-" * 60)
+            self._debug_print(f"Stage {stage_id.value}: {stage_spec.description}")
+            self._debug_print("-" * 60)
+            
+            # Stage を実行
+            if stage_spec.strategy == "pairwise":
+                strategy = self.pairwise_strategy
+            elif stage_spec.strategy == "monolithic":
+                strategy = self.monolithic_strategy
+            else:
+                raise ValueError(f"Unknown strategy: {stage_spec.strategy}")
+            
+            # Strategy を実行
+            result = self.check(
+                analysis1, analysis2,
+                binary1_name, binary2_name,
+                save_formula,
+                type_fix_result=type_fix_result,
+                retry_count=retry_count,
+                original_signature1=original_signature1,
+                original_signature2=original_signature2,
+                force_strategy=strategy
+            )
+            
+            # ★ [P2追加] stage_path を記録
+            result.stage_path = stage_path.copy()
+            
+            # 結果判定
+            if result.is_equivalent is True:
+                # UNSAT → 即終了
+                self._debug_print(f"Stage {stage_id.value}: EQUIVALENT - stopping stage plan")
+                return result
+            
+            elif result.is_equivalent is False:
+                # SAT → 即終了
+                self._debug_print(f"Stage {stage_id.value}: NOT EQUIVALENT - stopping stage plan")
+                return result
+            
+            else:
+                # UNKNOWN/TIMEOUT
+                if stage_id == StageID.S_PAIRWISE:
+                    # pairwise が UNKNOWN → monolithic fallback へ
+                    self._debug_print(f"Stage {stage_id.value}: UNKNOWN - proceeding to fallback")
+                    continue
+                else:
+                    # fallback も UNKNOWN → 終了
+                    self._debug_print(f"Stage {stage_id.value}: UNKNOWN - end of stage plan")
+                    return result
+        
+        # Stage plan 完了
+        if result is None:
+            raise RuntimeError(
+                "No stage was executed: stage_plan is empty or no result was produced"
+            )
+        
+        return result
     
     def check(
         self,
@@ -560,7 +666,8 @@ class EquivalenceChecker:
         type_fix_result: Optional[TypeFixResult] = None,
         retry_count: int = 0,
         original_signature1: Optional[FunctionSignature] = None,
-        original_signature2: Optional[FunctionSignature] = None
+        original_signature2: Optional[FunctionSignature] = None,
+        force_strategy = None  # ★ [P2追加] Stage から strategy を指定可能に
     ) -> EquivalenceResult:
         """2つの関数の等価性を判定"""
         start_time = time.time()
@@ -574,9 +681,12 @@ class EquivalenceChecker:
             # リライトを適用
             analysis1, analysis2, rewrite_info = self._apply_rewrite(analysis1, analysis2)
             
+            # ★ [P2修正] strategy を選択
+            strategy = force_strategy if force_strategy is not None else self.check_strategy
+            
             # 戦略を使用してチェック
-            self._debug_print(f"Using strategy: {self.strategy_name}")
-            strategy_result = self.check_strategy.check(analysis1, analysis2, save_formula)
+            self._debug_print(f"Using strategy: {strategy.__class__.__name__}")
+            strategy_result = strategy.check(analysis1, analysis2, save_formula)
             
             if self.debug and strategy_result.smt_formula:
                 print("\n" + "=" * 60)
@@ -751,8 +861,9 @@ class EquivalenceChecker:
         if ctx.original_signature2 is None:
             ctx.original_signature2 = FunctionSignature.from_analysis(analysis2)
         
-        self._debug_print("Running equivalence check...")
-        result = self.check(
+        # ★ [P1修正] self.check() ではなく _run_stage_plan() を呼ぶ
+        self._debug_print("Running stage plan...")
+        result = self._run_stage_plan(
             analysis1, analysis2,
             ctx.binary1_name, ctx.binary2_name,
             ctx.save_formula,

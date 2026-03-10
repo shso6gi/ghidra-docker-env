@@ -3,6 +3,7 @@
 
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from dataclasses import dataclass
+from enum import Enum
 import time
 
 from ...model import FunctionReturnAnalysis, FunctionSignature
@@ -11,6 +12,41 @@ from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from ..typing.signedness_param_fix import ParamSignednessFixer
 from ..arch.detector import ArchitectureDetector
 from ..arch.mips64 import MIPS64Handler
+
+
+# ============================================================================
+# Phase 定義（新フロー骨格）
+# ============================================================================
+
+class PhaseID(Enum):
+    """Phase識別子"""
+    P0_BASE = "P0_BASE"
+    P1_SIGNEDNESS = "P1_SIGNEDNESS"  # Phase 1 + Phase 1.5 の複合
+    P2_PATTERN_INT = "P2_PATTERN_INT"  # Phase 2 + Phase 3 の複合
+    P4A_MIPS64_ABI = "P4A_MIPS64_ABI"  # Phase 4-A (conservative、主経路外)
+
+
+@dataclass
+class PhaseSpec:
+    """Phase仕様"""
+    phase_id: PhaseID
+    description: str
+
+
+@dataclass
+class PhaseResult:
+    """Phase実行結果"""
+    phase_id: PhaseID
+    applied: bool  # Phase が適用されたか
+    retry_name: str  # type_fix_result.retry_phase に設定する名前
+
+
+# デフォルトの Phase plan（主経路）
+DEFAULT_PHASE_PLAN: List[PhaseSpec] = [
+    PhaseSpec(PhaseID.P0_BASE, "Initial check without type fix"),
+    PhaseSpec(PhaseID.P1_SIGNEDNESS, "Signedness-based type fix (return + params)"),
+    PhaseSpec(PhaseID.P2_PATTERN_INT, "Pattern-based type fix (return + params)"),
+]
 
 
 @dataclass
@@ -49,11 +85,80 @@ class PhaseHandler:
         if self.debug:
             print(f"[PhaseHandler] {msg}")
     
+    # ============================================================================
+    # Phase 実行（新フロー骨格）
+    # ============================================================================
+    
+    def execute_phase(
+        self,
+        phase_spec: PhaseSpec,
+        ctx: PhaseContext,
+        type_fixer1: TypeFixer,
+        type_fixer2: TypeFixer,
+        get_params_func: Callable
+    ) -> PhaseResult:
+        """
+        指定された Phase を実行
+        
+        Returns:
+            PhaseResult（適用されたか、retry_name など）
+        """
+        phase_id = phase_spec.phase_id
+        
+        if phase_id == PhaseID.P0_BASE:
+            # P0 は型修正なしなので何もしない
+            return PhaseResult(phase_id, applied=False, retry_name="initial")
+        
+        elif phase_id == PhaseID.P1_SIGNEDNESS:
+            # Phase 1 + Phase 1.5 を統合
+            applied = False
+            retry_name = "signedness_fix"
+            
+            # Phase 1: 符号性に基づく型修正（戻り値）
+            if self.run_phase1_signedness_fix(ctx, type_fixer1, type_fixer2):
+                applied = True
+            
+            # Phase 1.5: 引数の符号性に基づく型修正
+            if self.run_phase1_5_param_signedness_fix(ctx, type_fixer1, type_fixer2, get_params_func):
+                applied = True
+                retry_name = "param_signedness_fix"
+            
+            return PhaseResult(phase_id, applied=applied, retry_name=retry_name)
+        
+        elif phase_id == PhaseID.P2_PATTERN_INT:
+            # Phase 2 + Phase 3 を統合
+            applied = False
+            retry_name = "pattern_int_fix"
+            
+            # Phase 2: パターンマッチに基づく戻り値の型修正
+            if self.run_phase2_return_type_fix(ctx, type_fixer1, type_fixer2):
+                applied = True
+                retry_name = "return_type_fix"
+            
+            # Phase 3: 引数の型修正
+            if self.run_phase3_param_type_fix(ctx, type_fixer1, type_fixer2, get_params_func):
+                applied = True
+                retry_name = "param_type_fix"
+            
+            return PhaseResult(phase_id, applied=applied, retry_name=retry_name)
+        
+        elif phase_id == PhaseID.P4A_MIPS64_ABI:
+            # Phase 4-A: MIPS64 ABI param fix (主経路外)
+            applied = self.run_phase4_mips64_fix(ctx, type_fixer1, type_fixer2, get_params_func)
+            return PhaseResult(phase_id, applied=applied, retry_name="mips64_abi_fix")
+        
+        else:
+            raise ValueError(f"Unknown phase_id: {phase_id}")
+    
+    # ============================================================================
+    # 遷移判定（ゲート）
+    # ============================================================================
+    
     def should_retry(self, result: EquivalenceResult) -> bool:
         """通常recovery継続可否を判定（UNKNOWN/TIMEOUTのみ許可）
         
         Returns:
-            True: UNKNOWN/TIMEOUT → 通常recovery phases (P1, P2, P3, P4-A) を試行可能
+            True: UNKNOWN/TIMEOUT → 通常recovery phases (P1, P2) を試行可能
             False: UNSAT/SAT/critical error → 通常recovery phases へ進まない
         
         Note:
@@ -78,6 +183,10 @@ class PhaseHandler:
             return "UNKNOWN"
         else:
             return "EQUIVALENT (no retry needed)"
+    
+    # ============================================================================
+    # 個別 Phase 実行メソッド（既存コードを再利用）
+    # ============================================================================
     
     def should_fix_return_type(
         self,
@@ -202,8 +311,6 @@ class PhaseHandler:
                         )
         
         return signedness_fix_applied
-    
-    # ===== Phase 1.5: 引数の符号性修正（NEW）=====
     
     def run_phase1_5_param_signedness_fix(
         self,
@@ -416,8 +523,6 @@ class PhaseHandler:
             self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
         
         return True
-    
-    # ===== Phase 4-A: MIPS64 ABI param fix (conservative) =====
     
     def run_phase4_mips64_fix(
         self,
