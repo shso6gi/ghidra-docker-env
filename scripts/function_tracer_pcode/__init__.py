@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Return Tracer - Ghidra High P-code Return Value Analyzer"""
+"""Public package surface for the function tracer tooling.
+
+Packaged usage should prefer ``function_tracer_pcode`` as the canonical import
+path. During the refactor, repository-local tooling may continue to import the
+same package via ``scripts.function_tracer_pcode`` for compatibility.
+"""
 
 from .analysis import ReturnAnalyzer
 from .model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType, Condition

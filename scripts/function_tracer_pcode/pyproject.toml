@@ -17,14 +17,18 @@ test = [
     "pytest-cov>=4.0.0",
 ]
 
+[tool.setuptools]
+package-dir = {"" = ".."}
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["model*", "smt*", "equivalence*", "analysis*", "transform*", "io*", "cli*", "config*"]
+where = [".."]
+include = ["function_tracer_pcode*"]
 
 [tool.pytest.ini_options]
-# ★ 修正: 実際のテストパスを指定
-pythonpath = ["."]
-testpaths = ["scripts/function_tracer_pcode/tests"]
+# Repository checkout では `scripts.function_tracer_pcode` を維持しつつ、
+# 配布パッケージでは `function_tracer_pcode` を正規 import path とする。
+pythonpath = ["../.."]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
