@@ -1,4 +1,7 @@
 __pycache__
+*.pytest_cache
+*.egg-info
+*.smt*
 output
 # targets配下のバイナリファイルを除外
 targets/**/*-x86_64-gcc-O*

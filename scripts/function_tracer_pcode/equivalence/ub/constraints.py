@@ -62,11 +62,6 @@ class UbConstraintBuilder:
             if negate_min_constraints:
                 all_constraints.extend(negate_min_constraints)
         
-        # 将来拡張: 他のUBタイプをここに追加
-        # if "div_overflow" in constraint_types:
-        #     div_constraints = self._build_div_overflow_constraints(...)
-        #     all_constraints.extend(div_constraints)
-        
         return all_constraints
     
     def _build_negate_min_constraints(
@@ -241,25 +236,3 @@ class UbConstraintBuilder:
             if info.original_name == param_name:
                 return info
         return None
-
-
-# 将来拡張用のプレースホルダー（コメントアウト）
-"""
-def _build_div_overflow_constraints(
-    self,
-    analysis: FunctionReturnAnalysis,
-    param_infos: List['ParameterInfo']
-) -> List[str]:
-    '''
-    INT_MIN / -1 オーバーフローを除外する制約を生成
-    
-    検出対象:
-    - INT_SDIV (bvsdiv) 演算子
-    - オペランドが (MIN_INT, -1) の組み合わせ
-    
-    生成制約:
-    - (assert (not (and (= dividend MIN) (= divisor -1))))
-    '''
-    # TODO: 実装
-    pass
-"""
