@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""データモデル層"""
+"""データモデル層.
+
+``Expression`` は AST の中核を保持し、render / variable collection /
+``Condition`` は専用モジュールへ分離されている。
+"""
 
 from .storage import StorageInfo
 from .analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""等価性判定層 - SMTベースの同値性判定"""
+"""等価性判定層.
+
+Public imports stay concentrated here while internal responsibilities are
+split across checker/workflow/reanalysis/attempts/result helpers.
+"""
 
 from .checker import EquivalenceChecker
 from .result import EquivalenceResult, RewriteInfo
