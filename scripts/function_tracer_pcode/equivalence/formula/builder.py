@@ -70,6 +70,23 @@ class FormulaBuilderResult:
     param_fragment_constrained: List[str]
 
 
+@dataclass
+class FormulaBuildContext:
+    """FormulaBuilder 内で共有する構築コンテキスト"""
+    params1: List[ParameterInfo]
+    params2: List[ParameterInfo]
+    extra_vars1: List[ExtraVariableInfo]
+    extra_vars2: List[ExtraVariableInfo]
+    var_analyses1: Dict[str, ExtraVariableAnalysis]
+    var_analyses2: Dict[str, ExtraVariableAnalysis]
+    param_pairs: List[ParameterPair]
+    return_size1: int
+    return_size2: int
+    header_lines: List[str]
+    constrained_fragments: List[str]
+    param_fragment_constrained: List[str]
+
+
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
@@ -129,8 +146,9 @@ class FormulaBuilder:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         lines = []
-        constrained_fragments: List[str] = []
-        param_fragment_constrained: List[str] = []
+        context = self._prepare_formula_context(
+            analysis1, analysis2, func1_suffix, func2_suffix, emit_debug_info=True
+        )
         
         # ヘッダー
         lines.append("; " + "=" * 60)
@@ -141,77 +159,11 @@ class FormulaBuilder:
         lines.append("")
         lines.append("(set-logic QF_BV)")
         lines.append("")
-        
-        # 各関数のパラメータ情報を収集
-        params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
-        params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
-        
-        # パラメータ名のセットを作成
-        param_names1 = {p.original_name for p in params1}
-        param_names2 = {p.original_name for p in params2}
-        
-        # 戻り値のビット幅を取得
-        return_size1 = self._get_return_size(analysis1)
-        return_size2 = self._get_return_size(analysis2)
-        
-        # 追加変数を分析
-        var_analyses1 = self.variable_analyzer.analyze_all_extra_variables(
-            analysis1, param_names1, return_size1
-        )
-        var_analyses2 = self.variable_analyzer.analyze_all_extra_variables(
-            analysis2, param_names2, return_size2
-        )
-        
-        # 追加変数情報を構築
-        extra_vars1 = self._build_extra_variable_infos(var_analyses1, func1_suffix)
-        extra_vars2 = self._build_extra_variable_infos(var_analyses2, func2_suffix)
-        
-        if self.debug:
-            self._print_debug_info(params1, params2, extra_vars1, extra_vars2)
-        
-        # パラメータペアを構築
-        param_pairs = self._build_parameter_pairs(params1, params2)
-        
-        # 関数1のパラメータを宣言
-        lines.extend(self._build_param_declarations(analysis1.function_name, params1))
-        
-        # 関数1の追加変数を宣言
-        if extra_vars1:
-            lines.extend(self._build_extra_var_declarations(analysis1.function_name, extra_vars1))
-        
-        # 関数2のパラメータを宣言
-        lines.extend(self._build_param_declarations(analysis2.function_name, params2))
-        
-        # 関数2の追加変数を宣言
-        if extra_vars2:
-            lines.extend(self._build_extra_var_declarations(analysis2.function_name, extra_vars2))
-        
-        # パラメータ間の等価制約
-        lines.extend(self._build_param_constraints_section(param_pairs))
-        
-        # 追加変数の制約（パラメータ断片としての制約）
-        constraint_lines, constrained_vars = self._build_extra_var_constraints(
-            extra_vars1, extra_vars2,
-            var_analyses1, var_analyses2,
-            func1_suffix, func2_suffix
-        )
-        if constraint_lines:
-            lines.extend(constraint_lines)
-            param_fragment_constrained.extend(constrained_vars)
-            constrained_fragments.extend(constrained_vars)
-        
-        # UB（未定義動作）除外制約
-        if self.exclude_ub:
-            ub_lines = self._build_ub_constraints_section(
-                analysis1, analysis2,
-                params1, params2
-            )
-            if ub_lines:
-                lines.extend(ub_lines)
+        lines.extend(context.header_lines)
         
         # 全変数の情報を統合（パラメータ + 追加変数）
-        all_vars1 = self._merge_param_and_extra_vars(params1, extra_vars1)
-        all_vars2 = self._merge_param_and_extra_vars(params2, extra_vars2)
+        all_vars1 = self._merge_param_and_extra_vars(context.params1, context.extra_vars1)
+        all_vars2 = self._merge_param_and_extra_vars(context.params2, context.extra_vars2)
         
         # 関数1のreturn値を定義
         lines.append("; " + "-" * 40)
@@ -232,7 +184,14 @@ class FormulaBuilder:
         lines.append("")
         
         # 等価性の否定をアサート
-        lines.extend(self._build_equivalence_assertion(return_var1, return_var2, return_size1, return_size2))
+        lines.extend(
+            self._build_equivalence_assertion(
+                return_var1,
+                return_var2,
+                context.return_size1,
+                context.return_size2,
+            )
+        )
         
         # ★ NEW: 追加アサート（(check-sat)の直前に挿入）
         if extra_assertions:
@@ -247,11 +206,133 @@ class FormulaBuilder:
             formula="\n".join(lines),
             return_var1=return_var1,
             return_var2=return_var2,
+            extra_vars1=context.extra_vars1,
+            extra_vars2=context.extra_vars2,
+            constrained_fragments=context.constrained_fragments,
+            param_fragment_constrained=context.param_fragment_constrained
+        )
+
+    def _prepare_formula_context(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        func1_suffix: str,
+        func2_suffix: str,
+        emit_debug_info: bool = False,
+    ) -> FormulaBuildContext:
+        """宣言・制約・補助情報をまとめて構築する"""
+        params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
+        params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
+
+        param_names1 = {p.original_name for p in params1}
+        param_names2 = {p.original_name for p in params2}
+
+        return_size1 = self._get_return_size(analysis1)
+        return_size2 = self._get_return_size(analysis2)
+
+        var_analyses1 = self.variable_analyzer.analyze_all_extra_variables(
+            analysis1, param_names1, return_size1
+        )
+        var_analyses2 = self.variable_analyzer.analyze_all_extra_variables(
+            analysis2, param_names2, return_size2
+        )
+
+        extra_vars1 = self._build_extra_variable_infos(var_analyses1, func1_suffix)
+        extra_vars2 = self._build_extra_variable_infos(var_analyses2, func2_suffix)
+
+        if self.debug and emit_debug_info:
+            self._print_debug_info(params1, params2, extra_vars1, extra_vars2)
+
+        param_pairs = self._build_parameter_pairs(params1, params2)
+        (
+            header_lines,
+            constrained_fragments,
+            param_fragment_constrained,
+        ) = self._build_base_header_lines(
+            analysis1,
+            analysis2,
+            params1,
+            params2,
+            extra_vars1,
+            extra_vars2,
+            var_analyses1,
+            var_analyses2,
+            param_pairs,
+            func1_suffix,
+            func2_suffix,
+        )
+
+        return FormulaBuildContext(
+            params1=params1,
+            params2=params2,
             extra_vars1=extra_vars1,
             extra_vars2=extra_vars2,
+            var_analyses1=var_analyses1,
+            var_analyses2=var_analyses2,
+            param_pairs=param_pairs,
+            return_size1=return_size1,
+            return_size2=return_size2,
+            header_lines=header_lines,
             constrained_fragments=constrained_fragments,
-            param_fragment_constrained=param_fragment_constrained
+            param_fragment_constrained=param_fragment_constrained,
         )
+
+    def _build_base_header_lines(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo],
+        extra_vars1: List[ExtraVariableInfo],
+        extra_vars2: List[ExtraVariableInfo],
+        var_analyses1: Dict[str, ExtraVariableAnalysis],
+        var_analyses2: Dict[str, ExtraVariableAnalysis],
+        param_pairs: List[ParameterPair],
+        func1_suffix: str,
+        func2_suffix: str
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """共通の宣言・制約セクションを組み立てる"""
+        lines: List[str] = []
+
+        lines.extend(self._build_param_declarations(analysis1.function_name, params1))
+
+        if extra_vars1:
+            lines.extend(
+                self._build_extra_var_declarations(analysis1.function_name, extra_vars1)
+            )
+
+        lines.extend(self._build_param_declarations(analysis2.function_name, params2))
+
+        if extra_vars2:
+            lines.extend(
+                self._build_extra_var_declarations(analysis2.function_name, extra_vars2)
+            )
+
+        lines.extend(self._build_param_constraints_section(param_pairs))
+
+        constrained_fragments: List[str] = []
+        param_fragment_constrained: List[str] = []
+        constraint_lines, constrained_vars = self._build_extra_var_constraints(
+            extra_vars1,
+            extra_vars2,
+            var_analyses1,
+            var_analyses2,
+            func1_suffix,
+            func2_suffix,
+        )
+        if constraint_lines:
+            lines.extend(constraint_lines)
+            constrained_fragments.extend(constrained_vars)
+            param_fragment_constrained.extend(constrained_vars)
+
+        if self.exclude_ub:
+            ub_lines = self._build_ub_constraints_section(
+                analysis1, analysis2, params1, params2
+            )
+            if ub_lines:
+                lines.extend(ub_lines)
+
+        return lines, constrained_fragments, param_fragment_constrained
     
     # ============================================
     # NEW: UB制約セクション構築
@@ -834,79 +915,17 @@ class FormulaBuilder:
                 'return_size2': int,
             }
         """
-        lines = []
-        
-        # 各関数のパラメータ情報を収集
-        params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
-        params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
-        
-        # パラメータ名のセットを作成
-        param_names1 = {p.original_name for p in params1}
-        param_names2 = {p.original_name for p in params2}
-        
-        # 戻り値のビット幅を取得
-        return_size1 = self._get_return_size(analysis1)
-        return_size2 = self._get_return_size(analysis2)
-        
-        # 追加変数を分析
-        var_analyses1 = self.variable_analyzer.analyze_all_extra_variables(
-            analysis1, param_names1, return_size1
+        context = self._prepare_formula_context(
+            analysis1, analysis2, func1_suffix, func2_suffix
         )
-        var_analyses2 = self.variable_analyzer.analyze_all_extra_variables(
-            analysis2, param_names2, return_size2
-        )
-        
-        # 追加変数情報を構築
-        extra_vars1 = self._build_extra_variable_infos(var_analyses1, func1_suffix)
-        extra_vars2 = self._build_extra_variable_infos(var_analyses2, func2_suffix)
-        
-        # パラメータペアを構築
-        param_pairs = self._build_parameter_pairs(params1, params2)
-        
-        # 関数1のパラメータを宣言
-        lines.extend(self._build_param_declarations(analysis1.function_name, params1))
-        
-        # 関数1の追加変数を宣言
-        if extra_vars1:
-            lines.extend(self._build_extra_var_declarations(analysis1.function_name, extra_vars1))
-        
-        # 関数2のパラメータを宣言
-        lines.extend(self._build_param_declarations(analysis2.function_name, params2))
-        
-        # 関数2の追加変数を宣言
-        if extra_vars2:
-            lines.extend(self._build_extra_var_declarations(analysis2.function_name, extra_vars2))
-        
-        # パラメータ間の等価制約
-        lines.extend(self._build_param_constraints_section(param_pairs))
-        
-        # 追加変数の制約（パラメータ断片としての制約）
-        constrained_fragments = []
-        constraint_lines, constrained_vars = self._build_extra_var_constraints(
-            extra_vars1, extra_vars2,
-            var_analyses1, var_analyses2,
-            func1_suffix, func2_suffix
-        )
-        if constraint_lines:
-            lines.extend(constraint_lines)
-            constrained_fragments.extend(constrained_vars)
-        
-        # UB（未定義動作）除外制約
-        if self.exclude_ub:
-            ub_lines = self._build_ub_constraints_section(
-                analysis1, analysis2,
-                params1, params2
-            )
-            if ub_lines:
-                lines.extend(ub_lines)
-        
+
         return {
-            'header_lines': lines,
-            'params1': params1,
-            'params2': params2,
-            'extra_vars1': extra_vars1,
-            'extra_vars2': extra_vars2,
-            'constrained_fragments': constrained_fragments,
-            'return_size1': return_size1,
-            'return_size2': return_size2,
+            'header_lines': context.header_lines,
+            'params1': context.params1,
+            'params2': context.params2,
+            'extra_vars1': context.extra_vars1,
+            'extra_vars2': context.extra_vars2,
+            'constrained_fragments': context.constrained_fragments,
+            'return_size1': context.return_size1,
+            'return_size2': context.return_size2,
         }

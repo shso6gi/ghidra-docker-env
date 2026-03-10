@@ -676,3 +676,72 @@ class TestPublicAPIWrappers:
         print("\n[TEST] build_equivalence_formula wrapper is consistent with extended version")
         print(f"  - Verified positional args: analysis1, analysis2, '_1', '_2'")
         print(f"  - Verified keyword arg: extra_assertions")
+
+
+class TestSharedFormulaContext:
+    """FormulaBuilder 内の共有 context/header 構築の回帰テスト"""
+
+    @staticmethod
+    def _build_simple_analyses():
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func1",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression(ExpressionType.PARAMETER, name="x", size=4)
+                )
+            ]
+        )
+
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func2",
+            entry_point="0x00402000",
+            parameters=[{"name": "y", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression(ExpressionType.PARAMETER, name="y", size=4)
+                )
+            ]
+        )
+
+        return analysis1, analysis2
+
+    def test_build_base_context_reuses_extended_header_context(self):
+        """build_base_context と extended 版が同じ header/context を共有することを確認"""
+        builder = FormulaBuilder(debug=False, exclude_ub=False)
+        analysis1, analysis2 = self._build_simple_analyses()
+
+        base_ctx = builder.build_base_context(analysis1, analysis2)
+        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
+
+        header_text = "\n".join(base_ctx["header_lines"])
+
+        assert header_text in result.formula
+        assert base_ctx["extra_vars1"] == result.extra_vars1
+        assert base_ctx["extra_vars2"] == result.extra_vars2
+        assert base_ctx["constrained_fragments"] == result.constrained_fragments
+        assert base_ctx["return_size1"] == 32
+        assert base_ctx["return_size2"] == 32
+
+        print("\n[TEST] build_base_context shares the same header/context as extended builder")
+
+    def test_build_base_context_preserves_debug_silence(self):
+        """build_base_context では debug 情報を増やさず、extended 版のみ詳細出力することを確認"""
+        from unittest.mock import patch
+
+        builder = FormulaBuilder(debug=True, exclude_ub=False)
+        analysis1, analysis2 = self._build_simple_analyses()
+
+        with patch.object(builder, "_print_debug_info") as spy_debug:
+            builder.build_base_context(analysis1, analysis2)
+            spy_debug.assert_not_called()
+
+            builder.build_equivalence_formula_extended(analysis1, analysis2)
+            spy_debug.assert_called_once()
+
+        print("\n[TEST] shared context helper preserves previous debug behavior")
