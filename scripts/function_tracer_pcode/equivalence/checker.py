@@ -575,41 +575,20 @@ class EquivalenceChecker:
                 ctx.analysis1, ctx.analysis2
             )
             
-            # 通常のSMT式を構築
-            smt_formula, return_var1, return_var2 = (
-                self.formula_builder.build_equivalence_formula(analysis1, analysis2)
+            # ★ NEW: ABI制約セクションを FormulaBuilder に完全委譲
+            abi_assertion_section = self.formula_builder.build_abi_assertion_section(
+                abi_constraints, "_1", "_2"
             )
             
-            # ABI整合制約を手動で追加
-            constraint_lines = []
-            for param_name, (signedness, narrow_bits) in abi_constraints.items():
-                if signedness == "signed":
-                    # 符号拡張: ((_ sign_extend X) ((_ extract N 0) param))
-                    extend_bits = 64 - narrow_bits
-                    constraint_lines.append(
-                        f"(assert (= {param_name} "
-                        f"((_ sign_extend {extend_bits}) "
-                        f"((_ extract {narrow_bits - 1} 0) {param_name}))))"
-                    )
-                else:
-                    # ゼロ拡張: ((_ zero_extend X) ((_ extract N 0) param))
-                    extend_bits = 64 - narrow_bits
-                    constraint_lines.append(
-                        f"(assert (= {param_name} "
-                        f"((_ zero_extend {extend_bits}) "
-                        f"((_ extract {narrow_bits - 1} 0) {param_name}))))"
-                    )
+            # SMT式を構築（ABI制約を extra_assertions として渡す）
+            result = self.formula_builder.build_equivalence_formula_extended(
+                analysis1, analysis2,
+                extra_assertions=abi_assertion_section if abi_assertion_section else None
+            )
             
-            # SMT式に制約を挿入 (check-sat の前に)
-            if constraint_lines:
-                parts = smt_formula.rsplit("(check-sat)", 1)
-                if len(parts) == 2:
-                    constraints_str = "\n".join(constraint_lines)
-                    smt_formula = parts[0] + "\n" + constraints_str + "\n(check-sat)" + parts[1]
-                else:
-                    # check-satが見つからない場合は末尾に追加
-                    constraints_str = "\n".join(constraint_lines)
-                    smt_formula = smt_formula + "\n" + constraints_str
+            smt_formula = result.formula
+            return_var1 = result.return_var1
+            return_var2 = result.return_var2
             
             if self.debug:
                 print("\n" + "=" * 60)

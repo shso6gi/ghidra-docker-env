@@ -66,39 +66,46 @@ class FormulaBuilderResult:
     return_var2: str
     extra_vars1: List[ExtraVariableInfo]
     extra_vars2: List[ExtraVariableInfo]
-    constrained_fragments: List[str]  # 後方互換性のため残す（実際はextension制約）
-    param_fragment_constrained: List[str]  # パラメータ断片として制約された変数
+    constrained_fragments: List[str]
+    param_fragment_constrained: List[str]
 
 
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
-    def __init__(self, debug: bool = False, exclude_ub: bool = True):  # 変更
+    def __init__(self, debug: bool = False, exclude_ub: bool = True):
         """
         Args:
             debug: デバッグ出力を有効にする
             exclude_ub: UB（未定義動作）除外制約を追加する
         """
         self.debug = debug
-        self.exclude_ub = exclude_ub  # NEW
+        self.exclude_ub = exclude_ub
         self.variable_analyzer = VariableAnalyzer(debug=debug)
-        self.ub_constraint_builder = UbConstraintBuilder(debug=debug)  # NEW
+        self.ub_constraint_builder = UbConstraintBuilder(debug=debug)
     
     def build_equivalence_formula(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
         func1_suffix: str = "_1",
-        func2_suffix: str = "_2"
+        func2_suffix: str = "_2",
+        extra_assertions: Optional[List[str]] = None  # ★ NEW
     ) -> Tuple[str, str, str]:
         """
         2つの関数の等価性検証用SMT式を構築
+        
+        Args:
+            analysis1, analysis2: 各関数の解析結果
+            func1_suffix, func2_suffix: サフィックス
+            extra_assertions: 追加のアサート文（(check-sat)の直前に挿入）
         
         Returns:
             (smt_formula, return_var1, return_var2)
         """
         result = self.build_equivalence_formula_extended(
-            analysis1, analysis2, func1_suffix, func2_suffix
+            analysis1, analysis2, func1_suffix, func2_suffix,
+            extra_assertions=extra_assertions  # ★ NEW
         )
         return result.formula, result.return_var1, result.return_var2
     
@@ -107,10 +114,16 @@ class FormulaBuilder:
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
         func1_suffix: str = "_1",
-        func2_suffix: str = "_2"
+        func2_suffix: str = "_2",
+        extra_assertions: Optional[List[str]] = None  # ★ NEW
     ) -> FormulaBuilderResult:
         """
         2つの関数の等価性検証用SMT式を構築（拡張版）
+        
+        Args:
+            analysis1, analysis2: 各関数の解析結果
+            func1_suffix, func2_suffix: サフィックス
+            extra_assertions: 追加のアサート文（(check-sat)の直前に挿入）
         
         Returns:
             FormulaBuilderResult: 構築結果（詳細情報付き）
@@ -185,12 +198,9 @@ class FormulaBuilder:
         if constraint_lines:
             lines.extend(constraint_lines)
             param_fragment_constrained.extend(constrained_vars)
-            # 後方互換性のため constrained_fragments にも追加
             constrained_fragments.extend(constrained_vars)
         
-        # ============================================
         # UB（未定義動作）除外制約
-        # ============================================
         if self.exclude_ub:
             ub_lines = self._build_ub_constraints_section(
                 analysis1, analysis2,
@@ -224,6 +234,11 @@ class FormulaBuilder:
         # 等価性の否定をアサート
         lines.extend(self._build_equivalence_assertion(return_var1, return_var2, return_size1, return_size2))
         
+        # ★ NEW: 追加アサート（(check-sat)の直前に挿入）
+        if extra_assertions:
+            lines.append("")
+            lines.extend(extra_assertions)
+        
         lines.append("")
         lines.append("(check-sat)")
         lines.append("(get-model)")
@@ -248,29 +263,17 @@ class FormulaBuilder:
         params1: List[ParameterInfo],
         params2: List[ParameterInfo]
     ) -> List[str]:
-        """
-        UB除外制約セクションを構築
-        
-        Args:
-            analysis1, analysis2: 各関数の解析結果
-            params1, params2: パラメータ情報
-        
-        Returns:
-            SMT-LIB形式の制約行のリスト
-        """
+        """UB除外制約セクションを構築"""
         lines = []
         
-        # 関数1のUB制約を生成
         ub1_constraints = self.ub_constraint_builder.build_constraints(
             analysis1, params1
         )
         
-        # 関数2のUB制約を生成
         ub2_constraints = self.ub_constraint_builder.build_constraints(
             analysis2, params2
         )
         
-        # 制約がある場合のみセクションを追加
         if ub1_constraints or ub2_constraints:
             lines.append("; " + "-" * 40)
             lines.append("; UB Exclusion Constraints (C semantics)")
@@ -695,42 +698,32 @@ class FormulaBuilder:
         
         return result
     
-    def build_with_abi_constraints(
+    def build_abi_constraints(
         self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
         abi_constraints: Dict[str, Tuple[str, int]],
         func1_suffix: str = "_1",
         func2_suffix: str = "_2"
-    ) -> str:
+    ) -> List[str]:
         """
-        ABI整合制約を追加したSMT式を構築
+        ABI整合制約のassert文リストを生成
         
         Args:
-            analysis1, analysis2: 各バイナリの関数解析結果
             abi_constraints: {"param0_1": ("signed", 32), ...}
-                - key: 64bitパラメータ名
+                - key: 64bitパラメータ名（wide側、サフィックス付き）
                 - value: (signedness, narrow_bits) タプル
             func1_suffix, func2_suffix: サフィックス
         
         Returns:
-            SMT-LIB script
-        """
-        # 通常のSMT式を構築（UB制約も含む）
-        result = self.build_equivalence_formula_extended(
-            analysis1, analysis2, func1_suffix, func2_suffix
-        )
-        base_formula = result.formula
+            SMT-LIB assert文のリスト（コメント含む）
         
-        # ABI制約を生成
-        constraint_lines = []
-        constraint_lines.append("; " + "-" * 40)
-        constraint_lines.append("; MIPS64 ABI constraints (sign/zero extension)")
-        constraint_lines.append("; " + "-" * 40)
+        制約の意味:
+            wide_param = sign/zero_extend(opposite_suffix_narrow_param)
+            例: param0_1 (64bit) = sign_extend(param0_2 (32bit))
+        """
+        lines = []
         
         for param_wide, (signedness, narrow_bits) in abi_constraints.items():
-            # 対応する狭いパラメータ名を推定
-            # param0_1 -> param0_2 など
+            # 対応する狭いパラメータ名を推定（サフィックスを反転）
             if param_wide.endswith(func1_suffix):
                 param_narrow = param_wide.replace(func1_suffix, func2_suffix)
             elif param_wide.endswith(func2_suffix):
@@ -745,41 +738,79 @@ class FormulaBuilder:
             
             # 制約を生成
             if signedness == "signed":
+                comment = f"; {param_wide} must be sign-extension of {param_narrow} ({narrow_bits}bit)"
                 constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {param_narrow})))"
-                comment = f"; {param_wide} must be sign-extension of {param_narrow}"
             else:
+                comment = f"; {param_wide} must be zero-extension of {param_narrow} ({narrow_bits}bit)"
                 constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {param_narrow})))"
-                comment = f"; {param_wide} must be zero-extension of {param_narrow}"
             
-            constraint_lines.append(comment)
-            constraint_lines.append(constraint)
+            lines.append(comment)
+            lines.append(constraint)
         
-        constraint_lines.append("")
+        return lines
+    
+    def build_abi_assertion_section(
+        self,
+        abi_constraints: Dict[str, Tuple[str, int]],
+        func1_suffix: str = "_1",
+        func2_suffix: str = "_2"
+    ) -> List[str]:
+        """
+        ABI整合制約セクション全体を生成（ヘッダ付き）
         
-        # SMT式に挿入（(check-sat)の直前）
-        lines = base_formula.split('\n')
-        insert_pos = -1
-        for i in range(len(lines) - 1, -1, -1):
-            if '(check-sat)' in lines[i]:
-                insert_pos = i
-                break
+        Args:
+            abi_constraints: ABI制約マップ
+            func1_suffix, func2_suffix: サフィックス
         
-        if insert_pos >= 0:
-            lines = lines[:insert_pos] + constraint_lines + lines[insert_pos:]
-        else:
-            # (check-sat)が見つからない場合は末尾に追加
-            if self.debug:
-                print("[FormulaBuilder] Warning: (check-sat) not found, appending constraints at end")
-            # (get-model)の前に挿入
-            for i in range(len(lines) - 1, -1, -1):
-                if '(get-model)' in lines[i]:
-                    lines = lines[:i] + constraint_lines + lines[i:]
-                    break
-            else:
-                # それもない場合は末尾
-                lines.extend(constraint_lines)
+        Returns:
+            セクション全体の行リスト（ヘッダ + 制約）
+            空の場合は空リスト
+        """
+        if not abi_constraints:
+            return []
         
-        return '\n'.join(lines)
+        lines = []
+        lines.append("; " + "-" * 40)
+        lines.append("; MIPS64 ABI constraints (sign/zero extension)")
+        lines.append("; " + "-" * 40)
+        lines.extend(
+            self.build_abi_constraints(abi_constraints, func1_suffix, func2_suffix)
+        )
+        
+        return lines
+
+    # ★ MODIFIED: build_with_abi_constraints のコメント修正
+    def build_with_abi_constraints(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        abi_constraints: Dict[str, Tuple[str, int]],
+        func1_suffix: str = "_1",
+        func2_suffix: str = "_2"
+    ) -> str:
+        """
+        ABI整合制約を追加したSMT式を構築（後方互換性のためのラッパー）
+        
+        Args:
+            analysis1, analysis2: 各バイナリの関数解析結果
+            abi_constraints: {"param0_1": ("signed", 32), ...}
+            func1_suffix, func2_suffix: サフィックス
+        
+        Returns:
+            SMT-LIB script
+        """
+        # ★ 新しい helper を使用（セクション化の知識を一元化）
+        abi_assertion_section = self.build_abi_assertion_section(
+            abi_constraints, func1_suffix, func2_suffix
+        )
+        
+        result = self.build_equivalence_formula_extended(
+            analysis1, analysis2,
+            func1_suffix, func2_suffix,
+            extra_assertions=abi_assertion_section if abi_assertion_section else None
+        )
+        
+        return result.formula
     
     def build_base_context(
         self,
