@@ -27,6 +27,7 @@ class StrategyResult:
     unknown_pairs: int = 0
     error_pairs: int = 0
     sat_pair_info: Optional[Dict[str, Any]] = None  # (i, j, conditions, values)
+    normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
 
 
 class CheckStrategy(ABC):

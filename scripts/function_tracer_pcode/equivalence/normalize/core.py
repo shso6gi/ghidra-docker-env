@@ -53,8 +53,11 @@ def normalize_expression(
     # 1. 二重否定の除去（最も基本的な変形、常に安全）
     expr_before = expr
     expr = normalize_double_negation(expr)
-    if expr is not expr_before and context.debug:
-        print(f"[Normalize] Applied: double_negation")
+    if expr is not expr_before:
+        context.record_rule(
+            rule_name="double_negation",
+            reason="Removed double negation"
+        )
     
     # 2. 除算の符号正規化（安全性チェック付き）
     expr_before = expr

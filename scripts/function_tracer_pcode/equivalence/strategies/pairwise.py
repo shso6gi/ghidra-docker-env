@@ -20,6 +20,7 @@ from ..normalize import (
     are_structurally_equivalent,
     get_structural_summary,
 )
+from ..debug_trace import NormalizationRuleApplication, PairwiseDecisiveInfo
 
 
 class ReturnCase:
@@ -126,8 +127,7 @@ class PairwiseStrategy(CheckStrategy):
         # 共通SMT部分を生成
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
         
-        # シンボル置換関数を作成（params + extra_vars の両方を含む）
-        # 修正: _create_param_replacer() -> build_symbol_replacer()
+        # シンボル置換関数を作成
         symbol_replace_fn1 = build_symbol_replacer(
             base_ctx['params1'],
             base_ctx.get('extra_vars1', [])
@@ -161,20 +161,27 @@ class PairwiseStrategy(CheckStrategy):
         counterexample_raw = None
         last_formula = None
         
+        # ★ 追加: 正規化ルール収集用の配列を初期化
+        all_normalization_rules = []
+        
         for i, case1 in enumerate(cases1):
             for j, case2 in enumerate(cases2):
                 pair_id = f"({i},{j})"
                 
                 # 二段階チェック実行
-                # 修正: param_replace_fn -> symbol_replace_fn
                 result = self._solve_query_twostage(
                     base_ctx, case1, case2,
                     symbol_replace_fn1, symbol_replace_fn2,
                     pair_id
                 )
                 
-                if save_formula and result.last_query:
+                # ★ 修正: save_formula に関わらず last_formula を保存
+                if result.last_query:
                     last_formula = result.last_query
+                
+                # ★ 追加: 正規化ルールを収集
+                if hasattr(result, 'normalization_rules') and result.normalization_rules:
+                    all_normalization_rules.extend(result.normalization_rules)
                 
                 if result.is_equivalent is False:
                     # SAT: 反例発見 → 即座に終了
@@ -186,6 +193,8 @@ class PairwiseStrategy(CheckStrategy):
                         'case2_summary': case2.get_condition_summary(),
                         'value1': case1.get_value_smt(symbol_replace_fn1),
                         'value2': case2.get_value_smt(symbol_replace_fn2),
+                        'pair_stage': result.pair_stage if hasattr(result, 'pair_stage') else 'unknown',
+                        'final_query': result.last_query,  # 完全なクエリ
                     }
                     counterexample_raw = result.counterexample_raw
                     
@@ -248,7 +257,7 @@ class PairwiseStrategy(CheckStrategy):
         return StrategyResult(
             is_equivalent=final_is_equiv,
             solver_results=aggregate_result,
-            smt_formula=last_formula if save_formula else None,
+            smt_formula=last_formula,  # save_formula の条件を削除
             counterexample_raw=counterexample_raw,
             return_var1="return_1",
             return_var2="return_2",
@@ -258,7 +267,8 @@ class PairwiseStrategy(CheckStrategy):
             sat_pairs=sat_count,
             unknown_pairs=unknown_count,
             error_pairs=error_count,
-            sat_pair_info=sat_pair_info
+            sat_pair_info=sat_pair_info,
+            normalization_rules=all_normalization_rules  # ★ これで使える
         )
     
     def _solve_query_twostage(
@@ -270,17 +280,7 @@ class PairwiseStrategy(CheckStrategy):
         param_replace_fn2,
         pair_id: str
     ) -> 'QueryResult':
-        """
-        二段階チェック：
-        1. Stage 1: 条件のみチェック（C1_i ∧ C2_j）
-           - UNSAT → 到達不能なのでペア自体をUNSAT扱い
-           - SAT → Stage 2へ
-        2. Stage 2: 値不等式を追加してチェック（C1_i ∧ C2_j ∧ V1_i≠V2_j）
-           - hard timeout で再試行
-        3. Stage 3 (NEW): Stage 2が unknown の場合、正規化してSMTで比較
-           - 正規化後が等価なら UNSAT 扱い
-           - 正規化後も非等価なら反例として SAT
-        """
+        """二段階チェック"""
         # Stage 1: 条件のみチェック
         cond_query = self._build_condition_only_query(
             base_ctx, case1, case2,
@@ -293,19 +293,12 @@ class PairwiseStrategy(CheckStrategy):
         )
         
         if stage1_result.is_equivalent is True:
-            # UNSAT: 条件が矛盾 → 到達不能なのでペア自体をUNSAT扱い
-            self._debug_print(f"  Pair {pair_id} stage1(conds-only): UNSAT (unreachable) - skip value check")
+            # UNSAT: 条件が矛盾 → 到達不能
             stage1_result.last_query = cond_query
+            stage1_result.pair_stage = "conds-only"  # ★ 追加
             return stage1_result
         
-        if stage1_result.is_equivalent is False:
-            # SAT: 条件が充足可能 → Stage 2へ
-            self._debug_print(f"  Pair {pair_id} stage1(conds-only): SAT - proceed to value check")
-        else:
-            # UNKNOWN: 条件チェックで不明 → とりあえずStage 2へ
-            self._debug_print(f"  Pair {pair_id} stage1(conds-only): UNKNOWN - proceed to value check")
-        
-        # Stage 2: 値不等式を追加して再チェック
+        # Stage 2: 値不等式を追加
         full_query = self._build_pair_query(
             base_ctx, case1, case2,
             param_replace_fn1, param_replace_fn2,
@@ -317,26 +310,24 @@ class PairwiseStrategy(CheckStrategy):
         )
         
         stage2_result.last_query = full_query
+        stage2_result.pair_stage = "with-ineq"  # ★ 追加
         
-        # Stage 3 (NEW): unknown の場合のみ正規化を試行
+        # Stage 3: 正規化
         if stage2_result.is_equivalent is None:
             norm_result = self._try_normalization_equivalence(
-                base_ctx,  # 追加
-                case1, case2,
+                base_ctx, case1, case2,
                 param_replace_fn1, param_replace_fn2,
                 pair_id
             )
             
-            # 正規化で確定した場合はその結果を返す
             if norm_result.is_equivalent is True:
-                # UNSAT: 正規化後は等価
                 norm_result.last_query = full_query
+                norm_result.pair_stage = "norm-ineq"  # ★ 追加
                 return norm_result
             elif norm_result.is_equivalent is False:
-                # SAT: 正規化後も非等価（反例発見）
                 norm_result.last_query = full_query
+                norm_result.pair_stage = "norm-ineq"  # ★ 追加
                 return norm_result
-            # UNKNOWN の場合は stage2_result をそのまま使う
         
         return stage2_result
     
@@ -357,6 +348,9 @@ class PairwiseStrategy(CheckStrategy):
         2. Phase 1の結果にUDIVが残っていれば、SMTガード証明ベースの正規化を試行（Phase 2）
         3. 構造一致チェック（ヒントとして使用）
         4. **必ずSMTで最終確認**（構造一致時も含む）
+        
+        Returns:
+            QueryResult (正規化ルール記録を含む)
         """
         # 元の式
         value1_orig = case1.value_expr
@@ -542,10 +536,24 @@ class PairwiseStrategy(CheckStrategy):
         else:
             self._debug_print(f"    No normalization rules applied")
         
+        # ★ 正規化ルールを記録（QueryResultに渡すため）
+        from ..debug_trace import NormalizationRuleApplication
+        normalization_rules = []
+        for rule_app in norm_context.applied_rules:
+            normalization_rules.append(NormalizationRuleApplication(
+                rule_name=rule_app.rule_name,
+                reason=rule_app.reason,
+                applied_to=f"pair_{pair_id}",
+                before=rule_app.before_expr,
+                after=rule_app.after_expr,
+            ))
+        
         # 正規化で変更がなければスキップ（最適化）
         if not changed1 and not changed2:
             self._debug_print(f"    No normalization applied -> remain UNKNOWN")
-            return QueryResult(is_equivalent=None)
+            result = QueryResult(is_equivalent=None)
+            result.normalization_rules = normalization_rules
+            return result
         
         # ============================================
         # 構造的同一性チェック（ヒントとして使用）
@@ -586,6 +594,9 @@ class PairwiseStrategy(CheckStrategy):
             norm_query, pair_id, stage="norm-ineq", use_hard_timeout=False
         )
         
+        # ★ 正規化ルールを結果に追加
+        norm_result.normalization_rules = normalization_rules
+        
         # 結果判定
         if norm_result.is_equivalent is True:
             # UNSAT: 正規化後は等価 → ペアをUNSAT扱い
@@ -593,7 +604,7 @@ class PairwiseStrategy(CheckStrategy):
             if is_struct_eq:
                 self._debug_print(f"    (Structural match was confirmed by SMT)")
             self._debug_print(f"  Pair {pair_id} normalization: values became equivalent -> UNSAT")
-            return QueryResult(is_equivalent=True)
+            return norm_result
         
         elif norm_result.is_equivalent is False:
             # SAT: 正規化後も非等価 → 反例あり
@@ -602,17 +613,14 @@ class PairwiseStrategy(CheckStrategy):
                 self._debug_print(f"    WARNING: Structural match detected but SMT found counterexample!")
                 self._debug_print(f"    This indicates the structural check may have false positives.")
             self._debug_print(f"  Pair {pair_id} normalization: found counterexample -> NOT EQUIVALENT")
-            return QueryResult(
-                is_equivalent=False,
-                counterexample_raw=norm_result.counterexample_raw
-            )
+            return norm_result
         
         else:
             # UNKNOWN: 正規化後もタイムアウト
             self._debug_print(f"    Normalized inequality: UNKNOWN -> remain UNKNOWN")
             if is_struct_eq:
                 self._debug_print(f"    (Structural match detected but SMT solver timed out)")
-            return QueryResult(is_equivalent=None)
+            return norm_result
     
     def _solve_query_internal(
         self,
@@ -989,3 +997,5 @@ class QueryResult:
         self.is_equivalent = is_equivalent
         self.counterexample_raw = counterexample_raw
         self.last_query: Optional[str] = None
+        self.normalization_rules: List = []
+        self.pair_stage: Optional[str] = None

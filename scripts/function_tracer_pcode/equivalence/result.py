@@ -9,6 +9,7 @@ from ..smt import ParallelResult, SolverStatus
 from .counterexample import FormattedCounterexample
 from .typing.fixer import TypeFixResult
 from ..transform.rewrite.rules import RewriteResult
+from .debug_trace import DebugTrace  # 新規追加
 
 
 @dataclass
@@ -78,6 +79,10 @@ class EquivalenceResult:
     pairwise_stats: Optional[Dict[str, int]] = None
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
+    debug_trace: Optional[DebugTrace] = None
+    
+    # ★ 新規追加: 正規化ルール適用履歴
+    normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -102,7 +107,8 @@ class EquivalenceResult:
         return any(kw in self.error_message for kw in critical_keywords)
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        """機械可読な辞書に変換（JSON シリアライズ可能）"""
+        result = {
             "is_equivalent": self.is_equivalent,
             "function1_name": self.function1_name,
             "function2_name": self.function2_name,
@@ -111,7 +117,7 @@ class EquivalenceResult:
             "function1_signature": self.function1_signature.to_dict() if self.function1_signature else None,
             "function2_signature": self.function2_signature.to_dict() if self.function2_signature else None,
             "solver_results": self.solver_results.to_dict() if self.solver_results else None,
-            "counterexample": self.counterexample.to_string("json") if self.counterexample else None,
+            "counterexample": self.counterexample.to_dict() if self.counterexample else None,
             "total_time": self.total_time,
             "error_message": self.error_message,
             "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
@@ -123,6 +129,20 @@ class EquivalenceResult:
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
+        
+        # ★ 新規追加: mips64_abi_constraints
+        if self.mips64_abi_constraints:
+            # Dict[str, Tuple[str, int]] を JSON可能な形式に変換
+            result["mips64_abi_constraints"] = {
+                k: {"signedness": v[0], "narrow_bits": v[1]}
+                for k, v in self.mips64_abi_constraints.items()
+            }
+        
+        # ★ 新規追加: デバッグトレース
+        if self.debug_trace:
+            result["debug_trace"] = self.debug_trace.to_dict()
+        
+        return result
     
     def to_string(self, verbose: bool = False) -> str:
         lines = []
