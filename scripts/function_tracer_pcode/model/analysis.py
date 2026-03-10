@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .expression import Expression, Condition
+    from .condition import Condition
+    from .expression import Expression
     from ..analysis.signedness import SignednessEvidence
 
 

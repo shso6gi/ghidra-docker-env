@@ -3,7 +3,8 @@
 
 from .storage import StorageInfo
 from .analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
-from .expression import Expression, ExpressionType, Condition
+from .expression import Expression, ExpressionType
+from .condition import Condition
 from .signature import FunctionSignature
 
 __all__ = [

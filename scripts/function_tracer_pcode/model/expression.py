@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
-"""式の表現クラス（Python互換出力対応）"""
+"""式の表現クラス"""
 
-from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Any, Dict, Tuple, Set
+from typing import List, Optional, Any, Dict, Set
 
 from .storage import StorageInfo
+from .render_python import (
+    expression_to_string,
+    format_piece_expression,
+    format_subpiece_expression,
+    get_python_operator,
+)
+from .render_smt import expression_to_smt, get_smt_operator
+from .variable_collection import (
+    collect_variables,
+    collect_variables_into,
+    collect_variables_with_storage,
+    collect_variables_with_storage_into,
+)
 
 
 class ExpressionType(Enum):
@@ -233,190 +245,20 @@ class Expression:
             return str(value)
     
     def to_string(self, simplify: bool = True) -> str:
-        """式をPython互換の文字列に変換"""
-        return self._to_string_internal(simplify)
+        """式を Python 互換の文字列に変換"""
+        return expression_to_string(self, simplify)
     
     def _to_string_internal(self, simplify: bool) -> str:
-        if self.expr_type == ExpressionType.CONSTANT:
-            return self._format_constant(self.value)
-        
-        elif self.expr_type == ExpressionType.PARAMETER:
-            return self.name if self.name else f"param_{self.value}"
-        
-        elif self.expr_type == ExpressionType.VARIABLE:
-            return self.name if self.name else "var"
-        
-        elif self.expr_type == ExpressionType.BINARY_OP:
-            left = self.operands[0]
-            right = self.operands[1]
-            left_str = left._to_string_internal(simplify)
-            right_str = right._to_string_internal(simplify)
-            
-            # PIECE: 2つの値を結合（upper << (lower_bits) | lower）
-            if self.operator == "PIECE":
-                return self._format_piece(left, right, simplify)
-            
-            # SUBPIECE: 値の一部を抽出
-            if self.operator == "SUBPIECE":
-                return self._format_subpiece(left, right, simplify)
-            
-            op = self._get_python_operator(self.operator)
-            return f"({left_str} {op} {right_str})"
-        
-        elif self.expr_type == ExpressionType.UNARY_OP:
-            operand = self.operands[0]._to_string_internal(simplify)
-            op = self._get_python_operator(self.operator)
-            if op == "not":
-                return f"(not {operand})"
-            elif op in ("-", "~"):
-                return f"({op}{operand})"
-            else:
-                return f"{op}({operand})"
-        
-        elif self.expr_type == ExpressionType.CALL:
-            args = ", ".join(op._to_string_internal(simplify) for op in self.operands)
-            return f"{self.name}({args})"
-        
-        elif self.expr_type == ExpressionType.MEMORY:
-            addr = self.operands[0]._to_string_internal(simplify)
-            return f"MEM[{addr}]"
-        
-        elif self.expr_type == ExpressionType.PHI:
-            branches = self.value
-            if not branches:
-                return "UNKNOWN"
-            if len(branches) == 1:
-                _, val = branches[0]
-                if hasattr(val, '_to_string_internal'):
-                    return val._to_string_internal(simplify)
-                return str(val)
-            
-            parts = []
-            for cond, val in branches:
-                if hasattr(val, '_to_string_internal'):
-                    val_str = val._to_string_internal(simplify)
-                else:
-                    val_str = str(val)
-                if cond is not None:
-                    if hasattr(cond, '_to_string_internal'):
-                        cond_str = cond._to_string_internal(simplify)
-                    elif hasattr(cond, 'to_string'):
-                        cond_str = cond.to_string()
-                    else:
-                        cond_str = str(cond)
-                    parts.append(f"{val_str} if {cond_str}")
-                else:
-                    parts.append(val_str)
-            return "PHI(" + ", ".join(parts) + ")"
-        
-        else:
-            return self.name if self.name else "UNKNOWN"
+        return expression_to_string(self, simplify)
     
     def _format_piece(self, high: 'Expression', low: 'Expression', simplify: bool) -> str:
-        """
-        PIECE を Python 互換形式に変換
-        PIECE(high, low) = (high << (low_size * 8)) | low
-        """
-        high_str = high._to_string_internal(simplify)
-        low_str = low._to_string_internal(simplify)
-        
-        # lowのビット幅からシフト量を計算
-        shift_bits = low.get_bit_width()
-        
-        # 簡略化
-        if simplify:
-            # high が定数 0 の場合
-            if high.expr_type == ExpressionType.CONSTANT and high.value == 0:
-                return low_str
-            
-            # low が定数 0 の場合
-            if low.expr_type == ExpressionType.CONSTANT and low.value == 0:
-                return f"({high_str} << {shift_bits})"
-        
-        # 一般形式
-        return f"(({high_str} << {shift_bits}) | {low_str})"
+        return format_piece_expression(self, high, low, simplify)
     
     def _format_subpiece(self, source: 'Expression', offset: 'Expression', simplify: bool) -> str:
-        """
-        SUBPIECE を Python 互換形式に変換
-        SUBPIECE(source, byte_offset) = (source >> (byte_offset * 8)) & mask
-        
-        mask は出力サイズに基づく
-        """
-        source_str = source._to_string_internal(simplify)
-        
-        # オフセット値を取得
-        if offset.expr_type == ExpressionType.CONSTANT:
-            byte_offset = offset.value
-        else:
-            # 非定数オフセットの場合
-            offset_str = offset._to_string_internal(simplify)
-            output_bits = self.get_bit_width()
-            mask = (1 << output_bits) - 1
-            mask_str = self._format_constant(mask)
-            return f"(({source_str} >> ({offset_str} * 8)) & {mask_str})"
-        
-        # 出力サイズからマスクを計算
-        output_bits = self.get_bit_width()
-        mask = (1 << output_bits) - 1
-        mask_str = self._format_constant(mask)
-        
-        shift_bits = byte_offset * 8
-        
-        # 簡略化
-        if simplify and shift_bits == 0:
-            # オフセット0の場合はシフト不要
-            return f"({source_str} & {mask_str})"
-        
-        # 一般形式
-        return f"(({source_str} >> {shift_bits}) & {mask_str})"
+        return format_subpiece_expression(self, source, offset, simplify)
     
     def _get_python_operator(self, operator: Optional[str]) -> str:
-        """P-codeオペレータをPython演算子に変換"""
-        if operator is None:
-            return ""
-        op_map: Dict[str, str] = {
-            # 算術演算
-            "INT_ADD": "+",
-            "INT_SUB": "-",
-            "INT_MULT": "*",
-            "INT_DIV": "//",
-            "INT_SDIV": "//",
-            "INT_REM": "%",
-            "INT_SREM": "%",
-            # ビット演算
-            "INT_AND": "&",
-            "INT_OR": "|",
-            "INT_XOR": "^",
-            "INT_LEFT": "<<",
-            "INT_RIGHT": ">>",
-            "INT_SRIGHT": ">>",
-            # 比較演算
-            "INT_EQUAL": "==",
-            "INT_NOTEQUAL": "!=",
-            "INT_LESS": "<",
-            "INT_SLESS": "<",
-            "INT_LESSEQUAL": "<=",
-            "INT_SLESSEQUAL": "<=",
-            # 論理演算（Python形式）
-            "BOOL_AND": "and",
-            "BOOL_OR": "or",
-            "BOOL_XOR": "^",
-            # 単項演算
-            "INT_NEGATE": "~",
-            "INT_2COMP": "-",
-            "BOOL_NEGATE": "not",
-            "INT_ZEXT": "int",
-            "INT_SEXT": "int",
-            "COPY": "",
-            # 浮動小数点
-            "FLOAT_ADD": "+",
-            "FLOAT_SUB": "-",
-            "FLOAT_MULT": "*",
-            "FLOAT_DIV": "/",
-        }
-        op: str = operator
-        return op_map.get(op, op)
+        return get_python_operator(operator)
     
     def equals(self, other: 'Expression') -> bool:
         """式が等価かどうかを判定"""
@@ -438,227 +280,14 @@ class Expression:
         return True
     
     def to_smt(self) -> str:
-        """SMTソルバー用の式に変換"""
-        return self._to_smt_internal()
+        """SMT ソルバー用の式に変換"""
+        return expression_to_smt(self)
     
     def _to_smt_internal(self) -> str:
-        if self.expr_type == ExpressionType.CONSTANT:
-            bits = self.get_bit_width()
-            # 負の値の処理（2の補数表現に変換）
-            value = self.value
-            if value < 0:
-                value = value & ((1 << bits) - 1)
-            return f"(_ bv{value} {bits})"
-        
-        elif self.expr_type == ExpressionType.PARAMETER:
-            return self.name if self.name else f"param_{self.value}"
-        
-        elif self.expr_type == ExpressionType.VARIABLE:
-            return self.name if self.name else "var"
-        
-        elif self.expr_type == ExpressionType.BINARY_OP:
-            left = self.operands[0]
-            right = self.operands[1]
-            
-            # PIECE -> concat
-            if self.operator == "PIECE":
-                left_smt = left._to_smt_internal()
-                right_smt = right._to_smt_internal()
-                return f"(concat {left_smt} {right_smt})"
-            
-            # SUBPIECE -> extract
-            if self.operator == "SUBPIECE":
-                source_smt = left._to_smt_internal()
-                if right.expr_type == ExpressionType.CONSTANT:
-                    byte_offset = right.value
-                    output_size = self.size if self.size else 4
-                    high_bit = (byte_offset + output_size) * 8 - 1
-                    low_bit = byte_offset * 8
-                    return f"((_ extract {high_bit} {low_bit}) {source_smt})"
-                else:
-                    return f"(subpiece {source_smt} {right._to_smt_internal()})"
-            
-            # ビット幅を取得
-            left_bits = left.get_bit_width()
-            right_bits = right.get_bit_width()
-            
-            left_smt = left._to_smt_internal()
-            right_smt = right._to_smt_internal()
-            
-            # シフト演算: シフト量のビット幅を第1オペランドに合わせる
-            if self.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
-                result_bits = left_bits
-                if right_bits != result_bits:
-                    if right_bits > result_bits:
-                        # シフト量が大きい場合は下位ビットを抽出
-                        right_smt = f"((_ extract {result_bits - 1} 0) {right_smt})"
-                    else:
-                        # シフト量が小さい場合はゼロ拡張
-                        right_smt = f"((_ zero_extend {result_bits - right_bits}) {right_smt})"
-                
-                op = self._get_smt_operator(self.operator)
-                return f"({op} {left_smt} {right_smt})"
-            
-            # ビット演算・算術演算: 両オペランドのビット幅を揃える
-            if self.operator in ["INT_AND", "INT_OR", "INT_XOR", 
-                                 "INT_ADD", "INT_SUB", "INT_MULT",
-                                 "INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM"]:
-                if left_bits != right_bits:
-                    target_bits = max(left_bits, right_bits)
-                    if left_bits < target_bits:
-                        left_smt = f"((_ zero_extend {target_bits - left_bits}) {left_smt})"
-                    if right_bits < target_bits:
-                        right_smt = f"((_ zero_extend {target_bits - right_bits}) {right_smt})"
-                
-                op = self._get_smt_operator(self.operator)
-                return f"({op} {left_smt} {right_smt})"
-            
-            # 比較演算: 両オペランドのビット幅を揃える
-            if self.operator in ["INT_EQUAL", "INT_NOTEQUAL", 
-                                 "INT_LESS", "INT_SLESS", 
-                                 "INT_LESSEQUAL", "INT_SLESSEQUAL"]:
-                if left_bits != right_bits:
-                    target_bits = max(left_bits, right_bits)
-                    if left_bits < target_bits:
-                        left_smt = f"((_ zero_extend {target_bits - left_bits}) {left_smt})"
-                    if right_bits < target_bits:
-                        right_smt = f"((_ zero_extend {target_bits - right_bits}) {right_smt})"
-                
-                op = self._get_smt_operator(self.operator)
-                return f"({op} {left_smt} {right_smt})"
-            
-            # その他の二項演算（BOOL_AND, BOOL_OR など）
-            op = self._get_smt_operator(self.operator)
-            return f"({op} {left_smt} {right_smt})"
-        
-        elif self.expr_type == ExpressionType.UNARY_OP:
-            operand = self.operands[0]
-            operand_smt = operand._to_smt_internal()
-            operand_bits = operand.get_bit_width()
-            
-            # INT_ZEXT: ゼロ拡張
-            if self.operator == "INT_ZEXT":
-                output_bits = (self.size if self.size else 8) * 8
-                extend_bits = output_bits - operand_bits
-                if extend_bits > 0:
-                    return f"((_ zero_extend {extend_bits}) {operand_smt})"
-                elif extend_bits == 0:
-                    return operand_smt
-                else:
-                    # 入力より出力が小さい場合は抽出
-                    return f"((_ extract {output_bits - 1} 0) {operand_smt})"
-            
-            # INT_SEXT: 符号拡張
-            elif self.operator == "INT_SEXT":
-                output_bits = (self.size if self.size else 8) * 8
-                extend_bits = output_bits - operand_bits
-                if extend_bits > 0:
-                    return f"((_ sign_extend {extend_bits}) {operand_smt})"
-                elif extend_bits == 0:
-                    return operand_smt
-                else:
-                    return f"((_ extract {output_bits - 1} 0) {operand_smt})"
-            
-            # INT_NEGATE - ビット反転（1の補数）
-            elif self.operator == "INT_NEGATE":
-                return f"(bvnot {operand_smt})"
-            
-            # INT_2COMP - 算術否定（2の補数）
-            elif self.operator == "INT_2COMP":
-                return f"(bvneg {operand_smt})"
-            
-            # BOOL_NEGATE
-            elif self.operator == "BOOL_NEGATE":
-                return f"(not {operand_smt})"
-            
-            # その他の単項演算
-            else:
-                op = self._get_smt_operator(self.operator)
-                return f"({op} {operand_smt})"
-        
-        elif self.expr_type == ExpressionType.CALL:
-            args = " ".join(op._to_smt_internal() for op in self.operands)
-            if args:
-                return f"({self.name} {args})"
-            else:
-                return f"{self.name}"
-        
-        elif self.expr_type == ExpressionType.MEMORY:
-            addr = self.operands[0]._to_smt_internal()
-            return f"(select mem {addr})"
-        
-        elif self.expr_type == ExpressionType.PHI:
-            branches = self.value
-            if not branches:
-                return "undefined"
-            
-            # 最後のブランチがデフォルト値
-            last_val = branches[-1][1]
-            if hasattr(last_val, '_to_smt_internal'):
-                result = last_val._to_smt_internal()
-            else:
-                result = str(last_val)
-            
-            # 逆順にite式を構築
-            for i in range(len(branches) - 2, -1, -1):
-                cond, val = branches[i]
-                if cond is not None and hasattr(cond, '_to_smt_internal'):
-                    cond_str = cond._to_smt_internal()
-                elif cond is not None and hasattr(cond, 'to_smt'):
-                    cond_str = cond.to_smt()
-                else:
-                    cond_str = "true"
-                
-                if hasattr(val, '_to_smt_internal'):
-                    val_str = val._to_smt_internal()
-                else:
-                    val_str = str(val)
-                
-                result = f"(ite {cond_str} {val_str} {result})"
-            
-            return result
-        
-        else:
-            return "unknown"
+        return expression_to_smt(self)
 
     def _get_smt_operator(self, operator: Optional[str] = None) -> str:
-        """P-codeオペレータをSMT-LIB演算子に変換"""
-        if operator is None:
-            return "unknown"
-
-        op_map = {
-            # 算術演算
-            "INT_ADD": "bvadd",
-            "INT_SUB": "bvsub",
-            "INT_MULT": "bvmul",
-            "INT_DIV": "bvudiv",
-            "INT_SDIV": "bvsdiv",
-            "INT_REM": "bvurem",
-            "INT_SREM": "bvsrem",
-            # ビット演算
-            "INT_AND": "bvand",
-            "INT_OR": "bvor",
-            "INT_XOR": "bvxor",
-            "INT_LEFT": "bvshl",
-            "INT_RIGHT": "bvlshr",
-            "INT_SRIGHT": "bvashr",
-            # 比較演算
-            "INT_EQUAL": "=",
-            "INT_NOTEQUAL": "distinct",
-            "INT_LESS": "bvult",
-            "INT_SLESS": "bvslt",
-            "INT_LESSEQUAL": "bvule",
-            "INT_SLESSEQUAL": "bvsle",
-            # 単項演算（特別処理済みのものは除外）
-            "INT_NEGATE": "bvnot",
-            "INT_2COMP": "bvneg",
-            "BOOL_NEGATE": "not",
-            # 論理演算
-            "BOOL_AND": "and",
-            "BOOL_OR": "or",
-            "BOOL_XOR": "xor",
-        }
-        return op_map.get(operator, operator.lower())
+        return get_smt_operator(operator)
     
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {"type": self.expr_type.name}
@@ -679,157 +308,20 @@ class Expression:
         return result
     
     def get_all_variables(self) -> Set[str]:
-        """
-        式に含まれる全ての変数名（パラメータ・変数）を取得
-        
-        Returns:
-            変数名のセット
-        """
-        variables: Set[str] = set()
-        self._collect_variables(variables)
-        return variables
+        """式に含まれる全ての変数名（パラメータ・変数）を取得"""
+        return collect_variables(self)
     
     def _collect_variables(self, variables: Set[str]) -> None:
         """再帰的に変数を収集"""
-        if self.expr_type == ExpressionType.PARAMETER:
-            if self.name:
-                variables.add(self.name)
-        
-        elif self.expr_type == ExpressionType.VARIABLE:
-            if self.name:
-                variables.add(self.name)
-        
-        elif self.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP):
-            for operand in self.operands:
-                operand._collect_variables(variables)
-        
-        elif self.expr_type == ExpressionType.CALL:
-            for operand in self.operands:
-                operand._collect_variables(variables)
-        
-        elif self.expr_type == ExpressionType.MEMORY:
-            for operand in self.operands:
-                operand._collect_variables(variables)
-        
-        elif self.expr_type == ExpressionType.PHI:
-            if self.value:
-                for cond, val in self.value:
-                    if cond is not None and hasattr(cond, '_collect_variables'):
-                        cond._collect_variables(variables)
-                    if hasattr(val, '_collect_variables'):
-                        val._collect_variables(variables)
+        collect_variables_into(self, variables)
     
     def get_all_variables_with_storage(self) -> Dict[str, Optional['StorageInfo']]:
-        """
-        式に含まれる全ての変数名とストレージ情報を取得
-        
-        Returns:
-            変数名 -> StorageInfo のマッピング
-        """
-        variables: Dict[str, Optional[StorageInfo]] = {}
-        self._collect_variables_with_storage(variables)
-        return variables
+        """式に含まれる全ての変数名とストレージ情報を取得"""
+        return collect_variables_with_storage(self)
     
     def _collect_variables_with_storage(self, variables: Dict[str, Optional['StorageInfo']]) -> None:
         """再帰的に変数とストレージ情報を収集"""
-        if self.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
-            if self.name and self.name not in variables:
-                variables[self.name] = self.storage_info
-        
-        elif self.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP):
-            for operand in self.operands:
-                operand._collect_variables_with_storage(variables)
-        
-        elif self.expr_type == ExpressionType.CALL:
-            for operand in self.operands:
-                operand._collect_variables_with_storage(variables)
-        
-        elif self.expr_type == ExpressionType.MEMORY:
-            for operand in self.operands:
-                operand._collect_variables_with_storage(variables)
-        
-        elif self.expr_type == ExpressionType.PHI:
-            if self.value:
-                for cond, val in self.value:
-                    if cond is not None and hasattr(cond, '_collect_variables_with_storage'):
-                        cond._collect_variables_with_storage(variables)
-                    if hasattr(val, '_collect_variables_with_storage'):
-                        val._collect_variables_with_storage(variables)
+        collect_variables_with_storage_into(self, variables)
 
 
-class Condition:
-    """条件式を表現するクラス"""
-    
-    def __init__(self, expression: Expression, negated: bool = False):
-        self.expression = expression
-        self.negated = negated
-    
-    def negate(self) -> 'Condition':
-        return Condition(self.expression, not self.negated)
-    
-    def to_string(self) -> str:
-        expr_str = self.expression.to_string()
-        if self.negated:
-            return f"(not {expr_str})"
-        return expr_str
-    
-    def to_smt(self) -> str:
-        expr_smt = self.expression.to_smt()
-        if self.negated:
-            return f"(not {expr_smt})"
-        return expr_smt
-    
-    def equals(self, other: 'Condition') -> bool:
-        """条件が等価かどうかを判定"""
-        if not isinstance(other, Condition):
-            return False
-        if self.negated != other.negated:
-            return False
-        return self.expression.to_string() == other.expression.to_string()
-    
-    @classmethod
-    def combine_and(cls, conditions: List['Condition']) -> Optional['Condition']:
-        """複数の条件をANDで結合（重複除去付き）"""
-        if not conditions:
-            return None
-        
-        unique = []
-        for cond in conditions:
-            is_dup = False
-            for existing in unique:
-                if cond.equals(existing):
-                    is_dup = True
-                    break
-            if not is_dup:
-                unique.append(cond)
-        
-        if len(unique) == 0:
-            return None
-        if len(unique) == 1:
-            return unique[0]
-        
-        def to_expr(c: Condition) -> Expression:
-            if c.negated:
-                return Expression.unary_op("BOOL_NEGATE", c.expression)
-            return c.expression
-        
-        combined = Expression.binary_op("BOOL_AND", to_expr(unique[0]), to_expr(unique[1]))
-        for cond in unique[2:]:
-            combined = Expression.binary_op("BOOL_AND", combined, to_expr(cond))
-        
-        return Condition(combined, False)
-    
-    def get_all_variables(self) -> Set[str]:
-        """条件式に含まれる全ての変数名を取得"""
-        return self.expression.get_all_variables()
-    
-    def get_all_variables_with_storage(self) -> Dict[str, Optional[StorageInfo]]:
-        """条件式に含まれる全ての変数名とストレージ情報を取得"""
-        return self.expression.get_all_variables_with_storage()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """辞書形式に変換"""
-        return {
-            "expression": self.expression.to_dict(),
-            "negated": self.negated,
-        }
+from .condition import Condition
