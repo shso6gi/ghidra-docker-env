@@ -5,7 +5,6 @@ from .analysis import ReturnAnalyzer
 from .model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType, Condition
 from .io import OutputFormatter
 from .analysis.condition import ConditionSimplifier
-from .cli import main
 
 __version__ = "1.0.0"
 __all__ = [
@@ -23,3 +22,10 @@ __all__ = [
     "ConditionSimplifier",
     "OutputFormatter",
 ]
+
+
+def __getattr__(name):
+    if name == "main":
+        from .cli.main import main
+        return main
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

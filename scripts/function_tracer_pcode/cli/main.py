@@ -30,47 +30,44 @@ def parse_arguments():
         epilog="""
 使用例:
   # デフォルト設定で実行
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary
   
   # 特定の関数を指定
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/ -f main func1
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary -f main func1
   
   # 16進数表示で出力
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/ --hex
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary --hex
   
   # SMT形式で出力
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/ --format smt
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary --format smt
   
   # 詳細形式で出力
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/ --format detailed
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary --format detailed
   
   # ファイルに出力
-  python3 -m scripts.function_tracer_pcode.main /workspace/targets/ -o output.txt
+  python3 -m scripts.function_tracer_pcode.cli.main /workspace/targets/binary -o output.txt
   
   # 等価性判定モード
-  # 同じ関数名で比較
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f target_function
+  # 同じ関数名で比較（recovery phases デフォルト有効）
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f target_function
 
   # 異なる関数名で比較
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func_in_bin1 func_in_bin2
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func_in_bin1 func_in_bin2
 
   # タイムアウトを5分に設定
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --equiv-timeout 300
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --equiv-timeout 300
 
-  # 型修正リトライを有効にして比較（longlong/undefined → int）
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func --retry-with-int
+  # recovery phases を無効にして比較（型修正リトライなし）
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --no-retry-phases
 
   # デバッグモードで詳細を確認
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f target_func --retry-with-int -d -v
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f target_func -d -v
 
   # 詳細出力とSMT式保存
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func -v --save-formula
-
-  # デバッグモード
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f func -d
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func -v --save-formula
 
   # リライトを無効にして実行
-  python3 -m scripts.function_tracer_pcode.main --equiv binary1 binary2 -f modulo --no-rewrite
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f modulo --no-rewrite
         """
     )
     
@@ -168,11 +165,11 @@ def parse_arguments():
         help="定数の表示形式 (dec: 10進数, hex: 16進数, auto: 自動判定)"
     )
 
-    # === 型修正リトライオプション ===
+    # === Recovery Phases オプション（デフォルト有効） ===
     parser.add_argument(
-        "--retry-with-int",
+        "--no-retry-phases",
         action="store_true",
-        help="等価性判定に失敗した場合、longlong/undefined型をint型に変更してリトライする"
+        help="Recovery phases（型修正リトライなど）を無効にする（デフォルト: 有効）"
     )
     
     parser.add_argument(
@@ -291,7 +288,7 @@ def analyze_and_output(
                 msg = f"[Warning] Function '{func_name}' not found or analysis failed"
                 output_result(msg, output_file, quiet)
         
-        completion_msg = f"\n"
+        completion_msg = f"\n解析完了: {processed_count}/{len(function_names)} 関数"
         output_result(completion_msg, output_file, quiet)
         
     finally:
@@ -316,8 +313,8 @@ def run_equivalence_check(args):
         func_name1 = function_names[0]
         func_name2 = function_names[1]
     
-    # 型修正リトライオプションを取得
-    retry_with_type_fix = getattr(args, 'retry_with_int', False)
+    # ★ Recovery phases オプション（デフォルト有効、--no-retry-phases で無効化）
+    retry_with_type_fix = not getattr(args, 'no_retry_phases', False)
 
     # 戦略設定を取得（表示用）
     strategy = getattr(args, 'strategy', 'pairwise')
@@ -330,7 +327,7 @@ def run_equivalence_check(args):
         print(f"  Function 2: {func_name2}")
         print(f"  Strategy: {strategy}")
         print(f"  Timeout: {args.equiv_timeout}秒")
-        print(f"  Retry with int type fix: {'enabled' if retry_with_type_fix else 'disabled'}")
+        print(f"  Recovery phases: {'disabled' if getattr(args, 'no_retry_phases', False) else 'enabled'}")
         print()
     
     # Ghidra起動
@@ -399,7 +396,7 @@ def run_equivalence_check(args):
                     program2 = result2.getPrimaryDomainObject()
                     pyghidra.analyze(program2)
                     
-                    # 等価性判定を実行（リトライオプションを渡す）
+                    # 等価性判定を実行（retry_with_type_fix を渡す）
                     result = checker.check_from_binaries(
                         program1,
                         program2,
