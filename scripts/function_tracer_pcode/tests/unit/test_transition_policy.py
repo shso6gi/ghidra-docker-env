@@ -117,8 +117,11 @@ class TestPhaseTransitionPolicy:
             analysis2=None
         )
         
-        applied = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
+        # ★ 修正: タプルアンパッキング + changed1/changed2 の検証
+        applied, changed1, changed2 = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
         assert applied is True, "Signedness fix should be applied"
+        assert changed1 is True, "binary1 should be changed"
+        assert changed2 is False, "binary2 should NOT be changed (analysis2 is None)"
         assert ctx.type_fix_result.signedness_fixed_binary1 is True
     
     def test_phase1_skipped_if_no_signedness_info(self, mock_program_x86):
@@ -150,8 +153,11 @@ class TestPhaseTransitionPolicy:
             analysis2=None
         )
         
-        applied = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
+        # ★ 修正: タプルアンパッキング + changed1/changed2 の検証
+        applied, changed1, changed2 = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
         assert applied is False, "Phase 1 should be skipped"
+        assert changed1 is False, "binary1 should NOT be changed"
+        assert changed2 is False, "binary2 should NOT be changed"
     
     def test_phase2_pattern_match_execution(self, mock_program_x86):
         """Phase 2: パターンマッチ型修正の実行条件"""
@@ -185,8 +191,11 @@ class TestPhaseTransitionPolicy:
             analysis2=None
         )
         
-        applied = handler.run_phase2_return_type_fix(ctx, type_fixer, type_fixer)
-        assert applied is True
+        # ★ 修正: タプルアンパッキング + changed1/changed2 の検証
+        applied, changed1, changed2 = handler.run_phase2_return_type_fix(ctx, type_fixer, type_fixer)
+        assert applied is True, "Pattern fix should be applied"
+        assert changed1 is True, "binary1 should be changed"
+        assert changed2 is False, "binary2 should NOT be changed (analysis2 is None)"
         assert ctx.type_fix_result.return_type_fixed_binary1 is True
     
     def test_phase4a_mips64_condition(self, mock_program_mips64, mock_program_x86):

@@ -13,7 +13,7 @@ from .counterexample import CounterexampleFormatter
 from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
 from .phases.handler import (
-    PhaseHandler, PhaseContext, PhaseID, PhaseSpec, DEFAULT_PHASE_PLAN
+    PhaseHandler, PhaseContext, PhaseID, PhaseSpec, PhaseResult, DEFAULT_PHASE_PLAN
 )
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies import create_strategy
@@ -222,18 +222,13 @@ class EquivalenceChecker:
         """
         2つのバイナリから関数を解析して等価性を判定
         
-        新フロー（Stage/Phase ループ骨格）:
+        新フロー（Stage/Phase ループ骨格 + Selective Reanalysis）:
         1. Phase plan を定義（デフォルト: P0_BASE -> P1_SIGNEDNESS -> P2_PATTERN_INT）
         2. 各 Phase ごとに：
            a. Phase を実行（型修正など、P0 は何もしない）
-           b. 必要に応じて再解析
-           c. **Stage plan を実行**（等価性判定）
-              - S_PAIRWISE: pairwise strategy
-              - S_MONOLITHIC_FALLBACK: UNKNOWN 時のみ monolithic fallback
-           d. 結果に応じた遷移判定：
-              - UNSAT → 即終了
-              - SAT → Phase 4-B（MIPS64 spurious）のみ許可、それ以外は即終了
-              - UNKNOWN/TIMEOUT → 次 Phase へ進む
+           b. ★ 変更された側だけ再解析（未変更側は ctx.analysis1/2 を再利用）
+           c. Stage plan を実行（等価性判定）
+           d. 結果に応じた遷移判定
         3. Phase plan 完了後、Phase 4-A（MIPS64 conservative fix）を追加試行
         """
         start_time = time.time()
@@ -264,14 +259,10 @@ class EquivalenceChecker:
             type_fixer1 = TypeFixer(program1, self.type_fixer_config, debug=self.debug)
             type_fixer2 = TypeFixer(program2, self.type_fixer_config, debug=self.debug)
         
-        # ============================================
         # Phase Plan の定義
-        # ============================================
         phase_plan = DEFAULT_PHASE_PLAN.copy()
         
-        # ============================================
         # Phase Loop
-        # ============================================
         result = None
         retry_count = 0
         first_phase = True
@@ -283,9 +274,7 @@ class EquivalenceChecker:
             self._debug_print(f"Phase {phase_id.value}: {phase_spec.description}")
             self._debug_print("=" * 60)
             
-            # ============================================
             # Phase 実行（型修正など）
-            # ============================================
             if first_phase:
                 # P0: 初回は解析から実行
                 first_phase = False
@@ -318,21 +307,19 @@ class EquivalenceChecker:
                     self._debug_print(f"Phase {phase_id.value}: No changes applied, skipping recheck")
                     continue  # 次 Phase へ
                 
-                # ★ [P1修正] 型修正が適用された → 再解析 & 再チェック & ctx 更新
+                # ★ NEW: 変更された側だけ再解析
                 retry_count += 1
                 type_fix_result.retry_phase = phase_result.retry_name
                 
-                analysis1, analysis2, result = self._analyze_and_check_with_analysis(
-                    ctx, retry_count=retry_count
+                analysis1, analysis2, result = self._selective_reanalysis_and_check(
+                    ctx, phase_result, retry_count=retry_count
                 )
                 
-                # ★ [P1修正] 再解析結果を ctx に戻す
+                # 再解析結果を ctx に戻す
                 ctx.analysis1 = analysis1
                 ctx.analysis2 = analysis2
             
-            # ============================================
             # 結果に応じた遷移判定
-            # ============================================
             
             # UNSAT → 即終了
             if result.is_equivalent is True:
@@ -346,9 +333,7 @@ class EquivalenceChecker:
                 result.total_time = time.time() - start_time
                 return result
             
-            # ============================================
             # SAT → Phase 4-B（MIPS64 偽反例対策）のみ試行
-            # ============================================
             if result.is_equivalent is False:
                 self._debug_print(f"Phase {phase_id.value}: SAT - checking for Phase 4-B eligibility")
                 
@@ -373,9 +358,7 @@ class EquivalenceChecker:
                 result.total_time = time.time() - start_time
                 return result
             
-            # ============================================
             # UNKNOWN/TIMEOUT → 次 Phase へ進むか判定
-            # ============================================
             should_retry = self.phase_handler.should_retry(result)
             retry_reason = self.phase_handler.get_retry_reason(result)
             self._debug_print(f"Phase {phase_id.value} result: {retry_reason}")
@@ -386,9 +369,7 @@ class EquivalenceChecker:
             
             self._debug_print(f"Proceeding to next phase ({retry_reason})")
         
-        # ============================================
         # Phase Plan 完了後、Phase 4-A を追加試行
-        # ============================================
         if retry_with_type_fix and type_fixer1 and type_fixer2 and result is not None:
             phase4a_spec = PhaseSpec(PhaseID.P4A_MIPS64_ABI, "MIPS64 ABI param fix (conservative)")
             
@@ -404,9 +385,9 @@ class EquivalenceChecker:
                 retry_count += 1
                 type_fix_result.retry_phase = phase_result.retry_name
                 
-                # ★ [P1修正] 再解析結果を ctx に戻す
-                analysis1, analysis2, result = self._analyze_and_check_with_analysis(
-                    ctx, retry_count=retry_count
+                # ★ NEW: selective reanalysis
+                analysis1, analysis2, result = self._selective_reanalysis_and_check(
+                    ctx, phase_result, retry_count=retry_count
                 )
                 ctx.analysis1 = analysis1
                 ctx.analysis2 = analysis2
@@ -430,9 +411,7 @@ class EquivalenceChecker:
                             result.total_time = time.time() - start_time
                             return result
         
-        # ============================================
         # 最終結果
-        # ============================================
         self._debug_print("=" * 60)
         self._debug_print("Final Result (end of phase plan)")
         self._debug_print("=" * 60)
@@ -445,6 +424,126 @@ class EquivalenceChecker:
         result.total_time = time.time() - start_time
         
         return result
+    
+    # ★ NEW: Selective Reanalysis Helper
+    def _selective_reanalysis_and_check(
+        self,
+        ctx: PhaseContext,
+        phase_result: PhaseResult,
+        retry_count: int
+    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
+        """変更された側だけ再解析して等価性をチェック
+        
+        Args:
+            ctx: Phaseコンテキスト（既存の ctx.analysis1/2 を含む）
+            phase_result: Phase実行結果（changed_binary1/2 情報を含む）
+            retry_count: リトライカウント
+        
+        Returns:
+            (analysis1, analysis2, result)
+        """
+        from ..analysis import ReturnAnalyzer
+        
+        start_time = time.time()
+        
+        # 再解析対象を決定
+        need_reanalyze1 = phase_result.changed_binary1
+        need_reanalyze2 = phase_result.changed_binary2
+        
+        self._debug_print(
+            f"Selective reanalysis: binary1={need_reanalyze1}, binary2={need_reanalyze2}"
+        )
+        
+        # binary1 の再解析または再利用
+        if need_reanalyze1:
+            self._debug_print(f"Re-analyzing binary1: {ctx.function_name1}")
+            analyzer1 = ReturnAnalyzer(ctx.program1, debug=self.debug)
+            try:
+                analysis1 = analyzer1.analyze_function_by_name(
+                    ctx.function_name1, ctx.decompile_timeout
+                )
+                if analysis1 is None:
+                    # エラー処理
+                    return self._create_reanalysis_error(
+                        ctx, f"Function '{ctx.function_name1}' not found after type fix",
+                        retry_count
+                    )
+            finally:
+                analyzer1.dispose()
+        else:
+            self._debug_print(f"Reusing cached analysis for binary1")
+            analysis1 = ctx.analysis1
+            # ★ ctx.analysis1 が None の場合はエラー
+            if analysis1 is None:
+                return self._create_reanalysis_error(
+                    ctx, f"Cached analysis for binary1 is not available",
+                    retry_count
+                )
+        
+        # binary2 の再解析または再利用
+        if need_reanalyze2:
+            self._debug_print(f"Re-analyzing binary2: {ctx.function_name2}")
+            analyzer2 = ReturnAnalyzer(ctx.program2, debug=self.debug)
+            try:
+                analysis2 = analyzer2.analyze_function_by_name(
+                    ctx.function_name2, ctx.decompile_timeout
+                )
+                if analysis2 is None:
+                    return self._create_reanalysis_error(
+                        ctx, f"Function '{ctx.function_name2}' not found after type fix",
+                        retry_count
+                    )
+            finally:
+                analyzer2.dispose()
+        else:
+            self._debug_print(f"Reusing cached analysis for binary2")
+            analysis2 = ctx.analysis2
+            # ★ ctx.analysis2 が None の場合はエラー
+            if analysis2 is None:
+                return self._create_reanalysis_error(
+                    ctx, f"Cached analysis for binary2 is not available",
+                    retry_count
+                )
+        
+        # Stage plan を実行（ここで analysis1, analysis2 は確実に non-None）
+        result = self._run_stage_plan(
+            analysis1, analysis2,
+            ctx.binary1_name, ctx.binary2_name,
+            ctx.save_formula,
+            type_fix_result=ctx.type_fix_result,
+            retry_count=retry_count,
+            original_signature1=ctx.original_signature1,
+            original_signature2=ctx.original_signature2
+        )
+        
+        return analysis1, analysis2, result
+
+    def _create_reanalysis_error(
+        self,
+        ctx: PhaseContext,
+        error_message: str,
+        retry_count: int
+    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
+        """再解析エラー用の結果を作成"""
+        start_time = time.time()
+        
+        result = EquivalenceResult(
+            is_equivalent=None,
+            function1_name=ctx.function_name1,
+            function2_name=ctx.function_name2,
+            binary1_name=ctx.binary1_name,
+            binary2_name=ctx.binary2_name,
+            solver_results=ParallelResult(results=[]),
+            total_time=time.time() - start_time,
+            error_message=error_message,
+            type_fix_result=ctx.type_fix_result,
+            retry_count=retry_count,
+            function1_signature=ctx.original_signature1,
+            function2_signature=ctx.original_signature2,
+            constrained_fragments=[]
+        )
+        
+        return ctx.analysis1, ctx.analysis2, result
     
     # ★ [P3修正] _retry_with_abi_constraints の完全実装を復元
     def _retry_with_abi_constraints(

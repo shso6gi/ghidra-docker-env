@@ -39,6 +39,8 @@ class PhaseResult:
     phase_id: PhaseID
     applied: bool  # Phase が適用されたか
     retry_name: str  # type_fix_result.retry_phase に設定する名前
+    changed_binary1: bool = False  # ★ NEW: binary1 に変更があったか
+    changed_binary2: bool = False  # ★ NEW: binary2 に変更があったか
 
 
 # デフォルトの Phase plan（主経路）
@@ -101,51 +103,85 @@ class PhaseHandler:
         指定された Phase を実行
         
         Returns:
-            PhaseResult（適用されたか、retry_name など）
+            PhaseResult（適用されたか、retry_name、changed sides など）
         """
         phase_id = phase_spec.phase_id
         
         if phase_id == PhaseID.P0_BASE:
             # P0 は型修正なしなので何もしない
-            return PhaseResult(phase_id, applied=False, retry_name="initial")
+            return PhaseResult(
+                phase_id, applied=False, retry_name="initial",
+                changed_binary1=False, changed_binary2=False
+            )
         
         elif phase_id == PhaseID.P1_SIGNEDNESS:
             # Phase 1 + Phase 1.5 を統合
-            applied = False
             retry_name = "signedness_fix"
+            changed_binary1 = False
+            changed_binary2 = False
             
             # Phase 1: 符号性に基づく型修正（戻り値）
-            if self.run_phase1_signedness_fix(ctx, type_fixer1, type_fixer2):
-                applied = True
+            applied1, ch1_1, ch1_2 = self.run_phase1_signedness_fix(ctx, type_fixer1, type_fixer2)
+            changed_binary1 = changed_binary1 or ch1_1
+            changed_binary2 = changed_binary2 or ch1_2
             
             # Phase 1.5: 引数の符号性に基づく型修正
-            if self.run_phase1_5_param_signedness_fix(ctx, type_fixer1, type_fixer2, get_params_func):
-                applied = True
+            applied15, ch15_1, ch15_2 = self.run_phase1_5_param_signedness_fix(
+                ctx, type_fixer1, type_fixer2, get_params_func
+            )
+            changed_binary1 = changed_binary1 or ch15_1
+            changed_binary2 = changed_binary2 or ch15_2
+            
+            if applied15:
                 retry_name = "param_signedness_fix"
             
-            return PhaseResult(phase_id, applied=applied, retry_name=retry_name)
+            applied = applied1 or applied15
+            
+            return PhaseResult(
+                phase_id, applied=applied, retry_name=retry_name,
+                changed_binary1=changed_binary1, changed_binary2=changed_binary2
+            )
         
         elif phase_id == PhaseID.P2_PATTERN_INT:
             # Phase 2 + Phase 3 を統合
-            applied = False
             retry_name = "pattern_int_fix"
+            changed_binary1 = False
+            changed_binary2 = False
             
             # Phase 2: パターンマッチに基づく戻り値の型修正
-            if self.run_phase2_return_type_fix(ctx, type_fixer1, type_fixer2):
-                applied = True
+            applied2, ch2_1, ch2_2 = self.run_phase2_return_type_fix(ctx, type_fixer1, type_fixer2)
+            changed_binary1 = changed_binary1 or ch2_1
+            changed_binary2 = changed_binary2 or ch2_2
+            
+            if applied2:
                 retry_name = "return_type_fix"
             
             # Phase 3: 引数の型修正
-            if self.run_phase3_param_type_fix(ctx, type_fixer1, type_fixer2, get_params_func):
-                applied = True
+            applied3, ch3_1, ch3_2 = self.run_phase3_param_type_fix(
+                ctx, type_fixer1, type_fixer2, get_params_func
+            )
+            changed_binary1 = changed_binary1 or ch3_1
+            changed_binary2 = changed_binary2 or ch3_2
+            
+            if applied3:
                 retry_name = "param_type_fix"
             
-            return PhaseResult(phase_id, applied=applied, retry_name=retry_name)
+            applied = applied2 or applied3
+            
+            return PhaseResult(
+                phase_id, applied=applied, retry_name=retry_name,
+                changed_binary1=changed_binary1, changed_binary2=changed_binary2
+            )
         
         elif phase_id == PhaseID.P4A_MIPS64_ABI:
             # Phase 4-A: MIPS64 ABI param fix (主経路外)
-            applied = self.run_phase4_mips64_fix(ctx, type_fixer1, type_fixer2, get_params_func)
-            return PhaseResult(phase_id, applied=applied, retry_name="mips64_abi_fix")
+            applied, ch1, ch2 = self.run_phase4_mips64_fix(
+                ctx, type_fixer1, type_fixer2, get_params_func
+            )
+            return PhaseResult(
+                phase_id, applied=applied, retry_name="mips64_abi_fix",
+                changed_binary1=ch1, changed_binary2=ch2
+            )
         
         else:
             raise ValueError(f"Unknown phase_id: {phase_id}")
@@ -185,7 +221,7 @@ class PhaseHandler:
             return "EQUIVALENT (no retry needed)"
     
     # ============================================================================
-    # 個別 Phase 実行メソッド（既存コードを再利用）
+    # 個別 Phase 実行メソッド（戻り値を (applied, changed1, changed2) に拡張）
     # ============================================================================
     
     def should_fix_return_type(
@@ -238,15 +274,15 @@ class PhaseHandler:
         ctx: PhaseContext,
         type_fixer1: TypeFixer,
         type_fixer2: TypeFixer
-    ) -> bool:
+    ) -> Tuple[bool, bool, bool]:
         """
         Phase 1: 符号性に基づく型修正
         
         Returns:
-            True: 修正が適用された
-            False: 修正なし
+            (applied, changed_binary1, changed_binary2)
         """
-        signedness_fix_applied = False
+        changed_binary1 = False
+        changed_binary2 = False
         
         if ctx.analysis1 and ctx.analysis1.signedness_result:
             ctx.type_fix_result.inferred_signedness_binary1 = (
@@ -274,7 +310,7 @@ class PhaseHandler:
                         ctx.type_fix_result.signedness_fixed_binary1 = True
                         ctx.type_fix_result.original_type_binary1 = original_type
                         ctx.type_fix_result.fixed_type_binary1 = signed_type
-                        signedness_fix_applied = True
+                        changed_binary1 = True
                         self._debug_print(
                             f"Binary 1: {original_type} -> {signed_type} (signedness fix)"
                         )
@@ -305,12 +341,13 @@ class PhaseHandler:
                         ctx.type_fix_result.signedness_fixed_binary2 = True
                         ctx.type_fix_result.original_type_binary2 = original_type
                         ctx.type_fix_result.fixed_type_binary2 = signed_type
-                        signedness_fix_applied = True
+                        changed_binary2 = True
                         self._debug_print(
                             f"Binary 2: {original_type} -> {signed_type} (signedness fix)"
                         )
         
-        return signedness_fix_applied
+        applied = changed_binary1 or changed_binary2
+        return (applied, changed_binary1, changed_binary2)
     
     def run_phase1_5_param_signedness_fix(
         self,
@@ -318,15 +355,15 @@ class PhaseHandler:
         type_fixer1: TypeFixer,
         type_fixer2: TypeFixer,
         get_params_func: Callable
-    ) -> bool:
+    ) -> Tuple[bool, bool, bool]:
         """
         Phase 1.5: 引数の符号性に基づく型修正
         
         Returns:
-            True: 修正が適用された
-            False: 修正なし
+            (applied, changed_binary1, changed_binary2)
         """
-        param_signedness_fix_applied = False
+        changed_binary1 = False
+        changed_binary2 = False
         
         # Binary 1の引数符号性チェック
         if ctx.analysis1:
@@ -356,7 +393,7 @@ class PhaseHandler:
                 if param_fixed:
                     ctx.type_fix_result.param_signedness_fixed_binary1 = True
                     ctx.type_fix_result.param_signedness_override_map_binary1 = override_map1
-                    param_signedness_fix_applied = True
+                    changed_binary1 = True
                     
                     # 修正内容をログ出力
                     for param_idx, new_type in override_map1.items():
@@ -403,7 +440,7 @@ class PhaseHandler:
                 if param_fixed:
                     ctx.type_fix_result.param_signedness_fixed_binary2 = True
                     ctx.type_fix_result.param_signedness_override_map_binary2 = override_map2
-                    param_signedness_fix_applied = True
+                    changed_binary2 = True
                     
                     # 修正内容をログ出力
                     for param_idx, new_type in override_map2.items():
@@ -422,26 +459,26 @@ class PhaseHandler:
                             f"{old_type} -> {new_type} (param signedness fix)"
                         )
         
-        return param_signedness_fix_applied
+        applied = changed_binary1 or changed_binary2
+        return (applied, changed_binary1, changed_binary2)
 
     def run_phase2_return_type_fix(
         self,
         ctx: PhaseContext,
         type_fixer1: TypeFixer,
         type_fixer2: TypeFixer
-    ) -> bool:
+    ) -> Tuple[bool, bool, bool]:
         """
         Phase 2: パターンマッチに基づく戻り値の型修正
         
         Returns:
-            True: 修正が適用された
-            False: 修正なし
+            (applied, changed_binary1, changed_binary2)
         """
         ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1)
         ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2)
         
         if not (ret_needs_fix1 or ret_needs_fix2):
-            return False
+            return (False, False, False)
         
         self._debug_print("=" * 60)
         self._debug_print("Phase 2: Pattern-based return type fix")
@@ -449,6 +486,9 @@ class PhaseHandler:
         
         params1 = ctx.analysis1.parameters if ctx.analysis1 else []
         params2 = ctx.analysis2.parameters if ctx.analysis2 else []
+        
+        changed_binary1 = False
+        changed_binary2 = False
         
         if ret_needs_fix1:
             ret_fixed1, _ = type_fixer1.fix_function_signature_by_name(
@@ -458,6 +498,7 @@ class PhaseHandler:
                 fix_param_types=False
             )
             ctx.type_fix_result.return_type_fixed_binary1 = ret_fixed1
+            changed_binary1 = ret_fixed1
             self._debug_print(f"Binary 1 return type fixed: {ret_fixed1}")
         
         if ret_needs_fix2:
@@ -468,9 +509,11 @@ class PhaseHandler:
                 fix_param_types=False
             )
             ctx.type_fix_result.return_type_fixed_binary2 = ret_fixed2
+            changed_binary2 = ret_fixed2
             self._debug_print(f"Binary 2 return type fixed: {ret_fixed2}")
         
-        return True
+        applied = changed_binary1 or changed_binary2
+        return (applied, changed_binary1, changed_binary2)
     
     def run_phase3_param_type_fix(
         self,
@@ -478,23 +521,25 @@ class PhaseHandler:
         type_fixer1: TypeFixer,
         type_fixer2: TypeFixer,
         get_params_func: Callable
-    ) -> bool:
+    ) -> Tuple[bool, bool, bool]:
         """
         Phase 3: 引数の型修正
         
         Returns:
-            True: 修正が適用された
-            False: 修正なし
+            (applied, changed_binary1, changed_binary2)
         """
         param_needs_fix1 = self.should_fix_params(ctx.analysis1)
         param_needs_fix2 = self.should_fix_params(ctx.analysis2)
         
         if not (param_needs_fix1 or param_needs_fix2):
-            return False
+            return (False, False, False)
         
         self._debug_print("=" * 60)
         self._debug_print("Phase 3: Parameter type fix")
         self._debug_print("=" * 60)
+        
+        changed_binary1 = False
+        changed_binary2 = False
         
         if param_needs_fix1:
             params1_updated = get_params_func(
@@ -507,6 +552,7 @@ class PhaseHandler:
                 fix_param_types=True
             )
             ctx.type_fix_result.param_types_fixed_binary1 = param_fixed1
+            changed_binary1 = param_fixed1
             self._debug_print(f"Binary 1 param types fixed: {param_fixed1}")
         
         if param_needs_fix2:
@@ -520,9 +566,11 @@ class PhaseHandler:
                 fix_param_types=True
             )
             ctx.type_fix_result.param_types_fixed_binary2 = param_fixed2
+            changed_binary2 = param_fixed2
             self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
         
-        return True
+        applied = changed_binary1 or changed_binary2
+        return (applied, changed_binary1, changed_binary2)
     
     def run_phase4_mips64_fix(
         self,
@@ -530,14 +578,13 @@ class PhaseHandler:
         type_fixer1: TypeFixer,
         type_fixer2: TypeFixer,
         get_params_func: Callable
-    ) -> bool:
+    ) -> Tuple[bool, bool, bool]:
         """
         Phase 4-A: MIPS64 ABI param fix (long → int)
         片側がint/uint確定、もう片側がlong/ulongの場合のみ型修正を適用
         
         Returns:
-            True: 修正が適用された
-            False: 修正なし
+            (applied, changed_binary1, changed_binary2)
         """
         is_mips64_1 = self.arch_detector.is_mips64(ctx.program1)
         is_mips64_2 = self.arch_detector.is_mips64(ctx.program2)
@@ -550,13 +597,14 @@ class PhaseHandler:
         if not self.mips64_handler.should_apply_fix(
             is_mips64_1, is_mips64_2, ctx.analysis1, ctx.analysis2
         ):
-            return False
+            return (False, False, False)
         
         self._debug_print("=" * 60)
         self._debug_print("Phase 4-A: MIPS64 ABI param fix (conservative)")
         self._debug_print("=" * 60)
         
-        mips64_fix_applied = False
+        changed_binary1 = False
+        changed_binary2 = False
         
         if is_mips64_1 and ctx.analysis1 and ctx.analysis2:
             override_map1 = self.mips64_handler.detect_param_type_mismatch(
@@ -577,7 +625,7 @@ class PhaseHandler:
                 if param_fixed:
                     ctx.type_fix_result.mips64_abi_fixed_binary1 = True
                     ctx.type_fix_result.mips64_abi_override_map_binary1 = override_map1
-                    mips64_fix_applied = True
+                    changed_binary1 = True
                     self._debug_print(
                         f"Binary 1 (MIPS64): Applied param type fix {override_map1}"
                     )
@@ -601,12 +649,13 @@ class PhaseHandler:
                 if param_fixed:
                     ctx.type_fix_result.mips64_abi_fixed_binary2 = True
                     ctx.type_fix_result.mips64_abi_override_map_binary2 = override_map2
-                    mips64_fix_applied = True
+                    changed_binary2 = True
                     self._debug_print(
                         f"Binary 2 (MIPS64): Applied param type fix {override_map2}"
                     )
         
-        return mips64_fix_applied
+        applied = changed_binary1 or changed_binary2
+        return (applied, changed_binary1, changed_binary2)
     
     # ===== Phase 4-B: MIPS64 ABI Retry (spurious counterexample detection) =====
     
