@@ -1,0 +1,124 @@
+# -*- coding: utf-8 -*-
+"""Equivalence-mode CLI helpers."""
+
+import sys
+import tempfile
+from pathlib import Path
+
+from ...config import GHIDRA_INSTALL_DIR
+from ...io import output_result
+from .analyze import get_target_functions
+
+
+def run_equivalence_check(args):
+    """等価性判定を実行する。"""
+    import pyghidra
+
+    from ...equivalence import EquivalenceChecker, TypeFixerConfig
+
+    binary1_path, binary2_path = args.equiv
+    function_names = get_target_functions(args)
+
+    if len(function_names) == 0:
+        print("Error: 関数名を指定してください（-f オプション）")
+        sys.exit(1)
+    if len(function_names) == 1:
+        func_name1 = func_name2 = function_names[0]
+    else:
+        func_name1 = function_names[0]
+        func_name2 = function_names[1]
+
+    retry_with_type_fix = not getattr(args, "no_retry_phases", False)
+    strategy = getattr(args, "strategy", "pairwise")
+
+    if not args.quiet:
+        print("等価性判定モード")
+        print(f"  Binary 1: {binary1_path}")
+        print(f"  Binary 2: {binary2_path}")
+        print(f"  Function 1: {func_name1}")
+        print(f"  Function 2: {func_name2}")
+        print(f"  Strategy: {strategy}")
+        print(f"  Timeout: {args.equiv_timeout}秒")
+        print(
+            f"  Recovery phases: {'disabled' if getattr(args, 'no_retry_phases', False) else 'enabled'}"
+        )
+        print()
+
+    pyghidra.start(install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None)
+
+    type_fixer_config = TypeFixerConfig()
+    enable_rewrite = not getattr(args, "no_rewrite", False)
+    rewrite_direction = getattr(args, "rewrite_direction", "to_modulo")
+    pairwise_timeout = getattr(args, "pairwise_timeout", 5)
+    pairwise_timeout_hard = getattr(args, "pairwise_timeout_hard", 30)
+    pairwise_save_unknown = getattr(args, "pairwise_save_unknown", False)
+
+    checker = EquivalenceChecker(
+        timeout=args.equiv_timeout,
+        debug=args.debug,
+        type_fixer_config=type_fixer_config,
+        enable_rewrite=enable_rewrite,
+        rewrite_direction=rewrite_direction,
+        strategy=strategy,
+        pairwise_timeout=pairwise_timeout,
+        pairwise_timeout_hard=pairwise_timeout_hard,
+        pairwise_save_unknown=pairwise_save_unknown,
+    )
+
+    available_solvers = checker.solver_runner.get_available_solvers()
+    if not args.quiet:
+        print(f"利用可能なソルバー: {', '.join(available_solvers) if available_solvers else 'なし'}")
+        print()
+
+    if not available_solvers:
+        print("Error: SMTソルバーが利用できません")
+        print("以下のいずれかをインストールしてください:")
+        print("  pip install z3-solver")
+        print("  pip install pyboolector")
+        print("  pip install yices")
+        print("  pip install cvc5")
+        sys.exit(1)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "EquivCheckProject", create=True) as project:
+            loader1 = pyghidra.program_loader().project(project).source(binary1_path).name("binary1")
+            with loader1.load() as result1:
+                program1 = result1.getPrimaryDomainObject()
+                pyghidra.analyze(program1)
+
+                loader2 = pyghidra.program_loader().project(project).source(binary2_path).name("binary2")
+                with loader2.load() as result2:
+                    program2 = result2.getPrimaryDomainObject()
+                    pyghidra.analyze(program2)
+
+                    result = checker.check_from_binaries(
+                        program1,
+                        program2,
+                        func_name1,
+                        func_name2,
+                        decompile_timeout=args.timeout,
+                        save_formula=args.save_formula,
+                        retry_with_type_fix=retry_with_type_fix,
+                    )
+
+    output_content = result.to_string(verbose=args.verbose)
+    output_result(output_content, args.output, args.quiet)
+
+    if args.save_formula and result.smt_formula:
+        if not args.quiet:
+            print("\nGenerated SMT Formula:")
+            print("-" * 70)
+            print(result.smt_formula)
+            print("-" * 70)
+
+        if args.output:
+            smt_output = args.output.rsplit(".", 1)[0] + ".smt2"
+            with open(smt_output, "w") as handle:
+                handle.write(result.smt_formula)
+            print(f"SMT formula saved to: {smt_output}")
+
+    if result.is_equivalent is True:
+        sys.exit(0)
+    if result.is_equivalent is False:
+        sys.exit(1)
+    sys.exit(2)
