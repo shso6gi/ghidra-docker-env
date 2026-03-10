@@ -24,7 +24,9 @@ class MonolithicStrategy(CheckStrategy):
         
         try:
             # SMT式を構築
-            result = self.formula_builder.build_equivalence_formula(analysis1, analysis2)
+            result = self.formula_builder.build_equivalence_formula_extended(
+                analysis1, analysis2
+            )
             smt_formula = result.formula
             return_var1 = result.return_var1
             return_var2 = result.return_var2

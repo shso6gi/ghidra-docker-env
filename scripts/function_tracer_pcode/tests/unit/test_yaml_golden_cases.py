@@ -357,6 +357,49 @@ class TestMonolithicStrategyBackwardCompatibility:
                     assert result.is_equivalent is True
                     
                     print("\n[MONOLITHIC STRATEGY] Pairwise was correctly skipped, only monolithic was called")
+
+    def test_monolithic_strategy_uses_extended_formula_result(self):
+        """monolithic 戦略は FormulaBuilderResult を使って詳細情報を受け取る"""
+        from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
+        from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilderResult
+        from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+        from unittest.mock import Mock
+
+        formula_builder = Mock()
+        formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+            formula="(set-logic QF_BV)\n(check-sat)",
+            return_var1="return_1",
+            return_var2="return_2",
+            extra_vars1=[],
+            extra_vars2=[],
+            constrained_fragments=["param_2_hi"],
+            param_fragment_constrained=["param_2_hi"],
+        )
+        solver_runner = Mock()
+        solver_runner.run_parallel.return_value = ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="z3",
+                    status=SolverStatus.UNSAT,
+                    elapsed_time=0.01,
+                )
+            ]
+        )
+
+        strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
+        analysis1 = create_mock_analysis(function_name="func1")
+        analysis2 = create_mock_analysis(function_name="func2")
+
+        result = strategy.check(analysis1, analysis2)
+
+        formula_builder.build_equivalence_formula_extended.assert_called_once_with(
+            analysis1, analysis2
+        )
+        assert result.is_equivalent is True
+        assert result.smt_formula == "(set-logic QF_BV)\n(check-sat)"
+        assert result.return_var1 == "return_1"
+        assert result.return_var2 == "return_2"
+        assert result.constrained_fragments == ["param_2_hi"]
     
     def test_pairwise_strategy_uses_two_stages(self):
         """★ [P2] strategy="pairwise" なら 2-stage plan を使う"""

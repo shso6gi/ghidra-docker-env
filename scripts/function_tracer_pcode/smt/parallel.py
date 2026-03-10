@@ -20,6 +20,17 @@ class ParallelResult:
     results: List[SolverResult]
     first_definitive: Optional[SolverResult] = None  # 最初に確定した結果
     is_equivalent: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        """手動構築時も SAT/UNSAT から代表結果を補完する。"""
+        if self.first_definitive is None:
+            for result in self.results:
+                if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
+                    self.first_definitive = result
+                    break
+
+        if self.is_equivalent is None and self.first_definitive is not None:
+            self.is_equivalent = self.first_definitive.status == SolverStatus.UNSAT
     
     def get_successful_results(self) -> List[SolverResult]:
         """成功した結果のみ返す"""
