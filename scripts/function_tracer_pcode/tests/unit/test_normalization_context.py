@@ -179,3 +179,89 @@ def test_normalize_expression_removes_sign_extension_for_nonnegative_shift_count
     assert [rule.rule_name for rule in context.applied_rules] == [
         "SHIFT_AMOUNT_NORMALIZATION"
     ]
+
+
+def test_normalize_expression_canonicalizes_sub_and_add_neg_to_same_form():
+    lhs = _param("param_1")
+    rhs = _param("param_2")
+    mid = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SRIGHT",
+        operands=[rhs, Expression.constant(1, size=8)],
+        size=8,
+    )
+
+    expr_sub = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SDIV",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SUB",
+                operands=[lhs, mid],
+                size=8,
+            ),
+            rhs,
+        ],
+        size=8,
+    )
+    expr_add_neg = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SDIV",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[Expression.unary_op("INT_2COMP", mid), lhs],
+                size=8,
+            ),
+            rhs,
+        ],
+        size=8,
+    )
+
+    normalized_sub = normalize_expression(expr_sub, NormalizationContext())
+    normalized_add_neg = normalize_expression(expr_add_neg, NormalizationContext())
+
+    assert normalized_sub.to_smt() == normalized_add_neg.to_smt()
+    assert "(bvadd param_1" in normalized_sub.to_smt()
+    assert "bvneg" in normalized_sub.to_smt()
+
+
+def test_normalize_expression_removes_add_zero_identity():
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[Expression.constant(0, size=8), _param("param_1")],
+        size=8,
+    )
+    context = NormalizationContext()
+
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.expr_type == ExpressionType.PARAMETER
+    assert normalized.name == "param_1"
+    assert [rule.rule_name for rule in context.applied_rules] == [
+        "ARITHMETIC_CANONICALIZATION"
+    ]
+
+
+def test_normalize_expression_flattens_and_sorts_add_tree():
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[_param("param_2"), _param("param_1")],
+                size=8,
+            ),
+            Expression.constant(0, size=8),
+        ],
+        size=8,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == "(bvadd param_1 param_2)"
