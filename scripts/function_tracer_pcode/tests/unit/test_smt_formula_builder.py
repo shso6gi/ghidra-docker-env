@@ -3,7 +3,13 @@
 
 import pytest
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from scripts.function_tracer_pcode.model import (
+    FunctionReturnAnalysis,
+    ReturnInfo,
+    Expression,
+    ExpressionType,
+    Condition,
+)
 
 
 class TestExtraAssertions:
@@ -400,6 +406,86 @@ class TestIntegration:
         assert "Additional constraint" in before_check_sat
         
         print("\n[TEST] UB constraints (negate_min) and extra_assertions coexist correctly")
+
+    def test_shift_count_ub_constraints_are_emitted(self):
+        """可変シフトに対して shift-count UB 制約が追加されることを確認"""
+        builder = FormulaBuilder(debug=False, exclude_ub=True)
+
+        shift_amount_1 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shift_amount_2 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shift_base_1 = Expression(ExpressionType.CONSTANT, value=1, size=8)
+        shift_base_2 = Expression(ExpressionType.CONSTANT, value=1, size=8)
+
+        shift_expr_1 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[shift_base_1, shift_amount_1],
+            size=8,
+        )
+        shift_expr_2 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[shift_base_2, shift_amount_2],
+            size=8,
+        )
+
+        nonzero_cond_1 = Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[
+                    shift_expr_1,
+                    Expression(ExpressionType.CONSTANT, value=0, size=8),
+                ],
+                size=1,
+            )
+        )
+        nonzero_cond_2 = Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[
+                    shift_expr_2,
+                    Expression(ExpressionType.CONSTANT, value=0, size=8),
+                ],
+                size=1,
+            )
+        )
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func1",
+            entry_point="0x00401000",
+            parameters=[{"name": "shift", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[nonzero_cond_1],
+                    value=shift_expr_1,
+                )
+            ],
+        )
+
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func2",
+            entry_point="0x00402000",
+            parameters=[{"name": "shift", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[nonzero_cond_2],
+                    value=shift_expr_2,
+                )
+            ],
+        )
+
+        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
+        formula = result.formula
+
+        assert "Exclude UB: INT_LEFT shift amount must be < 64 bits" in formula
+        assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
+        assert "(assert (bvult shift_2 (_ bv64 32)))" in formula
+
+        print("\n[TEST] shift-count UB constraints are emitted for variable shifts")
 
 
 class TestCheckerABIRetryIntegration:

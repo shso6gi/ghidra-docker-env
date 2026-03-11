@@ -12,6 +12,7 @@ from .variable import (
     VariableClassification,
     get_parameter_fragment_constraints
 )
+from .symbol_replace import build_symbol_replacer
 
 from ..ub.constraints import UbConstraintBuilder
 
@@ -327,7 +328,12 @@ class FormulaBuilder:
 
         if self.exclude_ub:
             ub_lines = self._build_ub_constraints_section(
-                analysis1, analysis2, params1, params2
+                analysis1,
+                analysis2,
+                params1,
+                params2,
+                extra_vars1,
+                extra_vars2,
             )
             if ub_lines:
                 lines.extend(ub_lines)
@@ -342,17 +348,26 @@ class FormulaBuilder:
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
         params1: List[ParameterInfo],
-        params2: List[ParameterInfo]
+        params2: List[ParameterInfo],
+        extra_vars1: List[ExtraVariableInfo],
+        extra_vars2: List[ExtraVariableInfo],
     ) -> List[str]:
         """UB除外制約セクションを構築"""
         lines = []
+
+        symbol_replace_fn1 = build_symbol_replacer(params1, extra_vars1)
+        symbol_replace_fn2 = build_symbol_replacer(params2, extra_vars2)
         
         ub1_constraints = self.ub_constraint_builder.build_constraints(
-            analysis1, params1
+            analysis1,
+            params1,
+            symbol_replace_fn=symbol_replace_fn1,
         )
         
         ub2_constraints = self.ub_constraint_builder.build_constraints(
-            analysis2, params2
+            analysis2,
+            params2,
+            symbol_replace_fn=symbol_replace_fn2,
         )
         
         if ub1_constraints or ub2_constraints:
