@@ -487,6 +487,136 @@ class TestIntegration:
 
         print("\n[TEST] shift-count UB constraints are emitted for variable shifts")
 
+    def test_signed_left_shift_overflow_constraints_are_emitted_for_signed_context(self):
+        """signed 文脈の 1 << shift に対して overflow UB 制約が追加されることを確認"""
+        builder = FormulaBuilder(debug=False, exclude_ub=True)
+
+        shift1 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shift2 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shifted1 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[Expression(ExpressionType.CONSTANT, value=1, size=8), shift1],
+            size=8,
+        )
+        shifted2 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[Expression(ExpressionType.CONSTANT, value=1, size=8), shift2],
+            size=8,
+        )
+
+        value1 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_SDIV",
+            operands=[
+                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                shifted1,
+            ],
+            size=8,
+        )
+        value2 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_SDIV",
+            operands=[
+                Expression(ExpressionType.PARAMETER, name="y", size=8),
+                shifted2,
+            ],
+            size=8,
+        )
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func1",
+            entry_point="0x00401000",
+            parameters=[
+                {"name": "x", "size": 8, "index": 0, "is_signed": True},
+                {"name": "shift", "size": 4, "index": 1, "is_signed": True},
+            ],
+            returns=[ReturnInfo(address="0x00401000", conditions=[], value=value1)],
+        )
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func2",
+            entry_point="0x00402000",
+            parameters=[
+                {"name": "y", "size": 8, "index": 0, "is_signed": True},
+                {"name": "shift", "size": 4, "index": 1, "is_signed": True},
+            ],
+            returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+        assert "signed left shift overflow requires shift < 63" in formula
+        assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
+        assert "(assert (bvult shift_2 (_ bv63 32)))" in formula
+
+        print("\n[TEST] signed left shift overflow constraints emitted for signed context")
+
+    def test_signed_left_shift_overflow_constraints_are_not_emitted_for_unsigned_context(self):
+        """unsigned 文脈では追加の signed overflow 制約を入れないことを確認"""
+        builder = FormulaBuilder(debug=False, exclude_ub=True)
+
+        shift1 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shift2 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
+        shifted1 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[Expression(ExpressionType.CONSTANT, value=1, size=8), shift1],
+            size=8,
+        )
+        shifted2 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_LEFT",
+            operands=[Expression(ExpressionType.CONSTANT, value=1, size=8), shift2],
+            size=8,
+        )
+
+        value1 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_DIV",
+            operands=[
+                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                shifted1,
+            ],
+            size=8,
+        )
+        value2 = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_DIV",
+            operands=[
+                Expression(ExpressionType.PARAMETER, name="y", size=8),
+                shifted2,
+            ],
+            size=8,
+        )
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func1",
+            entry_point="0x00401000",
+            parameters=[
+                {"name": "x", "size": 8, "index": 0, "is_signed": False},
+                {"name": "shift", "size": 4, "index": 1, "is_signed": True},
+            ],
+            returns=[ReturnInfo(address="0x00401000", conditions=[], value=value1)],
+        )
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func2",
+            entry_point="0x00402000",
+            parameters=[
+                {"name": "y", "size": 8, "index": 0, "is_signed": False},
+                {"name": "shift", "size": 4, "index": 1, "is_signed": True},
+            ],
+            returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+        assert "signed left shift overflow requires shift < 63" not in formula
+        assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
+        assert "(assert (bvult shift_2 (_ bv64 32)))" in formula
+
+        print("\n[TEST] no signed overflow constraints emitted for unsigned context")
+
 
 class TestCheckerABIRetryIntegration:
     """checker._retry_with_abi_constraints() 経由の integration test"""

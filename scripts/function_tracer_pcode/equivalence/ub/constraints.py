@@ -5,6 +5,7 @@ C言語の未定義動作（UB）を除外するSMT制約を生成するモジ�
 現在サポートされているUB:
 1. 符号付き整数の -MIN_INT オーバーフロー (bvneg on INT_MIN)
 2. シフト量がビット幅以上になるシフト演算
+3. signed left shift の表現不能オーバーフロー（guarded subset）
 
 将来拡張予定:
 - INT_MIN / -1 オーバーフロー
@@ -46,7 +47,7 @@ class UbConstraintBuilder:
             param_infos: パラメータ情報（SMT名・ビット幅付き）
             constraint_types: 生成する制約タイプのセット
                 None の場合は全タイプを生成
-                例: {"negate_min", "shift_count"}
+                例: {"negate_min", "shift_count", "signed_left_shift_overflow"}
             symbol_replace_fn: Expression.to_smt() で得た元名を
                 SMT変数名へ置換する関数
         
@@ -54,7 +55,11 @@ class UbConstraintBuilder:
             SMT-LIB形式の制約行のリスト
         """
         if constraint_types is None:
-            constraint_types = {"negate_min", "shift_count"}
+            constraint_types = {
+                "negate_min",
+                "shift_count",
+                "signed_left_shift_overflow",
+            }
         
         all_constraints = []
         
@@ -73,6 +78,14 @@ class UbConstraintBuilder:
             )
             if shift_constraints:
                 all_constraints.extend(shift_constraints)
+
+        if "signed_left_shift_overflow" in constraint_types:
+            signed_shift_constraints = self._build_signed_left_shift_constraints(
+                analysis,
+                symbol_replace_fn=symbol_replace_fn,
+            )
+            if signed_shift_constraints:
+                all_constraints.extend(signed_shift_constraints)
 
         return all_constraints
 
@@ -132,6 +145,67 @@ class UbConstraintBuilder:
 
             self._debug_print(
                 f"Added shift-count UB constraint for {operator}: {right_smt} < {left_bits}"
+            )
+
+        return constraints
+
+    def _build_signed_left_shift_constraints(
+        self,
+        analysis: FunctionReturnAnalysis,
+        symbol_replace_fn: Optional[Callable[[str], str]] = None,
+    ) -> List[str]:
+        """
+        signed left shift overflow を guarded に除外する制約を生成
+
+        対象は次の保守的 subset のみ:
+        - INT_LEFT(lhs, rhs)
+        - lhs が正の定数
+        - shift 結果が signed 演算文脈で使われている
+
+        これにより unsigned left shift まで誤って制約しないようにする。
+        """
+        signed_shift_sites = self._collect_signed_left_shift_sites(analysis)
+        if not signed_shift_sites:
+            self._debug_print("No guarded signed-left-shift sites found")
+            return []
+
+        constraints: List[str] = []
+        seen: Set[Tuple[str, int, int]] = set()
+
+        for shift_expr in signed_shift_sites:
+            if len(shift_expr.operands) < 2:
+                continue
+
+            left = shift_expr.operands[0]
+            right = shift_expr.operands[1]
+            bound = self._get_signed_left_shift_safe_bound(left, shift_expr.get_bit_width())
+            if bound is None:
+                continue
+
+            if self._is_shift_count_statically_safe(right, bound):
+                continue
+
+            right_smt = right.to_smt()
+            if symbol_replace_fn is not None:
+                right_smt = symbol_replace_fn(right_smt)
+
+            right_bits = right.get_bit_width()
+            key = (right_smt, right_bits, bound)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            comment = (
+                "; Exclude UB: signed left shift overflow requires "
+                f"shift < {bound}"
+            )
+            constraint = (
+                f"(assert (bvult {right_smt} (_ bv{bound} {right_bits})))"
+            )
+            constraints.append(comment)
+            constraints.append(constraint)
+            self._debug_print(
+                f"Added signed-left-shift UB constraint: {right_smt} < {bound}"
             )
 
         return constraints
@@ -236,6 +310,22 @@ class UbConstraintBuilder:
 
         return shift_sites
 
+    def _collect_signed_left_shift_sites(
+        self,
+        analysis: FunctionReturnAnalysis
+    ) -> List[Expression]:
+        """signed 演算文脈で使われる INT_LEFT を収集"""
+        shift_sites: List[Expression] = []
+        for ret in analysis.returns:
+            self._walk_expression_for_signed_left_shift(ret.value, shift_sites, signed_context=False)
+            for cond in ret.conditions:
+                self._walk_expression_for_signed_left_shift(
+                    cond.expression,
+                    shift_sites,
+                    signed_context=False,
+                )
+        return shift_sites
+
     def _walk_expression_for_shift(
         self,
         expr: Optional[Expression],
@@ -255,6 +345,33 @@ class UbConstraintBuilder:
             for operand in expr.operands:
                 self._walk_expression_for_shift(operand, shift_sites)
 
+    def _walk_expression_for_signed_left_shift(
+        self,
+        expr: Optional[Expression],
+        shift_sites: List[Expression],
+        signed_context: bool
+    ) -> None:
+        """signed 文脈を伝播しながら INT_LEFT を収集"""
+        if expr is None:
+            return
+
+        next_signed_context = signed_context or self._is_signed_operation(expr)
+
+        if (
+            expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == "INT_LEFT"
+            and next_signed_context
+        ):
+            shift_sites.append(expr)
+
+        if hasattr(expr, "operands") and expr.operands:
+            for operand in expr.operands:
+                self._walk_expression_for_signed_left_shift(
+                    operand,
+                    shift_sites,
+                    signed_context=next_signed_context,
+                )
+
     def _is_shift_count_statically_safe(
         self,
         expr: Expression,
@@ -265,6 +382,45 @@ class UbConstraintBuilder:
             return False
 
         return 0 <= expr.value < width_bits
+
+    def _get_signed_left_shift_safe_bound(
+        self,
+        left: Expression,
+        result_bits: int
+    ) -> Optional[int]:
+        """正の定数 lhs に対して overflow しない shift 上限（排他的）を返す"""
+        if left.expr_type != ExpressionType.CONSTANT:
+            return None
+
+        value = left.value
+        if not isinstance(value, int) or value <= 0:
+            return None
+
+        if result_bits <= 1:
+            return None
+
+        signed_max = (1 << (result_bits - 1)) - 1
+        if value > signed_max:
+            return None
+
+        bound = result_bits - value.bit_length()
+        if bound <= 0:
+            return None
+
+        return bound
+
+    def _is_signed_operation(self, expr: Expression) -> bool:
+        """式ノードが signed 演算文脈を作るか"""
+        if expr.expr_type != ExpressionType.BINARY_OP:
+            return False
+
+        return expr.operator in {
+            "INT_SDIV",
+            "INT_SREM",
+            "INT_SLESS",
+            "INT_SLESSEQUAL",
+            "INT_SRIGHT",
+        }
     
     def _walk_condition(
         self,
