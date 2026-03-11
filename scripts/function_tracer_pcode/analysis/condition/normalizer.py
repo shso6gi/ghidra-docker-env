@@ -218,7 +218,10 @@ class ConditionNormalizer:
         """
         if not expr:
             return False
-        
+
+        if expr.expr_type == ExpressionType.CONSTANT:
+            return expr.value == 0
+
         if expr.expr_type == ExpressionType.LITERAL:
             # リテラルの場合、値をチェック
             try:
@@ -226,6 +229,11 @@ class ConditionNormalizer:
                 return value == 0
             except (ValueError, TypeError, AttributeError):
                 pass
+
+        # -0 は 0 と同値
+        if expr.expr_type == ExpressionType.UNARY_OP:
+            if expr.operator in ("INT_2COMP", "INT_NEGATE") and expr.operands:
+                return ConditionNormalizer._is_zero(expr.operands[0])
         
         return False
     
@@ -277,7 +285,7 @@ class ConditionNormalizer:
         Returns:
             定数の場合True
         """
-        if expr.expr_type == ExpressionType.LITERAL:
+        if expr.expr_type in (ExpressionType.CONSTANT, ExpressionType.LITERAL):
             return True
         
         # INT_2COMP や INT_NEGATE の内部が定数の場合も定数扱い
