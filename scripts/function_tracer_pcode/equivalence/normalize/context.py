@@ -31,7 +31,31 @@ class NormalizationContext:
     
     # ★ 新規追加: 適用されたルールを記録
     applied_rules: List[RuleApplication] = field(default_factory=list)
-    
+
+    def is_min_excluded(self, var_name: str) -> bool:
+        """MIN値除外制約があるか"""
+        return var_name in self.min_excluded_params
+
+    def is_nonneg(self, var_name: str) -> bool:
+        """非負が保証されるか"""
+        return var_name in self.nonneg_vars or var_name in self.pos_vars
+
+    def is_pos(self, var_name: str) -> bool:
+        """正が保証されるか"""
+        return var_name in self.pos_vars
+
+    def is_neg(self, var_name: str) -> bool:
+        """負が保証されるか"""
+        return var_name in self.neg_vars
+
+    def is_nonzero(self, var_name: str) -> bool:
+        """ゼロでないことが保証されるか"""
+        return (
+            var_name in self.nonzero_vars
+            or var_name in self.pos_vars
+            or var_name in self.neg_vars
+        )
+
     def record_rule(
         self,
         rule_name: str,
