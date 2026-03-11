@@ -167,6 +167,14 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is neg ({var_name} < 0)")
+
+        elif _is_minus_one(left):
+            # -1 < param -> param >= 0
+            var_name = _get_integral_var_name(right)
+            if var_name:
+                facts.nonneg_vars.add(var_name)
+                if debug:
+                    print(f"[Facts] {var_name} is nonneg (-1 < {var_name}, integral)")
     
     # param != 0 または 0 != param
     elif operator in ("INT_NOTEQUAL", "distinct"):
@@ -268,3 +276,22 @@ def _get_var_name(expr: Expression) -> Optional[str]:
         return expr.name
     
     return None
+
+
+def _get_integral_var_name(expr: Expression) -> Optional[str]:
+    """
+    整数として扱ってよい PARAMETER/VARIABLE 名を取得
+
+    `(-1) < x` を `0 <= x` とみなせるのは整数比較に限る。
+    FLOAT 系を誤って符号 facts に入れないよう、data_type に float/double
+    が見えている場合は保守的に除外する。
+    """
+    var_name = _get_var_name(expr)
+    if not var_name:
+        return None
+
+    data_type = (expr.data_type or "").lower()
+    if "float" in data_type or "double" in data_type:
+        return None
+
+    return var_name
