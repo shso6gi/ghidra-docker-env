@@ -202,6 +202,7 @@ class EquivalenceResult:
         lines.append("-" * 70)
         
         if self.error_message:
+            lines.append("Result: ERROR")
             lines.append(f"ERROR: {self.error_message}")
         elif self.is_equivalent is None:
             if self.is_timeout():
