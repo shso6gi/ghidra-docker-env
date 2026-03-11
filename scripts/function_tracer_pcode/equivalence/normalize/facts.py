@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""条件式から符号に関する facts を抽出（強化版）"""
+"""条件式から符号・範囲 facts を抽出"""
 
-from typing import List, Set, Optional
+from typing import Dict, List, Set, Optional
 from dataclasses import dataclass
 
 from ...model import Condition, Expression, ExpressionType
@@ -9,17 +9,19 @@ from ...model import Condition, Expression, ExpressionType
 
 @dataclass
 class SignFacts:
-    """符号に関する facts"""
+    """符号・範囲に関する facts"""
     nonneg_vars: Set[str]  # 0 <= x が保証される変数
     pos_vars: Set[str]      # 0 < x が保証される変数
     neg_vars: Set[str]      # x < 0 が保証される変数
     nonzero_vars: Set[str]  # x != 0 が保証される変数
+    upper_bounds: Dict[str, int]  # x < C が保証される変数
     
     def __init__(self):
         self.nonneg_vars = set()
         self.pos_vars = set()
         self.neg_vars = set()
         self.nonzero_vars = set()
+        self.upper_bounds = {}
     
     def merge(self, other: 'SignFacts') -> None:
         """他の facts をマージ"""
@@ -27,6 +29,10 @@ class SignFacts:
         self.pos_vars.update(other.pos_vars)
         self.neg_vars.update(other.neg_vars)
         self.nonzero_vars.update(other.nonzero_vars)
+        for var_name, bound in other.upper_bounds.items():
+            current = self.upper_bounds.get(var_name)
+            if current is None or bound < current:
+                self.upper_bounds[var_name] = bound
     
     def is_nonneg(self, var_name: str) -> bool:
         """変数が非負か"""
@@ -44,13 +50,17 @@ class SignFacts:
         """変数が非ゼロか"""
         return var_name in self.nonzero_vars or var_name in self.pos_vars or var_name in self.neg_vars
 
+    def get_upper_bound(self, var_name: str) -> Optional[int]:
+        """変数の既知の上限（排他的）を取得"""
+        return self.upper_bounds.get(var_name)
+
 
 def extract_sign_facts(
     conditions: List[Condition],
     debug: bool = False
 ) -> SignFacts:
     """
-    条件式から符号に関する facts を抽出（強化版）
+    条件式から符号・範囲 facts を抽出
     
     対応パターン:
     - param >= 0  -> nonneg
@@ -58,6 +68,8 @@ def extract_sign_facts(
     - param < 0   -> neg (and nonzero)
     - param <= -1 -> neg (同上)
     - param != 0  -> nonzero
+    - param < C  -> upper_bound=C （C>=0 の定数）
+    - param <= C -> upper_bound=C+1 （C>=0 の定数）
     - (param & other) >= 0 と param < 0 -> other is nonneg
     - (param & other) < 0 -> both are neg
     
@@ -136,6 +148,12 @@ def _extract_from_comparison(
         elif _is_zero(right):
             # param <= 0 -> nonpos（今は使わない）
             pass
+
+        elif _is_nonneg_constant(right):
+            # param <= C -> param < C+1
+            var_name = _get_integral_var_name(left)
+            if var_name:
+                _record_upper_bound(facts, var_name, right.value + 1, debug, "<=")
         
         elif _is_minus_one(right):
             # param <= -1 -> neg
@@ -167,6 +185,12 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is neg ({var_name} < 0)")
+
+        elif _is_nonneg_constant(right):
+            # param < C -> upper_bound=C
+            var_name = _get_integral_var_name(left)
+            if var_name:
+                _record_upper_bound(facts, var_name, right.value, debug, "<")
 
         elif _is_minus_one(left):
             # -1 < param -> param >= 0
@@ -256,6 +280,11 @@ def _is_minus_one(expr: Expression) -> bool:
     return expr.expr_type == ExpressionType.CONSTANT and expr.value == -1
 
 
+def _is_nonneg_constant(expr: Expression) -> bool:
+    """式が0以上の定数か"""
+    return expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int) and expr.value >= 0
+
+
 def _is_and_operation(expr: Expression) -> bool:
     """式がAND演算（INT_AND）か"""
     return (expr.expr_type == ExpressionType.BINARY_OP and 
@@ -295,3 +324,18 @@ def _get_integral_var_name(expr: Expression) -> Optional[str]:
         return None
 
     return var_name
+
+
+def _record_upper_bound(
+    facts: SignFacts,
+    var_name: str,
+    bound: int,
+    debug: bool,
+    source: str
+) -> None:
+    """上限 facts を最小値優先で記録"""
+    current = facts.upper_bounds.get(var_name)
+    if current is None or bound < current:
+        facts.upper_bounds[var_name] = bound
+        if debug:
+            print(f"[Facts] {var_name} has upper bound {bound} (source {source})")

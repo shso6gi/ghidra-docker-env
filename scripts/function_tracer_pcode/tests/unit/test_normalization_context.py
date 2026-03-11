@@ -13,6 +13,12 @@ from scripts.function_tracer_pcode.model import Expression, ExpressionType
 from scripts.function_tracer_pcode.equivalence.normalize.context import (
     NormalizationContext,
 )
+from scripts.function_tracer_pcode.equivalence.normalize.core import (
+    normalize_expression,
+)
+from scripts.function_tracer_pcode.equivalence.normalize.policy import (
+    extract_upper_bound_facts,
+)
 from scripts.function_tracer_pcode.equivalence.normalize.division import (
     normalize_division_signs,
 )
@@ -98,4 +104,78 @@ def test_normalize_division_signedness_uses_sign_fact_helpers():
     assert normalized.operator == "INT_SDIV"
     assert [rule.rule_name for rule in context.applied_rules] == [
         "UDIV_TO_SDIV_NONNEG_POS"
+    ]
+
+
+def test_normalization_context_upper_bound_queries():
+    context = NormalizationContext(upper_bounds={"param_1": 64, "param_2": 8})
+
+    assert context.get_upper_bound("param_1") == 64
+    assert context.get_upper_bound("param_x") is None
+    assert context.has_upper_bound_le("param_1", 64) is True
+    assert context.has_upper_bound_le("param_1", 63) is False
+    assert context.has_upper_bound_le("param_x", 64) is False
+
+
+def test_extract_upper_bound_facts_parses_shift_ub_constraints():
+    lines = [
+        "(assert (bvult param_2_1 (_ bv64 64)))",
+        "(assert (bvult ((_ sign_extend 32) param_2_2) (_ bv64 64)))",
+        "(assert (bvult ((_ zero_extend 32) param_2_3) (_ bv8 64)))",
+    ]
+
+    upper_bounds = extract_upper_bound_facts(lines)
+
+    assert upper_bounds == {
+        "param_2_1": 64,
+        "param_2_2": 64,
+        "param_2_3": 8,
+    }
+
+
+def test_normalize_expression_removes_shift_mask_when_range_proven():
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_LEFT",
+        operands=[
+            Expression.constant(1, size=8),
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_AND",
+                operands=[_param("param_1"), Expression.constant(63, size=8)],
+                size=8,
+            ),
+        ],
+        size=8,
+    )
+    context = NormalizationContext(upper_bounds={"param_1": 64})
+
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.operands[1].expr_type == ExpressionType.PARAMETER
+    assert normalized.operands[1].name == "param_1"
+    assert [rule.rule_name for rule in context.applied_rules] == [
+        "SHIFT_AMOUNT_NORMALIZATION"
+    ]
+
+
+def test_normalize_expression_removes_sign_extension_for_nonnegative_shift_count():
+    param32 = Expression(ExpressionType.PARAMETER, name="param_2", size=4)
+    extended = Expression.unary_op("INT_SEXT", param32)
+    extended.size = 8
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_LEFT",
+        operands=[Expression.constant(1, size=8), extended],
+        size=8,
+    )
+    context = NormalizationContext(upper_bounds={"param_2": 64})
+
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.operands[1].expr_type == ExpressionType.PARAMETER
+    assert normalized.operands[1].name == "param_2"
+    assert normalized.operands[1].size == 4
+    assert [rule.rule_name for rule in context.applied_rules] == [
+        "SHIFT_AMOUNT_NORMALIZATION"
     ]

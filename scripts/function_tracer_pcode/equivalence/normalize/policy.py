@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""正規化ポリシー（MIN除外制約の解析など）"""
+"""正規化ポリシー（UB由来factsの解析など）"""
 
-from typing import Set, List
+from typing import Dict, Set, List
 import re
 
 
@@ -62,3 +62,43 @@ def extract_min_excluded_params(
                 print(f"[Policy] MIN excluded: {param_name} (pattern: distinct)")
     
     return excluded
+
+
+def extract_upper_bound_facts(
+    smt_lines: List[str],
+    debug: bool = False
+) -> Dict[str, int]:
+    """
+    SMT制約から `var < C` 形式の上限 facts を抽出
+
+    対応パターン:
+        (assert (bvult param_2_2 (_ bv64 32)))
+        (assert (bvult ((_ sign_extend 32) param_2_2) (_ bv64 64)))
+        (assert (bvult ((_ zero_extend 32) param_2_2) (_ bv64 64)))
+
+    Returns:
+        SMT変数名 -> 排他的上限 の辞書
+    """
+    upper_bounds: Dict[str, int] = {}
+
+    simple_pattern = re.compile(
+        r'\(assert\s+\(bvult\s+(\w+)\s+\(_\s+bv(\d+)\s+\d+\)\)\)'
+    )
+    extend_pattern = re.compile(
+        r'\(assert\s+\(bvult\s+\(\(_\s+(?:sign_extend|zero_extend)\s+\d+\)\s+(\w+)\)\s+\(_\s+bv(\d+)\s+\d+\)\)\)'
+    )
+
+    for line in smt_lines:
+        match = simple_pattern.search(line) or extend_pattern.search(line)
+        if not match:
+            continue
+
+        var_name = match.group(1)
+        bound = int(match.group(2))
+        prev = upper_bounds.get(var_name)
+        if prev is None or bound < prev:
+            upper_bounds[var_name] = bound
+            if debug:
+                print(f"[Policy] Upper bound: {var_name} < {bound}")
+
+    return upper_bounds

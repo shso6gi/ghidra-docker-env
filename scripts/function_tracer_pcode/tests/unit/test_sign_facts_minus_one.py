@@ -79,3 +79,37 @@ def test_minus_one_less_than_float_like_param_is_ignored():
     assert facts.is_nonneg("param_2") is False
     assert facts.is_pos("param_2") is False
     assert facts.is_neg("param_2") is False
+
+
+def test_less_than_constant_implies_upper_bound():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_param("param_2", data_type="long"), _const(64)],
+                size=1,
+            )
+        )
+    ]
+
+    facts = extract_sign_facts(conditions)
+
+    assert facts.get_upper_bound("param_2") == 64
+
+
+def test_less_equal_constant_implies_exclusive_upper_bound_plus_one():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_param("param_2", data_type="long"), _const(62)],
+                size=1,
+            )
+        )
+    ]
+
+    facts = extract_sign_facts(conditions)
+
+    assert facts.get_upper_bound("param_2") == 63

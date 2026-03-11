@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """正規化コンテキスト"""
 
-from typing import Set, Optional, List
+from typing import Dict, Set, Optional, List
 from dataclasses import dataclass, field
 
 
@@ -27,6 +27,7 @@ class NormalizationContext:
     pos_vars: Set[str] = field(default_factory=set)
     neg_vars: Set[str] = field(default_factory=set)
     nonzero_vars: Set[str] = field(default_factory=set)
+    upper_bounds: Dict[str, int] = field(default_factory=dict)
     allow_unsafe: bool = False
     
     # ★ 新規追加: 適用されたルールを記録
@@ -55,6 +56,15 @@ class NormalizationContext:
             or var_name in self.pos_vars
             or var_name in self.neg_vars
         )
+
+    def get_upper_bound(self, var_name: str) -> Optional[int]:
+        """変数の既知の上限（排他的）を取得"""
+        return self.upper_bounds.get(var_name)
+
+    def has_upper_bound_le(self, var_name: str, bound: int) -> bool:
+        """変数の上限が指定値以下と分かっているか"""
+        actual = self.get_upper_bound(var_name)
+        return actual is not None and actual <= bound
 
     def record_rule(
         self,

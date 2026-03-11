@@ -16,6 +16,7 @@ def try_normalization_equivalence(
     normalization_context_cls,
     sign_facts_cls,
     extract_min_excluded_params_fn,
+    extract_upper_bound_facts_fn,
     extract_sign_facts_fn,
     contains_udiv_fn,
     normalize_udiv_with_guard_fn,
@@ -29,8 +30,11 @@ def try_normalization_equivalence(
 
     header_lines = base_ctx.get("header_lines", [])
     min_excluded_smt = extract_min_excluded_params_fn(header_lines, debug=strategy.debug)
+    upper_bounds_smt = extract_upper_bound_facts_fn(header_lines, debug=strategy.debug)
     if strategy.debug and min_excluded_smt:
         strategy._debug_print(f"MIN-excluded SMT vars: {min_excluded_smt}")
+    if strategy.debug and upper_bounds_smt:
+        strategy._debug_print(f"Upper-bound SMT vars: {upper_bounds_smt}")
 
     smt_to_original = {}
     for param_info in base_ctx.get("params1", []):
@@ -43,8 +47,12 @@ def try_normalization_equivalence(
         if smt_name in smt_to_original:
             min_excluded_original.add(smt_to_original[smt_name])
 
+    upper_bounds_original = _translate_upper_bounds(upper_bounds_smt, smt_to_original)
+
     if strategy.debug and min_excluded_original:
         strategy._debug_print(f"MIN-excluded original vars: {min_excluded_original}")
+    if strategy.debug and upper_bounds_original:
+        strategy._debug_print(f"Upper-bound original vars: {upper_bounds_original}")
 
     if strategy.debug:
         strategy._debug_print("  Extracting sign facts from conditions...")
@@ -59,6 +67,10 @@ def try_normalization_equivalence(
     pos_original = _translate_fact_names(combined_facts.pos_vars, smt_to_original)
     neg_original = _translate_fact_names(combined_facts.neg_vars, smt_to_original)
     nonzero_original = _translate_fact_names(combined_facts.nonzero_vars, smt_to_original)
+    upper_bounds_original = _merge_upper_bounds(
+        upper_bounds_original,
+        _translate_upper_bounds(combined_facts.upper_bounds, smt_to_original),
+    )
 
     if strategy.debug:
         if nonneg_original:
@@ -69,6 +81,8 @@ def try_normalization_equivalence(
             strategy._debug_print(f"Sign facts: neg={neg_original}")
         if nonzero_original:
             strategy._debug_print(f"Sign facts: nonzero={nonzero_original}")
+        if upper_bounds_original:
+            strategy._debug_print(f"Range facts: upper_bounds={upper_bounds_original}")
 
     norm_context = normalization_context_cls(
         debug=strategy.debug,
@@ -77,6 +91,7 @@ def try_normalization_equivalence(
         pos_vars=pos_original,
         neg_vars=neg_original,
         nonzero_vars=nonzero_original,
+        upper_bounds=upper_bounds_original,
         allow_unsafe=False,
     )
 
@@ -233,6 +248,25 @@ def _translate_fact_names(var_names, smt_to_original):
     for var_name in var_names:
         translated.add(smt_to_original.get(var_name, var_name))
     return translated
+
+
+def _translate_upper_bounds(upper_bounds, smt_to_original):
+    translated = {}
+    for var_name, bound in upper_bounds.items():
+        original_name = smt_to_original.get(var_name, var_name)
+        current = translated.get(original_name)
+        if current is None or bound < current:
+            translated[original_name] = bound
+    return translated
+
+
+def _merge_upper_bounds(left, right):
+    merged = dict(left)
+    for var_name, bound in right.items():
+        current = merged.get(var_name)
+        if current is None or bound < current:
+            merged[var_name] = bound
+    return merged
 
 
 def _normalize_udiv_if_present(
