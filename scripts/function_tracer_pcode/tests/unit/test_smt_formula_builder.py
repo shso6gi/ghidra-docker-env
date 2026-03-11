@@ -220,6 +220,26 @@ class TestABIConstraints:
         assert "zero_extend" in text_2to1
         
         print("\n[TEST] Suffix resolution works correctly for both directions")
+
+    def test_suffix_resolution_only_rewrites_trailing_suffix(self):
+        """パラメータ名中の `_1` / `_2` を壊さず、末尾サフィックスだけを反転することを確認"""
+        builder = FormulaBuilder(debug=False)
+
+        abi_constraints = {
+            "param_1_1": ("signed", 32),
+            "param_2_2": ("unsigned", 32),
+        }
+
+        text = "\n".join(builder.build_abi_constraints(abi_constraints, "_1", "_2"))
+
+        assert "param_1_2" in text
+        assert "param_2_1" in text
+        assert "param_2_2 ((_ sign_extend 32) param_1_1)" not in text
+        assert "param_1_1 ((_ zero_extend 32) param_2_2)" not in text
+        assert "(= param_1_1 ((_ sign_extend 32) param_1_2))" in text
+        assert "(= param_2_2 ((_ zero_extend 32) param_2_1))" in text
+
+        print("\n[TEST] Trailing suffix rewrite does not corrupt numbered parameter names")
     
     def test_build_with_abi_constraints_wrapper_consistency(self):
         """build_with_abi_constraints が build_abi_assertion_section を経由することを確認"""

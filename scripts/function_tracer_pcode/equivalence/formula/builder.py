@@ -806,9 +806,9 @@ class FormulaBuilder:
         for param_wide, (signedness, narrow_bits) in abi_constraints.items():
             # 対応する狭いパラメータ名を推定（サフィックスを反転）
             if param_wide.endswith(func1_suffix):
-                param_narrow = param_wide.replace(func1_suffix, func2_suffix)
+                param_narrow = param_wide[:-len(func1_suffix)] + func2_suffix
             elif param_wide.endswith(func2_suffix):
-                param_narrow = param_wide.replace(func2_suffix, func1_suffix)
+                param_narrow = param_wide[:-len(func2_suffix)] + func1_suffix
             else:
                 if self.debug:
                     print(f"[FormulaBuilder] Warning: Cannot determine narrow param for {param_wide}")
