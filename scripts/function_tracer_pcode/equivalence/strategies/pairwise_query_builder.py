@@ -2,25 +2,55 @@
 """SMT query builders for PairwiseStrategy."""
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from ...model import FunctionReturnAnalysis
+from ...analysis.condition.simplifier import ConditionSimplifier
+from ...analysis.condition.normalizer import ConditionNormalizer
+from ..normalize import normalize_expression, NormalizationContext
 from .pairwise_models import ReturnCase
 
 
 def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
     """FunctionReturnAnalysis から ReturnCase を抽出"""
     cases = []
+    merged_cases: Dict[Tuple[Tuple[Tuple[str, str, str, bool], ...], str], ReturnCase] = {}
+
     for index, ret_info in enumerate(analysis.returns):
-        cases.append(
-            ReturnCase(
-                index=index,
-                conditions=ret_info.conditions,
-                value_expr=ret_info.value,
-                return_info=ret_info,
-            )
+        simplified_conditions = ConditionSimplifier.simplify_conditions(ret_info.conditions)
+        normalized_value = normalize_expression(
+            ret_info.value,
+            NormalizationContext(),
         )
+
+        case = ReturnCase(
+            index=index,
+            conditions=simplified_conditions,
+            value_expr=normalized_value,
+            return_info=ret_info,
+        )
+        key = _build_return_case_key(case)
+        existing = merged_cases.get(key)
+        if existing is not None:
+            existing.source_indices.append(index)
+            continue
+
+        merged_cases[key] = case
+        cases.append(case)
+
     return cases
+
+
+def _build_return_case_key(case: ReturnCase) -> Tuple[Tuple[Tuple[str, str, str, bool], ...], str]:
+    """分岐ケースの統合キーを生成する"""
+    cond_key = tuple(
+        sorted(
+            ConditionNormalizer.normalize_for_contradiction(cond)
+            for cond in case.conditions
+        )
+    )
+    value_key = case.value_expr.to_smt()
+    return cond_key, value_key
 
 
 def build_condition_only_query(

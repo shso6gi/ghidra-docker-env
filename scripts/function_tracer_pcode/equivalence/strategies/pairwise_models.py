@@ -14,12 +14,14 @@ class ReturnCase:
         index: int,
         conditions: List[Condition],
         value_expr,
-        return_info: ReturnInfo
+        return_info: ReturnInfo,
+        source_indices: Optional[List[int]] = None,
     ):
         self.index = index
         self.conditions = conditions
         self.value_expr = value_expr
         self.return_info = return_info
+        self.source_indices = source_indices or [index]
         self.conditions_smt: Optional[List[str]] = None
         self.value_smt: Optional[str] = None
 
