@@ -4,9 +4,56 @@
 from typing import Optional
 
 
+_BOOLEAN_BINARY_OPERATORS = {
+    "INT_EQUAL",
+    "INT_NOTEQUAL",
+    "INT_LESS",
+    "INT_SLESS",
+    "INT_LESSEQUAL",
+    "INT_SLESSEQUAL",
+    "FLOAT_EQUAL",
+    "FLOAT_NOTEQUAL",
+    "FLOAT_LESS",
+    "FLOAT_LESSEQUAL",
+    "BOOL_AND",
+    "BOOL_OR",
+    "BOOL_XOR",
+}
+
+
 def expression_to_smt(expr) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
     return _to_smt_internal(expr)
+
+
+def expression_returns_bool(expr) -> bool:
+    """式が SMT 上で Bool sort を返すか判定する。"""
+    if expr is None:
+        return False
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type == expr_kind.BINARY_OP:
+        return expr.operator in _BOOLEAN_BINARY_OPERATORS
+
+    if expr_type == expr_kind.UNARY_OP:
+        return expr.operator == "BOOL_NEGATE"
+
+    if expr_type == expr_kind.PHI:
+        branches = expr.value or []
+        return bool(branches) and all(
+            expression_returns_bool(branch_value) for _, branch_value in branches
+        )
+
+    return False
+
+
+def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
+    """Bool sort の式を 0/1 の bitvector へ変換する。"""
+    if bits <= 0 or not expression_returns_bool(expr):
+        return expr_smt
+    return f"(ite {expr_smt} (_ bv1 {bits}) (_ bv0 {bits}))"
 
 
 def _to_smt_internal(expr) -> str:
@@ -50,6 +97,8 @@ def _to_smt_internal(expr) -> str:
         right_smt = right._to_smt_internal()
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
+            left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
+            right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
             result_bits = left_bits
             if right_bits != result_bits:
                 if right_bits > result_bits:
@@ -71,6 +120,8 @@ def _to_smt_internal(expr) -> str:
             "INT_REM",
             "INT_SREM",
         ]:
+            left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
+            right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
             if left_bits != right_bits:
                 target_bits = max(left_bits, right_bits)
                 if left_bits < target_bits:
@@ -107,6 +158,8 @@ def _to_smt_internal(expr) -> str:
 
         if expr.operator == "INT_ZEXT":
             output_bits = (expr.size if expr.size else 8) * 8
+            if expression_returns_bool(operand):
+                return _coerce_bool_to_bitvec(operand, operand_smt, output_bits)
             extend_bits = output_bits - operand_bits
             if extend_bits > 0:
                 return f"((_ zero_extend {extend_bits}) {operand_smt})"
@@ -116,6 +169,8 @@ def _to_smt_internal(expr) -> str:
 
         if expr.operator == "INT_SEXT":
             output_bits = (expr.size if expr.size else 8) * 8
+            if expression_returns_bool(operand):
+                return _coerce_bool_to_bitvec(operand, operand_smt, output_bits)
             extend_bits = output_bits - operand_bits
             if extend_bits > 0:
                 return f"((_ sign_extend {extend_bits}) {operand_smt})"

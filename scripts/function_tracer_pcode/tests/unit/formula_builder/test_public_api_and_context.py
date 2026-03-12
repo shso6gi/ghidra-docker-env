@@ -147,6 +147,17 @@ class TestSharedFormulaContext:
 class TestBooleanReturnNormalization:
     """Bool 戻り値の SMT 正規化に関する回帰テスト"""
 
+    @staticmethod
+    def _signed_less_than_parameter(param_name: str, param_size: int, constant: int, result_size: int):
+        comparison = Expression.binary_op(
+            "INT_SLESS",
+            Expression(ExpressionType.CONSTANT, value=constant, size=param_size),
+            Expression(ExpressionType.PARAMETER, name=param_name, size=param_size),
+        )
+        coerced = Expression.unary_op("INT_ZEXT", comparison)
+        coerced.size = result_size
+        return coerced
+
     def test_boolean_return_expression_is_coerced_to_bitvec(self):
         builder = FormulaBuilder(debug=False)
         analysis1 = FunctionReturnAnalysis(
@@ -220,3 +231,54 @@ class TestBooleanReturnNormalization:
         assert "(define-fun return_1 () (_ BitVec 8)\n  (_ bv255 8))" in formula
         assert "(define-fun return_2 () (_ BitVec 8)\n  (_ bv255 8))" in formula
         assert "(ite (_ bv255 8)" not in formula
+
+    def test_nested_boolean_to_int_expression_uses_ite_instead_of_zero_extend(self):
+        expr = Expression.binary_op(
+            "INT_ADD",
+            self._signed_less_than_parameter("x", 4, 100, 4),
+            Expression(ExpressionType.CONSTANT, value=2, size=4),
+        )
+
+        smt = expr.to_smt()
+
+        assert smt == "(bvadd (ite (bvslt (_ bv100 32) x) (_ bv1 32) (_ bv0 32)) (_ bv2 32))"
+        assert "zero_extend" not in smt
+
+    def test_formula_builder_handles_branch_bucket_style_optimized_value(self):
+        builder = FormulaBuilder(debug=False)
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func_simple",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=3, size=4),
+                )
+            ],
+            return_type="int",
+        )
+        optimized_value = Expression.binary_op(
+            "INT_OR",
+            self._signed_less_than_parameter("y", 8, 100, 4),
+            Expression(ExpressionType.CONSTANT, value=2, size=4),
+        )
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func_bucket_opt",
+            entry_point="0x00402000",
+            parameters=[{"name": "y", "size": 8, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=optimized_value,
+                )
+            ],
+            return_type="int",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+        assert "(bvor (ite (bvslt (_ bv100 64) y_2) (_ bv1 32) (_ bv0 32)) (_ bv2 32))" in formula
+        assert "((_ zero_extend 24) (bvslt (_ bv100 64) y_2))" not in formula

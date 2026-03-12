@@ -5,26 +5,10 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ...model import Expression, ExpressionType, FunctionReturnAnalysis
+from ...model import Expression, FunctionReturnAnalysis
+from ...model.render_smt import expression_returns_bool
 from .params import replace_symbol_names
 from .types import ParameterInfo
-
-
-_BOOLEAN_BINARY_OPERATORS = {
-    "INT_EQUAL",
-    "INT_NOTEQUAL",
-    "INT_LESS",
-    "INT_SLESS",
-    "INT_LESSEQUAL",
-    "INT_SLESSEQUAL",
-    "FLOAT_EQUAL",
-    "FLOAT_NOTEQUAL",
-    "FLOAT_LESS",
-    "FLOAT_LESSEQUAL",
-    "BOOL_AND",
-    "BOOL_OR",
-    "BOOL_XOR",
-}
 
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
@@ -38,22 +22,7 @@ def get_return_size(analysis: FunctionReturnAnalysis) -> int:
 
 def is_boolean_return_expr(expr: Expression) -> bool:
     """戻り値式が SMT 上で Bool sort を返すかを判定する。"""
-    if expr is None:
-        return False
-
-    if expr.expr_type == ExpressionType.BINARY_OP:
-        return expr.operator in _BOOLEAN_BINARY_OPERATORS
-
-    if expr.expr_type == ExpressionType.UNARY_OP:
-        return expr.operator == "BOOL_NEGATE"
-
-    if expr.expr_type == ExpressionType.PHI:
-        branches = expr.value or []
-        return bool(branches) and all(
-            is_boolean_return_expr(branch_value) for _, branch_value in branches
-        )
-
-    return False
+    return expression_returns_bool(expr)
 
 
 def coerce_return_value_to_bitvec(
