@@ -394,10 +394,20 @@ class TestPhaseRetryGates:
 
         analysis1 = create_mock_analysis(
             function_name="test_func",
-            return_type="int",
+            return_type="undefined8",
             parameters=[{"name": "param_1", "data_type": "long", "size": 8}],
         )
         analysis2 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined8",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        post_p4c_analysis1 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}],
+        )
+        post_p4c_analysis2 = create_mock_analysis(
             function_name="test_func",
             return_type="int",
             parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
@@ -439,7 +449,11 @@ class TestPhaseRetryGates:
                          counterexample=counterexample,
                      ),
                  ) as mock_retry, \
-                 patch.object(checker.phase_handler, "run_phase2_return_type_fix") as mock_p2, \
+                 patch.object(
+                     checker.phase_handler,
+                     "run_phase2_return_type_fix",
+                     return_value=(True, True, True),
+                 ) as mock_p2, \
                  patch.object(
                      checker.phase_handler,
                      "execute_phase",
@@ -454,14 +468,25 @@ class TestPhaseRetryGates:
                  patch.object(
                      checker,
                      "_selective_reanalysis_and_check",
-                     return_value=(
-                         fixed_analysis1,
-                         fixed_analysis2,
-                         create_mock_result(
-                             is_equivalent=True,
-                             solver_status=SolverStatus.UNSAT,
+                     side_effect=[
+                         (
+                             post_p4c_analysis1,
+                             post_p4c_analysis2,
+                             create_mock_result(
+                                 is_equivalent=False,
+                                 solver_status=SolverStatus.SAT,
+                                 counterexample=counterexample,
+                             ),
                          ),
-                     ),
+                         (
+                             fixed_analysis1,
+                             fixed_analysis2,
+                             create_mock_result(
+                                 is_equivalent=True,
+                                 solver_status=SolverStatus.UNSAT,
+                             ),
+                         ),
+                     ],
                  ) as mock_reanalyze:
                 mock_check.return_value = create_mock_result(
                     is_equivalent=False,
@@ -479,9 +504,9 @@ class TestPhaseRetryGates:
 
                 assert mock_phase4b.call_count >= 2
                 assert mock_retry.called
-                mock_p2.assert_not_called()
-                assert mock_execute_phase.called, "Phase 4-A tail should be attempted before SAT stop"
-                assert mock_reanalyze.called
+                assert mock_p2.called, "Phase 4-C should run before Phase 4-A tail"
+                assert mock_execute_phase.called, "Phase 4-A tail should be attempted after Phase 4-C remains SAT"
+                assert mock_reanalyze.call_count == 2
                 assert result.is_equivalent is True
 
     def test_phase4b_retry_on_successful_spurious_detection(self, mock_program_mips64, mock_program_x86):
