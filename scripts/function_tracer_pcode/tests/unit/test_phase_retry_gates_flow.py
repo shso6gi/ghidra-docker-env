@@ -225,6 +225,91 @@ class TestPhaseRetryGates:
                 assert mock_reanalyze.called, "Return type fix should re-analyze before re-check"
                 assert result.is_equivalent is True
 
+    def test_sat_without_phase4b_still_runs_return_type_fix_for_suspicious_return(
+        self,
+        mock_program_mips64,
+        mock_program_x86,
+    ):
+        """Phase 4-B が不要でも、undefined系戻り値なら Phase 4-C で再試行する"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from unittest.mock import Mock, patch
+
+        checker = EquivalenceChecker(debug=True)
+
+        analysis1 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined8",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        analysis2 = create_mock_analysis(
+            function_name="test_func",
+            return_type="undefined8",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        fixed_analysis1 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        fixed_analysis2 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+
+        counterexample = {
+            "param_1_1": 0xFFFFFFFF,
+            "param_1_2": 0xFFFFFFFF,
+        }
+
+        with patch("scripts.function_tracer_pcode.analysis.ReturnAnalyzer") as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = [analysis1, analysis2]
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+
+            with patch.object(checker, "check") as mock_check, \
+                 patch.object(
+                     checker.phase_handler,
+                     "run_phase4_mips64_retry",
+                     return_value=None,
+                 ) as mock_phase4b, \
+                 patch.object(
+                     checker.phase_handler,
+                     "run_phase2_return_type_fix",
+                     return_value=(True, True, True),
+                 ) as mock_p2, \
+                 patch.object(
+                     checker,
+                     "_selective_reanalysis_and_check",
+                     return_value=(
+                         fixed_analysis1,
+                         fixed_analysis2,
+                         create_mock_result(
+                             is_equivalent=True,
+                             solver_status=SolverStatus.UNSAT,
+                         ),
+                     ),
+                 ) as mock_reanalyze:
+                mock_check.return_value = create_mock_result(
+                    is_equivalent=False,
+                    solver_status=SolverStatus.SAT,
+                    counterexample=counterexample,
+                )
+
+                result = checker.check_from_binaries(
+                    mock_program_mips64,
+                    mock_program_x86,
+                    "test_func",
+                    "test_func",
+                    retry_with_type_fix=True,
+                )
+
+                assert mock_phase4b.called
+                assert mock_p2.called, "Suspicious return type should trigger Phase 4-C even without Phase 4-B"
+                assert mock_reanalyze.called
+                assert result.is_equivalent is True
+
     def test_sat_after_phase4b_skips_return_type_fix_when_return_type_is_not_suspicious(
         self,
         mock_program_mips64,
