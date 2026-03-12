@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """SMT式構築サブモジュール"""
 
-from .builder import (
-    FormulaBuilder,
+from .builder import FormulaBuilder
+from .types import (
     FormulaBuilderResult,
     ParameterInfo,
     ExtraVariableInfo,

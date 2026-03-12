@@ -2,10 +2,22 @@
 """SMT式構築モジュール"""
 
 from typing import List, Dict, Optional, Tuple, Set, Any
-from dataclasses import dataclass
-import re
 
-from ...model import FunctionReturnAnalysis, ReturnInfo, Expression, ExpressionType
+from ...model import FunctionReturnAnalysis
+from .params import (
+    build_parameter_constraint,
+    build_parameter_pairs,
+    collect_param_info,
+    merge_param_and_extra_vars,
+)
+from .returns import build_return_definition, get_return_size
+from .types import (
+    ExtraVariableInfo,
+    FormulaBuildContext,
+    FormulaBuilderResult,
+    ParameterInfo,
+    ParameterPair,
+)
 from .variable import (
     VariableAnalyzer, 
     ExtraVariableAnalysis, 
@@ -15,77 +27,6 @@ from .variable import (
 from .symbol_replace import build_symbol_replacer
 
 from ..ub.constraints import UbConstraintBuilder
-
-
-@dataclass
-class ParameterInfo:
-    """パラメータ情報"""
-    original_name: str
-    smt_name: str
-    bit_width: int
-    index: int
-    is_signed: bool = True
-
-
-@dataclass
-class ExtraVariableInfo:
-    """追加変数情報"""
-    original_name: str
-    smt_name: str
-    bit_width: int
-    analysis: Optional[ExtraVariableAnalysis] = None
-
-
-@dataclass
-class ParameterPair:
-    """パラメータペア（2つの関数間のマッピング）"""
-    index: int
-    param1: Optional[ParameterInfo]
-    param2: Optional[ParameterInfo]
-    
-    def has_width_mismatch(self) -> bool:
-        if self.param1 is None or self.param2 is None:
-            return True
-        return self.param1.bit_width != self.param2.bit_width
-    
-    def get_overlapping_width(self) -> int:
-        if self.param1 is None or self.param2 is None:
-            return 0
-        return min(self.param1.bit_width, self.param2.bit_width)
-    
-    def get_larger_width(self) -> int:
-        w1 = self.param1.bit_width if self.param1 else 0
-        w2 = self.param2.bit_width if self.param2 else 0
-        return max(w1, w2)
-
-
-@dataclass
-class FormulaBuilderResult:
-    """SMT式構築の結果"""
-    formula: str
-    return_var1: str
-    return_var2: str
-    extra_vars1: List[ExtraVariableInfo]
-    extra_vars2: List[ExtraVariableInfo]
-    constrained_fragments: List[str]
-    param_fragment_constrained: List[str]
-
-
-@dataclass
-class FormulaBuildContext:
-    """FormulaBuilder 内で共有する構築コンテキスト"""
-    params1: List[ParameterInfo]
-    params2: List[ParameterInfo]
-    extra_vars1: List[ExtraVariableInfo]
-    extra_vars2: List[ExtraVariableInfo]
-    var_analyses1: Dict[str, ExtraVariableAnalysis]
-    var_analyses2: Dict[str, ExtraVariableAnalysis]
-    param_pairs: List[ParameterPair]
-    return_size1: int
-    return_size2: int
-    header_lines: List[str]
-    constrained_fragments: List[str]
-    param_fragment_constrained: List[str]
 
 
 class FormulaBuilder:
@@ -551,16 +492,7 @@ class FormulaBuilder:
         extra_vars: List[ExtraVariableInfo]
     ) -> List[ParameterInfo]:
         """パラメータと追加変数を統合"""
-        result = list(params)
-        for v in extra_vars:
-            result.append(ParameterInfo(
-                original_name=v.original_name,
-                smt_name=v.smt_name,
-                bit_width=v.bit_width,
-                index=-1,
-                is_signed=True  # デフォルト
-            ))
-        return result
+        return merge_param_and_extra_vars(params, extra_vars)
     
     def _build_equivalence_assertion(
         self,
@@ -596,24 +528,7 @@ class FormulaBuilder:
         suffix: str
     ) -> List[ParameterInfo]:
         """パラメータ情報を収集"""
-        result = []
-        for param in params:
-            name = param.get('name', f"param_{param.get('index', 0)}")
-            size = param.get('size', 4) * 8
-            index = param.get('index', 0)
-            is_signed = param.get('is_signed', True)
-            smt_name = f"{name}{suffix}"
-            
-            result.append(ParameterInfo(
-                original_name=name,
-                smt_name=smt_name,
-                bit_width=size,
-                index=index,
-                is_signed=is_signed
-            ))
-        
-        result.sort(key=lambda x: x.index)
-        return result
+        return collect_param_info(params, suffix)
     
     def _build_parameter_pairs(
         self,
@@ -621,28 +536,7 @@ class FormulaBuilder:
         params2: List[ParameterInfo]
     ) -> List[ParameterPair]:
         """パラメータペアを構築"""
-        pairs = []
-        
-        all_indices = set()
-        p1_by_index = {}
-        p2_by_index = {}
-        
-        for p in params1:
-            p1_by_index[p.index] = p
-            all_indices.add(p.index)
-        
-        for p in params2:
-            p2_by_index[p.index] = p
-            all_indices.add(p.index)
-        
-        for idx in sorted(all_indices):
-            pairs.append(ParameterPair(
-                index=idx,
-                param1=p1_by_index.get(idx),
-                param2=p2_by_index.get(idx)
-            ))
-        
-        return pairs
+        return build_parameter_pairs(params1, params2)
     
     def _build_parameter_constraint(self, pair: ParameterPair) -> List[str]:
         """
@@ -651,96 +545,11 @@ class FormulaBuilder:
         - 同じビット幅: 直接等価
         - 異なるビット幅: 重複するビット（下位ビット）のみ等価、上位ビットは自由
         """
-        lines = []
-        
-        if pair.param1 is None or pair.param2 is None:
-            lines.append(f"; Parameter index {pair.index}: missing in one function")
-            return lines
-        
-        p1 = pair.param1
-        p2 = pair.param2
-        
-        if not pair.has_width_mismatch():
-            # 同じビット幅：直接比較
-            lines.append(f"; {p1.smt_name} and {p2.smt_name}: same width ({p1.bit_width}bit)")
-            lines.append(f"(assert (= {p1.smt_name} {p2.smt_name}))")
-        else:
-            # 異なるビット幅：重複ビットのみ等価
-            overlap_bits = pair.get_overlapping_width()
-            
-            lines.append(f"; {p1.smt_name} ({p1.bit_width}bit) vs {p2.smt_name} ({p2.bit_width}bit)")
-            lines.append(f"; Overlapping bits: {overlap_bits}")
-            lines.append(f"; Constraint: lower {overlap_bits} bits are equal")
-            
-            if p1.bit_width < p2.bit_width:
-                # p1が小さい: p1全体 = p2の下位ビット
-                lines.append(f"(assert (= {p1.smt_name} ((_ extract {overlap_bits - 1} 0) {p2.smt_name})))")
-                lines.append(f"; Upper bits of {p2.smt_name} [{p2.bit_width - 1}:{overlap_bits}] are free")
-            else:
-                # p2が小さい: p1の下位ビット = p2全体
-                lines.append(f"(assert (= ((_ extract {overlap_bits - 1} 0) {p1.smt_name}) {p2.smt_name}))")
-                lines.append(f"; Upper bits of {p1.smt_name} [{p1.bit_width - 1}:{overlap_bits}] are free")
-        
-        return lines
+        return build_parameter_constraint(pair)
     
     def _get_return_size(self, analysis: FunctionReturnAnalysis) -> int:
         """return値のビット幅を取得"""
-        if analysis.returns:
-            first_ret = analysis.returns[0]
-            if hasattr(first_ret.value, 'size') and first_ret.value.size:
-                return first_ret.value.size * 8
-        return 32
-
-    def _is_boolean_return_expr(self, expr: Expression) -> bool:
-        """戻り値式が SMT 上で Bool sort になるかを判定"""
-        if expr is None:
-            return False
-
-        if expr.expr_type == ExpressionType.BINARY_OP:
-            return expr.operator in {
-                "INT_EQUAL",
-                "INT_NOTEQUAL",
-                "INT_LESS",
-                "INT_SLESS",
-                "INT_LESSEQUAL",
-                "INT_SLESSEQUAL",
-                "FLOAT_EQUAL",
-                "FLOAT_NOTEQUAL",
-                "FLOAT_LESS",
-                "FLOAT_LESSEQUAL",
-                "BOOL_AND",
-                "BOOL_OR",
-                "BOOL_XOR",
-            }
-
-        if expr.expr_type == ExpressionType.UNARY_OP:
-            return expr.operator == "BOOL_NEGATE"
-
-        if expr.expr_type == ExpressionType.PHI:
-            branches = expr.value or []
-            return bool(branches) and all(
-                self._is_boolean_return_expr(branch_value)
-                for _, branch_value in branches
-            )
-
-        return False
-
-    def _coerce_return_value_to_bitvec(
-        self,
-        expr: Expression,
-        value_smt: str,
-        return_size: int
-    ) -> str:
-        """
-        Bool sort の戻り値を bitvector 0/1 に正規化する。
-
-        比較演算や BOOL_* は render_smt で Bool を返す一方、return 定義は
-        BitVec sort として宣言されるため、ここでのみ局所的に整合を取る。
-        """
-        if not self._is_boolean_return_expr(expr):
-            return value_smt
-
-        return f"(ite {value_smt} (_ bv1 {return_size}) (_ bv0 {return_size}))"
+        return get_return_size(analysis)
     
     def _build_return_definition(
         self,
@@ -753,48 +562,7 @@ class FormulaBuilder:
         
         全てのreturn定義の条件を反映したite式を生成
         """
-        lines = []
-        
-        return_size = self._get_return_size(analysis)
-        
-        return_defs = []
-        for i, ret in enumerate(analysis.returns):
-            if ret.conditions:
-                cond_parts = []
-                for c in ret.conditions:
-                    cond_smt = c.to_smt()
-                    cond_smt = self._replace_param_names(cond_smt, param_infos)
-                    cond_parts.append(cond_smt)
-                
-                if len(cond_parts) == 1:
-                    cond_str = cond_parts[0]
-                else:
-                    cond_str = f"(and {' '.join(cond_parts)})"
-            else:
-                cond_str = "true"
-            
-            value_smt = ret.value.to_smt()
-            value_smt = self._replace_param_names(value_smt, param_infos)
-            value_smt = self._coerce_return_value_to_bitvec(
-                ret.value,
-                value_smt,
-                return_size
-            )
-            
-            return_defs.append({
-                "condition": cond_str,
-                "value": value_smt
-            })
-        
-        if return_defs:
-            unified_return = self._build_ite_expression(return_defs, return_size)
-        else:
-            unified_return = f"(_ bv0 {return_size})"
-        
-        lines.append(f"(define-fun {return_var_name} () (_ BitVec {return_size})")
-        lines.append(f"  {unified_return})")
-        
-        return lines
+        return build_return_definition(analysis, return_var_name, param_infos)
     
     def _replace_param_names(
         self,
@@ -802,14 +570,9 @@ class FormulaBuilder:
         param_infos: List[ParameterInfo]
     ) -> str:
         """SMT式内のパラメータ名を置換"""
-        result = smt_expr
-        sorted_params = sorted(param_infos, key=lambda p: -len(p.original_name))
-        
-        for param in sorted_params:
-            pattern = r'\b' + re.escape(param.original_name) + r'\b'
-            result = re.sub(pattern, param.smt_name, result)
-        
-        return result
+        from .params import replace_symbol_names
+
+        return replace_symbol_names(smt_expr, param_infos)
     
     def _build_ite_expression(self, return_defs: List[dict], return_size: int) -> str:
         """
@@ -826,29 +589,9 @@ class FormulaBuilder:
             - 全てのreturn定義の条件を必ず反映
             - どの条件にも該当しない場合のデフォルト値を追加
         """
-        if not return_defs:
-            return f"(_ bv0 {return_size})"
-        
-        # デフォルト値（どの条件にも該当しない場合）
-        default_value = f"(_ bv0 {return_size})"
-        
-        # 逆順にite式を構築（最後の条件から順に）
-        result = default_value
-        
-        for i in range(len(return_defs) - 1, -1, -1):
-            ret_def = return_defs[i]
-            cond = ret_def["condition"]
-            value = ret_def["value"]
-            
-            if cond == "true":
-                # 無条件の場合、これが最終的な値になる
-                # ただし、これより前の条件がある場合は、それらを優先
-                result = value
-            else:
-                # 条件付きの場合、ite式を構築
-                result = f"(ite {cond} {value} {result})"
-        
-        return result
+        from .returns import build_ite_expression
+
+        return build_ite_expression(return_defs, return_size)
     
     def build_abi_constraints(
         self,
