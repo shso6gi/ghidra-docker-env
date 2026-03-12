@@ -4,7 +4,13 @@
 import time
 
 from .debug_trace import DebugTrace, TransitionReason
-from .phases.handler import DEFAULT_PHASE_PLAN, PhaseContext, PhaseID, PhaseSpec
+from .phases.handler import (
+    DEFAULT_PHASE_PLAN,
+    PhaseContext,
+    PhaseID,
+    PhaseResult,
+    PhaseSpec,
+)
 from .typing.fixer import TypeFixResult
 
 
@@ -169,11 +175,30 @@ def run_check_from_binaries(
                             return _attach_trace_and_return(
                                 result, debug_trace, start_time, True
                             )
+                        result, attempt_id = _maybe_retry_sat_return_type_fix(
+                            checker,
+                            ctx,
+                            result,
+                            debug_trace,
+                            attempt_id,
+                            retry_count + 2,
+                            type_fixer1,
+                            type_fixer2,
+                            retry_with_type_fix,
+                        )
+                        if result.is_equivalent is True:
+                            checker._debug_print(
+                                f"Phase 4-C: EQUIVALENT after return type retry (from {phase_id.value})"
+                            )
+                            return _attach_trace_and_return(
+                                result, debug_trace, start_time, True
+                            )
             else:
                 checker._debug_print("Phase 4-B: Skipped")
 
-            checker._debug_print(f"Phase {phase_id.value}: NOT EQUIVALENT - stopping")
-            return _attach_trace_and_return(result, debug_trace, start_time, False)
+            if result.is_equivalent is False:
+                checker._debug_print(f"Phase {phase_id.value}: NOT EQUIVALENT - stopping")
+                return _attach_trace_and_return(result, debug_trace, start_time, False)
 
         should_retry = checker.phase_handler.should_retry(result)
         retry_reason = checker.phase_handler.get_retry_reason(result)
@@ -292,8 +317,92 @@ def _run_phase4a_tail(
                         "Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 4-A)"
                     )
                     return _attach_trace_and_return(result, debug_trace, start_time, True), attempt_id
+                result, attempt_id = _maybe_retry_sat_return_type_fix(
+                    checker,
+                    ctx,
+                    result,
+                    debug_trace,
+                    attempt_id,
+                    retry_count + 2,
+                    type_fixer1,
+                    type_fixer2,
+                    retry_with_type_fix,
+                )
+                if result.is_equivalent is True:
+                    checker._debug_print(
+                        "Phase 4-C: EQUIVALENT after return type retry (from Phase 4-A)"
+                    )
+                    return _attach_trace_and_return(result, debug_trace, start_time, True), attempt_id
 
     return result, attempt_id
+
+
+def _maybe_retry_sat_return_type_fix(
+    checker,
+    ctx: PhaseContext,
+    result,
+    debug_trace: DebugTrace,
+    attempt_id: int,
+    retry_count: int,
+    type_fixer1,
+    type_fixer2,
+    retry_with_type_fix: bool,
+):
+    """SAT のまま残った戻り値型疑義に対して、限定的に型修正リトライする。"""
+    if not retry_with_type_fix:
+        return result, attempt_id
+
+    if result.is_equivalent is not False:
+        return result, attempt_id
+
+    if ctx.analysis1 is None or ctx.analysis2 is None:
+        return result, attempt_id
+
+    should_fix1 = checker.phase_handler.should_fix_return_type(ctx.analysis1)
+    should_fix2 = checker.phase_handler.should_fix_return_type(ctx.analysis2)
+    if not (should_fix1 or should_fix2):
+        return result, attempt_id
+
+    checker._debug_print(
+        "Phase 4-C: SAT persists after ABI retry, attempting suspicious return type fix"
+    )
+
+    applied, changed1, changed2 = checker.phase_handler.run_phase2_return_type_fix(
+        ctx,
+        type_fixer1,
+        type_fixer2,
+    )
+    if not applied:
+        checker._debug_print("Phase 4-C: Return type fix was not applied")
+        return result, attempt_id
+
+    ctx.type_fix_result.retry_phase = "sat_return_type_fix"
+    phase_result = PhaseResult(
+        PhaseID.P2_PATTERN_INT,
+        applied=True,
+        retry_name="sat_return_type_fix",
+        changed_binary1=changed1,
+        changed_binary2=changed2,
+    )
+    analysis1, analysis2, result = checker._selective_reanalysis_and_check(
+        ctx, phase_result, retry_count=retry_count
+    )
+    ctx.analysis1 = analysis1
+    ctx.analysis2 = analysis2
+
+    transition_reason = checker._get_transition_reason(
+        result, retry_with_type_fix, phase_id="P4C_RETURN_TYPE_FIX"
+    )
+    checker._record_attempt_from_result(
+        debug_trace,
+        attempt_id,
+        retry_count,
+        "P4C_RETURN_TYPE_FIX",
+        result,
+        transition_reason,
+        ctx.type_fix_result,
+    )
+    return result, attempt_id + 1
 
 
 def _finalize_if_terminal(checker, result, debug_trace, start_time, phase_name):
