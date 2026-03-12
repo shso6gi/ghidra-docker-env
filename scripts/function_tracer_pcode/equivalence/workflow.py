@@ -152,7 +152,7 @@ def run_check_from_binaries(
             if retry_with_type_fix and will_try_phase4b:
                 abi_constraints = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
                 if abi_constraints:
-                    phase4b_result = checker._retry_with_abi_constraints(
+                    phase4b_result = checker._retry_with_iterative_abi_constraints(
                         ctx, abi_constraints, retry_count=retry_count + 1
                     )
                     if phase4b_result is not None:
@@ -336,7 +336,7 @@ def _run_phase4a_tail(
     if result.is_equivalent is False and retry_with_type_fix and will_try_phase4b:
         abi_constraints = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
         if abi_constraints:
-            phase4b_result = checker._retry_with_abi_constraints(
+            phase4b_result = checker._retry_with_iterative_abi_constraints(
                 ctx, abi_constraints, retry_count=retry_count + 1
             )
             if phase4b_result is not None:

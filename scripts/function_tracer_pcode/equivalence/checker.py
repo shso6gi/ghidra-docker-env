@@ -211,7 +211,9 @@ class EquivalenceChecker:
         self._debug_print("Phase 4-B: Spurious counterexample detected, retrying with ABI constraints")
         ctx.type_fix_result.retry_phase = "mips64_abi_retry"
         
-        return self._retry_with_abi_constraints(ctx, abi_constraints, retry_count=retry_count)
+        return self._retry_with_iterative_abi_constraints(
+            ctx, abi_constraints, retry_count=retry_count
+        )
     
     def check_from_binaries(
         self,
@@ -435,7 +437,96 @@ class EquivalenceChecker:
                 ctx.type_fix_result, retry_count,
                 ctx.original_signature1, ctx.original_signature2
             )
-    
+
+    def _merge_abi_constraints(
+        self,
+        accumulated: Dict[str, Tuple[str, int]],
+        discovered: Dict[str, Tuple[str, int]],
+    ) -> Tuple[Dict[str, Tuple[str, int]], Dict[str, Tuple[str, int]], List[str]]:
+        """ABI 制約を累積し、新規追加分と競合を返す。"""
+        merged = dict(accumulated)
+        added: Dict[str, Tuple[str, int]] = {}
+        conflicts: List[str] = []
+
+        for param_name, constraint in discovered.items():
+            existing = merged.get(param_name)
+            if existing is None:
+                merged[param_name] = constraint
+                added[param_name] = constraint
+                continue
+
+            if existing != constraint:
+                conflicts.append(param_name)
+
+        return merged, added, conflicts
+
+    def _retry_with_iterative_abi_constraints(
+        self,
+        ctx: PhaseContext,
+        abi_constraints: Dict[str, Tuple[str, int]],
+        retry_count: int,
+    ) -> EquivalenceResult:
+        """ABI 制約を累積しながら Phase 4-B を反復する。"""
+        if not abi_constraints:
+            return self._retry_with_abi_constraints(ctx, abi_constraints, retry_count)
+
+        param_budget = 0
+        if ctx.analysis1 is not None:
+            param_budget += len(ctx.analysis1.parameters)
+        if ctx.analysis2 is not None:
+            param_budget += len(ctx.analysis2.parameters)
+        max_iterations = max(1, param_budget or len(abi_constraints))
+
+        accumulated = dict(abi_constraints)
+        current_retry_count = retry_count
+        latest_result: Optional[EquivalenceResult] = None
+
+        for iteration in range(max_iterations):
+            self._debug_print(
+                f"Phase 4-B iterative retry {iteration + 1}/{max_iterations} "
+                f"with constraints: {accumulated}"
+            )
+            latest_result = self._retry_with_abi_constraints(
+                ctx, accumulated, current_retry_count
+            )
+
+            if latest_result.is_equivalent is not False:
+                return latest_result
+
+            discovered = self.phase_handler.run_phase4_mips64_retry(latest_result, ctx)
+            if not discovered:
+                self._debug_print(
+                    "Phase 4-B iterative retry: no additional ABI constraints found"
+                )
+                return latest_result
+
+            merged, added, conflicts = self._merge_abi_constraints(
+                accumulated, discovered
+            )
+            if conflicts:
+                self._debug_print(
+                    "Phase 4-B iterative retry: conflicting ABI constraints "
+                    f"detected for {conflicts}; stopping"
+                )
+                return latest_result
+
+            if not added:
+                self._debug_print(
+                    "Phase 4-B iterative retry: discovered constraints were already "
+                    "applied; stopping"
+                )
+                return latest_result
+
+            accumulated = merged
+            current_retry_count += 1
+
+        self._debug_print(
+            "Phase 4-B iterative retry: reached iteration limit; returning latest result"
+        )
+        if latest_result is None:
+            return self._retry_with_abi_constraints(ctx, abi_constraints, retry_count)
+        return latest_result
+
     def _run_stage_plan(
         self,
         analysis1: FunctionReturnAnalysis,
