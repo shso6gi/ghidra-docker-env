@@ -160,9 +160,12 @@ class MIPS64Handler:
             if {size1, size2} == {4, 8}:
                 constraint = self._check_width_mismatch(
                     i, p1, p2, size1, size2,
+                    param_name_1, param_name_2,
                     param_key_1, param_key_2,
                     is_mips64_1, is_mips64_2,
-                    counterexample
+                    counterexample,
+                    usage1,
+                    usage2,
                 )
                 if constraint:
                     param_wide, signedness, narrow_bits = constraint
@@ -211,11 +214,15 @@ class MIPS64Handler:
         p2: Dict[str, Any],
         size1: int,
         size2: int,
+        param_name_1: str,
+        param_name_2: str,
         param_key_1: str,
         param_key_2: str,
         is_mips64_1: bool,
         is_mips64_2: bool,
-        counterexample: Dict[str, Any]
+        counterexample: Dict[str, Any],
+        usage1: Dict[str, Tuple[str, int]],
+        usage2: Dict[str, Tuple[str, int]],
     ) -> Optional[Tuple[str, str, int]]:
         """幅不一致のパラメータについて偽反例をチェック"""
         if is_mips64_1 and size1 == 8 and size2 == 4:
@@ -240,7 +247,15 @@ class MIPS64Handler:
         
         val_wide = counterexample[param_wide]
         val_narrow = counterexample[param_narrow]
-        signedness = self._infer_signedness(narrow_param)
+        signedness = self._resolve_width_mismatch_signedness(
+            param_name_1,
+            param_name_2,
+            p1,
+            p2,
+            narrow_param,
+            usage1,
+            usage2,
+        )
         
         is_spurious = self._check_spurious_upper_bits(
             val_wide, val_narrow, narrow_bits, signedness
@@ -266,45 +281,59 @@ class MIPS64Handler:
         Returns:
             param_name -> (signedness, narrow_bits) のマップ
         """
-        usage: Dict[str, Tuple[str, int]] = {}
+        evidence: Dict[str, Dict[str, Any]] = {}
         
         for ret_info in analysis.returns:
             if ret_info.value:
-                patterns = self._detect_extension_patterns(ret_info.value)
-                for param_name, (signedness, bits) in patterns.items():
-                    if param_name not in usage:
-                        usage[param_name] = (signedness, bits)
+                self._detect_extension_patterns(ret_info.value, evidence)
             
             for cond in ret_info.conditions:
                 if cond.expression:
-                    patterns = self._detect_extension_patterns(cond.expression)
-                    for param_name, (signedness, bits) in patterns.items():
-                        if param_name not in usage:
-                            usage[param_name] = (signedness, bits)
-        
+                    self._detect_extension_patterns(cond.expression, evidence)
+
+        usage: Dict[str, Tuple[str, int]] = {}
+        params_by_name = {
+            param.get("name", f"param{index}"): param
+            for index, param in enumerate(analysis.parameters)
+        }
+
+        for param_name, param_evidence in evidence.items():
+            narrow_bits = self._resolve_narrow_bits(param_evidence)
+            if narrow_bits is None:
+                continue
+
+            signedness = self._resolve_usage_signedness(
+                param_evidence,
+                params_by_name.get(param_name),
+            )
+            if signedness is None:
+                continue
+
+            usage[param_name] = (signedness, narrow_bits)
+
         return usage
     
     def _detect_extension_patterns(
         self,
-        expr: Expression
-    ) -> Dict[str, Tuple[str, int]]:
+        expr: Expression,
+        evidence: Dict[str, Dict[str, Any]],
+    ) -> None:
         """
-        式から拡張パターンを検出
-        
-        検出パターン：
-        1. INT_SEXT(SUBPIECE(PARAM, 0)) → signed
-        2. INT_ZEXT(SUBPIECE(PARAM, 0)) → unsigned
-        3. INT_AND(PARAM, 0xffffffff) → unsigned, 32bit
-        4. SUBPIECE(PARAM, 0) (size=4) → unsigned, 32bit
+        式からパラメータの width/signedness 証拠を収集
+
+        検出パターン:
+        1. INT_SEXT(SUBPIECE(PARAM, 0)) → signed 32bit
+        2. INT_ZEXT(SUBPIECE(PARAM, 0)) → unsigned 32bit
+        3. INT_AND(PARAM, 0xffffffff) → 32bit 利用 + unsigned 寄り
+        4. SUBPIECE(PARAM, 0) (size=4) → 32bit 利用の証拠
+        5. INT_SLESS / INT_SLESSEQUAL with 0/-1 → signed 利用の証拠
         """
-        patterns: Dict[str, Tuple[str, int]] = {}
-        self._detect_extension_patterns_recursive(expr, patterns)
-        return patterns
+        self._detect_extension_patterns_recursive(expr, evidence)
     
     def _detect_extension_patterns_recursive(
         self,
         expr: Expression,
-        patterns: Dict[str, Tuple[str, int]]
+        evidence: Dict[str, Dict[str, Any]]
     ) -> None:
         """式を再帰的に走査"""
         
@@ -316,7 +345,12 @@ class MIPS64Handler:
                 if param_name:
                     narrow_bits = inner.get_bit_width()
                     if narrow_bits == 32:
-                        patterns[param_name] = ("signed", 32)
+                        self._record_param_evidence(
+                            evidence,
+                            param_name,
+                            narrow_bits=32,
+                            signed_score=3,
+                        )
                         self._debug_print(
                             f"  Detected INT_SEXT(SUBPIECE({param_name}, 0)) -> signed 32bit"
                         )
@@ -329,7 +363,12 @@ class MIPS64Handler:
                 if param_name:
                     narrow_bits = inner.get_bit_width()
                     if narrow_bits == 32:
-                        patterns[param_name] = ("unsigned", 32)
+                        self._record_param_evidence(
+                            evidence,
+                            param_name,
+                            narrow_bits=32,
+                            unsigned_score=3,
+                        )
                         self._debug_print(
                             f"  Detected INT_ZEXT(SUBPIECE({param_name}, 0)) -> unsigned 32bit"
                         )
@@ -342,7 +381,12 @@ class MIPS64Handler:
                    right.expr_type == ExpressionType.CONSTANT and \
                    right.value == 0xffffffff:
                     if left.name:
-                        patterns[left.name] = ("unsigned", 32)
+                        self._record_param_evidence(
+                            evidence,
+                            left.name,
+                            narrow_bits=32,
+                            unsigned_score=1,
+                        )
                         self._debug_print(
                             f"  Detected {left.name} & 0xffffffff -> unsigned 32bit"
                         )
@@ -350,7 +394,12 @@ class MIPS64Handler:
                      left.expr_type == ExpressionType.CONSTANT and \
                      left.value == 0xffffffff:
                     if right.name:
-                        patterns[right.name] = ("unsigned", 32)
+                        self._record_param_evidence(
+                            evidence,
+                            right.name,
+                            narrow_bits=32,
+                            unsigned_score=1,
+                        )
                         self._debug_print(
                             f"  Detected 0xffffffff & {right.name} -> unsigned 32bit"
                         )
@@ -359,23 +408,32 @@ class MIPS64Handler:
         elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "SUBPIECE":
             param_name = self._extract_subpiece_param(expr, 0)
             if param_name and expr.size == 4:
-                if param_name not in patterns:
-                    patterns[param_name] = ("unsigned", 32)
-                    self._debug_print(
-                        f"  Detected SUBPIECE({param_name}, 0) [32bit] -> unsigned 32bit"
-                    )
+                self._record_param_evidence(
+                    evidence,
+                    param_name,
+                    narrow_bits=32,
+                )
+                self._debug_print(
+                    f"  Detected SUBPIECE({param_name}, 0) [32bit] -> width evidence"
+                )
+
+        # パターン5: signed 比較 with 0/-1 は signed 利用の証拠
+        elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator in {
+            "INT_SLESS", "INT_SLESSEQUAL"
+        }:
+            self._record_signed_comparison_evidence(expr, evidence)
         
         # 再帰
         if expr.operands:
             for operand in expr.operands:
-                self._detect_extension_patterns_recursive(operand, patterns)
+                self._detect_extension_patterns_recursive(operand, evidence)
         
         if expr.expr_type == ExpressionType.PHI and expr.value:
             for cond, val in expr.value:
                 if hasattr(val, 'expr_type'):
-                    self._detect_extension_patterns_recursive(val, patterns)
+                    self._detect_extension_patterns_recursive(val, evidence)
                 if cond and hasattr(cond, 'expression'):
-                    self._detect_extension_patterns_recursive(cond.expression, patterns)
+                    self._detect_extension_patterns_recursive(cond.expression, evidence)
     
     def _extract_subpiece_param(
         self,
@@ -444,6 +502,182 @@ class MIPS64Handler:
             return "unsigned"
         
         return "signed"
+
+    def _resolve_width_mismatch_signedness(
+        self,
+        param_name_1: str,
+        param_name_2: str,
+        p1: Dict[str, Any],
+        p2: Dict[str, Any],
+        narrow_param: Dict[str, Any],
+        usage1: Dict[str, Tuple[str, int]],
+        usage2: Dict[str, Tuple[str, int]],
+    ) -> str:
+        """幅不一致時に使う signedness を、usage 証拠優先で決める。"""
+        usage_signedness = []
+
+        pattern1 = usage1.get(param_name_1)
+        if pattern1 is not None:
+            usage_signedness.append(pattern1[0])
+
+        pattern2 = usage2.get(param_name_2)
+        if pattern2 is not None:
+            usage_signedness.append(pattern2[0])
+
+        unique = set(usage_signedness)
+        if len(unique) == 1:
+            return usage_signedness[0]
+
+        if "signed" in unique and "unsigned" not in unique:
+            return "signed"
+        if "unsigned" in unique and "signed" not in unique:
+            return "unsigned"
+
+        if pattern1 is not None and pattern2 is None:
+            return pattern1[0]
+        if pattern2 is not None and pattern1 is None:
+            return pattern2[0]
+
+        if pattern1 is not None and pattern2 is not None and pattern1[0] == pattern2[0]:
+            return pattern1[0]
+
+        fallback_candidates = [self._infer_signedness(p1), self._infer_signedness(p2)]
+        if "signed" in fallback_candidates and "unsigned" not in fallback_candidates:
+            return "signed"
+        if "unsigned" in fallback_candidates and "signed" not in fallback_candidates:
+            return "unsigned"
+
+        return self._infer_signedness(narrow_param)
+
+    def _record_param_evidence(
+        self,
+        evidence: Dict[str, Dict[str, Any]],
+        param_name: str,
+        narrow_bits: Optional[int] = None,
+        signed_score: int = 0,
+        unsigned_score: int = 0,
+    ) -> None:
+        """パラメータ usage 証拠を累積する。"""
+        entry = evidence.setdefault(
+            param_name,
+            {
+                "narrow_bits": set(),
+                "signed_score": 0,
+                "unsigned_score": 0,
+            },
+        )
+        if narrow_bits is not None:
+            entry["narrow_bits"].add(narrow_bits)
+        entry["signed_score"] += signed_score
+        entry["unsigned_score"] += unsigned_score
+
+    def _resolve_narrow_bits(self, param_evidence: Dict[str, Any]) -> Optional[int]:
+        """証拠から narrow bit 幅を決める。"""
+        narrow_bits = sorted(param_evidence.get("narrow_bits", ()))
+        if not narrow_bits:
+            return None
+        return narrow_bits[0]
+
+    def _resolve_usage_signedness(
+        self,
+        param_evidence: Dict[str, Any],
+        param: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """証拠スコアから signedness を決める。"""
+        signed_score = param_evidence.get("signed_score", 0)
+        unsigned_score = param_evidence.get("unsigned_score", 0)
+
+        if signed_score > unsigned_score:
+            return "signed"
+        if unsigned_score > signed_score:
+            return "unsigned"
+        if signed_score == 0 and unsigned_score == 0:
+            return None
+
+        return self._infer_signedness(param) if param is not None else None
+
+    def _record_signed_comparison_evidence(
+        self,
+        expr: Expression,
+        evidence: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """signed 比較から signedness の証拠を収集する。"""
+        if len(expr.operands) != 2:
+            return
+
+        left, right = expr.operands
+        recorded = False
+
+        if self._is_zero_or_minus_one_constant(right):
+            recorded = self._record_signed_operand_evidence(left, evidence)
+        if self._is_zero_or_minus_one_constant(left):
+            recorded = self._record_signed_operand_evidence(right, evidence) or recorded
+
+        if recorded and self.debug:
+            self._debug_print(
+                f"  Detected signed comparison evidence in {expr.to_string()}"
+            )
+
+    def _record_signed_operand_evidence(
+        self,
+        expr: Expression,
+        evidence: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        """operand から signed 利用の証拠を記録する。"""
+        extracted = self._extract_param_reference(expr)
+        if extracted is None:
+            return False
+
+        param_name, narrow_bits = extracted
+        self._record_param_evidence(
+            evidence,
+            param_name,
+            narrow_bits=narrow_bits,
+            signed_score=3,
+        )
+        return True
+
+    def _extract_param_reference(
+        self,
+        expr: Expression,
+    ) -> Optional[Tuple[str, Optional[int]]]:
+        """式から対応するパラメータ名と width ヒントを抽出する。"""
+        if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+            return expr.name, None
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            if expr.operator in {"INT_SEXT", "INT_ZEXT"}:
+                inner = self._extract_param_reference(expr.operands[0])
+                if inner is not None:
+                    return inner
+
+        if expr.expr_type == ExpressionType.BINARY_OP:
+            if expr.operator == "SUBPIECE":
+                param_name = self._extract_subpiece_param(expr, 0)
+                if param_name:
+                    return param_name, expr.get_bit_width()
+
+            if expr.operator == "INT_AND" and len(expr.operands) == 2:
+                left, right = expr.operands
+                if left.expr_type == ExpressionType.PARAMETER and \
+                   right.expr_type == ExpressionType.CONSTANT and \
+                   right.value == 0xffffffff:
+                    if left.name:
+                        return left.name, 32
+                if right.expr_type == ExpressionType.PARAMETER and \
+                   left.expr_type == ExpressionType.CONSTANT and \
+                   left.value == 0xffffffff:
+                    if right.name:
+                        return right.name, 32
+
+        return None
+
+    def _is_zero_or_minus_one_constant(self, expr: Expression) -> bool:
+        """0 または -1 比較かどうかを判定。"""
+        return (
+            expr.expr_type == ExpressionType.CONSTANT and
+            expr.value in {0, -1, 0xffffffff, 0xffffffffffffffff}
+        )
     
     def _check_spurious_upper_bits(
         self,
