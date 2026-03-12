@@ -981,3 +981,92 @@ class TestSharedFormulaContext:
             spy_debug.assert_called_once()
 
         print("\n[TEST] shared context helper preserves previous debug behavior")
+
+
+class TestBooleanReturnNormalization:
+    """Bool 戻り値の SMT 正規化に関する回帰テスト"""
+
+    def test_boolean_return_expression_is_coerced_to_bitvec(self):
+        """比較式を返す bool 関数が BitVec 0/1 に変換されることを確認"""
+        builder = FormulaBuilder(debug=False)
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func_int",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=0, size=4)
+                )
+            ],
+            return_type="int",
+        )
+
+        bool_expr = Expression.binary_op(
+            "INT_LESS",
+            Expression(ExpressionType.PARAMETER, name="y", size=4),
+            Expression(ExpressionType.CONSTANT, value=10, size=4),
+        )
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func_bool",
+            entry_point="0x00402000",
+            parameters=[{"name": "y", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=bool_expr
+                )
+            ],
+            return_type="bool",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+        assert "(define-fun return_2 () (_ BitVec 8)" in formula
+        assert "(ite (bvult y_2 (_ bv10 32)) (_ bv1 8) (_ bv0 8))" in formula
+        assert "(define-fun return_2 () (_ BitVec 8)\n  (bvult" not in formula
+
+        print("\n[TEST] Boolean return expression is normalized to BitVec 0/1")
+
+    def test_non_boolean_byte_return_is_not_coerced(self):
+        """1byte 定数 return は Bool 扱いされずそのまま残ることを確認"""
+        builder = FormulaBuilder(debug=False)
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="func_u8_a",
+            entry_point="0x00401000",
+            parameters=[],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=255, size=1)
+                )
+            ],
+            return_type="uchar",
+        )
+
+        analysis2 = FunctionReturnAnalysis(
+            function_name="func_u8_b",
+            entry_point="0x00402000",
+            parameters=[],
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=255, size=1)
+                )
+            ],
+            return_type="uchar",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+        assert "(define-fun return_1 () (_ BitVec 8)\n  (_ bv255 8))" in formula
+        assert "(define-fun return_2 () (_ BitVec 8)\n  (_ bv255 8))" in formula
+        assert "(ite (_ bv255 8)" not in formula
+
+        print("\n[TEST] Non-boolean byte return is preserved as BitVec")

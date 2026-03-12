@@ -690,6 +690,57 @@ class FormulaBuilder:
             if hasattr(first_ret.value, 'size') and first_ret.value.size:
                 return first_ret.value.size * 8
         return 32
+
+    def _is_boolean_return_expr(self, expr: Expression) -> bool:
+        """戻り値式が SMT 上で Bool sort になるかを判定"""
+        if expr is None:
+            return False
+
+        if expr.expr_type == ExpressionType.BINARY_OP:
+            return expr.operator in {
+                "INT_EQUAL",
+                "INT_NOTEQUAL",
+                "INT_LESS",
+                "INT_SLESS",
+                "INT_LESSEQUAL",
+                "INT_SLESSEQUAL",
+                "FLOAT_EQUAL",
+                "FLOAT_NOTEQUAL",
+                "FLOAT_LESS",
+                "FLOAT_LESSEQUAL",
+                "BOOL_AND",
+                "BOOL_OR",
+                "BOOL_XOR",
+            }
+
+        if expr.expr_type == ExpressionType.UNARY_OP:
+            return expr.operator == "BOOL_NEGATE"
+
+        if expr.expr_type == ExpressionType.PHI:
+            branches = expr.value or []
+            return bool(branches) and all(
+                self._is_boolean_return_expr(branch_value)
+                for _, branch_value in branches
+            )
+
+        return False
+
+    def _coerce_return_value_to_bitvec(
+        self,
+        expr: Expression,
+        value_smt: str,
+        return_size: int
+    ) -> str:
+        """
+        Bool sort の戻り値を bitvector 0/1 に正規化する。
+
+        比較演算や BOOL_* は render_smt で Bool を返す一方、return 定義は
+        BitVec sort として宣言されるため、ここでのみ局所的に整合を取る。
+        """
+        if not self._is_boolean_return_expr(expr):
+            return value_smt
+
+        return f"(ite {value_smt} (_ bv1 {return_size}) (_ bv0 {return_size}))"
     
     def _build_return_definition(
         self,
@@ -724,6 +775,11 @@ class FormulaBuilder:
             
             value_smt = ret.value.to_smt()
             value_smt = self._replace_param_names(value_smt, param_infos)
+            value_smt = self._coerce_return_value_to_bitvec(
+                ret.value,
+                value_smt,
+                return_size
+            )
             
             return_defs.append({
                 "condition": cond_str,
