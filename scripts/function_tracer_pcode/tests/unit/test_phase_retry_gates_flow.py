@@ -295,6 +295,110 @@ class TestPhaseRetryGates:
                 mock_reanalyze.assert_not_called()
                 assert result.is_equivalent is False
 
+    def test_sat_before_stop_runs_phase4a_tail_for_mips64_param_fix(
+        self,
+        mock_program_mips64,
+        mock_program_x86,
+    ):
+        """SAT 停止直前に Phase 4-A を試し、MIPS64 引数型修正で解決できるようにする"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+        from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseResult, PhaseID
+        from unittest.mock import Mock, patch
+
+        checker = EquivalenceChecker(debug=True)
+
+        analysis1 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "long", "size": 8}],
+        )
+        analysis2 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        fixed_analysis1 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+        fixed_analysis2 = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            parameters=[{"name": "param_1", "data_type": "int", "size": 4}],
+        )
+
+        counterexample = {
+            "param_1_1": 0xFFFFFFFF80000001,
+            "param_1_2": 0x80000001,
+        }
+
+        with patch("scripts.function_tracer_pcode.analysis.ReturnAnalyzer") as mock_analyzer_class:
+            mock_analyzer = Mock()
+            mock_analyzer.analyze_function_by_name.side_effect = [analysis1, analysis2]
+            mock_analyzer.dispose = Mock()
+            mock_analyzer_class.return_value = mock_analyzer
+
+            with patch.object(checker, "check") as mock_check, \
+                 patch.object(
+                     checker.phase_handler,
+                     "run_phase4_mips64_retry",
+                     return_value={"param_1_1": ("signed", 32)},
+                 ) as mock_phase4b, \
+                 patch.object(
+                     checker,
+                     "_retry_with_abi_constraints",
+                     return_value=create_mock_result(
+                         is_equivalent=False,
+                         solver_status=SolverStatus.SAT,
+                         counterexample=counterexample,
+                     ),
+                 ) as mock_retry, \
+                 patch.object(checker.phase_handler, "run_phase2_return_type_fix") as mock_p2, \
+                 patch.object(
+                     checker.phase_handler,
+                     "execute_phase",
+                     return_value=PhaseResult(
+                         PhaseID.P4A_MIPS64_ABI,
+                         applied=True,
+                         retry_name="mips64_abi_fix",
+                         changed_binary1=True,
+                         changed_binary2=False,
+                     ),
+                 ) as mock_execute_phase, \
+                 patch.object(
+                     checker,
+                     "_selective_reanalysis_and_check",
+                     return_value=(
+                         fixed_analysis1,
+                         fixed_analysis2,
+                         create_mock_result(
+                             is_equivalent=True,
+                             solver_status=SolverStatus.UNSAT,
+                         ),
+                     ),
+                 ) as mock_reanalyze:
+                mock_check.return_value = create_mock_result(
+                    is_equivalent=False,
+                    solver_status=SolverStatus.SAT,
+                    counterexample=counterexample,
+                )
+
+                result = checker.check_from_binaries(
+                    mock_program_mips64,
+                    mock_program_x86,
+                    "test_func",
+                    "test_func",
+                    retry_with_type_fix=True,
+                )
+
+                assert mock_phase4b.call_count >= 2
+                assert mock_retry.called
+                mock_p2.assert_not_called()
+                assert mock_execute_phase.called, "Phase 4-A tail should be attempted before SAT stop"
+                assert mock_reanalyze.called
+                assert result.is_equivalent is True
+
     def test_phase4b_retry_on_successful_spurious_detection(self, mock_program_mips64, mock_program_x86):
         """★ [新規] 偽反例検出成功時に _retry_with_abi_constraints が呼ばれることを確認"""
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker

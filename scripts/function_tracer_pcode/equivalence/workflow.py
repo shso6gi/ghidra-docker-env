@@ -197,6 +197,21 @@ def run_check_from_binaries(
                 checker._debug_print("Phase 4-B: Skipped")
 
             if result.is_equivalent is False:
+                if retry_with_type_fix and type_fixer1 is not None and type_fixer2 is not None:
+                    result, attempt_id = _run_phase4a_tail(
+                        checker,
+                        ctx,
+                        result,
+                        debug_trace,
+                        start_time,
+                        retry_count,
+                        attempt_id,
+                        type_fixer1,
+                        type_fixer2,
+                        retry_with_type_fix,
+                    )
+                    if result.debug_trace is not None:
+                        return result
                 checker._debug_print(f"Phase {phase_id.value}: NOT EQUIVALENT - stopping")
                 return _attach_trace_and_return(result, debug_trace, start_time, False)
 
