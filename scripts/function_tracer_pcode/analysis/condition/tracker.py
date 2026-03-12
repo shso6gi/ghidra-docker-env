@@ -349,3 +349,20 @@ class ConditionTracker:
                 self._debug_print(f"RETURN block: index={return_block_info.index}")
                 return self.get_path_conditions_to_block(return_block_info)
         return []
+
+    def get_all_valid_paths_to_return(
+        self,
+        return_op,
+        limit_paths: Optional[int] = None
+    ) -> List[List[Condition]]:
+        """RETURNに至る全ての有効パス条件を収集"""
+        return_parent = return_op.getParent()
+        if return_parent:
+            return_block_info = self.get_block_by_hash(return_parent)
+            if return_block_info:
+                self._debug_print(f"RETURN block: index={return_block_info.index}")
+                return self.get_all_valid_paths_to_block(
+                    return_block_info,
+                    limit_paths=limit_paths,
+                )
+        return []

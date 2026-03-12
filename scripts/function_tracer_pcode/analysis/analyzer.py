@@ -386,15 +386,26 @@ class ReturnAnalyzer:
         
         # RETURNへのパス条件を取得
         path_conditions = condition_tracker.get_path_conditions_to_return(return_op)
-        
+        all_valid_path_conditions = condition_tracker.get_all_valid_paths_to_return(return_op)
+
         if self.debug and path_conditions:
             cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in path_conditions]
             self._debug_print(f"Path conditions to RETURN: {cond_strs}")
+        if self.debug and len(all_valid_path_conditions) > 1:
+            self._debug_print(
+                f"RETURN has {len(all_valid_path_conditions)} valid path variants",
+            )
         
         if num_inputs >= 2:
             return_varnode = return_op.getInput(1)
             return self._analyze_return_value(
-                return_varnode, address, tracer, condition_tracker, path_conditions, return_index
+                return_varnode,
+                address,
+                tracer,
+                condition_tracker,
+                path_conditions,
+                return_index,
+                all_path_conditions=all_valid_path_conditions,
             )
         else:
             # void return
@@ -413,7 +424,8 @@ class ReturnAnalyzer:
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
         path_conditions: List[Condition],
-        return_index: int
+        return_index: int,
+        all_path_conditions: Optional[List[List[Condition]]] = None,
     ) -> List[ReturnInfo]:
         """Return値を解析"""
         from ..transform import ExpressionExpander
@@ -431,7 +443,23 @@ class ReturnAnalyzer:
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
             expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
-            expanded_values = expander.expand_from_varnode(return_varnode, path_conditions)
+            path_condition_sets = all_path_conditions or []
+            if not path_condition_sets:
+                path_condition_sets = [path_conditions] if path_conditions else [[]]
+
+            expanded_values = []
+            for path_idx, conds in enumerate(path_condition_sets):
+                if self.debug and len(path_condition_sets) > 1:
+                    cond_strs = [
+                        ConditionSimplifier.get_simplified_condition_string(c)
+                        for c in conds
+                    ]
+                    self._debug_print(
+                        f"Expanding non-PHI return with path[{path_idx}]: {cond_strs}"
+                    )
+                expanded_values.extend(
+                    expander.expand_from_varnode(return_varnode, conds)
+                )
         
         self._debug_print(f"Expanded to {len(expanded_values)} candidate(s)")
         
