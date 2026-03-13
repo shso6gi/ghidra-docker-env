@@ -56,6 +56,23 @@ def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     return f"(ite {expr_smt} (_ bv1 {bits}) (_ bv0 {bits}))"
 
 
+def _coerce_expr_to_bitvec_width(expr, expr_smt: str, target_bits: int) -> str:
+    """式を target_bits 幅の bitvector に揃える。"""
+    if target_bits <= 0:
+        return expr_smt
+
+    expr_smt = _coerce_bool_to_bitvec(expr, expr_smt, target_bits)
+    if expression_returns_bool(expr):
+        return expr_smt
+
+    expr_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else target_bits
+    if expr_bits == target_bits:
+        return expr_smt
+    if expr_bits < target_bits:
+        return f"((_ zero_extend {target_bits - expr_bits}) {expr_smt})"
+    return f"((_ extract {target_bits - 1} 0) {expr_smt})"
+
+
 def _to_smt_internal(expr) -> str:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
@@ -204,11 +221,22 @@ def _to_smt_internal(expr) -> str:
         if not branches:
             return "undefined"
 
+        phi_returns_bool = expression_returns_bool(expr)
+        target_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+
+        def render_branch_value(branch_expr):
+            if hasattr(branch_expr, "_to_smt_internal"):
+                branch_smt = branch_expr._to_smt_internal()
+            else:
+                branch_smt = str(branch_expr)
+
+            if phi_returns_bool or not hasattr(branch_expr, "get_bit_width"):
+                return branch_smt
+
+            return _coerce_expr_to_bitvec_width(branch_expr, branch_smt, target_bits)
+
         last_val = branches[-1][1]
-        if hasattr(last_val, "_to_smt_internal"):
-            result = last_val._to_smt_internal()
-        else:
-            result = str(last_val)
+        result = render_branch_value(last_val)
 
         for index in range(len(branches) - 2, -1, -1):
             cond, val = branches[index]
@@ -219,10 +247,7 @@ def _to_smt_internal(expr) -> str:
             else:
                 cond_str = "true"
 
-            if hasattr(val, "_to_smt_internal"):
-                val_str = val._to_smt_internal()
-            else:
-                val_str = str(val)
+            val_str = render_branch_value(val)
 
             result = f"(ite {cond_str} {val_str} {result})"
 

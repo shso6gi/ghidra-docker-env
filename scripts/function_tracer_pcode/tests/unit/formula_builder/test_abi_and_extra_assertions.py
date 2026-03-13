@@ -75,11 +75,11 @@ class TestABIConstraints:
         assert "param0_1" in constraints_text
         assert "sign_extend" in constraints_text
         assert "param0_2" in constraints_text
-        assert "(= param0_1 ((_ sign_extend 32) param0_2))" in constraints_text
+        assert "(= param0_1 ((_ sign_extend 32) ((_ extract 31 0) param0_2)))" in constraints_text
         assert "param1_2" in constraints_text
         assert "zero_extend" in constraints_text
         assert "param1_1" in constraints_text
-        assert "(= param1_2 ((_ zero_extend 32) param1_1))" in constraints_text
+        assert "(= param1_2 ((_ zero_extend 32) ((_ extract 31 0) param1_1)))" in constraints_text
 
     def test_build_with_abi_constraints_uses_new_api(self):
         builder = FormulaBuilder(debug=False)
@@ -158,8 +158,16 @@ class TestABIConstraints:
         assert "param_2_1" in text
         assert "param_2_2 ((_ sign_extend 32) param_1_1)" not in text
         assert "param_1_1 ((_ zero_extend 32) param_2_2)" not in text
-        assert "(= param_1_1 ((_ sign_extend 32) param_1_2))" in text
-        assert "(= param_2_2 ((_ zero_extend 32) param_2_1))" in text
+        assert "(= param_1_1 ((_ sign_extend 32) ((_ extract 31 0) param_1_2)))" in text
+        assert "(= param_2_2 ((_ zero_extend 32) ((_ extract 31 0) param_2_1)))" in text
+
+    def test_abi_constraints_extract_lower_bits_before_extension(self):
+        builder = FormulaBuilder(debug=False)
+        text = "\n".join(builder.build_abi_constraints({"x_1": ("signed", 32)}, "_1", "_2"))
+
+        assert "lower 32 bits" in text
+        assert "((_ extract 31 0) x_2)" in text
+        assert "((_ sign_extend 32) ((_ extract 31 0) x_2))" in text
 
     def test_build_with_abi_constraints_wrapper_consistency(self):
         builder = FormulaBuilder(debug=False)

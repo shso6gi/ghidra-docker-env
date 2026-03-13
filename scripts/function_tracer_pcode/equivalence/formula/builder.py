@@ -628,16 +628,23 @@ class FormulaBuilder:
                     print(f"[FormulaBuilder] Warning: Cannot determine narrow param for {param_wide}")
                 continue
             
+            source_expr = param_narrow
+            if narrow_bits < 64:
+                source_expr = f"((_ extract {narrow_bits - 1} 0) {param_narrow})"
+
             # 拡張ビット数
             extend_bits = 64 - narrow_bits
             
             # 制約を生成
-            if signedness == "signed":
-                comment = f"; {param_wide} must be sign-extension of {param_narrow} ({narrow_bits}bit)"
-                constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {param_narrow})))"
+            if extend_bits <= 0:
+                comment = f"; {param_wide} must match lower {narrow_bits} bits of {param_narrow}"
+                constraint = f"(assert (= {param_wide} {source_expr}))"
+            elif signedness == "signed":
+                comment = f"; {param_wide} must be sign-extension of lower {narrow_bits} bits of {param_narrow}"
+                constraint = f"(assert (= {param_wide} ((_ sign_extend {extend_bits}) {source_expr})))"
             else:
-                comment = f"; {param_wide} must be zero-extension of {param_narrow} ({narrow_bits}bit)"
-                constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {param_narrow})))"
+                comment = f"; {param_wide} must be zero-extension of lower {narrow_bits} bits of {param_narrow}"
+                constraint = f"(assert (= {param_wide} ((_ zero_extend {extend_bits}) {source_expr})))"
             
             lines.append(comment)
             lines.append(constraint)

@@ -3,21 +3,58 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+import re
+from typing import Dict, List, Optional
 
 from ...model import Expression, FunctionReturnAnalysis
 from ...model.render_smt import expression_returns_bool
+from ..typing.helpers import is_unsigned_type
 from .params import replace_symbol_names
 from .types import ParameterInfo
 
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
     """return値のビット幅を取得する。"""
-    if analysis.returns:
-        first_ret = analysis.returns[0]
-        if hasattr(first_ret.value, "size") and first_ret.value.size:
-            return first_ret.value.size * 8
+    declared_bits = get_declared_return_size_bits(analysis.return_type)
+    if declared_bits is not None:
+        return declared_bits
+
+    expr_bits = [
+        ret.value.get_bit_width()
+        for ret in analysis.returns
+        if ret.value is not None
+    ]
+    if expr_bits:
+        return max(expr_bits)
     return 32
+
+
+def get_declared_return_size_bits(return_type: Optional[str]) -> Optional[int]:
+    """型名から戻り値のビット幅を推定する。"""
+    return_type = (return_type or "").strip()
+    if not return_type:
+        return None
+
+    type_lower = return_type.lower()
+
+    undefined_match = re.fullmatch(r"undefined(\d+)", type_lower)
+    if undefined_match:
+        return int(undefined_match.group(1)) * 8
+
+    if type_lower == "bool":
+        return 8
+    if any(token in type_lower for token in ["char", "byte"]):
+        return 8
+    if "short" in type_lower:
+        return 16
+    if "longlong" in type_lower or "long long" in type_lower:
+        return 64
+    if "long" in type_lower:
+        return 64
+    if "int" in type_lower:
+        return 32
+
+    return None
 
 
 def is_boolean_return_expr(expr: Expression) -> bool:
@@ -34,6 +71,46 @@ def coerce_return_value_to_bitvec(
     if not is_boolean_return_expr(expr):
         return value_smt
     return f"(ite {value_smt} (_ bv1 {return_size}) (_ bv0 {return_size}))"
+
+
+def should_sign_extend_to_return_size(analysis: FunctionReturnAnalysis) -> bool:
+    """return値の幅補正で sign extension を使うべきか判定する。"""
+    return should_sign_extend_return_type(analysis.return_type)
+
+
+def should_sign_extend_return_type(return_type: Optional[str]) -> bool:
+    """return型名から sign extension の要否を判定する。"""
+    return_type = (return_type or "").strip()
+    if not return_type:
+        return False
+
+    type_lower = return_type.lower()
+    if "undefined" in type_lower or "unknown" in type_lower:
+        return False
+    if is_unsigned_type(return_type):
+        return False
+    return "int" in type_lower or "long" in type_lower
+
+
+def coerce_value_to_bitvec_width(
+    expr: Expression,
+    value_smt: str,
+    target_size: int,
+    use_sign_extension: bool = False,
+) -> str:
+    """値式を target_size の bitvector に揃える。"""
+    value_smt = coerce_return_value_to_bitvec(expr, value_smt, target_size)
+
+    expr_bits = expr.get_bit_width()
+    if expr_bits == target_size:
+        return value_smt
+
+    if expr_bits < target_size:
+        extend_bits = target_size - expr_bits
+        op = "sign_extend" if use_sign_extension else "zero_extend"
+        return f"((_ {op} {extend_bits}) {value_smt})"
+
+    return f"((_ extract {target_size - 1} 0) {value_smt})"
 
 
 def build_ite_expression(return_defs: List[Dict[str, str]], return_size: int) -> str:
@@ -62,6 +139,7 @@ def build_return_definition(
     return_size = get_return_size(analysis)
 
     return_defs: List[Dict[str, str]] = []
+    use_sign_extension = should_sign_extend_to_return_size(analysis)
     for ret in analysis.returns:
         if ret.conditions:
             cond_parts = []
@@ -73,7 +151,12 @@ def build_return_definition(
             cond_str = "true"
 
         value_smt = replace_symbol_names(ret.value.to_smt(), param_infos)
-        value_smt = coerce_return_value_to_bitvec(ret.value, value_smt, return_size)
+        value_smt = coerce_value_to_bitvec_width(
+            ret.value,
+            value_smt,
+            return_size,
+            use_sign_extension=use_sign_extension,
+        )
         return_defs.append({"condition": cond_str, "value": value_smt})
 
     unified_return = build_ite_expression(return_defs, return_size)

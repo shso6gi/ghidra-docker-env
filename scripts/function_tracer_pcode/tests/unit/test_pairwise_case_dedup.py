@@ -10,8 +10,11 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import (
+    build_normalized_inequality_query,
+    build_pair_query,
     extract_return_cases,
 )
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -130,3 +133,64 @@ def test_extract_return_cases_keeps_distinct_conditions_separate():
     assert len(cases) == 2
     assert cases[0].source_indices == [0]
     assert cases[1].source_indices == [1]
+
+
+def test_build_pair_query_coerces_case_values_to_return_width():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
+        return_type="ulong",
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=2, size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=2, size=4)),
+        return_type="ulong",
+    )
+
+    query = build_pair_query(
+        {"header_lines": [], "return_size1": 64, "return_size2": 64},
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert "(assert (not (= param_1 ((_ zero_extend 32) (_ bv2 32)))))" in query
+
+
+def test_build_normalized_inequality_query_coerces_normalized_values_to_return_width():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
+        return_type="ulong",
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=2, size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=2, size=4)),
+        return_type="ulong",
+    )
+
+    norm_expr = Expression(ExpressionType.CONSTANT, value=2, size=4)
+    query = build_normalized_inequality_query(
+        {"header_lines": [], "return_size1": 64, "return_size2": 64},
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        norm_expr,
+        norm_expr,
+        "(_ bv2 32)",
+        "(_ bv2 32)",
+        "(0,1)",
+    )
+
+    assert "(assert (not (= ((_ zero_extend 32) (_ bv2 32)) ((_ zero_extend 32) (_ bv2 32)))))" in query

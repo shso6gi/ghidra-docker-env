@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.model import (
+    Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
@@ -282,3 +283,136 @@ class TestBooleanReturnNormalization:
 
         assert "(bvor (ite (bvslt (_ bv100 64) y_2) (_ bv1 32) (_ bv0 32)) (_ bv2 32))" in formula
         assert "((_ zero_extend 24) (bvslt (_ bv100 64) y_2))" not in formula
+
+    def test_formula_builder_coerces_mixed_width_return_values_to_declared_size(self):
+        builder = FormulaBuilder(debug=False)
+        analysis = FunctionReturnAnalysis(
+            function_name="func_mixed",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[
+                        Condition(
+                            Expression.binary_op(
+                                "INT_EQUAL",
+                                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                                Expression(ExpressionType.CONSTANT, value=0, size=8),
+                            )
+                        )
+                    ],
+                    value=Expression(ExpressionType.PARAMETER, name="x", size=8),
+                ),
+                ReturnInfo(
+                    address="0x00401010",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=2, size=4),
+                ),
+            ],
+            return_type="ulong",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert "(define-fun return_1 () (_ BitVec 64)" in formula
+        assert "((_ zero_extend 32) (_ bv2 32))" in formula
+        assert "ite (=" in formula
+
+    def test_declared_return_type_takes_priority_over_first_branch_size(self):
+        builder = FormulaBuilder(debug=False)
+        analysis = FunctionReturnAnalysis(
+            function_name="func_declared_ulong",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[
+                        Condition(
+                            Expression.binary_op(
+                                "INT_EQUAL",
+                                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                                Expression(ExpressionType.CONSTANT, value=0, size=8),
+                            )
+                        )
+                    ],
+                    value=Expression(ExpressionType.CONSTANT, value=0, size=4),
+                ),
+                ReturnInfo(
+                    address="0x00401010",
+                    conditions=[],
+                    value=Expression(ExpressionType.PARAMETER, name="x", size=8),
+                ),
+            ],
+            return_type="ulong",
+        )
+
+        base_ctx = builder.build_base_context(analysis, analysis)
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert base_ctx["return_size1"] == 64
+        assert base_ctx["return_size2"] == 64
+        assert "(define-fun return_1 () (_ BitVec 64)" in formula
+        assert "(define-fun return_2 () (_ BitVec 64)" in formula
+        assert "((_ zero_extend 32) (_ bv0 32))" in formula
+
+    def test_undefined8_return_type_is_treated_as_64bit(self):
+        builder = FormulaBuilder(debug=False)
+        analysis = FunctionReturnAnalysis(
+            function_name="func_undefined8",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression(ExpressionType.CONSTANT, value=0, size=4),
+                )
+            ],
+            return_type="undefined8",
+        )
+
+        base_ctx = builder.build_base_context(analysis, analysis)
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert base_ctx["return_size1"] == 64
+        assert "(define-fun return_1 () (_ BitVec 64)" in formula
+        assert "((_ zero_extend 32) (_ bv0 32))" in formula
+
+    def test_phi_return_branches_are_coerced_to_common_bit_width(self):
+        builder = FormulaBuilder(debug=False)
+        phi_expr = Expression.phi([
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression(ExpressionType.PARAMETER, name="x", size=8),
+                        Expression(ExpressionType.CONSTANT, value=0, size=8),
+                    )
+                ),
+                Expression(ExpressionType.PARAMETER, name="x", size=8),
+            ),
+            (None, Expression(ExpressionType.CONSTANT, value=2, size=4)),
+        ])
+        phi_expr.size = 8
+
+        analysis = FunctionReturnAnalysis(
+            function_name="func_phi",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=phi_expr,
+                )
+            ],
+            return_type="ulong",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert "(define-fun return_1 () (_ BitVec 64)" in formula
+        assert "((_ zero_extend 32) (_ bv2 32))" in formula
+        assert "(ite (= x_1 (_ bv0 64)) x_1 ((_ zero_extend 32) (_ bv2 32)))" in formula

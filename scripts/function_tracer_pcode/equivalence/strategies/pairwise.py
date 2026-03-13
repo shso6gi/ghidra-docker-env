@@ -312,6 +312,8 @@ class PairwiseStrategy(CheckStrategy):
         case2: ReturnCase,
         param_replace_fn1,
         param_replace_fn2,
+        value1_norm_expr,
+        value2_norm_expr,
         value1_smt_norm: str,
         value2_smt_norm: str,
         pair_id: str
@@ -322,6 +324,8 @@ class PairwiseStrategy(CheckStrategy):
             case2,
             param_replace_fn1,
             param_replace_fn2,
+            value1_norm_expr,
+            value2_norm_expr,
             value1_smt_norm,
             value2_smt_norm,
             pair_id,

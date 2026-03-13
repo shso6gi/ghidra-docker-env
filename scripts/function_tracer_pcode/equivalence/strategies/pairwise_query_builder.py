@@ -8,7 +8,13 @@ from ...model import FunctionReturnAnalysis
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.normalizer import ConditionNormalizer
 from ..normalize import normalize_expression, NormalizationContext
+from ..formula.returns import coerce_value_to_bitvec_width, should_sign_extend_return_type
 from .pairwise_models import ReturnCase
+
+
+def _case_return_type(case: ReturnCase):
+    """古い Mock ベースのテストとも互換な return_type 取得。"""
+    return getattr(case, "return_type", None)
 
 
 def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
@@ -28,6 +34,7 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
             conditions=simplified_conditions,
             value_expr=normalized_value,
             return_info=ret_info,
+            return_type=analysis.return_type,
         )
         key = _build_return_case_key(case)
         existing = merged_cases.get(key)
@@ -93,8 +100,16 @@ def build_pair_query(
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
     lines.extend(
         _build_value_inequality_section(
-            case1.get_value_smt(param_replace_fn1),
-            case2.get_value_smt(param_replace_fn2),
+            case1.get_value_smt(
+                param_replace_fn1,
+                target_bits=base_ctx.get("return_size1", 32),
+                use_sign_extension=should_sign_extend_return_type(_case_return_type(case1)),
+            ),
+            case2.get_value_smt(
+                param_replace_fn2,
+                target_bits=base_ctx.get("return_size2", 32),
+                use_sign_extension=should_sign_extend_return_type(_case_return_type(case2)),
+            ),
             base_ctx.get("return_size1", 32),
             base_ctx.get("return_size2", 32),
             title="; Value inequality",
@@ -113,6 +128,8 @@ def build_normalized_inequality_query(
     case2: ReturnCase,
     param_replace_fn1,
     param_replace_fn2,
+    value1_norm_expr,
+    value2_norm_expr,
     value1_smt_norm: str,
     value2_smt_norm: str,
     pair_id: str
@@ -125,12 +142,26 @@ def build_normalized_inequality_query(
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    return_size1 = base_ctx.get("return_size1", 32)
+    return_size2 = base_ctx.get("return_size2", 32)
+    value1_smt_norm = coerce_value_to_bitvec_width(
+        value1_norm_expr,
+        value1_smt_norm,
+        return_size1,
+        use_sign_extension=should_sign_extend_return_type(_case_return_type(case1)),
+    )
+    value2_smt_norm = coerce_value_to_bitvec_width(
+        value2_norm_expr,
+        value2_smt_norm,
+        return_size2,
+        use_sign_extension=should_sign_extend_return_type(_case_return_type(case2)),
+    )
     lines.extend(
         _build_value_inequality_section(
             value1_smt_norm,
             value2_smt_norm,
-            base_ctx.get("return_size1", 32),
-            base_ctx.get("return_size2", 32),
+            return_size1,
+            return_size2,
             title="; Normalized value inequality",
             note_lines=["; (param_*_1 and param_*_2 are constrained to be equal by base_ctx)"],
         )

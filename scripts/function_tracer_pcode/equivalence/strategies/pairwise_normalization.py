@@ -202,6 +202,8 @@ def try_normalization_equivalence(
         case2,
         param_replace_fn1,
         param_replace_fn2,
+        value1_norm,
+        value2_norm,
         value1_smt_norm,
         value2_smt_norm,
         pair_id,
