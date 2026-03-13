@@ -8,7 +8,10 @@ from ...model import FunctionReturnAnalysis
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.normalizer import ConditionNormalizer
 from ..normalize import normalize_expression, NormalizationContext
-from ..formula.returns import coerce_value_to_bitvec_width, should_sign_extend_return_type
+from ..formula.returns import (
+    coerce_value_to_bitvec_width,
+    should_sign_extend_value,
+)
 from .pairwise_models import ReturnCase
 
 
@@ -103,12 +106,20 @@ def build_pair_query(
             case1.get_value_smt(
                 param_replace_fn1,
                 target_bits=base_ctx.get("return_size1", 32),
-                use_sign_extension=should_sign_extend_return_type(_case_return_type(case1)),
+                use_sign_extension=should_sign_extend_value(
+                    _case_return_type(case1),
+                    case1.value_expr,
+                    case1.conditions,
+                ),
             ),
             case2.get_value_smt(
                 param_replace_fn2,
                 target_bits=base_ctx.get("return_size2", 32),
-                use_sign_extension=should_sign_extend_return_type(_case_return_type(case2)),
+                use_sign_extension=should_sign_extend_value(
+                    _case_return_type(case2),
+                    case2.value_expr,
+                    case2.conditions,
+                ),
             ),
             base_ctx.get("return_size1", 32),
             base_ctx.get("return_size2", 32),
@@ -148,13 +159,21 @@ def build_normalized_inequality_query(
         value1_norm_expr,
         value1_smt_norm,
         return_size1,
-        use_sign_extension=should_sign_extend_return_type(_case_return_type(case1)),
+        use_sign_extension=should_sign_extend_value(
+            _case_return_type(case1),
+            value1_norm_expr,
+            case1.conditions,
+        ),
     )
     value2_smt_norm = coerce_value_to_bitvec_width(
         value2_norm_expr,
         value2_smt_norm,
         return_size2,
-        use_sign_extension=should_sign_extend_return_type(_case_return_type(case2)),
+        use_sign_extension=should_sign_extend_value(
+            _case_return_type(case2),
+            value2_norm_expr,
+            case2.conditions,
+        ),
     )
     lines.extend(
         _build_value_inequality_section(

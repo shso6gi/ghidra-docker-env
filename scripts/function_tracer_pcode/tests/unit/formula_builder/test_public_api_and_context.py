@@ -416,3 +416,69 @@ class TestBooleanReturnNormalization:
         assert "(define-fun return_1 () (_ BitVec 64)" in formula
         assert "((_ zero_extend 32) (_ bv2 32))" in formula
         assert "(ite (= x_1 (_ bv0 64)) x_1 ((_ zero_extend 32) (_ bv2 32)))" in formula
+
+    def test_signed_branch_evidence_sign_extends_ambiguous_negative_return_constant(self):
+        builder = FormulaBuilder(debug=False)
+        analysis = FunctionReturnAnalysis(
+            function_name="func_signed_bucket",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[
+                        Condition(
+                            Expression.binary_op(
+                                "INT_SLESS",
+                                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                                Expression(ExpressionType.CONSTANT, value=-100, size=8),
+                            )
+                        )
+                    ],
+                    value=Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8),
+                )
+            ],
+            return_type="undefined8",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert "(define-fun return_1 () (_ BitVec 64)" in formula
+        assert "(_ bv18446744073709551613 64)" in formula
+        assert "(_ bv4294967293 64)" not in formula
+
+    def test_phi_with_signed_branch_evidence_sign_extends_negative_constants(self):
+        builder = FormulaBuilder(debug=False)
+        phi_expr = Expression.phi([
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_SLESS",
+                        Expression(ExpressionType.PARAMETER, name="x", size=4),
+                        Expression(ExpressionType.CONSTANT, value=-100, size=4),
+                    )
+                ),
+                Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8),
+            ),
+            (None, Expression(ExpressionType.CONSTANT, value=2, size=8)),
+        ])
+        phi_expr.size = 8
+
+        analysis = FunctionReturnAnalysis(
+            function_name="func_phi_signed_bucket",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 8, "index": 0, "is_signed": False}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=phi_expr,
+                )
+            ],
+            return_type="undefined8",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert "(_ bv18446744073709551613 64)" in formula
+        assert "(_ bv4294967293 64)" not in formula

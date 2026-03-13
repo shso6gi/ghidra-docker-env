@@ -20,6 +20,11 @@ _BOOLEAN_BINARY_OPERATORS = {
     "BOOL_XOR",
 }
 
+_SIGNED_COMPARISON_OPERATORS = {
+    "INT_SLESS",
+    "INT_SLESSEQUAL",
+}
+
 
 def expression_to_smt(expr) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
@@ -49,6 +54,35 @@ def expression_returns_bool(expr) -> bool:
     return False
 
 
+def expression_contains_signed_comparison(expr) -> bool:
+    """式木のどこかに signed 比較が含まれるか判定する。"""
+    if expr is None:
+        return False
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type == expr_kind.BINARY_OP and expr.operator in _SIGNED_COMPARISON_OPERATORS:
+        return True
+
+    if getattr(expr, "operands", None):
+        for operand in expr.operands:
+            if expression_contains_signed_comparison(operand):
+                return True
+
+    if expr_type == expr_kind.PHI and expr.value:
+        for cond, branch_value in expr.value:
+            if cond is not None:
+                if hasattr(cond, "expression") and expression_contains_signed_comparison(cond.expression):
+                    return True
+                if hasattr(cond, "operands") and expression_contains_signed_comparison(cond):
+                    return True
+            if expression_contains_signed_comparison(branch_value):
+                return True
+
+    return False
+
+
 def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     """Bool sort の式を 0/1 の bitvector へ変換する。"""
     if bits <= 0 or not expression_returns_bool(expr):
@@ -56,7 +90,33 @@ def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     return f"(ite {expr_smt} (_ bv1 {bits}) (_ bv0 {bits}))"
 
 
-def _coerce_expr_to_bitvec_width(expr, expr_smt: str, target_bits: int) -> str:
+def _rewrite_ambiguous_negative_constant(expr, expr_smt: str, target_bits: int, prefer_sign_extension: bool) -> str:
+    """32bit 由来の負定数が 64bit で zero-extended された形なら sign-extended に補正する。"""
+    if not prefer_sign_extension:
+        return expr_smt
+    if getattr(expr, "expr_type", None) is None:
+        return expr_smt
+    if expr.expr_type != expr.expr_type.__class__.CONSTANT:
+        return expr_smt
+    if target_bits <= 32:
+        return expr_smt
+
+    value = getattr(expr, "value", None)
+    if not isinstance(value, int) or value < 0 or value > 0xffffffff:
+        return expr_smt
+    if (value & 0x80000000) == 0:
+        return expr_smt
+
+    sign_extended = value | (((1 << (target_bits - 32)) - 1) << 32)
+    return f"(_ bv{sign_extended} {target_bits})"
+
+
+def _coerce_expr_to_bitvec_width(
+    expr,
+    expr_smt: str,
+    target_bits: int,
+    prefer_sign_extension: bool = False,
+) -> str:
     """式を target_bits 幅の bitvector に揃える。"""
     if target_bits <= 0:
         return expr_smt
@@ -64,12 +124,16 @@ def _coerce_expr_to_bitvec_width(expr, expr_smt: str, target_bits: int) -> str:
     expr_smt = _coerce_bool_to_bitvec(expr, expr_smt, target_bits)
     if expression_returns_bool(expr):
         return expr_smt
+    expr_smt = _rewrite_ambiguous_negative_constant(
+        expr, expr_smt, target_bits, prefer_sign_extension
+    )
 
     expr_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else target_bits
     if expr_bits == target_bits:
         return expr_smt
     if expr_bits < target_bits:
-        return f"((_ zero_extend {target_bits - expr_bits}) {expr_smt})"
+        op = "sign_extend" if prefer_sign_extension else "zero_extend"
+        return f"((_ {op} {target_bits - expr_bits}) {expr_smt})"
     return f"((_ extract {target_bits - 1} 0) {expr_smt})"
 
 
@@ -223,6 +287,7 @@ def _to_smt_internal(expr) -> str:
 
         phi_returns_bool = expression_returns_bool(expr)
         target_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        prefer_sign_extension = expression_contains_signed_comparison(expr)
 
         def render_branch_value(branch_expr):
             if hasattr(branch_expr, "_to_smt_internal"):
@@ -233,7 +298,12 @@ def _to_smt_internal(expr) -> str:
             if phi_returns_bool or not hasattr(branch_expr, "get_bit_width"):
                 return branch_smt
 
-            return _coerce_expr_to_bitvec_width(branch_expr, branch_smt, target_bits)
+            return _coerce_expr_to_bitvec_width(
+                branch_expr,
+                branch_smt,
+                target_bits,
+                prefer_sign_extension=prefer_sign_extension,
+            )
 
         last_val = branches[-1][1]
         result = render_branch_value(last_val)

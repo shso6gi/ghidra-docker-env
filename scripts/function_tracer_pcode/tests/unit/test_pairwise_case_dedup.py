@@ -194,3 +194,43 @@ def test_build_normalized_inequality_query_coerces_normalized_values_to_return_w
     )
 
     assert "(assert (not (= ((_ zero_extend 32) (_ bv2 32)) ((_ zero_extend 32) (_ bv2 32)))))" in query
+
+
+def test_build_pair_query_sign_extends_ambiguous_negative_constant_with_signed_evidence():
+    signed_case = ReturnCase(
+        index=0,
+        conditions=[
+            Condition(
+                Expression(
+                    ExpressionType.BINARY_OP,
+                    operator="INT_SLESS",
+                    operands=[
+                        Expression(ExpressionType.PARAMETER, name="param_1", size=8),
+                        Expression(ExpressionType.CONSTANT, value=-100, size=8),
+                    ],
+                    size=1,
+                )
+            )
+        ],
+        value_expr=Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8),
+        return_info=ReturnInfo(address="0x1003", value=Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8)),
+        return_type="undefined8",
+    )
+    other_case = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8),
+        return_info=ReturnInfo(address="0x1004", value=Expression(ExpressionType.CONSTANT, value=0xFFFFFFFD, size=8)),
+        return_type="undefined8",
+    )
+
+    query = build_pair_query(
+        {"header_lines": [], "return_size1": 64, "return_size2": 64},
+        signed_case,
+        other_case,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert "(_ bv18446744073709551613 64)" in query

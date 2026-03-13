@@ -7,7 +7,10 @@ import re
 from typing import Dict, List, Optional
 
 from ...model import Expression, FunctionReturnAnalysis
-from ...model.render_smt import expression_returns_bool
+from ...model.render_smt import (
+    expression_contains_signed_comparison,
+    expression_returns_bool,
+)
 from ..typing.helpers import is_unsigned_type
 from .params import replace_symbol_names
 from .types import ParameterInfo
@@ -92,6 +95,52 @@ def should_sign_extend_return_type(return_type: Optional[str]) -> bool:
     return "int" in type_lower or "long" in type_lower
 
 
+def has_signed_branch_evidence(expr: Expression, conditions) -> bool:
+    """値式やガード条件に signed 比較の証拠があるか判定する。"""
+    if expression_contains_signed_comparison(expr):
+        return True
+
+    for condition in conditions or []:
+        condition_expr = getattr(condition, "expression", None)
+        if condition_expr is not None and expression_contains_signed_comparison(condition_expr):
+            return True
+
+    return False
+
+
+def should_sign_extend_value(
+    return_type: Optional[str],
+    expr: Expression,
+    conditions,
+) -> bool:
+    """return_type だけでなく branch evidence も見て sign extension の要否を判定する。"""
+    if should_sign_extend_return_type(return_type):
+        return True
+    return has_signed_branch_evidence(expr, conditions)
+
+
+def _rewrite_ambiguous_negative_constant(
+    expr: Expression,
+    value_smt: str,
+    target_size: int,
+    use_sign_extension: bool,
+) -> str:
+    """32bit 由来の負定数が 64bit で zero-extended されていたら sign-extended に補正する。"""
+    if not use_sign_extension:
+        return value_smt
+    if expr.expr_type != expr.expr_type.__class__.CONSTANT:
+        return value_smt
+    if target_size <= 32:
+        return value_smt
+    if not isinstance(expr.value, int) or expr.value < 0 or expr.value > 0xffffffff:
+        return value_smt
+    if (expr.value & 0x80000000) == 0:
+        return value_smt
+
+    sign_extended = expr.value | (((1 << (target_size - 32)) - 1) << 32)
+    return f"(_ bv{sign_extended} {target_size})"
+
+
 def coerce_value_to_bitvec_width(
     expr: Expression,
     value_smt: str,
@@ -100,6 +149,12 @@ def coerce_value_to_bitvec_width(
 ) -> str:
     """値式を target_size の bitvector に揃える。"""
     value_smt = coerce_return_value_to_bitvec(expr, value_smt, target_size)
+    value_smt = _rewrite_ambiguous_negative_constant(
+        expr,
+        value_smt,
+        target_size,
+        use_sign_extension,
+    )
 
     expr_bits = expr.get_bit_width()
     if expr_bits == target_size:
@@ -139,7 +194,6 @@ def build_return_definition(
     return_size = get_return_size(analysis)
 
     return_defs: List[Dict[str, str]] = []
-    use_sign_extension = should_sign_extend_to_return_size(analysis)
     for ret in analysis.returns:
         if ret.conditions:
             cond_parts = []
@@ -151,6 +205,11 @@ def build_return_definition(
             cond_str = "true"
 
         value_smt = replace_symbol_names(ret.value.to_smt(), param_infos)
+        use_sign_extension = should_sign_extend_value(
+            analysis.return_type,
+            ret.value,
+            ret.conditions,
+        )
         value_smt = coerce_value_to_bitvec_width(
             ret.value,
             value_smt,
