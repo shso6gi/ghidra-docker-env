@@ -84,7 +84,17 @@ def test_attempt():
 
 def test_debug_trace():
     """DebugTrace全体の記録"""
-    trace = DebugTrace()
+    trace = DebugTrace(
+        planned_phases=["P0_BASE", "P1_SIGNEDNESS", "P2_PATTERN_INT"],
+        known_phases=[
+            "P0_BASE",
+            "P1_SIGNEDNESS",
+            "P2_PATTERN_INT",
+            "P4A_MIPS64_ABI",
+            "P4B_MIPS64_SPURIOUS",
+            "P4C_RETURN_TYPE_FIX",
+        ],
+    )
     
     # Attempt 1: P0 UNKNOWN
     attempt1 = Attempt(
@@ -137,6 +147,70 @@ def test_debug_trace():
     parsed = json.loads(json_str)
     assert parsed["attempt_count"] == 2
     assert parsed["final_result"] is True
+    assert parsed["used_phases"] == ["P0_BASE", "P1_SIGNEDNESS"]
+
+
+def test_debug_trace_phase_usage_summary():
+    """Phase利用状況の集約が取れることを確認"""
+    trace = DebugTrace(
+        planned_phases=["P0_BASE", "P1_SIGNEDNESS", "P2_PATTERN_INT"],
+        known_phases=[
+            "P0_BASE",
+            "P1_SIGNEDNESS",
+            "P2_PATTERN_INT",
+            "P4A_MIPS64_ABI",
+            "P4B_MIPS64_SPURIOUS",
+            "P4C_RETURN_TYPE_FIX",
+        ],
+    )
+
+    trace.add_attempt(
+        Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=["S_PAIRWISE"],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.UNKNOWN.value,
+            elapsed_time=0.3,
+        )
+    )
+    trace.add_attempt(
+        Attempt(
+            attempt_id=1,
+            retry_count=1,
+            phase="P1_SIGNEDNESS",
+            stage_path=[],
+            strategy="pairwise",
+            result=None,
+            transition_reason=TransitionReason.NO_CHANGES.value,
+            elapsed_time=0.0,
+        )
+    )
+
+    usage = {entry["phase"]: entry for entry in trace.get_phase_usage()}
+
+    assert usage["P0_BASE"]["planned"] is True
+    assert usage["P0_BASE"]["reached"] is True
+    assert usage["P0_BASE"]["used"] is True
+    assert usage["P0_BASE"]["result_attempt_count"] == 1
+
+    assert usage["P1_SIGNEDNESS"]["reached"] is True
+    assert usage["P1_SIGNEDNESS"]["used"] is False
+    assert usage["P1_SIGNEDNESS"]["no_change_skip_count"] == 1
+    assert usage["P1_SIGNEDNESS"]["last_transition_reason"] == "no_changes"
+
+    assert usage["P2_PATTERN_INT"]["reached"] is False
+    assert usage["P4B_MIPS64_SPURIOUS"]["planned"] is False
+    assert usage["P4B_MIPS64_SPURIOUS"]["reached"] is False
+
+    assert trace.get_used_phases() == ["P0_BASE"]
+
+    summary = trace.format_phase_usage_summary()
+    assert "P0_BASE: USED" in summary
+    assert "P1_SIGNEDNESS: NO_CHANGES" in summary
+    assert "P2_PATTERN_INT: NOT_REACHED" in summary
 
 
 def test_debug_trace_with_pairwise_decisive():

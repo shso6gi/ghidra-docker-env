@@ -101,7 +101,10 @@ def run_equivalence_check(args):
                         retry_with_type_fix=retry_with_type_fix,
                     )
 
-    output_content = result.to_string(verbose=args.verbose)
+    output_content = result.to_string(
+        verbose=args.verbose,
+        show_phase_usage=args.debug,
+    )
     output_result(output_content, args.output, args.quiet)
 
     if args.save_formula and result.smt_formula:

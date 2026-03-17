@@ -144,7 +144,7 @@ class EquivalenceResult:
         
         return result
     
-    def to_string(self, verbose: bool = False) -> str:
+    def to_string(self, verbose: bool = False, show_phase_usage: bool = False) -> str:
         lines = []
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")
@@ -233,6 +233,10 @@ class EquivalenceResult:
                     lines.append(f"    Error: {sr.error_message}")
                 if sr.model:
                     lines.append(f"    Model: {sr.model}")
+
+        if show_phase_usage and self.debug_trace:
+            lines.append("")
+            lines.append(self.debug_trace.format_phase_usage_summary())
         
         lines.append("=" * 70)
         return "\n".join(lines)

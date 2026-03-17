@@ -131,6 +131,8 @@ class Attempt:
 class DebugTrace:
     """デバッグトレース（機械可読）"""
     attempts: List[Attempt] = field(default_factory=list)
+    planned_phases: List[str] = field(default_factory=list)
+    known_phases: List[str] = field(default_factory=list)
     final_result: Optional[bool] = None
     total_time: float = 0.0
     error_message: Optional[str] = None
@@ -138,10 +140,103 @@ class DebugTrace:
     def add_attempt(self, attempt: Attempt):
         """試行を追加"""
         self.attempts.append(attempt)
+
+    def get_phase_usage(self) -> List[Dict[str, Any]]:
+        """Phase 利用状況を集約して返す。"""
+        ordered_phases: List[str] = []
+        seen_phases = set()
+
+        for phase in self.known_phases:
+            if phase not in seen_phases:
+                ordered_phases.append(phase)
+                seen_phases.add(phase)
+
+        for attempt in self.attempts:
+            if attempt.phase not in seen_phases:
+                ordered_phases.append(attempt.phase)
+                seen_phases.add(attempt.phase)
+
+        usage_by_phase: Dict[str, Dict[str, Any]] = {}
+        for phase in ordered_phases:
+            usage_by_phase[phase] = {
+                "phase": phase,
+                "planned": phase in self.planned_phases,
+                "reached": False,
+                "used": False,
+                "attempt_count": 0,
+                "result_attempt_count": 0,
+                "no_change_skip_count": 0,
+                "last_transition_reason": None,
+                "last_result": None,
+            }
+
+        for attempt in self.attempts:
+            phase_usage = usage_by_phase.setdefault(
+                attempt.phase,
+                {
+                    "phase": attempt.phase,
+                    "planned": attempt.phase in self.planned_phases,
+                    "reached": False,
+                    "used": False,
+                    "attempt_count": 0,
+                    "result_attempt_count": 0,
+                    "no_change_skip_count": 0,
+                    "last_transition_reason": None,
+                    "last_result": None,
+                }
+            )
+            phase_usage["reached"] = True
+            phase_usage["attempt_count"] += 1
+            if attempt.transition_reason == TransitionReason.NO_CHANGES.value:
+                phase_usage["no_change_skip_count"] += 1
+            else:
+                phase_usage["result_attempt_count"] += 1
+                phase_usage["used"] = True
+            phase_usage["last_transition_reason"] = attempt.transition_reason
+            phase_usage["last_result"] = attempt.result
+
+        return [usage_by_phase[phase] for phase in ordered_phases]
+
+    def get_used_phases(self) -> List[str]:
+        """実際に再解析・再判定まで進んだ Phase の一覧を返す。"""
+        return [entry["phase"] for entry in self.get_phase_usage() if entry["used"]]
+
+    def format_phase_usage_summary(self) -> str:
+        """人間向けの Phase 利用状況サマリを返す。"""
+        usage = self.get_phase_usage()
+        if not usage:
+            return "Phase Usage Summary:\n  (none)"
+
+        lines = ["Phase Usage Summary:"]
+        for entry in usage:
+            if not entry["reached"]:
+                status = "NOT_REACHED"
+            elif entry["used"]:
+                status = "USED"
+            else:
+                status = "NO_CHANGES"
+
+            scope = "planned" if entry["planned"] else "aux"
+            details = [f"scope={scope}"]
+            if entry["attempt_count"] > 0:
+                details.append(f"attempts={entry['attempt_count']}")
+            if entry["result_attempt_count"] > 0:
+                details.append(f"rechecks={entry['result_attempt_count']}")
+            if entry["no_change_skip_count"] > 0:
+                details.append(f"no_changes={entry['no_change_skip_count']}")
+            if entry["last_transition_reason"] is not None:
+                details.append(f"last={entry['last_transition_reason']}")
+
+            lines.append(f"  {entry['phase']}: {status} ({', '.join(details)})")
+        return "\n".join(lines)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "attempts": [attempt.to_dict() for attempt in self.attempts],
+            "planned_phases": self.planned_phases,
+            "known_phases": self.known_phases,
+            "used_phases": self.get_used_phases(),
+            "phase_usage": self.get_phase_usage(),
             "final_result": self.final_result,
             "total_time": self.total_time,
             "error_message": self.error_message,

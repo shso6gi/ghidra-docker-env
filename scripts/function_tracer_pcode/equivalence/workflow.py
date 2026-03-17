@@ -30,7 +30,15 @@ def run_check_from_binaries(
     binary2_name = program2.getName() if hasattr(program2, "getName") else "binary2"
 
     type_fix_result = TypeFixResult()
-    debug_trace = DebugTrace()
+    primary_phases = [phase_spec.phase_id.value for phase_spec in DEFAULT_PHASE_PLAN]
+    debug_trace = DebugTrace(
+        planned_phases=primary_phases,
+        known_phases=primary_phases + [
+            PhaseID.P4A_MIPS64_ABI.value,
+            "P4B_MIPS64_SPURIOUS",
+            "P4C_RETURN_TYPE_FIX",
+        ],
+    )
     ctx = PhaseContext(
         program1=program1,
         program2=program2,

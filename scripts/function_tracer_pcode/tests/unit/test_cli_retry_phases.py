@@ -400,3 +400,79 @@ def test_cli_output_shows_retry_phases_disabled():
                     f"Expected 'Recovery phases: disabled' in output, got:\n{output}"
                 
                 print("\n[OUTPUT CHECK] Verified: 'Recovery phases: disabled' displayed")
+
+
+def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
+    """--debug 時に phase usage summary 表示フラグが to_string() に渡ることを確認"""
+    from function_tracer_pcode.cli.main import run_equivalence_check
+
+    mock_args = Mock()
+    mock_args.equiv = ('binary1', 'binary2')
+    mock_args.functions = ['test_func']
+    mock_args.no_retry_phases = False
+    mock_args.equiv_timeout = 10
+    mock_args.timeout = 60
+    mock_args.save_formula = False
+    mock_args.debug = True
+    mock_args.quiet = True
+    mock_args.verbose = False
+    mock_args.output = None
+    mock_args.no_rewrite = False
+    mock_args.rewrite_direction = 'to_modulo'
+    mock_args.strategy = 'pairwise'
+    mock_args.pairwise_timeout = 5
+    mock_args.pairwise_timeout_hard = 30
+    mock_args.pairwise_save_unknown = False
+
+    mock_pyghidra = MagicMock()
+    mock_pyghidra.start = Mock()
+    mock_pyghidra.analyze = Mock()
+
+    mock_program1 = MagicMock()
+    mock_program2 = MagicMock()
+
+    mock_result1 = MagicMock()
+    mock_result1.getPrimaryDomainObject.return_value = mock_program1
+    mock_result2 = MagicMock()
+    mock_result2.getPrimaryDomainObject.return_value = mock_program2
+
+    mock_loader1 = MagicMock()
+    mock_loader1.load.return_value.__enter__.return_value = mock_result1
+    mock_loader1.load.return_value.__exit__ = Mock(return_value=False)
+    mock_loader2 = MagicMock()
+    mock_loader2.load.return_value.__enter__.return_value = mock_result2
+    mock_loader2.load.return_value.__exit__ = Mock(return_value=False)
+
+    mock_program_loader = MagicMock()
+    mock_program_loader.project.return_value.source.side_effect = [
+        mock_loader1, mock_loader2
+    ]
+    mock_pyghidra.program_loader.return_value = mock_program_loader
+
+    mock_project = MagicMock()
+    mock_pyghidra.open_project.return_value.__enter__.return_value = mock_project
+    mock_pyghidra.open_project.return_value.__exit__ = Mock(return_value=False)
+
+    with patch.dict('sys.modules', {'pyghidra': mock_pyghidra}):
+        with patch('function_tracer_pcode.equivalence.EquivalenceChecker') as MockEquivChecker:
+            mock_checker = Mock()
+            mock_checker.solver_runner = Mock()
+            mock_checker.solver_runner.get_available_solvers.return_value = ['z3']
+
+            mock_equiv_result = Mock()
+            mock_equiv_result.is_equivalent = True
+            mock_equiv_result.to_string.return_value = "EQUIVALENT"
+            mock_equiv_result.smt_formula = None
+            mock_checker.check_from_binaries = Mock(return_value=mock_equiv_result)
+
+            MockEquivChecker.return_value = mock_checker
+
+            try:
+                run_equivalence_check(mock_args)
+            except SystemExit:
+                pass
+
+            mock_equiv_result.to_string.assert_called_once_with(
+                verbose=False,
+                show_phase_usage=True,
+            )
