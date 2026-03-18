@@ -25,6 +25,8 @@ _SIGNED_COMPARISON_OPERATORS = {
     "INT_SLESSEQUAL",
 }
 
+_MEMORY_ARRAY_WIDTHS = {8, 16, 32, 64}
+
 
 def expression_to_smt(expr) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
@@ -278,7 +280,18 @@ def _to_smt_internal(expr) -> str:
         return f"{expr.name}"
 
     if expr_type == expr_kind.MEMORY:
-        return f"(select mem {expr.operands[0]._to_smt_internal()})"
+        mem_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 32
+        if mem_bits not in _MEMORY_ARRAY_WIDTHS:
+            mem_bits = 32
+        addr_expr = expr.operands[0]
+        addr_smt = addr_expr._to_smt_internal()
+        addr_smt = _coerce_expr_to_bitvec_width(
+            addr_expr,
+            addr_smt,
+            64,
+            prefer_sign_extension=False,
+        )
+        return f"(select mem{mem_bits} {addr_smt})"
 
     if expr_type == expr_kind.PHI:
         branches = expr.value

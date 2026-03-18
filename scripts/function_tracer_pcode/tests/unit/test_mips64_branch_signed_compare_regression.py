@@ -165,3 +165,42 @@ def test_width_mismatch_without_signed_branch_evidence_keeps_unsigned_fallback()
     )
 
     assert constraints == {}
+
+
+def test_width_mismatch_detects_spurious_upper_bits_even_when_non_mips_side_is_wide():
+    handler = MIPS64Handler(debug=True)
+
+    analysis_wide_non_mips = create_mock_analysis(
+        function_name="pointer_like_compare",
+        parameters=[
+            {"name": "param_1", "data_type": "long", "size": 8, "index": 0},
+        ],
+    )
+    analysis_narrow_mips = create_mock_analysis(
+        function_name="pointer_like_compare",
+        parameters=[
+            {"name": "param_1", "data_type": "uint", "size": 4, "index": 0},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[],
+                value=_subpiece("param_1", 8),
+            )
+        ],
+    )
+
+    counterexample = {
+        "param_1_1": 0x0008000000000000,
+        "param_1_2": 0x00000000,
+    }
+
+    constraints = handler.detect_spurious_counterexample(
+        counterexample,
+        analysis_wide_non_mips,
+        analysis_narrow_mips,
+        is_mips64_1=False,
+        is_mips64_2=True,
+    )
+
+    assert constraints == {"param_1_1": ("unsigned", 32)}

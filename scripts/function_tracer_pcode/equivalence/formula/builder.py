@@ -25,6 +25,7 @@ from .variable import (
     get_parameter_fragment_constraints
 )
 from .symbol_replace import build_symbol_replacer
+from ...analysis.memory_resolver import collect_memory_bit_widths_from_analysis
 
 from ..ub.constraints import UbConstraintBuilder
 
@@ -236,6 +237,10 @@ class FormulaBuilder:
         """共通の宣言・制約セクションを組み立てる"""
         lines: List[str] = []
 
+        mem_widths = self._collect_memory_widths(analysis1, analysis2)
+        if mem_widths:
+            lines.extend(self._build_memory_declarations(mem_widths))
+
         lines.extend(self._build_param_declarations(analysis1.function_name, params1))
 
         if extra_vars1:
@@ -401,6 +406,30 @@ class FormulaBuilder:
             lines.append(f"(declare-const {p.smt_name} (_ BitVec {p.bit_width}))  ; {signed_comment}")
         lines.append("")
         return lines
+
+    def _build_memory_declarations(self, mem_widths: List[int]) -> List[str]:
+        """共有メモリ配列の宣言を構築する。"""
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Shared memory arrays")
+        lines.append("; Memory loads are modeled as array selects by bit width")
+        lines.append("; " + "-" * 40)
+        for bits in mem_widths:
+            lines.append(
+                f"(declare-const mem{bits} (Array (_ BitVec 64) (_ BitVec {bits})))"
+            )
+        lines.append("")
+        return lines
+
+    def _collect_memory_widths(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> List[int]:
+        """2 関数で使われるメモリ load 幅を収集する。"""
+        widths = set(collect_memory_bit_widths_from_analysis(analysis1))
+        widths.update(collect_memory_bit_widths_from_analysis(analysis2))
+        return sorted(widths)
     
     def _build_extra_var_declarations(
         self,

@@ -13,6 +13,28 @@ def collect_variables(expr) -> Set[str]:
     return variables
 
 
+def contains_memory_access(expr) -> bool:
+    """式木のどこかに MEMORY ノードが含まれるか判定する。"""
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type == expr_kind.MEMORY:
+        return True
+
+    if expr_type in (expr_kind.BINARY_OP, expr_kind.UNARY_OP, expr_kind.CALL):
+        return any(contains_memory_access(operand) for operand in expr.operands)
+
+    if expr_type == expr_kind.PHI and expr.value:
+        for cond, val in expr.value:
+            if cond is not None and hasattr(cond, "expression"):
+                if contains_memory_access(cond.expression):
+                    return True
+            if hasattr(val, "expr_type") and contains_memory_access(val):
+                return True
+
+    return False
+
+
 def collect_variables_into(expr, variables: Set[str]) -> None:
     """式から再帰的に変数名を収集する。"""
     expr_type = expr.expr_type

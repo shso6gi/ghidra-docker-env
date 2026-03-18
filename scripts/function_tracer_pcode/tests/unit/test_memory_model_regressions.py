@@ -1,0 +1,121 @@
+# -*- coding: utf-8 -*-
+
+from scripts.function_tracer_pcode.analysis.memory_resolver import (
+    collect_memory_bit_widths_from_analysis,
+    concretize_readonly_loads,
+)
+from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
+from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+
+
+def _param(name: str, size: int = 4, is_signed: bool = True, index: int = 0):
+    return {"name": name, "size": size, "is_signed": is_signed, "index": index}
+
+
+def test_formula_builder_declares_memory_arrays_for_memory_returns():
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f1",
+        entry_point="0x0",
+        parameters=[_param("p", size=8)],
+        returns=[
+            ReturnInfo(
+                address="0x1",
+                conditions=[],
+                value=Expression.memory(Expression.parameter("p", 0, size=8), size=4),
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f2",
+        entry_point="0x0",
+        parameters=[_param("q", size=8)],
+        returns=[
+            ReturnInfo(
+                address="0x2",
+                conditions=[],
+                value=Expression.memory(Expression.parameter("q", 0, size=8), size=4),
+            )
+        ],
+        return_type="int",
+    )
+
+    builder = FormulaBuilder(debug=False, exclude_ub=False)
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+    assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in formula
+    assert "(select mem32 p_1)" in formula
+    assert "(select mem32 q_2)" in formula
+    assert collect_memory_bit_widths_from_analysis(analysis1) == [32]
+
+
+def test_mips64_handler_detects_spurious_same_pattern_extension_violation():
+    handler = MIPS64Handler(debug=False)
+    counterexample = {"param_1_1": 0x400000000002, "param_1_2": 0x400000000002}
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f1",
+        entry_point="0x0",
+        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "is_signed": True}],
+        returns=[],
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f2",
+        entry_point="0x0",
+        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "is_signed": True}],
+        returns=[],
+    )
+
+    handler._analyze_parameter_usage = lambda analysis: {"param_1": ("signed", 32)}
+
+    constraints = handler.detect_spurious_counterexample(
+        counterexample,
+        analysis1,
+        analysis2,
+        is_mips64_1=True,
+        is_mips64_2=True,
+    )
+
+    assert constraints == {"param_1_1": ("signed", 32), "param_1_2": ("signed", 32)}
+
+
+def test_memory_resolver_concretizes_small_readonly_jump_table():
+    param = Expression.parameter("param_1", 0, size=8)
+    index_expr = Expression.unary_op(
+        "INT_SEXT",
+        Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4)),
+    )
+    index_expr.size = 8
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("PTR_00112058", size=8),
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.binary_op("INT_MULT", index_expr, Expression.constant(4, 8)),
+            Expression.constant(5024, 8),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    cond = Condition(
+        Expression.binary_op("INT_LESS", param, Expression.constant(4, 8)),
+        False,
+    )
+
+    table = {
+        0x00112058 + 5024 + 0: 1,
+        0x00112058 + 5024 + 4: 1,
+        0x00112058 + 5024 + 8: 2,
+        0x00112058 + 5024 + 12: 2,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=8, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [1, 1, 2, 2]

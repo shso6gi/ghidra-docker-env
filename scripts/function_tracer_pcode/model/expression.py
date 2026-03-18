@@ -15,6 +15,7 @@ from .render_smt import expression_to_smt, get_smt_operator
 from .variable_collection import (
     collect_variables,
     collect_variables_into,
+    contains_memory_access,
     collect_variables_with_storage,
     collect_variables_with_storage_into,
 )
@@ -310,6 +311,10 @@ class Expression:
     def get_all_variables(self) -> Set[str]:
         """式に含まれる全ての変数名（パラメータ・変数）を取得"""
         return collect_variables(self)
+
+    def contains_memory_access(self) -> bool:
+        """式木のどこかに MEMORY ノードが含まれるか判定する。"""
+        return contains_memory_access(self)
     
     def _collect_variables(self, variables: Set[str]) -> None:
         """再帰的に変数を収集"""

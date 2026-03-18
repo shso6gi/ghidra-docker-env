@@ -8,6 +8,7 @@ from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResul
 from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
+from .memory_resolver import concretize_readonly_loads
 
 
 class ReturnAnalyzer:
@@ -17,6 +18,7 @@ class ReturnAnalyzer:
         self.program = program
         self.debug = debug
         self._decompiler = None
+        self._current_parameters: List[Dict] = []
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -178,6 +180,7 @@ class ReturnAnalyzer:
         condition_tracker.build()
         
         parameters = self._collect_parameters(high_function)
+        self._current_parameters = parameters
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
         
         # 戻り値の型を取得
@@ -470,15 +473,16 @@ class ReturnAnalyzer:
                 continue
             
             simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
+            resolved_value = self._concretize_readonly_loads(ev.value, simplified_conds, self._current_parameters)
             
             if self.debug:
                 cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in simplified_conds]
-                self._debug_print(f"Expansion {i}: value={ev.value.to_string()}")
+                self._debug_print(f"Expansion {i}: value={resolved_value.to_string()}")
                 self._debug_print(f"  conditions={cond_strs}")
             
             results.append(ReturnInfo(
                 address=address,
-                value=ev.value,
+                value=resolved_value,
                 conditions=simplified_conds,
                 branch_index=return_index * 100 + i
             ))
@@ -487,9 +491,10 @@ class ReturnAnalyzer:
             self._debug_print("WARNING: No valid expansions, falling back to simple trace")
             value = tracer.trace_varnode(return_varnode, use_cache=False)
             simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
+            resolved_value = self._concretize_readonly_loads(value, simplified_conds, self._current_parameters)
             return [ReturnInfo(
                 address=address,
-                value=value,
+                value=resolved_value,
                 conditions=simplified_conds,
                 branch_index=return_index
             )]
@@ -526,6 +531,52 @@ class ReturnAnalyzer:
             self._debug_print(f"Function '{function_name}' not found")
             return None
         return self.analyze_function(function, timeout)
+
+    def _concretize_readonly_loads(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+        parameters: List[Dict],
+    ) -> Expression:
+        """Resolve simple read-only indexed loads into finite PHI chains when possible."""
+        try:
+            return concretize_readonly_loads(
+                value,
+                conditions,
+                parameters,
+                self._read_memory_value,
+                debug=self.debug,
+            )
+        except Exception as exc:
+            self._debug_print(f"Readonly load concretization failed: {exc}")
+            return value
+
+    def _read_memory_value(self, address_value: int, size_bytes: int) -> Optional[int]:
+        """Read an unsigned integer from program memory."""
+        if address_value < 0 or size_bytes <= 0:
+            return None
+
+        try:
+            memory = self.program.getMemory()
+            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
+            addr = default_space.getAddress(address_value)
+            if addr is None:
+                return None
+
+            raw_bytes = []
+            for offset in range(size_bytes):
+                byte_val = memory.getByte(addr.add(offset))
+                raw_bytes.append(int(byte_val) & 0xFF)
+
+            is_big_endian = self.program.getLanguage().isBigEndian()
+            ordered = raw_bytes if is_big_endian else list(reversed(raw_bytes))
+
+            result = 0
+            for byte_val in ordered:
+                result = (result << 8) | byte_val
+            return result
+        except Exception:
+            return None
     
     def _find_function_by_name(self, function_name: str):
         function_manager = self.program.getFunctionManager()

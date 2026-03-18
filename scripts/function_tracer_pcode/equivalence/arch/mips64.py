@@ -192,8 +192,9 @@ class MIPS64Handler:
                     if constraint:
                         constraints[param_key_1] = constraint
                 
-                elif pattern1 and pattern2 and pattern1[0] != pattern2[0]:
-                    # 両側とも拡張だが符号性が異なる
+                elif pattern1 and pattern2:
+                    # 両側とも拡張証拠あり。signedness が同じでも、
+                    # 上位ビットが ABI 拡張規則を破っていれば偽反例。
                     c1 = self._check_extension_pattern_violation(
                         param_key_1, pattern1, counterexample
                     )
@@ -204,7 +205,7 @@ class MIPS64Handler:
                         constraints[param_key_1] = c1
                     if c2:
                         constraints[param_key_2] = c2
-        
+
         return constraints
     
     def _check_width_mismatch(
@@ -225,12 +226,12 @@ class MIPS64Handler:
         usage2: Dict[str, Tuple[str, int]],
     ) -> Optional[Tuple[str, str, int]]:
         """幅不一致のパラメータについて偽反例をチェック"""
-        if is_mips64_1 and size1 == 8 and size2 == 4:
+        if size1 == 8 and size2 == 4:
             param_wide = param_key_1
             param_narrow = param_key_2
             narrow_bits = 32
             narrow_param = p2
-        elif is_mips64_2 and size2 == 8 and size1 == 4:
+        elif size2 == 8 and size1 == 4:
             param_wide = param_key_2
             param_narrow = param_key_1
             narrow_bits = 32
