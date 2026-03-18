@@ -164,3 +164,50 @@ def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_b
     assert resolved.expr_type.name == "PHI"
     values = [branch_value.value for _, branch_value in resolved.value[:-1]]
     assert values == [1, 1, 2, 2]
+
+
+def test_memory_resolver_concretizes_mips_pic_jump_table_using_image_base_fallback():
+    param = Expression.parameter("param_1", 0, size=8)
+    subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
+    subpiece.size = 4
+    index_expr = Expression.unary_op("INT_SEXT", subpiece)
+    index_expr.size = 8
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("PTR_00112058", size=8),
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.binary_op("INT_MULT", index_expr, Expression.constant(4, 8)),
+                Expression.constant(0x13A0, 8),
+            ),
+            Expression.constant(1, 8),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    cond = Condition(
+        Expression.binary_op("INT_LESS", param, Expression.constant(4, 8)),
+        False,
+    )
+
+    image_base = 0x00100000
+    table = {
+        image_base + 0x13A0 + 0: 1,
+        image_base + 0x13A0 + 4: 1,
+        image_base + 0x13A0 + 8: 2,
+        image_base + 0x13A0 + 12: 2,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=8, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        image_base=image_base,
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [1, 1, 2, 2]

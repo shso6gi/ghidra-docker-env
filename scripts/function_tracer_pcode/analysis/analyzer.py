@@ -545,6 +545,7 @@ class ReturnAnalyzer:
                 conditions,
                 parameters,
                 self._read_memory_value,
+                image_base=self.program.getImageBase().getOffset(),
                 debug=self.debug,
             )
         except Exception as exc:

@@ -58,10 +58,18 @@ def concretize_readonly_loads(
     conditions: Sequence[Condition],
     parameters: Sequence[Dict],
     read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int] = None,
     debug: bool = False,
 ) -> Expression:
     """Replace simple read-only indexed loads with a finite PHI/ITE over constants."""
-    return _rewrite_expr(expr, list(conditions or []), list(parameters or []), read_memory_value, debug)
+    return _rewrite_expr(
+        expr,
+        list(conditions or []),
+        list(parameters or []),
+        read_memory_value,
+        image_base,
+        debug,
+    )
 
 
 def _rewrite_expr(
@@ -69,26 +77,35 @@ def _rewrite_expr(
     conditions: List[Condition],
     parameters: List[Dict],
     read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int],
     debug: bool,
 ) -> Expression:
     if expr is None:
         return expr
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
-        rewritten_addr = _rewrite_expr(expr.operands[0], conditions, parameters, read_memory_value, debug)
+        rewritten_addr = _rewrite_expr(
+            expr.operands[0],
+            conditions,
+            parameters,
+            read_memory_value,
+            image_base,
+            debug,
+        )
         candidate = Expression.memory(rewritten_addr, expr.size)
         resolved = _try_resolve_readonly_load(
             candidate,
             conditions,
             parameters,
             read_memory_value,
+            image_base,
             debug,
         )
         return resolved or candidate
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
         rewritten_operands = [
-            _rewrite_expr(op, conditions, parameters, read_memory_value, debug)
+            _rewrite_expr(op, conditions, parameters, read_memory_value, image_base, debug)
             for op in expr.operands
         ]
         if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
@@ -109,7 +126,14 @@ def _rewrite_expr(
         rewritten_branches = []
         changed = False
         for cond, value in expr.value:
-            new_value = _rewrite_expr(value, conditions, parameters, read_memory_value, debug)
+            new_value = _rewrite_expr(
+                value,
+                conditions,
+                parameters,
+                read_memory_value,
+                image_base,
+                debug,
+            )
             rewritten_branches.append((cond, new_value))
             changed = changed or (new_value is not value)
         if not changed:
@@ -126,6 +150,7 @@ def _try_resolve_readonly_load(
     conditions: List[Condition],
     parameters: List[Dict],
     read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int],
     debug: bool,
 ) -> Optional[Expression]:
     if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
@@ -147,9 +172,28 @@ def _try_resolve_readonly_load(
     index_size_bytes = max(1, pattern.index_bits // 8)
     load_size = expr.size if expr.size else 4
     fallback = expr
+    resolved_base = _resolve_readonly_base_address(
+        pattern,
+        candidate_indices,
+        load_size,
+        read_memory_value,
+        image_base,
+    )
+    if resolved_base is None:
+        if debug:
+            print(
+                "[MemoryResolver] unable to resolve readonly base "
+                f"symbol=0x{pattern.base_address:x} const_offset=0x{pattern.const_offset:x}"
+            )
+        return None
+    if debug:
+        print(
+            "[MemoryResolver] readonly base resolved to "
+            f"0x{resolved_base:x} (symbol=0x{pattern.base_address:x}, const_offset=0x{pattern.const_offset:x})"
+        )
 
     for index_value in candidate_indices:
-        addr = pattern.base_address + pattern.const_offset + pattern.scale * index_value
+        addr = resolved_base + pattern.const_offset + pattern.scale * index_value
         mem_value = read_memory_value(addr, load_size)
         if mem_value is None:
             return None
@@ -176,8 +220,10 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
     if flattened is None:
         return None
 
-    const_total, scaled_terms = flattened
+    const_total, symbolic_bases, scaled_terms = flattened
     if len(scaled_terms) != 1:
+        return None
+    if len(symbolic_bases) > 1:
         return None
 
     index_expr, scale = scaled_terms[0]
@@ -186,8 +232,8 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
         return None
 
     return IndexedAddressPattern(
-        base_address=const_total,
-        const_offset=0,
+        base_address=symbolic_bases[0] if symbolic_bases else 0,
+        const_offset=const_total,
         scale=scale,
         index_expr=index_expr,
         index_param_name=param_name,
@@ -195,15 +241,17 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
     )
 
 
-def _flatten_additive_terms(expr: Expression) -> Optional[Tuple[int, List[Tuple[Expression, int]]]]:
+def _flatten_additive_terms(
+    expr: Expression,
+) -> Optional[Tuple[int, List[int], List[Tuple[Expression, int]]]]:
     if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
         left_flat = _flatten_additive_terms(expr.operands[0])
         right_flat = _flatten_additive_terms(expr.operands[1])
         if left_flat is None or right_flat is None:
             return None
-        left_const, left_terms = left_flat
-        right_const, right_terms = right_flat
-        return left_const + right_const, left_terms + right_terms
+        left_const, left_bases, left_terms = left_flat
+        right_const, right_bases, right_terms = right_flat
+        return left_const + right_const, left_bases + right_bases, left_terms + right_terms
 
     if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_MULT" and len(expr.operands) == 2:
         left, right = expr.operands
@@ -212,14 +260,26 @@ def _flatten_additive_terms(expr: Expression) -> Optional[Tuple[int, List[Tuple[
         if right.expr_type == ExpressionType.CONSTANT and right.value == 1:
             return _flatten_additive_terms(left)
 
+    symbolic_base = _extract_symbolic_base_address(expr)
+    if symbolic_base is not None:
+        return 0, [symbolic_base], []
+
     const_value = _extract_constant_address(expr)
     if const_value is not None:
-        return const_value, []
+        return const_value, [], []
 
     scaled = _extract_scaled_index(expr)
     if scaled is not None:
-        return 0, [scaled]
+        return 0, [], [scaled]
 
+    return None
+
+
+def _extract_symbolic_base_address(expr: Expression) -> Optional[int]:
+    if expr.expr_type == ExpressionType.VARIABLE and expr.name and expr.name.startswith("PTR_"):
+        suffix = expr.name[4:]
+        if re.fullmatch(r"[0-9A-Fa-f]+", suffix):
+            return int(suffix, 16)
     return None
 
 
@@ -228,11 +288,58 @@ def _extract_constant_address(expr: Expression) -> Optional[int]:
         return expr.value
 
     if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        for prefix in ("PTR_", "DAT_", "LAB_"):
+        for prefix in ("DAT_", "LAB_"):
             if expr.name.startswith(prefix):
                 suffix = expr.name[len(prefix):]
                 if re.fullmatch(r"[0-9A-Fa-f]+", suffix):
                     return int(suffix, 16)
+    return None
+
+
+def _resolve_readonly_base_address(
+    pattern: IndexedAddressPattern,
+    candidate_indices: Sequence[int],
+    load_size: int,
+    read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int],
+) -> Optional[int]:
+    """Pick a base interpretation that makes the readonly table readable.
+
+    MIPS PIC often materializes jump tables as PTR_<got-slot> + constant_offset.
+    The PTR symbol address is only a relocation anchor, so the useful base can be
+    the image base rather than the symbol address itself.
+    """
+    candidates: List[int] = []
+
+    def _append(value: Optional[int]) -> None:
+        if value is None:
+            return
+        if value not in candidates:
+            candidates.append(value)
+
+    _append(pattern.base_address)
+    pointer_size = max(8, load_size)
+    if pattern.base_address:
+        pointee = read_memory_value(pattern.base_address, pointer_size)
+        _append(pointee)
+        if image_base is not None and pointee is not None:
+            _append(image_base + pointee)
+
+    _append(0)
+    _append(image_base)
+
+    for base in candidates:
+        if base is None:
+            continue
+        all_readable = True
+        for index_value in candidate_indices:
+            addr = base + pattern.const_offset + pattern.scale * index_value
+            if read_memory_value(addr, load_size) is None:
+                all_readable = False
+                break
+        if all_readable:
+            return base
+
     return None
 
 
