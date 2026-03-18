@@ -119,3 +119,48 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
     assert resolved.expr_type.name == "PHI"
     values = [branch_value.value for _, branch_value in resolved.value[:-1]]
     assert values == [1, 1, 2, 2]
+
+
+def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_by_mul_one():
+    param = Expression.parameter("param_1", 0, size=8)
+    subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
+    subpiece.size = 4
+    index_expr = Expression.unary_op("INT_SEXT", subpiece)
+    index_expr.size = 8
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("PTR_00112058", size=8),
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(1, 8),
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.constant(5024, 8),
+                Expression.binary_op("INT_MULT", index_expr, Expression.constant(4, 8)),
+            ),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    cond = Condition(
+        Expression.binary_op("INT_LESS", param, Expression.constant(4, 8)),
+        False,
+    )
+
+    table = {
+        0x00112058 + 5024 + 0: 1,
+        0x00112058 + 5024 + 4: 1,
+        0x00112058 + 5024 + 8: 2,
+        0x00112058 + 5024 + 12: 2,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=8, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [1, 1, 2, 2]

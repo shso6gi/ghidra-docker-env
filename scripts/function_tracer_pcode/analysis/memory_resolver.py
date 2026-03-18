@@ -205,6 +205,13 @@ def _flatten_additive_terms(expr: Expression) -> Optional[Tuple[int, List[Tuple[
         right_const, right_terms = right_flat
         return left_const + right_const, left_terms + right_terms
 
+    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_MULT" and len(expr.operands) == 2:
+        left, right = expr.operands
+        if left.expr_type == ExpressionType.CONSTANT and left.value == 1:
+            return _flatten_additive_terms(right)
+        if right.expr_type == ExpressionType.CONSTANT and right.value == 1:
+            return _flatten_additive_terms(left)
+
     const_value = _extract_constant_address(expr)
     if const_value is not None:
         return const_value, []
