@@ -7,43 +7,52 @@
 # ---------------------- 設定 ----------------------
 # 対象関数を配列で指定
 TARGET_FUNCS=(
-    "modulo_mixed"
-    "chained_divide"
-    "chained_modulo"
-    "complex_arithmetic"
-    "conditional_divide"
-    "signed_divide_logic"
-    "safe_divide"
-    "divide_by_power_of_2"
-    "modulo_power_of_2"
-    "bitwise_and_divide"
-    "unsigned_divide"
-    "unsigned_modulo"
-    "signed_unsigned_mix"
-    "divide_int64"
-    "modulo_uint64"
-    "widen_divide"
-    "calculate_average"
-    "calculate_percentage"
-    "divide_ceiling"
-    "divide_round"
-    "divide_by_3"
-    "divide_by_7"
-    "divide_by_10"
-    "modulo_by_10"
-    "divide_by_1000"
-    "nested_divide"
-    "nested_divmod"
-    "compound_divide"
-    "compound_modulo"
-    "ternary_divide"
-    "ternary_modulo"
+    "branch_eq"
+    "branch_ne"
+    "branch_lt"
+    "branch_le"
+    "branch_gt"
+    "branch_ge"
+    "branch_zero"
+    "branch_nonzero"
+    "branch_not"
+    "branch_closed_range"
+    "branch_half_open_range"
+    "branch_disjoint_range"
+    "branch_signed_compare"
+    "branch_unsigned_compare"
+    "branch_signed_unsigned_mix"
+    # "branch_short_circuit_and"
+    # "branch_short_circuit_or"
+    "branch_nested_boolean"
+    "branch_sign_bucket"
+    "branch_priority_select"
+    "branch_nested_if"
+    "branch_guard_clauses"
+    "branch_ternary_basic"
+    "branch_ternary_nested"
+    # "branch_ternary_with_side_effect"
+    "branch_switch_dense"
+    "branch_switch_sparse"
+    "branch_switch_fallthrough"
+    "branch_for_accumulate"
+    "branch_continue_break"
+    # "branch_while_state"
+    # "branch_do_while"
+    # "branch_pointer_check"
+    # "branch_array_scan"
+    "branch_bitmask"
+    "branch_shift_sign"
+    "branch_difference_check"
+    "branch_sum_parity"
+    "branch_multi_guard"
+    "branch_probe"
     # 必要に応じて追加
 )
 
-OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/arithmetic_long_test"
-BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test"
-PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
+OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/branch_condition_test"
+BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/branch_condition_test"
+PARALLEL_JOBS=${PARALLEL_JOBS:-10}  # 同時実行数。環境変数で上書き可能
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -53,32 +62,32 @@ fi
 
 # ---------------------- バイナリ定義 ----------------------
 declare -A BINARY_MAP=(
-    [B1]="arithmetic_long_test-arm64-clang-O0"
-    [B2]="arithmetic_long_test-arm64-clang-O1"
-    [B3]="arithmetic_long_test-arm64-clang-O2"
-    [B4]="arithmetic_long_test-arm64-clang-O3"
-    [B5]="arithmetic_long_test-arm64-gcc-O0"
-    [B6]="arithmetic_long_test-arm64-gcc-O1"
-    [B7]="arithmetic_long_test-arm64-gcc-O2"
-    [B8]="arithmetic_long_test-arm64-gcc-O3"
+    [B1]="branch_condition_test-arm64-clang-O0"
+    [B2]="branch_condition_test-arm64-clang-O1"
+    [B3]="branch_condition_test-arm64-clang-O2"
+    [B4]="branch_condition_test-arm64-clang-O3"
+    [B5]="branch_condition_test-arm64-gcc-O0"
+    [B6]="branch_condition_test-arm64-gcc-O1"
+    [B7]="branch_condition_test-arm64-gcc-O2"
+    [B8]="branch_condition_test-arm64-gcc-O3"
 
-    [B9]="arithmetic_long_test-mips64-clang-O0"
-    [B10]="arithmetic_long_test-mips64-clang-O1"
-    [B11]="arithmetic_long_test-mips64-clang-O2"
-    [B12]="arithmetic_long_test-mips64-clang-O3"
-    [B13]="arithmetic_long_test-mips64-gcc-O0"
-    [B14]="arithmetic_long_test-mips64-gcc-O1"
-    [B15]="arithmetic_long_test-mips64-gcc-O2"
-    [B16]="arithmetic_long_test-mips64-gcc-O3"
+    [B9]="branch_condition_test-mips64-clang-O0"
+    [B10]="branch_condition_test-mips64-clang-O1"
+    [B11]="branch_condition_test-mips64-clang-O2"
+    [B12]="branch_condition_test-mips64-clang-O3"
+    [B13]="branch_condition_test-mips64-gcc-O0"
+    [B14]="branch_condition_test-mips64-gcc-O1"
+    [B15]="branch_condition_test-mips64-gcc-O2"
+    [B16]="branch_condition_test-mips64-gcc-O3"
 
-    [B17]="arithmetic_long_test-x86_64-clang-O0"
-    [B18]="arithmetic_long_test-x86_64-clang-O1"
-    [B19]="arithmetic_long_test-x86_64-clang-O2"
-    [B20]="arithmetic_long_test-x86_64-clang-O3"
-    [B21]="arithmetic_long_test-x86_64-gcc-O0"
-    [B22]="arithmetic_long_test-x86_64-gcc-O1"
-    [B23]="arithmetic_long_test-x86_64-gcc-O2"
-    [B24]="arithmetic_long_test-x86_64-gcc-O3"
+    # [B17]="branch_condition_test-x86_64-clang-O0"
+    # [B18]="branch_condition_test-x86_64-clang-O1"
+    # [B19]="branch_condition_test-x86_64-clang-O2"
+    # [B20]="branch_condition_test-x86_64-clang-O3"
+    # [B21]="branch_condition_test-x86_64-gcc-O0"
+    # [B22]="branch_condition_test-x86_64-gcc-O1"
+    # [B23]="branch_condition_test-x86_64-gcc-O2"
+    # [B24]="branch_condition_test-x86_64-gcc-O3"
 )
 
 IDS=(${!BINARY_MAP[@]})
@@ -111,16 +120,17 @@ run_pair() {
 
     python3 -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
-        -f "$TARGET_FUNC" \
-        --retry-with-int \
+        -f "$TARGET_FUNC" -d \
         > "$LOG_FILE" 2>&1
     local ec=$?
 
     local status
-    if grep -q "Result: EQUIVALENT" "$LOG_FILE"; then
+    if grep -q "^Result: EQUIVALENT" "$LOG_FILE"; then
         status="EQUIVALENT ✓"
-    elif grep -q "Result: NOT EQUIVALENT" "$LOG_FILE"; then
+    elif grep -q "^Result: NOT EQUIVALENT" "$LOG_FILE"; then
         status="NOT EQUIVALENT ✗"
+    elif grep -q "^Result: ERROR" "$LOG_FILE"; then
+        status="ERROR !"
     else
         status="UNKNOWN / TIMEOUT"
     fi
@@ -132,6 +142,116 @@ run_pair() {
 
 export -f run_pair
 export BASE_PATH
+
+classify_log_result() {
+    local log_file="$1"
+
+    if grep -q "^Result: EQUIVALENT" "$log_file"; then
+        echo "EQ"
+    elif grep -q "^Result: NOT EQUIVALENT" "$log_file"; then
+        echo "NOT_EQ"
+    elif grep -q "^Result: ERROR" "$log_file"; then
+        echo "ERROR"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+summarize_phase_usage_lines() {
+    local -a log_files=("$@")
+
+    if (( ${#log_files[@]} == 0 )); then
+        return 0
+    fi
+
+    awk '
+        /^[[:space:]]+P[0-9A-Z_]+: (USED|NO_CHANGES|NOT_REACHED)/ {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+
+            phase = line
+            sub(/:.*/, "", phase)
+
+            status = line
+            sub(/^[^:]+: /, "", status)
+            sub(/ .*/, "", status)
+
+            total_logs[phase]++
+            counts[phase, status]++
+            phases[phase] = 1
+
+            meta = line
+            sub(/^[^(]*\(/, "", meta)
+            sub(/\).*/, "", meta)
+            if (meta != line) {
+                meta_count = split(meta, items, /, /)
+                for (i = 1; i <= meta_count; i++) {
+                    if (items[i] ~ /^last=/) {
+                        last = substr(items[i], 6)
+
+                        if (last == "UNSAT") {
+                            transitions[phase, "UNSAT"]++
+                        } else if (last == "SAT") {
+                            transitions[phase, "SAT"]++
+                        } else if (last == "SAT->Phase4B") {
+                            transitions[phase, "SAT_PHASE4B"]++
+                        } else if (last == "UNKNOWN") {
+                            transitions[phase, "UNKNOWN"]++
+                        } else if (last == "TIMEOUT") {
+                            transitions[phase, "TIMEOUT"]++
+                        } else if (last == "critical_error") {
+                            transitions[phase, "CRITICAL"]++
+                        } else {
+                            transitions[phase, "OTHER"]++
+                        }
+                    }
+                }
+            }
+        }
+        END {
+            for (phase in phases) {
+                total = total_logs[phase] + 0
+                used = counts[phase, "USED"] + 0
+                no_changes = counts[phase, "NO_CHANGES"] + 0
+                not_reached = counts[phase, "NOT_REACHED"] + 0
+                unsat = transitions[phase, "UNSAT"] + 0
+                sat = transitions[phase, "SAT"] + 0
+                sat_phase4b = transitions[phase, "SAT_PHASE4B"] + 0
+                unknown = transitions[phase, "UNKNOWN"] + 0
+                timeout = transitions[phase, "TIMEOUT"] + 0
+                critical = transitions[phase, "CRITICAL"] + 0
+                other = transitions[phase, "OTHER"] + 0
+                printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
+                    phase, total, used, no_changes, not_reached, unsat, sat, sat_phase4b, unknown, timeout, critical, other
+            }
+        }
+    ' "${log_files[@]}" | sort
+}
+
+print_phase_usage_summary_block() {
+    local indent="$1"
+    shift
+    local -a log_files=("$@")
+    local summary_lines
+
+    summary_lines=$(summarize_phase_usage_lines "${log_files[@]}")
+    if [[ -z "$summary_lines" ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo "${indent}Phase Usage Summary:"
+
+    while IFS=$'\t' read -r phase total used no_changes not_reached unsat sat sat_phase4b unknown timeout critical other; do
+        [[ -n "$phase" ]] || continue
+        printf "%s  - %-22s TOTAL=%3d | USED=%3d, NO_CHANGES=%3d, NOT_REACHED=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d, TIMEOUT=%3d, CRITICAL=%3d" \
+            "$indent" "$phase" "$total" "$used" "$no_changes" "$not_reached" "$unsat" "$((sat + sat_phase4b))" "$unknown" "$timeout" "$critical"
+        if (( other > 0 )); then
+            printf ", OTHER=%3d" "$other"
+        fi
+        printf "\n"
+    done <<< "$summary_lines"
+}
 
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
@@ -197,6 +317,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
 
     declare -a EQ_PAIRS=()
     declare -a NON_EQ_PAIRS=()
+    declare -a ERROR_PAIRS=()
     declare -a UNKNOWN_PAIRS=()
 
     for ((i=0; i<${#IDS[@]}-1; i++)); do
@@ -209,27 +330,50 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
                 continue
             fi
 
-            if grep -q "Result: EQUIVALENT" "$LOG_FILE"; then
+            case "$(classify_log_result "$LOG_FILE")" in
+                EQ)
                 EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-            elif grep -q "Result: NOT EQUIVALENT" "$LOG_FILE"; then
+                ;;
+                NOT_EQ)
                 NON_EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-            else
+                ;;
+                ERROR)
+                ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
+                ;;
+                *)
                 UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
-            fi
+                ;;
+            esac
         done
     done
 
     # --- tee を使って画面とファイルの両方に出力 ---
+    shopt -s nullglob
+    FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
+    shopt -u nullglob
+
     {
         echo "--- Results for $TARGET_FUNC ---"
+        echo "  Total pairs     : ${#FUNC_LOG_FILES[@]}"
         echo "  Equivalent     : ${#EQ_PAIRS[@]}"
         echo "  Not equivalent : ${#NON_EQ_PAIRS[@]}"
+        echo "  Error          : ${#ERROR_PAIRS[@]}"
         echo "  Unknown/Timeout: ${#UNKNOWN_PAIRS[@]}"
+
+        print_phase_usage_summary_block "  " "${FUNC_LOG_FILES[@]}"
 
         if (( ${#NON_EQ_PAIRS[@]} > 0 )); then
             echo ""
             echo "  NOT EQUIVALENT pairs:"
             for pair in "${NON_EQ_PAIRS[@]}"; do
+                echo "    - $pair"
+            done
+        fi
+
+        if (( ${#ERROR_PAIRS[@]} > 0 )); then
+            echo ""
+            echo "  ERROR pairs:"
+            for pair in "${ERROR_PAIRS[@]}"; do
                 echo "    - $pair"
             done
         fi
@@ -242,7 +386,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
             done
         fi
 
-        if (( ${#NON_EQ_PAIRS[@]} == 0 && ${#UNKNOWN_PAIRS[@]} == 0 )); then
+        if (( ${#NON_EQ_PAIRS[@]} == 0 && ${#ERROR_PAIRS[@]} == 0 && ${#UNKNOWN_PAIRS[@]} == 0 )); then
             echo ""
             echo "  ✓ All compared pairs are EQUIVALENT."
         fi
@@ -256,19 +400,44 @@ done
 # 全体サマリーの保存先
 SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
+mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
+
 {
     echo "============================================================"
     echo "  All functions processed: ${#TARGET_FUNCS[@]} function(s)"
     echo "============================================================"
     for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
         OUTPUT_DIR="${OUTPUT_BASE_DIR}/${TARGET_FUNC}"
-        eq_count=$(grep -l "Result: EQUIVALENT" "$OUTPUT_DIR"/*.log 2>/dev/null | wc -l)
-        non_eq_count=$(grep -l "Result: NOT EQUIVALENT" "$OUTPUT_DIR"/*.log 2>/dev/null | wc -l)
-        total_logs=$(ls "$OUTPUT_DIR"/*.log 2>/dev/null | wc -l)
-        unknown_count=$((total_logs - eq_count - non_eq_count))
-        
-        printf "  %-30s : EQ=%3d, NOT_EQ=%3d, UNKNOWN=%3d\n" \
-            "$TARGET_FUNC" "$eq_count" "$non_eq_count" "$unknown_count"
+        shopt -s nullglob
+        FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
+        shopt -u nullglob
+
+        eq_count=0
+        non_eq_count=0
+        error_count=0
+        unknown_count=0
+        total_logs=${#FUNC_LOG_FILES[@]}
+
+        for LOG_FILE in "${FUNC_LOG_FILES[@]}"; do
+            case "$(classify_log_result "$LOG_FILE")" in
+                EQ)
+                    eq_count=$((eq_count + 1))
+                    ;;
+                NOT_EQ)
+                    non_eq_count=$((non_eq_count + 1))
+                    ;;
+                ERROR)
+                    error_count=$((error_count + 1))
+                    ;;
+                *)
+                    unknown_count=$((unknown_count + 1))
+                    ;;
+            esac
+        done
+
+        printf "  %-30s : TOTAL=%3d, EQ=%3d, NOT_EQ=%3d, ERROR=%3d, UNKNOWN=%3d\n" \
+            "$TARGET_FUNC" "$total_logs" "$eq_count" "$non_eq_count" "$error_count" "$unknown_count"
     done
+    print_phase_usage_summary_block "  " "${ALL_LOG_FILES[@]}"
     echo "============================================================"
 } | tee "$SUMMARY_FILE"
