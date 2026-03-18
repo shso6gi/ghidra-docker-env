@@ -89,6 +89,8 @@ def solve_query_twostage(
     stage2_result.pair_stage = "with-ineq"
 
     if stage2_result.is_equivalent is None:
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["timeout_fallback_attempts"] += 1
         norm_result = strategy._try_normalization_equivalence(
             base_ctx,
             case1,

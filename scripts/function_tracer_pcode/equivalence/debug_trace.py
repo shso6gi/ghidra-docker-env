@@ -166,6 +166,15 @@ class DebugTrace:
                 "attempt_count": 0,
                 "result_attempt_count": 0,
                 "no_change_skip_count": 0,
+                "transition_counts": {
+                    TransitionReason.UNSAT.value: 0,
+                    TransitionReason.SAT.value: 0,
+                    TransitionReason.SAT_PHASE4B.value: 0,
+                    TransitionReason.UNKNOWN.value: 0,
+                    TransitionReason.TIMEOUT.value: 0,
+                    TransitionReason.CRITICAL_ERROR.value: 0,
+                    TransitionReason.NO_CHANGES.value: 0,
+                },
                 "last_transition_reason": None,
                 "last_result": None,
             }
@@ -181,12 +190,25 @@ class DebugTrace:
                     "attempt_count": 0,
                     "result_attempt_count": 0,
                     "no_change_skip_count": 0,
+                    "transition_counts": {
+                        TransitionReason.UNSAT.value: 0,
+                        TransitionReason.SAT.value: 0,
+                        TransitionReason.SAT_PHASE4B.value: 0,
+                        TransitionReason.UNKNOWN.value: 0,
+                        TransitionReason.TIMEOUT.value: 0,
+                        TransitionReason.CRITICAL_ERROR.value: 0,
+                        TransitionReason.NO_CHANGES.value: 0,
+                    },
                     "last_transition_reason": None,
                     "last_result": None,
                 }
             )
             phase_usage["reached"] = True
             phase_usage["attempt_count"] += 1
+            transition_counts = phase_usage["transition_counts"]
+            transition_counts[attempt.transition_reason] = (
+                transition_counts.get(attempt.transition_reason, 0) + 1
+            )
             if attempt.transition_reason == TransitionReason.NO_CHANGES.value:
                 phase_usage["no_change_skip_count"] += 1
             else:
@@ -224,6 +246,17 @@ class DebugTrace:
                 details.append(f"rechecks={entry['result_attempt_count']}")
             if entry["no_change_skip_count"] > 0:
                 details.append(f"no_changes={entry['no_change_skip_count']}")
+            transition_counts = entry["transition_counts"]
+            details.append(f"unsat={transition_counts.get(TransitionReason.UNSAT.value, 0)}")
+            details.append(f"sat={transition_counts.get(TransitionReason.SAT.value, 0)}")
+            details.append(
+                f"sat_phase4b={transition_counts.get(TransitionReason.SAT_PHASE4B.value, 0)}"
+            )
+            details.append(f"unknown={transition_counts.get(TransitionReason.UNKNOWN.value, 0)}")
+            details.append(f"timeout={transition_counts.get(TransitionReason.TIMEOUT.value, 0)}")
+            details.append(
+                f"critical={transition_counts.get(TransitionReason.CRITICAL_ERROR.value, 0)}"
+            )
             if entry["last_transition_reason"] is not None:
                 details.append(f"last={entry['last_transition_reason']}")
 

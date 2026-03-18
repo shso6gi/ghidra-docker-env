@@ -106,3 +106,27 @@ def test_to_string_can_include_phase_usage_summary():
     assert "P0_BASE: USED" in output
     assert "P1_SIGNEDNESS: USED" in output
     assert "P2_PATTERN_INT: NOT_REACHED" in output
+
+
+def test_to_string_includes_pairwise_timeout_normalization_summary():
+    result = EquivalenceResult(
+        is_equivalent=True,
+        function1_name="f",
+        function2_name="f",
+        binary1_name="b1",
+        binary2_name="b2",
+        solver_results=ParallelResult(results=[]),
+        pairwise_debug_stats={
+            "timeout_fallback_attempts": 4,
+            "changed_pairs": 3,
+            "no_change_pairs": 1,
+            "unsat_results": 2,
+            "sat_results": 1,
+            "unknown_results": 1,
+        },
+    )
+
+    output = result.to_string()
+
+    assert "Pairwise Timeout Normalization Summary:" in output
+    assert "attempts=4, changed=3, no_change=1, unsat=2, sat=1, unknown=1" in output

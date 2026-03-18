@@ -96,6 +96,15 @@ class PairwiseStrategy(CheckStrategy):
         counterexample_raw = None
         last_formula = None
         all_normalization_rules = []
+        normalization_stats = {
+            "timeout_fallback_attempts": 0,
+            "changed_pairs": 0,
+            "no_change_pairs": 0,
+            "unsat_results": 0,
+            "sat_results": 0,
+            "unknown_results": 0,
+        }
+        self._active_normalization_stats = normalization_stats
 
         for i, case1 in enumerate(cases1):
             for j, case2 in enumerate(cases2):
@@ -179,22 +188,26 @@ class PairwiseStrategy(CheckStrategy):
             counterexample_raw,
         )
 
-        return StrategyResult(
-            is_equivalent=final_is_equiv,
-            solver_results=aggregate_result,
-            smt_formula=last_formula,
-            counterexample_raw=counterexample_raw,
-            return_var1="return_1",
-            return_var2="return_2",
-            constrained_fragments=base_ctx.get("constrained_fragments", []),
-            total_pairs=total_pairs,
-            unsat_pairs=unsat_count,
-            sat_pairs=sat_count,
-            unknown_pairs=unknown_count,
-            error_pairs=error_count,
-            sat_pair_info=sat_pair_info,
-            normalization_rules=all_normalization_rules,
-        )
+        try:
+            return StrategyResult(
+                is_equivalent=final_is_equiv,
+                solver_results=aggregate_result,
+                smt_formula=last_formula,
+                counterexample_raw=counterexample_raw,
+                return_var1="return_1",
+                return_var2="return_2",
+                constrained_fragments=base_ctx.get("constrained_fragments", []),
+                total_pairs=total_pairs,
+                unsat_pairs=unsat_count,
+                sat_pairs=sat_count,
+                unknown_pairs=unknown_count,
+                error_pairs=error_count,
+                sat_pair_info=sat_pair_info,
+                normalization_rules=all_normalization_rules,
+                pairwise_debug_stats=normalization_stats,
+            )
+        finally:
+            self._active_normalization_stats = None
 
     def _solve_query_twostage(
         self,

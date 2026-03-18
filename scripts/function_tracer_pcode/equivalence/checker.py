@@ -676,6 +676,7 @@ class EquivalenceChecker:
                     'unknown_pairs': strategy_result.unknown_pairs,
                     'error_pairs': strategy_result.error_pairs,
                 } if strategy_result.total_pairs > 0 else None,
+                pairwise_debug_stats=strategy_result.pairwise_debug_stats,
                 sat_pair_info=strategy_result.sat_pair_info,
                 normalization_rules=strategy_result.normalization_rules
             )

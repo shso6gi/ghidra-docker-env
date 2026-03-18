@@ -177,7 +177,7 @@ summarize_phase_usage_lines() {
             sub(/ .*/, "", status)
 
             total_logs[phase]++
-            counts[phase, status]++
+            status_counts[phase, status]++
             phases[phase] = 1
 
             meta = line
@@ -186,43 +186,37 @@ summarize_phase_usage_lines() {
             if (meta != line) {
                 meta_count = split(meta, items, /, /)
                 for (i = 1; i <= meta_count; i++) {
-                    if (items[i] ~ /^last=/) {
-                        last = substr(items[i], 6)
+                    split(items[i], kv, "=")
+                    key = kv[1]
+                    value = kv[2] + 0
 
-                        if (last == "UNSAT") {
-                            transitions[phase, "UNSAT"]++
-                        } else if (last == "SAT") {
-                            transitions[phase, "SAT"]++
-                        } else if (last == "SAT->Phase4B") {
-                            transitions[phase, "SAT_PHASE4B"]++
-                        } else if (last == "UNKNOWN") {
-                            transitions[phase, "UNKNOWN"]++
-                        } else if (last == "TIMEOUT") {
-                            transitions[phase, "TIMEOUT"]++
-                        } else if (last == "critical_error") {
-                            transitions[phase, "CRITICAL"]++
-                        } else {
-                            transitions[phase, "OTHER"]++
-                        }
-                    }
+                    if (key == "attempts") attempt_counts[phase] += value
+                    else if (key == "rechecks") recheck_counts[phase] += value
+                    else if (key == "no_changes") no_change_counts[phase] += value
+                    else if (key == "unsat") unsat_counts[phase] += value
+                    else if (key == "sat") sat_counts[phase] += value
+                    else if (key == "sat_phase4b") sat_phase4b_counts[phase] += value
+                    else if (key == "unknown") unknown_counts[phase] += value
+                    else if (key == "timeout") timeout_counts[phase] += value
+                    else if (key == "critical") critical_counts[phase] += value
                 }
             }
         }
         END {
             for (phase in phases) {
-                total = total_logs[phase] + 0
-                used = counts[phase, "USED"] + 0
-                no_changes = counts[phase, "NO_CHANGES"] + 0
-                not_reached = counts[phase, "NOT_REACHED"] + 0
-                unsat = transitions[phase, "UNSAT"] + 0
-                sat = transitions[phase, "SAT"] + 0
-                sat_phase4b = transitions[phase, "SAT_PHASE4B"] + 0
-                unknown = transitions[phase, "UNKNOWN"] + 0
-                timeout = transitions[phase, "TIMEOUT"] + 0
-                critical = transitions[phase, "CRITICAL"] + 0
-                other = transitions[phase, "OTHER"] + 0
-                printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
-                    phase, total, used, no_changes, not_reached, unsat, sat, sat_phase4b, unknown, timeout, critical, other
+                printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
+                    phase, total_logs[phase] + 0, \
+                    status_counts[phase, "USED"] + 0, \
+                    status_counts[phase, "NO_CHANGES"] + 0, \
+                    status_counts[phase, "NOT_REACHED"] + 0, \
+                    attempt_counts[phase] + 0, \
+                    recheck_counts[phase] + 0, \
+                    unsat_counts[phase] + 0, \
+                    sat_counts[phase] + 0, \
+                    sat_phase4b_counts[phase] + 0, \
+                    unknown_counts[phase] + 0, \
+                    timeout_counts[phase] + 0, \
+                    critical_counts[phase] + 0
             }
         }
     ' "${log_files[@]}" | sort
@@ -242,15 +236,62 @@ print_phase_usage_summary_block() {
     echo ""
     echo "${indent}Phase Usage Summary:"
 
-    while IFS=$'\t' read -r phase total used no_changes not_reached unsat sat sat_phase4b unknown timeout critical other; do
+    while IFS=$'\t' read -r phase total used no_changes not_reached attempts rechecks unsat sat sat_phase4b unknown timeout critical; do
         [[ -n "$phase" ]] || continue
-        printf "%s  - %-22s TOTAL=%3d | USED=%3d, NO_CHANGES=%3d, NOT_REACHED=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d, TIMEOUT=%3d, CRITICAL=%3d" \
-            "$indent" "$phase" "$total" "$used" "$no_changes" "$not_reached" "$unsat" "$((sat + sat_phase4b))" "$unknown" "$timeout" "$critical"
-        if (( other > 0 )); then
-            printf ", OTHER=%3d" "$other"
-        fi
-        printf "\n"
+        printf "%s  - %-22s LOGS=%3d | USED=%3d, NO_CHANGES=%3d, NOT_REACHED=%3d | ATTEMPTS=%3d, RECHECKS=%3d | UNSAT=%3d, SAT=%3d, SAT->Phase4B=%3d, UNKNOWN=%3d, TIMEOUT=%3d, CRITICAL=%3d\n" \
+            "$indent" "$phase" "$total" "$used" "$no_changes" "$not_reached" "$attempts" "$rechecks" "$unsat" "$sat" "$sat_phase4b" "$unknown" "$timeout" "$critical"
     done <<< "$summary_lines"
+}
+
+summarize_pairwise_normalization_lines() {
+    local -a log_files=("$@")
+
+    if (( ${#log_files[@]} == 0 )); then
+        return 0
+    fi
+
+    awk '
+        /^[[:space:]]+attempts=[0-9]+, changed=[0-9]+, no_change=[0-9]+, unsat=[0-9]+, sat=[0-9]+, unknown=[0-9]+/ {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            line_count++
+            item_count = split(line, items, /, /)
+            for (i = 1; i <= item_count; i++) {
+                split(items[i], kv, "=")
+                totals[kv[1]] += kv[2] + 0
+            }
+        }
+        END {
+            if (line_count > 0) {
+                printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
+                    line_count, \
+                    totals["attempts"] + 0, \
+                    totals["changed"] + 0, \
+                    totals["no_change"] + 0, \
+                    totals["unsat"] + 0, \
+                    totals["sat"] + 0, \
+                    totals["unknown"] + 0
+            }
+        }
+    ' "${log_files[@]}"
+}
+
+print_pairwise_normalization_summary_block() {
+    local indent="$1"
+    shift
+    local -a log_files=("$@")
+    local summary_line
+
+    summary_line=$(summarize_pairwise_normalization_lines "${log_files[@]}")
+    if [[ -z "$summary_line" ]]; then
+        return 0
+    fi
+
+    IFS=$'\t' read -r logs attempts changed no_change unsat sat unknown <<< "$summary_line"
+    echo ""
+    echo "${indent}Pairwise Timeout Normalization Summary:"
+    printf "%s  LOGS=%3d | ATTEMPTS=%3d, CHANGED=%3d, NO_CHANGE=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d\n" \
+        "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
 
 # ---------------------- 関数ごとの処理 ----------------------
@@ -361,6 +402,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
         echo "  Unknown/Timeout: ${#UNKNOWN_PAIRS[@]}"
 
         print_phase_usage_summary_block "  " "${FUNC_LOG_FILES[@]}"
+        print_pairwise_normalization_summary_block "  " "${FUNC_LOG_FILES[@]}"
 
         if (( ${#NON_EQ_PAIRS[@]} > 0 )); then
             echo ""
@@ -439,5 +481,6 @@ mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sor
             "$TARGET_FUNC" "$total_logs" "$eq_count" "$non_eq_count" "$error_count" "$unknown_count"
     done
     print_phase_usage_summary_block "  " "${ALL_LOG_FILES[@]}"
+    print_pairwise_normalization_summary_block "  " "${ALL_LOG_FILES[@]}"
     echo "============================================================"
 } | tee "$SUMMARY_FILE"

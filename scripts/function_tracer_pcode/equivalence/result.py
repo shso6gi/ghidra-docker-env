@@ -77,6 +77,7 @@ class EquivalenceResult:
     rewrite_info: Optional[RewriteInfo] = None
     mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
     pairwise_stats: Optional[Dict[str, int]] = None
+    pairwise_debug_stats: Optional[Dict[str, int]] = None
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
     debug_trace: Optional[DebugTrace] = None
@@ -126,6 +127,7 @@ class EquivalenceResult:
             "constrained_fragments": self.constrained_fragments,
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
             "pairwise_stats": self.pairwise_stats,
+            "pairwise_debug_stats": self.pairwise_debug_stats,
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
@@ -180,6 +182,22 @@ class EquivalenceResult:
                 lines.append(f"  First SAT pair: ({info['i']}, {info['j']})")
                 lines.append(f"    Case1: {info['case1_summary']}")
                 lines.append(f"    Case2: {info['case2_summary']}")
+
+        if self.pairwise_debug_stats:
+            stats = self.pairwise_debug_stats
+            lines.append("")
+            lines.append("Pairwise Timeout Normalization Summary:")
+            lines.append(
+                "  attempts={attempts}, changed={changed}, no_change={no_change}, "
+                "unsat={unsat}, sat={sat}, unknown={unknown}".format(
+                    attempts=stats.get("timeout_fallback_attempts", 0),
+                    changed=stats.get("changed_pairs", 0),
+                    no_change=stats.get("no_change_pairs", 0),
+                    unsat=stats.get("unsat_results", 0),
+                    sat=stats.get("sat_results", 0),
+                    unknown=stats.get("unknown_results", 0),
+                )
+            )
                 
         lines.append("")
         

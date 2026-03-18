@@ -25,6 +25,7 @@ def try_normalization_equivalence(
     normalization_rule_application_cls,
 ):
     """正規化して値式を SMT で比較する"""
+    normalization_stats = getattr(strategy, "_active_normalization_stats", None)
     value1_orig = case1.value_expr
     value2_orig = case2.value_expr
 
@@ -170,9 +171,15 @@ def try_normalization_equivalence(
 
     if not changed1 and not changed2:
         strategy._debug_print("    No normalization applied -> remain UNKNOWN")
+        if normalization_stats is not None:
+            normalization_stats["no_change_pairs"] += 1
+            normalization_stats["unknown_results"] += 1
         result = QueryResult(is_equivalent=None)
         result.normalization_rules = normalization_rules
         return result
+
+    if normalization_stats is not None:
+        normalization_stats["changed_pairs"] += 1
 
     is_struct_eq, struct_reason = are_structurally_equivalent_fn(
         value1_norm,
@@ -217,6 +224,8 @@ def try_normalization_equivalence(
     norm_result.normalization_rules = normalization_rules
 
     if norm_result.is_equivalent is True:
+        if normalization_stats is not None:
+            normalization_stats["unsat_results"] += 1
         strategy._debug_print("    Normalized inequality: UNSAT -> values are equivalent")
         if is_struct_eq:
             strategy._debug_print("    (Structural match was confirmed by SMT)")
@@ -226,6 +235,8 @@ def try_normalization_equivalence(
         return norm_result
 
     if norm_result.is_equivalent is False:
+        if normalization_stats is not None:
+            normalization_stats["sat_results"] += 1
         strategy._debug_print("    Normalized inequality: SAT -> genuine counterexample found")
         if is_struct_eq:
             strategy._debug_print(
@@ -240,6 +251,8 @@ def try_normalization_equivalence(
         return norm_result
 
     strategy._debug_print("    Normalized inequality: UNKNOWN -> remain UNKNOWN")
+    if normalization_stats is not None:
+        normalization_stats["unknown_results"] += 1
     if is_struct_eq:
         strategy._debug_print("    (Structural match detected but SMT solver timed out)")
     return norm_result
