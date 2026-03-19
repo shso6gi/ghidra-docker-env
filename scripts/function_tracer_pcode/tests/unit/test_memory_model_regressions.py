@@ -625,7 +625,29 @@ def test_effect_summary_does_not_reapply_self_referential_store():
         [_param("box", size=8, is_signed=False), _param("delta", size=4, index=1)],
     )
 
-    assert rewritten.to_string() == "((MEM[(box + 4)] + delta) + delta)"
+    assert rewritten.to_string() == "(MEM[(box + 4)] + delta)"
+
+
+def test_effect_summary_does_not_reapply_commuted_self_referential_store():
+    box = Expression.parameter("box", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    right_addr = Expression.binary_op("INT_ADD", box, Expression.constant(4, 8))
+    original = Expression.binary_op("INT_ADD", delta, Expression.memory(right_addr, size=4))
+    effect = StoreEffect(
+        location=CanonicalLocation("box", 4, 4),
+        value=Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta),
+        conditions=[],
+        order_key=3,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [],
+        [effect],
+        [_param("box", size=8, is_signed=False), _param("delta", size=4, index=1)],
+    )
+
+    assert rewritten.to_string() == "(delta + MEM[(box + 4)])"
 
 
 def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():

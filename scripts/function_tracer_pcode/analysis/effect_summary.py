@@ -251,6 +251,8 @@ def rewrite_loads_from_effects(
         return expr
 
     active_blocked_locations = list(blocked_locations or [])
+    if _matches_existing_effect_value(expr, return_conditions, effects, max_order_key=max_order_key):
+        return expr
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = rewrite_loads_from_effects(
@@ -374,6 +376,96 @@ def rewrite_loads_from_effects(
         return rebuilt
 
     return expr
+
+
+def _matches_existing_effect_value(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    max_order_key: Optional[int] = None,
+) -> bool:
+    for effect in effects:
+        if max_order_key is not None and effect.order_key >= max_order_key:
+            continue
+        if ConditionSimplifier.is_contradiction(list(return_conditions) + list(effect.conditions)):
+            continue
+        if _expressions_equivalent(expr, effect.value):
+            return True
+    return False
+
+
+def _expressions_equivalent(left: Optional[Expression], right: Optional[Expression]) -> bool:
+    if left is right:
+        return True
+    if left is None or right is None:
+        return False
+    if left.expr_type != right.expr_type:
+        return False
+    if left.expr_type == ExpressionType.CONSTANT:
+        return left.value == right.value and left.size == right.size
+    if left.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.UNKNOWN, ExpressionType.CALL):
+        return (
+            left.name == right.name
+            and left.value == right.value
+            and left.size == right.size
+        )
+    if left.expr_type == ExpressionType.MEMORY:
+        return left.size == right.size and _expressions_equivalent(left.operands[0], right.operands[0])
+    if left.expr_type == ExpressionType.UNARY_OP:
+        return (
+            left.operator == right.operator
+            and left.size == right.size
+            and len(left.operands) == len(right.operands)
+            and all(_expressions_equivalent(lop, rop) for lop, rop in zip(left.operands, right.operands))
+        )
+    if left.expr_type == ExpressionType.BINARY_OP:
+        if left.operator != right.operator or left.size != right.size:
+            return False
+        if len(left.operands) != 2 or len(right.operands) != 2:
+            return False
+        left_pair = (left.operands[0], left.operands[1])
+        right_pair = (right.operands[0], right.operands[1])
+        if all(_expressions_equivalent(lop, rop) for lop, rop in zip(left_pair, right_pair)):
+            return True
+        if left.operator in {
+            "INT_ADD",
+            "INT_MULT",
+            "INT_AND",
+            "INT_OR",
+            "INT_XOR",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+        }:
+            return _expressions_equivalent(left.operands[0], right.operands[1]) and _expressions_equivalent(
+                left.operands[1], right.operands[0]
+            )
+        return False
+    if left.expr_type == ExpressionType.PHI:
+        if left.size != right.size or not left.value or not right.value or len(left.value) != len(right.value):
+            return False
+        for (left_cond, left_value), (right_cond, right_value) in zip(left.value, right.value):
+            if left_cond is None or right_cond is None:
+                if left_cond is not right_cond:
+                    return False
+            else:
+                if left_cond.negated != right_cond.negated:
+                    return False
+                if not _expressions_equivalent(left_cond.expression, right_cond.expression):
+                    return False
+            if not _expressions_equivalent(left_value, right_value):
+                return False
+        return True
+    return (
+        left.operator == right.operator
+        and left.name == right.name
+        and left.value == right.value
+        and left.size == right.size
+        and len(left.operands) == len(right.operands)
+        and all(_expressions_equivalent(lop, rop) for lop, rop in zip(left.operands, right.operands))
+    )
 
 
 def build_void_effect_summary_expr(effects: Sequence[StoreEffect]) -> Optional[Expression]:
