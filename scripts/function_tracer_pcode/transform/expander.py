@@ -415,7 +415,15 @@ class ExpressionExpander:
             self._debug_print(f"  Input[{i}] expanded to {len(expanded)} values", depth)
         
         # 組み合わせを生成
-        return self._combine_input_expansions_with_conditions(mnemonic, input_expansions, conditions, depth)
+        output = pcode_op.getOutput()
+        output_size = output.getSize() if output else 0
+        return self._combine_input_expansions_with_conditions(
+            mnemonic,
+            input_expansions,
+            conditions,
+            depth,
+            output_size=output_size,
+        )
     
     def _op_contains_multiequal(self, pcode_op, depth: int = 0) -> bool:
         """PcodeOpの入力ツリーにMULTIEQUALが含まれるかチェック"""
@@ -468,14 +476,23 @@ class ExpressionExpander:
             if len(expanded) > 1:
                 self._debug_print(f"  Input[{i}] has {len(expanded)} expansions", depth)
         
-        return self._combine_input_expansions_with_conditions(mnemonic, input_expansions, base_conditions, depth)
+        output = pcode_op.getOutput()
+        output_size = output.getSize() if output else 0
+        return self._combine_input_expansions_with_conditions(
+            mnemonic,
+            input_expansions,
+            base_conditions,
+            depth,
+            output_size=output_size,
+        )
     
     def _combine_input_expansions_with_conditions(
         self,
         mnemonic: str,
         input_expansions: List[List[ExpandedValue]],
         base_conditions: List[Condition],
-        depth: int
+        depth: int,
+        output_size: int = 0,
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
         self._debug_print(f"Combining expansions for {mnemonic}", depth)
@@ -505,7 +522,15 @@ class ExpressionExpander:
                         self._debug_print(f"  Combination contradictory, skip", depth)
                         continue
                     
-                    new_value = Expression.binary_op(mnemonic, left_ev.value, right_ev.value)
+                    if mnemonic == "LOAD":
+                        new_value = Expression.memory(
+                            right_ev.value,
+                            output_size if output_size > 0 else 4,
+                        )
+                    else:
+                        new_value = Expression.binary_op(mnemonic, left_ev.value, right_ev.value)
+                        if output_size > 0 and new_value.size == 0:
+                            new_value.size = output_size
                     simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
                     result.append(ExpandedValue(new_value, simplified_conds))
                     self._debug_print(f"  Combined: {new_value.to_string()}", depth)

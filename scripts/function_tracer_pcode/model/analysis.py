@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from .expression import Expression
     from ..analysis.signedness import SignednessEvidence
 
-
 @dataclass
 class ReturnInfo:
     """単一のreturn文の情報"""

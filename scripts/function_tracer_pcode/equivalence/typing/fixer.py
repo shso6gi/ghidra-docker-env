@@ -212,6 +212,8 @@ class TypeFixer:
             return False
         
         type_lower = type_str.lower().strip()
+        if "*" in type_lower or "ptr" in type_lower:
+            return False
         
         for pattern in self.config.target_patterns:
             if pattern in type_lower:

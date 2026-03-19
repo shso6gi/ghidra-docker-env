@@ -261,6 +261,9 @@ class PhaseHandler:
                 type_str = str(raw_dt).lower().strip()
             else:
                 type_str = param.get("data_type", "").lower().strip()
+
+            if "*" in type_str or "ptr" in type_str:
+                continue
             
             for pattern in self.type_fixer_config.target_patterns:
                 if pattern in type_str:

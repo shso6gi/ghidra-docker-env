@@ -4,9 +4,18 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
     collect_memory_bit_widths_from_analysis,
     concretize_readonly_loads,
 )
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CanonicalLocation,
+    StoreEffect,
+    build_void_effect_summary_expr,
+    canonicalize_param_location,
+    rewrite_loads_from_effects,
+)
+from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
 
 
 def _param(name: str, size: int = 4, is_signed: bool = True, index: int = 0):
@@ -337,3 +346,248 @@ def test_memory_resolver_concretizes_mips_got_base_symbol_with_address_suffix():
     assert resolved.expr_type.name == "PHI"
     values = [branch_value.value for _, branch_value in resolved.value[:-1]]
     assert values == [5, 7, 11, 13, 17, 19]
+
+
+def test_memory_resolver_splits_load_of_phi_address_into_phi_of_loads():
+    base = Expression.parameter("param_1", 0, size=8)
+    addr_phi = Expression.phi(
+        [
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("pick_right", 1, size=4),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                ),
+                Expression.binary_op("INT_ADD", base, Expression.constant(4, 8)),
+            ),
+            (None, base),
+        ]
+    )
+    addr_phi.size = 8
+    load_expr = Expression.memory(addr_phi, size=4)
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [],
+        [_param("param_1", size=8, is_signed=False), _param("pick_right", size=4)],
+        lambda addr, size: None,
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    assert resolved.value[0][1].expr_type.name == "MEMORY"
+    assert resolved.value[1][1].expr_type.name == "MEMORY"
+
+
+def test_memory_resolver_splits_bool_scaled_offset_load_into_two_loads():
+    base = Expression.parameter("param_1", 0, size=8)
+    cond_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.parameter("pick_right", 1, size=4),
+        Expression.constant(0, 4),
+    )
+    addr_expr = Expression.binary_op(
+        "INT_ADD",
+        base,
+        Expression.binary_op("INT_MULT", cond_expr, Expression.constant(4, 8)),
+    )
+    load_expr = Expression.memory(addr_expr, size=4)
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [],
+        [_param("param_1", size=8, is_signed=False), _param("pick_right", size=4)],
+        lambda addr, size: None,
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    first_addr = resolved.value[0][1].operands[0]
+    second_addr = resolved.value[1][1].operands[0]
+    assert first_addr.to_string() == "(param_1 + 4)"
+    assert second_addr.to_string() == "param_1"
+
+
+def test_effect_summary_rewrites_load_from_prior_store_under_same_path():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    original = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(ptr, size=4),
+        Expression.constant(0xFFFFFFFF, 4),
+    )
+    effect = StoreEffect(
+        location=CanonicalLocation("ptr", 0, 4),
+        value=Expression.binary_op("INT_ADD", value, Expression.constant(3, 4)),
+        conditions=[
+            Condition(
+                Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+                False,
+            )
+        ],
+        order_key=1,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        effect.conditions,
+        [effect],
+        [_param("ptr", size=8, is_signed=False), _param("value", size=4, index=1)],
+    )
+
+    assert rewritten.to_string() == "((value + 3) + 4294967295)"
+
+
+def test_effect_summary_builds_synthetic_expr_for_void_writes():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    positive = Condition(
+        Expression.binary_op("INT_SLESS", Expression.constant(0, 4), value),
+        False,
+    )
+    non_positive = positive.negate()
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=value,
+            conditions=[positive],
+            order_key=2,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=Expression.unary_op("INT_2COMP", value),
+            conditions=[non_positive],
+            order_key=1,
+        ),
+    ]
+
+    summary = build_void_effect_summary_expr(effects)
+
+    assert summary is not None
+    assert summary.expr_type.name == "BINARY_OP"
+    assert summary.operator == "PIECE"
+
+
+def test_effect_summary_accepts_variable_based_parameter_addresses():
+    addr_expr = Expression.variable("ptr", size=8)
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("ptr", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("ptr", 0, 4)
+
+
+def test_effect_summary_accepts_variable_plus_constant_parameter_addresses():
+    addr_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("box", size=8),
+        Expression.constant(4, 8),
+    )
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("box", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("box", 4, 4)
+
+
+def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
+    addr_expr = Expression.binary_op(
+        "INT_MULT",
+        Expression.constant(1, 8),
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.variable("box", size=8),
+            Expression.constant(4, 8),
+        ),
+    )
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("box", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("box", 4, 4)
+
+
+def test_effect_summary_accepts_subpiece_lower_parameter_addresses():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    addr_expr = Expression.unary_op(
+        "INT_ZEXT",
+        Expression.binary_op("SUBPIECE", ptr, Expression.constant(0, 4)),
+    )
+    addr_expr.size = 8
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("ptr", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("ptr", 0, 4)
+
+
+def test_effect_summary_keeps_load_when_multiple_writes_overlap():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    original = Expression.memory(ptr, size=4)
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=Expression.constant(1, 4),
+            conditions=[],
+            order_key=2,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=Expression.constant(2, 4),
+            conditions=[],
+            order_key=1,
+        ),
+    ]
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [],
+        effects,
+        [_param("ptr", size=8, is_signed=False)],
+    )
+
+    assert rewritten.expr_type.name == "MEMORY"
+
+
+def test_expander_combines_load_inputs_into_memory_expression():
+    tracer = type("Tracer", (), {"debug": False})()
+    expander = ExpressionExpander(tracer, condition_tracker=None, debug=False)
+
+    result = expander._combine_input_expansions_with_conditions(
+        "LOAD",
+        [
+            [ExpandedValue(Expression.constant(0x1B1, 4), [])],
+            [ExpandedValue(Expression.parameter("ptr", 0, size=8), [])],
+        ],
+        [],
+        0,
+        output_size=4,
+    )
+
+    assert len(result) == 1
+    assert result[0].value.expr_type.name == "MEMORY"
+    assert result[0].value.to_string() == "MEM[ptr]"
+
+
+def test_type_fixer_does_not_pattern_fix_pointer_types():
+    fixer = object.__new__(TypeFixer)
+    fixer.config = TypeFixerConfig()
+    fixer.debug = False
+
+    assert fixer._should_fix_type("undefined4")
+    assert not fixer._should_fix_type("undefined4 *")

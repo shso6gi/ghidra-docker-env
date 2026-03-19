@@ -8,6 +8,7 @@ from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResul
 from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
+from .effect_summary import rewrite_loads_from_effects, summarize_store_effects
 from .memory_resolver import concretize_readonly_loads
 
 
@@ -19,6 +20,7 @@ class ReturnAnalyzer:
         self.debug = debug
         self._decompiler = None
         self._current_parameters: List[Dict] = []
+        self._effect_summary_cache: Dict[str, Any] = {}
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -182,6 +184,14 @@ class ReturnAnalyzer:
         parameters = self._collect_parameters(high_function)
         self._current_parameters = parameters
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
+        effect_summary = self._build_effect_summary(
+            function,
+            high_function,
+            tracer,
+            condition_tracker,
+            parameters,
+            active_functions={function.getName()},
+        )
         
         # 戻り値の型を取得
         return_type = self._get_return_type(high_function)
@@ -213,6 +223,34 @@ class ReturnAnalyzer:
             return_type=return_type,
             signedness_result=signedness_result
         )
+
+        if effect_summary.effects:
+            rewritten_returns = []
+            for ret in result.returns:
+                rewritten_returns.append(
+                    ReturnInfo(
+                        address=ret.address,
+                        conditions=ret.conditions,
+                        branch_index=ret.branch_index,
+                        value=rewrite_loads_from_effects(
+                            ret.value,
+                            ret.conditions,
+                            effect_summary.effects,
+                            parameters,
+                        ),
+                    )
+                )
+            result.returns = rewritten_returns
+
+        if return_type and return_type.strip().lower() == "void" and effect_summary.synthetic_expr is not None:
+            result.returns = [
+                ReturnInfo(
+                    address=str(function.getEntryPoint()),
+                    conditions=[],
+                    branch_index=0,
+                    value=effect_summary.synthetic_expr,
+                )
+            ]
         
         # デバッグダンプ（解析結果の可視化）
         self._dump_return_infos(result)
@@ -233,6 +271,68 @@ class ReturnAnalyzer:
             print(f"  Use --debug flag for detailed report")
         
         return result
+
+    def _build_effect_summary(
+        self,
+        function,
+        high_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        parameters: List[Dict],
+        active_functions: set,
+    ):
+        cache_key = str(function.getEntryPoint())
+        cached = self._effect_summary_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        def summarize_call(function_name: str, args):
+            if function_name in active_functions:
+                return None
+            callee = self._find_function_by_name(function_name)
+            if callee is None:
+                return None
+            callee_key = str(callee.getEntryPoint())
+            cached_callee = self._effect_summary_cache.get(callee_key)
+            if cached_callee is not None:
+                return cached_callee
+
+            decompiler = self._get_decompiler()
+            results = decompiler.decompileFunction(callee, 60, None)
+            if not results.decompileCompleted():
+                return None
+            callee_high = results.getHighFunction()
+            if callee_high is None:
+                return None
+
+            callee_tracer = PcodeTracer(self.program, callee_high, debug=self.debug)
+            callee_tracker = ConditionTracker(callee_tracer)
+            from .phi_resolver import PhiHandler
+
+            callee_phi_handler = PhiHandler(callee_tracer, callee_tracker)
+            callee_tracer.phi_handler = callee_phi_handler
+            callee_tracker.build()
+            callee_parameters = self._collect_parameters(callee_high)
+            summary = self._build_effect_summary(
+                callee,
+                callee_high,
+                callee_tracer,
+                callee_tracker,
+                callee_parameters,
+                active_functions | {function_name},
+            )
+            return summary
+
+        summary = summarize_store_effects(
+            condition_tracker.block_by_index.values(),
+            tracer,
+            condition_tracker,
+            parameters,
+            direct_call_summary=summarize_call,
+            debug=self.debug,
+        )
+        self._effect_summary_cache[cache_key] = summary
+        return summary
     
     def _detect_signedness(self, high_function) -> Optional[SignednessResult]:
         """

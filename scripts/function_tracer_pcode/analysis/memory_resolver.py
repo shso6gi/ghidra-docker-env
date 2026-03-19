@@ -94,6 +94,26 @@ def _rewrite_expr(
             debug,
         )
         candidate = Expression.memory(rewritten_addr, expr.size)
+        split_phi = _split_memory_address_phi(candidate)
+        if split_phi is not None:
+            return _rewrite_expr(
+                split_phi,
+                conditions,
+                parameters,
+                read_memory_value,
+                image_base,
+                debug,
+            )
+        split_conditional = _split_conditional_offset_load(candidate)
+        if split_conditional is not None:
+            return _rewrite_expr(
+                split_conditional,
+                conditions,
+                parameters,
+                read_memory_value,
+                image_base,
+                debug,
+            )
         resolved = _try_resolve_readonly_load(
             candidate,
             conditions,
@@ -144,6 +164,130 @@ def _rewrite_expr(
         return rebuilt
 
     return expr
+
+
+def _split_memory_address_phi(expr: Expression) -> Optional[Expression]:
+    if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
+        return None
+
+    addr = expr.operands[0]
+    if addr.expr_type != ExpressionType.PHI or not addr.value:
+        return None
+
+    branches = []
+    for cond, branch_addr in addr.value:
+        branches.append((cond, Expression.memory(branch_addr, expr.size)))
+
+    split = Expression.phi(branches)
+    split.size = expr.size
+    return split
+
+
+def _split_conditional_offset_load(expr: Expression) -> Optional[Expression]:
+    if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
+        return None
+
+    pattern = _extract_conditional_offset_pattern(expr.operands[0])
+    if pattern is None:
+        return None
+
+    cond_expr, base_addr, offset_value = pattern
+    branches = [
+        (
+            Condition(cond_expr, False),
+            Expression.memory(
+                Expression.binary_op(
+                    "INT_ADD",
+                    base_addr,
+                    Expression.constant(offset_value, max(1, base_addr.size or 8)),
+                ),
+                expr.size,
+            ),
+        ),
+        (None, Expression.memory(base_addr, expr.size)),
+    ]
+    split = Expression.phi(branches)
+    split.size = expr.size
+    return split
+
+
+def _extract_conditional_offset_pattern(
+    addr_expr: Expression,
+) -> Optional[Tuple[Expression, Expression, int]]:
+    if (
+        addr_expr.expr_type != ExpressionType.BINARY_OP
+        or addr_expr.operator != "INT_ADD"
+        or len(addr_expr.operands) != 2
+    ):
+        return None
+
+    left, right = addr_expr.operands
+    scaled = _extract_bool_scaled_constant(right)
+    if scaled is not None:
+        cond_expr, offset_value = scaled
+        return cond_expr, left, offset_value
+
+    scaled = _extract_bool_scaled_constant(left)
+    if scaled is not None:
+        cond_expr, offset_value = scaled
+        return cond_expr, right, offset_value
+
+    return None
+
+
+def _extract_bool_scaled_constant(expr: Expression) -> Optional[Tuple[Expression, int]]:
+    if (
+        expr.expr_type != ExpressionType.BINARY_OP
+        or expr.operator != "INT_MULT"
+        or len(expr.operands) != 2
+    ):
+        return None
+
+    left, right = expr.operands
+
+    if right.expr_type == ExpressionType.CONSTANT and isinstance(right.value, int):
+        bool_expr = _unwrap_bool_to_bitvec(left)
+        if bool_expr is not None:
+            return bool_expr, right.value
+
+    if left.expr_type == ExpressionType.CONSTANT and isinstance(left.value, int):
+        bool_expr = _unwrap_bool_to_bitvec(right)
+        if bool_expr is not None:
+            return bool_expr, left.value
+
+    return None
+
+
+def _unwrap_bool_to_bitvec(expr: Expression) -> Optional[Expression]:
+    if _is_boolean_expr(expr):
+        return expr
+
+    if (
+        expr.expr_type == ExpressionType.UNARY_OP
+        and expr.operator in {"INT_ZEXT", "INT_SEXT"}
+        and expr.operands
+        and _is_boolean_expr(expr.operands[0])
+    ):
+        return expr.operands[0]
+
+    return None
+
+
+def _is_boolean_expr(expr: Expression) -> bool:
+    return (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator in {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        }
+    )
 
 
 def _try_resolve_readonly_load(
