@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     StoreEffect,
+    _resolve_call_target_name,
     build_void_effect_summary_expr,
     canonicalize_param_location,
     rewrite_loads_from_effects,
@@ -562,6 +563,160 @@ def test_effect_summary_keeps_load_when_multiple_writes_overlap():
     )
 
     assert rewritten.expr_type.name == "MEMORY"
+
+
+def test_effect_summary_skips_effects_that_contradict_return_conditions():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    flag = Expression.parameter("flag", 1, size=4)
+    original = Expression.memory(ptr, size=4)
+    positive = Condition(
+        Expression.binary_op("INT_NOTEQUAL", flag, Expression.constant(0, 4)),
+        False,
+    )
+    negative = positive.negate()
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=Expression.parameter("v_true", 2, size=4),
+            conditions=[positive],
+            order_key=2,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("ptr", 0, 4),
+            value=Expression.parameter("v_false", 3, size=4),
+            conditions=[negative],
+            order_key=1,
+        ),
+    ]
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [positive],
+        effects,
+        [
+            _param("ptr", size=8, is_signed=False),
+            _param("flag", size=4, index=1),
+            _param("v_true", size=4, index=2),
+            _param("v_false", size=4, index=3),
+        ],
+    )
+
+    assert rewritten.to_string() == "v_true"
+
+
+def test_effect_summary_does_not_reapply_self_referential_store():
+    box = Expression.parameter("box", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    right_addr = Expression.binary_op("INT_ADD", box, Expression.constant(4, 8))
+    original = Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta)
+    effect = StoreEffect(
+        location=CanonicalLocation("box", 4, 4),
+        value=Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta),
+        conditions=[],
+        order_key=3,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [],
+        [effect],
+        [_param("box", size=8, is_signed=False), _param("delta", size=4, index=1)],
+    )
+
+    assert rewritten.to_string() == "((MEM[(box + 4)] + delta) + delta)"
+
+
+def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", dst, src),
+        False,
+    )
+    original = Expression.memory(src, size=4)
+    effect = StoreEffect(
+        location=CanonicalLocation("dst", 0, 4),
+        value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+        conditions=[alias_cond],
+        order_key=4,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [alias_cond],
+        [effect],
+        [
+            _param("dst", size=8, is_signed=False),
+            _param("src", size=8, is_signed=False, index=1),
+            _param("delta", size=4, index=2),
+        ],
+    )
+
+    assert rewritten.to_string() == "(MEM[dst] + delta)"
+
+
+def test_effect_summary_resolves_callind_target_from_traced_constant():
+    class FakeVarnode:
+        def __init__(self, is_constant=False):
+            self._is_constant = is_constant
+
+        def isConstant(self):
+            return self._is_constant
+
+    class FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return FakeAddressSpace()
+
+    class FakeFunction:
+        def __init__(self, name):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class FakeFunctionManager:
+        def getFunctionAt(self, addr):
+            if addr == 0x401000:
+                return FakeFunction("callee")
+            return None
+
+    class FakeProgram:
+        def getAddressFactory(self):
+            return FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return FakeFunctionManager()
+
+    class FakeTracer:
+        def __init__(self):
+            self.program = FakeProgram()
+
+        def _get_function_name(self, _addr_varnode):
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.constant(0x401000, 8)
+
+    class FakeOp:
+        def __init__(self):
+            self._input = FakeVarnode(is_constant=False)
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+    assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
 
 
 def test_expander_combines_load_inputs_into_memory_expression():

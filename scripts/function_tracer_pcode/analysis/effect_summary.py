@@ -70,10 +70,12 @@ def summarize_store_effects(
                     )
                 continue
 
-            if mnemonic != "CALL" or direct_call_summary is None or op.getNumInputs() < 1:
+            if mnemonic not in {"CALL", "CALLIND"} or direct_call_summary is None or op.getNumInputs() < 1:
                 continue
 
-            target_name = tracer._get_function_name(op.getInput(0))
+            target_name = _resolve_call_target_name(tracer, op)
+            if not target_name:
+                continue
             args = [
                 tracer.trace_varnode(op.getInput(i), use_cache=False)
                 for i in range(1, op.getNumInputs())
@@ -111,6 +113,39 @@ def summarize_store_effects(
             f"for params={parameter_names}"
         )
     return EffectSummary(parameter_names=parameter_names, effects=effects, synthetic_expr=synthetic_expr)
+
+
+def _resolve_call_target_name(tracer, op) -> Optional[str]:
+    if op.getNumInputs() < 1:
+        return None
+
+    target_varnode = op.getInput(0)
+    mnemonic = op.getMnemonic()
+    if mnemonic == "CALL":
+        target_name = tracer._get_function_name(target_varnode)
+        return None if target_name == "UNKNOWN_FUNC" else target_name
+
+    if mnemonic != "CALLIND":
+        return None
+
+    target_name = tracer._get_function_name(target_varnode)
+    if target_name != "UNKNOWN_FUNC":
+        return target_name
+
+    traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
+    if traced_target.expr_type != ExpressionType.CONSTANT or not isinstance(traced_target.value, int):
+        return None
+
+    try:
+        default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
+        addr = default_space.getAddress(traced_target.value)
+        func = tracer.program.getFunctionManager().getFunctionAt(addr)
+        if func:
+            return func.getName()
+    except Exception:
+        return None
+
+    return None
 
 
 def canonicalize_param_location(
@@ -155,9 +190,12 @@ def rewrite_loads_from_effects(
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
+    blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
 ) -> Expression:
     if expr is None:
         return expr
+
+    active_blocked_locations = list(blocked_locations or [])
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = rewrite_loads_from_effects(
@@ -166,17 +204,26 @@ def rewrite_loads_from_effects(
             effects,
             parameters,
             max_order_key=max_order_key,
+            blocked_locations=active_blocked_locations,
         )
         location = canonicalize_param_location(rewritten_addr, parameters, size=expr.size)
         candidate = Expression.memory(rewritten_addr, expr.size)
         if location is None:
             return candidate
 
+        for blocked_location in active_blocked_locations:
+            if blocked_location.size != expr.size:
+                continue
+            if locations_match(location, blocked_location, return_conditions):
+                return candidate
+
         matched = []
         for effect in effects:
             if max_order_key is not None and effect.order_key >= max_order_key:
                 continue
             if effect.location.size != expr.size:
+                continue
+            if ConditionSimplifier.is_contradiction(list(return_conditions) + list(effect.conditions)):
                 continue
             if not locations_match(location, effect.location, list(return_conditions) + effect.conditions):
                 continue
@@ -203,6 +250,7 @@ def rewrite_loads_from_effects(
                             effects,
                             parameters,
                             max_order_key=effect_order,
+                            blocked_locations=active_blocked_locations + [location],
                         ),
                     )
                 )
@@ -213,6 +261,7 @@ def rewrite_loads_from_effects(
                     effects,
                     parameters,
                     max_order_key=effect_order,
+                    blocked_locations=active_blocked_locations + [location],
                 )
 
         branches.append((None, candidate))
@@ -228,6 +277,7 @@ def rewrite_loads_from_effects(
                 effects,
                 parameters,
                 max_order_key=max_order_key,
+                blocked_locations=active_blocked_locations,
             )
             for op in expr.operands
         ]
@@ -258,6 +308,7 @@ def rewrite_loads_from_effects(
                 effects,
                 parameters,
                 max_order_key=max_order_key,
+                blocked_locations=active_blocked_locations,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
