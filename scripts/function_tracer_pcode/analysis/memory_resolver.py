@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from .condition.normalizer import ConditionNormalizer
 from ..model import Condition, Expression, ExpressionType
 
 
@@ -435,39 +436,50 @@ def _extract_index_range(
     upper_bound: Optional[int] = None
 
     for cond in conditions:
-        if cond.negated:
+        left_str, op, right_str, is_positive = ConditionNormalizer.normalize(cond)
+        if not is_positive or not op:
             continue
 
-        expr = cond.expression
-        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) < 2:
-            continue
-
-        left, right = expr.operands[0], expr.operands[1]
-
-        if expr.operator == "INT_SLESS":
-            if _is_zero_constant(left) and _is_named_param(right, param_name):
+        if op == "INT_SLESS":
+            if left_str in {"0", "-1"} and right_str == param_name:
                 nonneg = True
-            elif _is_minus_one_constant(left) and _is_named_param(right, param_name):
+            elif left_str == param_name:
+                bound = _parse_nonnegative_int(right_str)
+                if bound is not None:
+                    upper_bound = bound if upper_bound is None else min(upper_bound, bound)
+        elif op == "INT_LESS":
+            if left_str == param_name:
+                bound = _parse_nonnegative_int(right_str)
+                if bound is not None:
+                    upper_bound = bound if upper_bound is None else min(upper_bound, bound)
+        elif op == "INT_LESSEQUAL":
+            if left_str == param_name:
+                bound = _parse_nonnegative_int(right_str)
+                if bound is not None:
+                    upper_bound_value = bound + 1
+                    upper_bound = (
+                        upper_bound_value if upper_bound is None else min(upper_bound, upper_bound_value)
+                    )
+        elif op == "INT_SLESSEQUAL":
+            if left_str == "0" and right_str == param_name:
                 nonneg = True
-            elif _is_named_param(left, param_name) and _is_nonnegative_constant(right):
-                bound = int(right.value)
-                upper_bound = bound if upper_bound is None else min(upper_bound, bound)
-        elif expr.operator == "INT_LESS":
-            if _is_named_param(left, param_name) and _is_nonnegative_constant(right):
-                bound = int(right.value)
-                upper_bound = bound if upper_bound is None else min(upper_bound, bound)
-        elif expr.operator == "INT_LESSEQUAL":
-            if _is_named_param(left, param_name) and _is_nonnegative_constant(right):
-                bound = int(right.value) + 1
-                upper_bound = bound if upper_bound is None else min(upper_bound, bound)
-        elif expr.operator == "INT_SLESSEQUAL":
-            if _is_zero_constant(left) and _is_named_param(right, param_name):
-                nonneg = True
-            elif _is_named_param(left, param_name) and _is_nonnegative_constant(right):
-                bound = int(right.value) + 1
-                upper_bound = bound if upper_bound is None else min(upper_bound, bound)
+            elif left_str == param_name:
+                bound = _parse_nonnegative_int(right_str)
+                if bound is not None:
+                    upper_bound_value = bound + 1
+                    upper_bound = (
+                        upper_bound_value if upper_bound is None else min(upper_bound, upper_bound_value)
+                    )
 
     return nonneg, upper_bound
+
+
+def _parse_nonnegative_int(value: str) -> Optional[int]:
+    try:
+        parsed = int(value, 0)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _is_named_param(expr: Expression, param_name: str) -> bool:
