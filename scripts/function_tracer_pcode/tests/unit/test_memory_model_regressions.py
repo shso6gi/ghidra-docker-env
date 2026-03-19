@@ -211,3 +211,42 @@ def test_memory_resolver_concretizes_mips_pic_jump_table_using_image_base_fallba
     assert resolved.expr_type.name == "PHI"
     values = [branch_value.value for _, branch_value in resolved.value[:-1]]
     assert values == [1, 1, 2, 2]
+
+
+def test_memory_resolver_accepts_unsigned_lessequal_range_conditions():
+    param = Expression.parameter("param_1", 0, size=4)
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.constant(0, 8), Expression.constant(0x1009EC, 8)),
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.binary_op("INT_MULT", Expression.unary_op("INT_ZEXT", param), Expression.constant(1, 8)),
+            Expression.constant(4, 8),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    cond = Condition(
+        Expression.binary_op("INT_LESSEQUAL", param, Expression.constant(5, 4)),
+        False,
+    )
+
+    table = {
+        0x1009EC + 0: 5,
+        0x1009EC + 4: 7,
+        0x1009EC + 8: 11,
+        0x1009EC + 12: 13,
+        0x1009EC + 16: 17,
+        0x1009EC + 20: 19,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=4, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [5, 7, 11, 13, 17, 19]

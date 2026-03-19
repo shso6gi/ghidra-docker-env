@@ -456,6 +456,10 @@ def _extract_index_range(
             if _is_named_param(left, param_name) and _is_nonnegative_constant(right):
                 bound = int(right.value)
                 upper_bound = bound if upper_bound is None else min(upper_bound, bound)
+        elif expr.operator == "INT_LESSEQUAL":
+            if _is_named_param(left, param_name) and _is_nonnegative_constant(right):
+                bound = int(right.value) + 1
+                upper_bound = bound if upper_bound is None else min(upper_bound, bound)
         elif expr.operator == "INT_SLESSEQUAL":
             if _is_zero_constant(left) and _is_named_param(right, param_name):
                 nonneg = True
