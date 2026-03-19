@@ -439,20 +439,28 @@ class PcodeTracer:
             if inputs:
                 func_addr = inputs[0]
                 func_name = self._get_function_name(func_addr)
-                args = []
-                for i in range(1, len(inputs)):
-                    args.append(self.trace_varnode(inputs[i], depth, use_cache))
-                return Expression.call(func_name, args)
+                self.emit_unknown_event(
+                    reason="call_out_of_scope",
+                    varnode=pcode_op.getOutput(),
+                    def_op=pcode_op,
+                    depth=depth,
+                    note=f"CALL target={func_name}",
+                )
+                return Expression.unknown(f"call_out_of_scope:{func_name}")
             return Expression.unknown("call_no_target")
-        
+
         # CALLIND
         if mnemonic == "CALLIND":
             if inputs:
-                func_ptr = self.trace_varnode(inputs[0], depth, use_cache)
-                args = []
-                for i in range(1, len(inputs)):
-                    args.append(self.trace_varnode(inputs[i], depth, use_cache))
-                return Expression.call(f"INDIRECT({func_ptr.to_string()})", args)
+                target_name = self._get_function_name(inputs[0])
+                self.emit_unknown_event(
+                    reason="callind_out_of_scope",
+                    varnode=pcode_op.getOutput(),
+                    def_op=pcode_op,
+                    depth=depth,
+                    note=f"CALLIND target={target_name}",
+                )
+                return Expression.unknown(f"callind_out_of_scope:{target_name}")
             return Expression.unknown("callind_no_target")
         
         # LOAD

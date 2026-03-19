@@ -31,6 +31,7 @@ class EffectSummary:
     parameter_names: List[str]
     effects: List[StoreEffect]
     synthetic_expr: Optional[Expression] = None
+    has_unsupported_call: bool = False
 
 
 def summarize_store_effects(
@@ -43,6 +44,7 @@ def summarize_store_effects(
 ) -> EffectSummary:
     parameter_names = [param.get("name") for param in parameters if param.get("name")]
     effects: List[StoreEffect] = []
+    has_unsupported_call = False
 
     for block_info in block_infos:
         path_sets = condition_tracker.get_all_valid_paths_to_block(block_info)
@@ -75,13 +77,15 @@ def summarize_store_effects(
 
             target_name = _resolve_call_target_name(tracer, op)
             if not target_name:
+                has_unsupported_call = True
                 continue
             args = [
                 tracer.trace_varnode(op.getInput(i), use_cache=False)
                 for i in range(1, op.getNumInputs())
             ]
             callee_summary = direct_call_summary(target_name, args)
-            if callee_summary is None:
+            if callee_summary is None or not is_call_effect_summary_allowed(callee_summary):
+                has_unsupported_call = True
                 continue
 
             for effect in callee_summary.effects:
@@ -112,7 +116,12 @@ def summarize_store_effects(
             f"[EffectSummary] collected {len(effects)} effects "
             f"for params={parameter_names}"
         )
-    return EffectSummary(parameter_names=parameter_names, effects=effects, synthetic_expr=synthetic_expr)
+    return EffectSummary(
+        parameter_names=parameter_names,
+        effects=effects,
+        synthetic_expr=synthetic_expr,
+        has_unsupported_call=has_unsupported_call,
+    )
 
 
 def _resolve_call_target_name(tracer, op) -> Optional[str]:
@@ -146,6 +155,52 @@ def _resolve_call_target_name(tracer, op) -> Optional[str]:
         return None
 
     return None
+
+
+def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
+    if summary is None:
+        return False
+    if summary.has_unsupported_call:
+        return False
+    if not summary.effects:
+        return False
+
+    for effect in summary.effects:
+        if not _expression_is_call_scope_safe(effect.value):
+            return False
+        for condition in effect.conditions:
+            if not _expression_is_call_scope_safe(condition.expression):
+                return False
+
+    if summary.synthetic_expr is not None and not _expression_is_call_scope_safe(summary.synthetic_expr):
+        return False
+
+    return True
+
+
+def _expression_is_call_scope_safe(expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return True
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type in (expr_kind.CALL, expr_kind.UNKNOWN):
+        return False
+
+    if expr_type == expr_kind.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and not _expression_is_call_scope_safe(cond.expression):
+                return False
+            if not _expression_is_call_scope_safe(value):
+                return False
+        return True
+
+    for operand in getattr(expr, "operands", []) or []:
+        if not _expression_is_call_scope_safe(operand):
+            return False
+
+    return True
 
 
 def canonicalize_param_location(

@@ -8,9 +8,11 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     StoreEffect,
     _resolve_call_target_name,
+    is_call_effect_summary_allowed,
     build_void_effect_summary_expr,
     canonicalize_param_location,
     rewrite_loads_from_effects,
+    EffectSummary,
 )
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
@@ -717,6 +719,59 @@ def test_effect_summary_resolves_callind_target_from_traced_constant():
             return "CALLIND"
 
     assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
+
+
+def test_call_effect_summary_policy_accepts_simple_param_store_summary():
+    summary = EffectSummary(
+        parameter_names=["ptr", "value"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(Expression.parameter("ptr", 0, size=8), size=4),
+                    Expression.parameter("value", 1, size=4),
+                ),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+    )
+
+    assert is_call_effect_summary_allowed(summary)
+
+
+def test_call_effect_summary_policy_rejects_nested_call_values():
+    summary = EffectSummary(
+        parameter_names=["ptr"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.call("callee", [Expression.parameter("ptr", 0, size=8)]),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+    )
+
+    assert not is_call_effect_summary_allowed(summary)
+
+
+def test_call_effect_summary_policy_rejects_unsupported_nested_calls():
+    summary = EffectSummary(
+        parameter_names=["ptr"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.constant(1, 4),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+        has_unsupported_call=True,
+    )
+
+    assert not is_call_effect_summary_allowed(summary)
 
 
 def test_expander_combines_load_inputs_into_memory_expression():

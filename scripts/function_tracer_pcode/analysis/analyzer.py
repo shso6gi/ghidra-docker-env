@@ -224,7 +224,7 @@ class ReturnAnalyzer:
             signedness_result=signedness_result
         )
 
-        if effect_summary.effects:
+        if effect_summary.effects and not effect_summary.has_unsupported_call:
             rewritten_returns = []
             for ret in result.returns:
                 rewritten_returns.append(
@@ -242,7 +242,12 @@ class ReturnAnalyzer:
                 )
             result.returns = rewritten_returns
 
-        if return_type and return_type.strip().lower() == "void" and effect_summary.synthetic_expr is not None:
+        if (
+            return_type
+            and return_type.strip().lower() == "void"
+            and effect_summary.synthetic_expr is not None
+            and not effect_summary.has_unsupported_call
+        ):
             result.returns = [
                 ReturnInfo(
                     address=str(function.getEntryPoint()),
@@ -250,6 +255,21 @@ class ReturnAnalyzer:
                     branch_index=0,
                     value=effect_summary.synthetic_expr,
                 )
+            ]
+
+        if effect_summary.has_unsupported_call:
+            self._debug_print(
+                "Unsupported CALL/CALLIND detected under scoped call policy - "
+                "marking returns as UNKNOWN"
+            )
+            result.returns = [
+                ReturnInfo(
+                    address=ret.address,
+                    conditions=ret.conditions,
+                    branch_index=ret.branch_index,
+                    value=Expression.unknown("unsupported_call_scope"),
+                )
+                for ret in result.returns
             ]
         
         # デバッグダンプ（解析結果の可視化）
