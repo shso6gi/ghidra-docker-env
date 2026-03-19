@@ -291,3 +291,49 @@ def test_memory_resolver_accepts_negated_less_condition_as_upper_bound():
     assert resolved.expr_type.name == "PHI"
     values = [branch_value.value for _, branch_value in resolved.value[:-1]]
     assert values == [5, 7, 11, 13, 17, 19]
+
+
+def test_memory_resolver_concretizes_mips_got_base_symbol_with_address_suffix():
+    param = Expression.parameter("param_1", 0, size=8)
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("PTR___DT_MIPS_BASE_ADDRESS_120011050", size=8),
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.binary_op("INT_MULT", param, Expression.constant(4, 8)),
+                Expression.constant(0xF00, 8),
+            ),
+            Expression.constant(1, 8),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    cond = Condition(
+        Expression.binary_op("INT_LESS", param, Expression.constant(6, 8)),
+        False,
+    )
+
+    got_slot = 0x120011050
+    image_base = 0x120000000
+    table = {
+        got_slot: image_base,
+        image_base + 0xF00 + 0: 5,
+        image_base + 0xF00 + 4: 7,
+        image_base + 0xF00 + 8: 11,
+        image_base + 0xF00 + 12: 13,
+        image_base + 0xF00 + 16: 17,
+        image_base + 0xF00 + 20: 19,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=8, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [5, 7, 11, 13, 17, 19]

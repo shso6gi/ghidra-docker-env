@@ -277,10 +277,8 @@ def _flatten_additive_terms(
 
 
 def _extract_symbolic_base_address(expr: Expression) -> Optional[int]:
-    if expr.expr_type == ExpressionType.VARIABLE and expr.name and expr.name.startswith("PTR_"):
-        suffix = expr.name[4:]
-        if re.fullmatch(r"[0-9A-Fa-f]+", suffix):
-            return int(suffix, 16)
+    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
+        return _extract_address_suffix(expr.name, ("PTR_",))
     return None
 
 
@@ -289,11 +287,23 @@ def _extract_constant_address(expr: Expression) -> Optional[int]:
         return expr.value
 
     if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        for prefix in ("DAT_", "LAB_"):
-            if expr.name.startswith(prefix):
-                suffix = expr.name[len(prefix):]
-                if re.fullmatch(r"[0-9A-Fa-f]+", suffix):
-                    return int(suffix, 16)
+        return _extract_address_suffix(expr.name, ("DAT_", "LAB_"))
+    return None
+
+
+def _extract_address_suffix(name: str, prefixes: Tuple[str, ...]) -> Optional[int]:
+    for prefix in prefixes:
+        if not name.startswith(prefix):
+            continue
+
+        direct_suffix = name[len(prefix):]
+        if re.fullmatch(r"[0-9A-Fa-f]{4,}", direct_suffix):
+            return int(direct_suffix, 16)
+
+        tail_match = re.search(r"_([0-9A-Fa-f]{4,})$", name)
+        if tail_match:
+            return int(tail_match.group(1), 16)
+
     return None
 
 
