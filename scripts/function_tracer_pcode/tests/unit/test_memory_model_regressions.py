@@ -702,6 +702,77 @@ def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
     assert rewritten.to_string() == "(MEM[dst] + delta)"
 
 
+def test_effect_summary_does_not_reapply_when_expr_matches_phi_branch_value():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    choose_src = Expression.parameter("choose_src", 2, size=4)
+    choose_true = Condition(
+        Expression.binary_op("INT_NOTEQUAL", choose_src, Expression.constant(0, 4)),
+        False,
+    )
+    choose_false = choose_true.negate()
+    original = Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), Expression.constant(1, 4))
+    effect = StoreEffect(
+        location=CanonicalLocation("dst", 0, 4),
+        value=Expression.phi(
+            [
+                (choose_true, Expression.memory(src, size=4)),
+                (None, Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), Expression.constant(1, 4))),
+            ]
+        ),
+        conditions=[],
+        order_key=3,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [choose_false],
+        [effect],
+        [
+            _param("dst", size=8, is_signed=False),
+            _param("src", size=8, is_signed=False, index=1),
+            _param("choose_src", size=4, index=2),
+        ],
+    )
+
+    assert rewritten.to_string() == "(MEM[dst] + 1)"
+
+
+def test_effect_summary_does_not_reapply_when_expr_matches_true_phi_branch_value():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    choose_src = Expression.parameter("choose_src", 2, size=4)
+    choose_true = Condition(
+        Expression.binary_op("INT_NOTEQUAL", choose_src, Expression.constant(0, 4)),
+        False,
+    )
+    original = Expression.memory(src, size=4)
+    effect = StoreEffect(
+        location=CanonicalLocation("dst", 0, 4),
+        value=Expression.phi(
+            [
+                (choose_true, Expression.memory(src, size=4)),
+                (None, Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), Expression.constant(1, 4))),
+            ]
+        ),
+        conditions=[],
+        order_key=3,
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [choose_true],
+        [effect],
+        [
+            _param("dst", size=8, is_signed=False),
+            _param("src", size=8, is_signed=False, index=1),
+            _param("choose_src", size=4, index=2),
+        ],
+    )
+
+    assert rewritten.to_string() == "MEM[src]"
+
+
 def test_effect_summary_resolves_callind_target_from_traced_constant():
     class FakeVarnode:
         def __init__(self, is_constant=False):

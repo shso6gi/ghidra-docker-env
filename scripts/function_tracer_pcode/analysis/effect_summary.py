@@ -430,7 +430,31 @@ def _matches_existing_effect_value(
             continue
         if not _expression_reads_location(expr, location, return_conditions, parameters):
             continue
-        if _expressions_equivalent(expr, effect.value):
+        if _expression_matches_value_under_conditions(
+            expr,
+            effect.value,
+            list(return_conditions) + list(effect.conditions),
+        ):
+            return True
+    return False
+
+
+def _expression_matches_value_under_conditions(
+    expr: Expression,
+    value: Expression,
+    conditions: Sequence[Condition],
+) -> bool:
+    if _expressions_equivalent(expr, value):
+        return True
+    if value.expr_type != ExpressionType.PHI or not value.value:
+        return False
+    for cond, branch_value in value.value:
+        combined = list(conditions)
+        if cond is not None:
+            combined.append(cond)
+        if ConditionSimplifier.is_contradiction(combined):
+            continue
+        if _expression_matches_value_under_conditions(expr, branch_value, combined):
             return True
     return False
 
