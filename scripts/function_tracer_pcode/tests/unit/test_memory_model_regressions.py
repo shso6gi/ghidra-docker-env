@@ -650,6 +650,28 @@ def test_effect_summary_does_not_reapply_commuted_self_referential_store():
     assert rewritten.to_string() == "(delta + MEM[(box + 4)])"
 
 
+def test_call_effect_summary_policy_rejects_interdependent_swap_writes():
+    summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(Expression.parameter("b", 1, size=8), size=4),
+                conditions=[],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(Expression.parameter("a", 0, size=8), size=4),
+                conditions=[],
+                order_key=2,
+            ),
+        ],
+    )
+
+    assert not is_call_effect_summary_allowed(summary)
+
+
 def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
     dst = Expression.parameter("dst", 0, size=8)
     src = Expression.parameter("src", 1, size=8)

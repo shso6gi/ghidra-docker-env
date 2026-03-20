@@ -174,6 +174,8 @@ def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
 
     if summary.synthetic_expr is not None and not _expression_is_call_scope_safe(summary.synthetic_expr):
         return False
+    if _summary_has_interdependent_writes(summary):
+        return False
 
     return True
 
@@ -201,6 +203,22 @@ def _expression_is_call_scope_safe(expr: Optional[Expression]) -> bool:
             return False
 
     return True
+
+
+def _summary_has_interdependent_writes(summary: EffectSummary) -> bool:
+    if summary is None or len(summary.effects) <= 1:
+        return False
+
+    params = [{"name": name} for name in summary.parameter_names]
+    for index, effect in enumerate(summary.effects):
+        for other_index, other in enumerate(summary.effects):
+            if index == other_index:
+                continue
+            if effect.location == other.location:
+                continue
+            if _expression_reads_location(effect.value, other.location, effect.conditions, params):
+                return True
+    return False
 
 
 def canonicalize_param_location(
@@ -251,8 +269,6 @@ def rewrite_loads_from_effects(
         return expr
 
     active_blocked_locations = list(blocked_locations or [])
-    if _matches_existing_effect_value(expr, return_conditions, effects, max_order_key=max_order_key):
-        return expr
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = rewrite_loads_from_effects(
@@ -266,6 +282,15 @@ def rewrite_loads_from_effects(
         location = canonicalize_param_location(rewritten_addr, parameters, size=expr.size)
         candidate = Expression.memory(rewritten_addr, expr.size)
         if location is None:
+            return candidate
+        if _matches_existing_effect_value(
+            candidate,
+            location,
+            return_conditions,
+            effects,
+            parameters,
+            max_order_key=max_order_key,
+        ):
             return candidate
 
         for blocked_location in active_blocked_locations:
@@ -327,6 +352,16 @@ def rewrite_loads_from_effects(
         return resolved
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
+        expr_location = canonicalize_expr_read_location(expr, parameters)
+        if expr_location is not None and _matches_existing_effect_value(
+            expr,
+            expr_location,
+            return_conditions,
+            effects,
+            parameters,
+            max_order_key=max_order_key,
+        ):
+            return expr
         new_operands = [
             rewrite_loads_from_effects(
                 op,
@@ -380,8 +415,10 @@ def rewrite_loads_from_effects(
 
 def _matches_existing_effect_value(
     expr: Expression,
+    location: CanonicalLocation,
     return_conditions: Sequence[Condition],
     effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
 ) -> bool:
     for effect in effects:
@@ -389,7 +426,58 @@ def _matches_existing_effect_value(
             continue
         if ConditionSimplifier.is_contradiction(list(return_conditions) + list(effect.conditions)):
             continue
+        if not locations_match(location, effect.location, return_conditions):
+            continue
+        if not _expression_reads_location(expr, location, return_conditions, parameters):
+            continue
         if _expressions_equivalent(expr, effect.value):
+            return True
+    return False
+
+
+def canonicalize_expr_read_location(expr: Expression, parameters: Sequence[Dict]) -> Optional[CanonicalLocation]:
+    if expr is None:
+        return None
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        return canonicalize_param_location(expr.operands[0], parameters, size=expr.size)
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left = canonicalize_expr_read_location(expr.operands[0], parameters)
+        right = canonicalize_expr_read_location(expr.operands[1], parameters)
+        if left is None:
+            return right
+        if right is None:
+            return left
+        if left == right:
+            return left
+        return None
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        return canonicalize_expr_read_location(expr.operands[0], parameters)
+    return None
+
+
+def _expression_reads_location(
+    expr: Optional[Expression],
+    location: CanonicalLocation,
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        read_location = canonicalize_param_location(expr.operands[0], parameters, size=expr.size)
+        if read_location is None:
+            return False
+        return locations_match(read_location, location, conditions)
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            combined = list(conditions)
+            if cond is not None:
+                combined.append(cond)
+            if _expression_reads_location(value, location, combined, parameters):
+                return True
+        return False
+    for operand in getattr(expr, "operands", []) or []:
+        if _expression_reads_location(operand, location, conditions, parameters):
             return True
     return False
 
