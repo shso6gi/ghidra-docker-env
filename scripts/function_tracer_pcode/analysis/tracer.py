@@ -598,12 +598,36 @@ class PcodeTracer:
     
     def _get_function_name(self, addr_varnode) -> str:
         """関数アドレスから関数名を取得"""
-        if addr_varnode.isConstant():
-            addr = addr_varnode.getAddress()
-            func = self.program.getFunctionManager().getFunctionAt(addr)
+        if addr_varnode is None:
+            return "UNKNOWN_FUNC"
+
+        addr = None
+        try:
+            if addr_varnode.isConstant():
+                addr = addr_varnode.getAddress()
+            else:
+                candidate = addr_varnode.getAddress()
+                space = candidate.getAddressSpace() if candidate else None
+                if space and not (
+                    space.isRegisterSpace()
+                    or space.isUniqueSpace()
+                    or space.isConstantSpace()
+                ):
+                    addr = candidate
+        except Exception:
+            addr = None
+
+        if addr is not None:
+            function_manager = self.program.getFunctionManager()
+            func = function_manager.getFunctionAt(addr)
+            if func is None:
+                func = function_manager.getFunctionContaining(addr)
             if func:
                 return func.getName()
-            return f"FUN_{addr_varnode.getOffset():x}"
+            try:
+                return f"FUN_{addr.getOffset():x}"
+            except Exception:
+                return "UNKNOWN_FUNC"
         return "UNKNOWN_FUNC"
     
     def get_all_pcode_ops(self) -> List[Any]:

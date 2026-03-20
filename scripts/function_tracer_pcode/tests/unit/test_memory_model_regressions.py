@@ -14,6 +14,8 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     rewrite_loads_from_effects,
     EffectSummary,
 )
+from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
@@ -916,3 +918,115 @@ def test_type_fixer_does_not_pattern_fix_pointer_types():
 
     assert fixer._should_fix_type("undefined4")
     assert not fixer._should_fix_type("undefined4 *")
+
+
+def test_return_analyzer_find_function_by_name_resolves_fun_address_via_containing():
+    class _FakeFunction:
+        def __init__(self, name):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class _FakeFunctionManager:
+        def __init__(self, containing):
+            self._containing = containing
+
+        def getFunctions(self, _forward):
+            return []
+
+        def getFunctionAt(self, _addr):
+            return None
+
+        def getFunctionContaining(self, _addr):
+            return self._containing
+
+    class _FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class _FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return _FakeAddressSpace()
+
+    class _FakeProgram:
+        def __init__(self, containing):
+            self._manager = _FakeFunctionManager(containing)
+            self._factory = _FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return self._manager
+
+        def getAddressFactory(self):
+            return self._factory
+
+    analyzer = ReturnAnalyzer(_FakeProgram(_FakeFunction("mem_void_write_if_needed")), debug=False)
+
+    resolved = analyzer._find_function_by_name("FUN_120001514")
+
+    assert resolved is not None
+    assert resolved.getName() == "mem_void_write_if_needed"
+
+
+def test_tracer_get_function_name_accepts_ram_address_varnode():
+    class _FakeFunction:
+        def __init__(self, name):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class _FakeFunctionManager:
+        def __init__(self, containing):
+            self._containing = containing
+
+        def getFunctionAt(self, _addr):
+            return None
+
+        def getFunctionContaining(self, _addr):
+            return self._containing
+
+    class _FakeProgram:
+        def __init__(self, containing):
+            self._manager = _FakeFunctionManager(containing)
+
+        def getFunctionManager(self):
+            return self._manager
+
+    class _FakeSpace:
+        def isRegisterSpace(self):
+            return False
+
+        def isUniqueSpace(self):
+            return False
+
+        def isConstantSpace(self):
+            return False
+
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+            self._space = _FakeSpace()
+
+        def getAddressSpace(self):
+            return self._space
+
+        def getOffset(self):
+            return self._offset
+
+    class _FakeVarnode:
+        def __init__(self, offset):
+            self._address = _FakeAddress(offset)
+
+        def isConstant(self):
+            return False
+
+        def getAddress(self):
+            return self._address
+
+    tracer = object.__new__(PcodeTracer)
+    tracer.program = _FakeProgram(_FakeFunction("mem_void_write_if_needed"))
+
+    resolved = tracer._get_function_name(_FakeVarnode(0x120001514))
+
+    assert resolved == "mem_void_write_if_needed"

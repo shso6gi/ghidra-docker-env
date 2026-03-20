@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Return解析メインモジュール（符号性検出統合版）"""
 
+import re
 from typing import List, Dict, Optional, Any
 
 from ..model.expression import Expression, ExpressionType, Condition
@@ -706,4 +707,19 @@ class ReturnAnalyzer:
         for func in functions:
             if func.getName() == function_name:
                 return func
-        return None
+
+        match = re.fullmatch(r"(?:thunk_)?FUN_([0-9a-fA-F]+)", function_name or "")
+        if not match:
+            return None
+
+        try:
+            addr_value = int(match.group(1), 16)
+            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
+            addr = default_space.getAddress(addr_value)
+        except Exception:
+            return None
+
+        func = function_manager.getFunctionAt(addr)
+        if func is None:
+            func = function_manager.getFunctionContaining(addr)
+        return func
