@@ -16,7 +16,11 @@ from .pairwise_query_builder import (
     extract_return_cases,
     save_unknown_query,
 )
-from .pairwise_query_executor import solve_query_internal, solve_query_twostage
+from .pairwise_query_executor import (
+    solve_query_internal,
+    solve_query_twostage,
+    validate_counterexample_across_cases,
+)
 from ..formula.symbol_replace import build_symbol_replacer
 from ..normalize import (
     SignFacts,
@@ -124,6 +128,23 @@ class PairwiseStrategy(CheckStrategy):
                     all_normalization_rules.extend(result.normalization_rules)
 
                 if result.is_equivalent is False:
+                    is_decisive = validate_counterexample_across_cases(
+                        self,
+                        base_ctx,
+                        cases1,
+                        cases2,
+                        symbol_replace_fn1,
+                        symbol_replace_fn2,
+                        (i, j),
+                        result.counterexample_raw,
+                    )
+                    if not is_decisive:
+                        unknown_count += 1
+                        self._debug_print(
+                            f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
+                        )
+                        continue
+
                     sat_count += 1
                     sat_pair_info = {
                         "i": i,

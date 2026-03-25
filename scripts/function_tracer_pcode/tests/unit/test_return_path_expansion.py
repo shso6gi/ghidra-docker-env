@@ -71,10 +71,11 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     class FakeExpander:
         calls = []
 
-        def __init__(self, tracer_obj, tracker_obj, debug=False):
+        def __init__(self, tracer_obj, tracker_obj, debug=False, call_resolver=None):
             self.tracer = tracer_obj
             self.tracker = tracker_obj
             self.debug = debug
+            self.call_resolver = call_resolver
 
         def expand_from_varnode(self, return_varnode, base_conditions, depth=0):
             FakeExpander.calls.append([cond.to_string() for cond in base_conditions])

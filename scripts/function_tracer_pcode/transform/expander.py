@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
-from typing import List, Optional, Set, Dict, Tuple, Any
+from typing import Callable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
+from ..analysis.effect_summary import _resolve_call_target_name
 
 
 class ExpandedValue:
@@ -47,10 +48,17 @@ class ExpressionExpander:
     # 展開の上限設定
     MAX_CASES_PER_MULTIEQUAL = 16  # 1つのMULTIEQUALから生成する最大ケース数
     
-    def __init__(self, tracer, condition_tracker, debug: bool = False):
+    def __init__(
+        self,
+        tracer,
+        condition_tracker,
+        debug: bool = False,
+        call_resolver: Optional[Callable[[str, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
+    ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
         self.debug = debug
+        self.call_resolver = call_resolver
         self._expanding_ops: Set[str] = set()
     
     def _debug_print(self, msg: str, indent: int = 0):
@@ -390,19 +398,27 @@ class ExpressionExpander:
         
         self._debug_print(f"Expanding operation {mnemonic} (depth={depth}, output_size={output_size})", depth)
         
-        # MULTIEQUALが含まれるかチェック
-        has_multiequal = self._op_contains_multiequal(pcode_op)
-        
-        if not has_multiequal:
-            # MULTIEQUALがなければ単純にトレース
-            self._debug_print(f"  No MULTIEQUAL in inputs, simple trace", depth)
+        if mnemonic in ("CALL", "CALLIND"):
+            return self._expand_call_operation(
+                pcode_op,
+                conditions,
+                depth,
+                output_size=output_size,
+            )
+
+        # MULTIEQUAL / CALL が含まれるかチェック
+        requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
+
+        if not requires_recursive_expansion:
+            # 特別な展開が不要なら単純にトレース
+            self._debug_print(f"  No recursive expansion target in inputs, simple trace", depth)
             value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
             # 出力サイズを設定
             if value.size == 0 and output_size > 0:
                 value.size = output_size
             return [ExpandedValue(value, conditions)]
-        
-        self._debug_print(f"  MULTIEQUAL found in inputs, expanding recursively", depth)
+
+        self._debug_print(f"  Recursive expansion target found in inputs, expanding recursively", depth)
         
         # MULTIEQUALがあれば各入力を再帰的に展開
         input_expansions: List[List[ExpandedValue]] = []
@@ -425,8 +441,8 @@ class ExpressionExpander:
             output_size=output_size,
         )
     
-    def _op_contains_multiequal(self, pcode_op, depth: int = 0) -> bool:
-        """PcodeOpの入力ツリーにMULTIEQUALが含まれるかチェック"""
+    def _op_requires_recursive_expansion(self, pcode_op, depth: int = 0) -> bool:
+        """PcodeOpの入力ツリーに再帰展開対象が含まれるかチェック"""
         if depth > 15:
             return False
         
@@ -434,17 +450,91 @@ class ExpressionExpander:
             return False
         
         mnemonic = pcode_op.getMnemonic()
-        if mnemonic == "MULTIEQUAL":
+        if mnemonic in {"MULTIEQUAL", "CALL", "CALLIND"}:
             return True
         
         for i in range(pcode_op.getNumInputs()):
             input_varnode = pcode_op.getInput(i)
             if input_varnode:
                 input_def = input_varnode.getDef()
-                if input_def and self._op_contains_multiequal(input_def, depth + 1):
+                if input_def and self._op_requires_recursive_expansion(input_def, depth + 1):
                     return True
-        
+
         return False
+
+    def _expand_call_operation(
+        self,
+        pcode_op,
+        base_conditions: List[Condition],
+        depth: int,
+        output_size: int = 0,
+    ) -> List[ExpandedValue]:
+        """CALL/CALLIND を callee の return case に展開する。"""
+        target_name = _resolve_call_target_name(self.tracer, pcode_op)
+        if not target_name or self.call_resolver is None:
+            self.tracer.emit_unknown_event(
+                reason="call_out_of_scope",
+                varnode=pcode_op.getOutput(),
+                def_op=pcode_op,
+                depth=depth,
+                note=f"{pcode_op.getMnemonic()} target={target_name or 'UNKNOWN_FUNC'}",
+                context="expander",
+            )
+            return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{target_name or 'UNKNOWN_FUNC'}"), base_conditions)]
+
+        arg_expansions: List[List[ExpandedValue]] = []
+        for index in range(1, pcode_op.getNumInputs()):
+            arg_expansions.append(
+                self._expand_input_varnode(pcode_op.getInput(index), [], depth + 1)
+            )
+
+        result: List[ExpandedValue] = []
+
+        def resolve_with_args(
+            arg_index: int,
+            current_args: List[Expression],
+            current_conditions: List[Condition],
+        ) -> None:
+            if arg_index >= len(arg_expansions):
+                resolved = self.call_resolver(target_name, current_args)
+                if not resolved:
+                    return
+                for ev in resolved:
+                    merged_conditions = ConditionSimplifier.simplify_conditions(
+                        current_conditions + ev.conditions
+                    )
+                    if ConditionSimplifier.is_contradiction(merged_conditions):
+                        continue
+                    value = ev.value
+                    if output_size > 0 and getattr(value, "size", 0) == 0:
+                        value.size = output_size
+                    result.append(ExpandedValue(value, merged_conditions))
+                return
+
+            for ev in arg_expansions[arg_index]:
+                merged_conditions = current_conditions + ev.conditions
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                resolve_with_args(
+                    arg_index + 1,
+                    current_args + [ev.value],
+                    merged_conditions,
+                )
+
+        resolve_with_args(0, [], list(base_conditions))
+
+        if result:
+            return self._deduplicate_expanded_values(result, depth)
+
+        self.tracer.emit_unknown_event(
+            reason="call_out_of_scope",
+            varnode=pcode_op.getOutput(),
+            def_op=pcode_op,
+            depth=depth,
+            note=f"{pcode_op.getMnemonic()} target={target_name}",
+            context="expander",
+        )
+        return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{target_name}"), base_conditions)]
     
     def _expand_operation(
         self,
@@ -458,10 +548,17 @@ class ExpressionExpander:
         
         self._debug_print(f"Operation {mnemonic} with {num_inputs} inputs", depth)
         
-        # MULTIEQUALが含まれるかチェック
-        has_multiequal = self._op_contains_multiequal(pcode_op)
-        
-        if not has_multiequal:
+        if mnemonic in ("CALL", "CALLIND"):
+            return self._expand_call_operation(
+                pcode_op,
+                base_conditions,
+                depth,
+            )
+
+        # MULTIEQUAL / CALL が含まれるかチェック
+        requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
+
+        if not requires_recursive_expansion:
             value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
             return [ExpandedValue(value, base_conditions)]
         

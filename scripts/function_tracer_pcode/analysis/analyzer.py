@@ -2,14 +2,19 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
-from .effect_summary import rewrite_loads_from_effects, summarize_store_effects
+from .effect_summary import (
+    rewrite_loads_from_effects,
+    summarize_store_effects,
+    substitute_condition,
+    substitute_expression,
+)
 from .memory_resolver import concretize_readonly_loads
 
 
@@ -22,6 +27,7 @@ class ReturnAnalyzer:
         self._decompiler = None
         self._current_parameters: List[Dict] = []
         self._effect_summary_cache: Dict[str, Any] = {}
+        self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -147,11 +153,19 @@ class ReturnAnalyzer:
             else:
                 self._debug_print(f"  {param_name}: no explicit checks", 1)
     
-    def analyze_function(self, function, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
+    def analyze_function(
+        self,
+        function,
+        timeout: int = 60,
+        active_functions: Optional[Set[str]] = None,
+    ) -> Optional[FunctionReturnAnalysis]:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
         ConditionSimplifier.DEBUG = self.debug
         
+        active_functions = set(active_functions or set())
+        active_functions.add(function.getName())
+
         self._debug_print("=" * 60)
         self._debug_print(f"Analyzing function: {function.getName()}")
         self._debug_print("=" * 60)
@@ -213,7 +227,13 @@ class ReturnAnalyzer:
         
         for i, return_op in enumerate(return_ops):
             self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
-            infos = self._analyze_return_op(return_op, tracer, condition_tracker, i)
+            infos = self._analyze_return_op(
+                return_op,
+                tracer,
+                condition_tracker,
+                i,
+                active_functions=active_functions,
+            )
             return_infos.extend(infos)
         
         result = FunctionReturnAnalysis(
@@ -258,21 +278,6 @@ class ReturnAnalyzer:
                 )
             ]
 
-        if effect_summary.has_unsupported_call:
-            self._debug_print(
-                "Unsupported CALL/CALLIND detected under scoped call policy - "
-                "marking returns as UNKNOWN"
-            )
-            result.returns = [
-                ReturnInfo(
-                    address=ret.address,
-                    conditions=ret.conditions,
-                    branch_index=ret.branch_index,
-                    value=Expression.unknown("unsupported_call_scope"),
-                )
-                for ret in result.returns
-            ]
-        
         # デバッグダンプ（解析結果の可視化）
         self._dump_return_infos(result)
         
@@ -354,6 +359,163 @@ class ReturnAnalyzer:
         )
         self._effect_summary_cache[cache_key] = summary
         return summary
+
+    def _make_call_resolver(self, active_functions: Set[str]):
+        def resolve_call(function_name: str, args):
+            return self._resolve_call_expansions(function_name, args, active_functions)
+
+        return resolve_call
+
+    def _resolve_call_expansions(
+        self,
+        function_name: str,
+        args: List[Expression],
+        active_functions: Set[str],
+    ):
+        from ..transform.expander import ExpandedValue
+
+        if function_name in active_functions:
+            self._debug_print(f"Skipping recursive call expansion for '{function_name}'")
+            return None
+
+        analysis = self._get_or_analyze_call_target(function_name, active_functions)
+        if analysis is None or not self._is_call_return_summary_allowed(analysis, args):
+            return None
+
+        param_names = [param.get("name") for param in analysis.parameters if param.get("name")]
+        if len(args) < len(param_names):
+            self._debug_print(
+                f"Call expansion skipped for '{function_name}': "
+                f"expected {len(param_names)} args, got {len(args)}"
+            )
+            return None
+
+        replacements = dict(zip(param_names, args))
+        allowed_names: Set[str] = set()
+        for arg in args:
+            allowed_names.update(arg.get_all_variables())
+
+        expanded = []
+        for ret in analysis.returns:
+            value = substitute_expression(ret.value, replacements)
+            conditions = [
+                substitute_condition(cond, replacements)
+                for cond in ret.conditions
+            ]
+
+            if not self._call_summary_is_safe(value, conditions, allowed_names):
+                self._debug_print(
+                    f"Call expansion rejected for '{function_name}': "
+                    "callee summary references unresolved symbols"
+                )
+                return None
+
+            expanded.append(
+                ExpandedValue(
+                    value=value,
+                    conditions=ConditionSimplifier.simplify_conditions(conditions),
+                )
+            )
+
+        return expanded
+
+    def _get_or_analyze_call_target(
+        self,
+        function_name: str,
+        active_functions: Set[str],
+    ) -> Optional[FunctionReturnAnalysis]:
+        callee = self._find_function_by_name(function_name)
+        if callee is None:
+            return None
+
+        cache_key = str(callee.getEntryPoint())
+        if cache_key in self._call_analysis_cache:
+            return self._call_analysis_cache[cache_key]
+
+        analysis = self.analyze_function(
+            callee,
+            timeout=60,
+            active_functions=active_functions | {function_name},
+        )
+        self._call_analysis_cache[cache_key] = analysis
+        return analysis
+
+    def _is_call_return_summary_allowed(
+        self,
+        analysis: FunctionReturnAnalysis,
+        args: List[Expression],
+    ) -> bool:
+        if analysis is None or not analysis.returns:
+            return False
+
+        param_names = {param.get("name") for param in analysis.parameters if param.get("name")}
+        allowed_names: Set[str] = set()
+        for arg in args:
+            allowed_names.update(arg.get_all_variables())
+
+        for ret in analysis.returns:
+            if self._expression_contains_unknown_or_call(ret.value):
+                return False
+            if not self._expression_uses_only_allowed_names(ret.value, param_names, allowed_names):
+                return False
+            for cond in ret.conditions:
+                if self._expression_contains_unknown_or_call(cond.expression):
+                    return False
+                if not self._expression_uses_only_allowed_names(cond.expression, param_names, allowed_names):
+                    return False
+
+        return True
+
+    def _call_summary_is_safe(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+        allowed_names: Set[str],
+    ) -> bool:
+        if self._expression_contains_unknown_or_call(value):
+            return False
+        if not self._expression_uses_only_allowed_names(value, set(), allowed_names):
+            return False
+
+        for cond in conditions:
+            if self._expression_contains_unknown_or_call(cond.expression):
+                return False
+            if not self._expression_uses_only_allowed_names(cond.expression, set(), allowed_names):
+                return False
+
+        return True
+
+    def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+
+        if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+            return True
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_unknown_or_call(cond.expression):
+                    return True
+                if self._expression_contains_unknown_or_call(value):
+                    return True
+            return False
+
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unknown_or_call(operand):
+                return True
+
+        return False
+
+    def _expression_uses_only_allowed_names(
+        self,
+        expr: Optional[Expression],
+        local_param_names: Set[str],
+        allowed_names: Set[str],
+    ) -> bool:
+        if expr is None:
+            return True
+        referenced = expr.get_all_variables()
+        return referenced.issubset(local_param_names | allowed_names)
     
     def _detect_signedness(self, high_function) -> Optional[SignednessResult]:
         """
@@ -499,7 +661,8 @@ class ReturnAnalyzer:
         return_op,
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
-        return_index: int
+        return_index: int,
+        active_functions: Set[str],
     ) -> List[ReturnInfo]:
         """単一のRETURNを解析"""
         seq = return_op.getSeqnum()
@@ -530,6 +693,7 @@ class ReturnAnalyzer:
                 path_conditions,
                 return_index,
                 all_path_conditions=all_valid_path_conditions,
+                active_functions=active_functions,
             )
         else:
             # void return
@@ -550,6 +714,7 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
+        active_functions: Optional[Set[str]] = None,
     ) -> List[ReturnInfo]:
         """Return値を解析"""
         from ..transform import ExpressionExpander
@@ -561,12 +726,22 @@ class ReturnAnalyzer:
         
         if has_multiequal:
             self._debug_print("Return value contains MULTIEQUAL - using PHI-based expansion")
-            expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
+            expander = ExpressionExpander(
+                tracer,
+                condition_tracker,
+                debug=self.debug,
+                call_resolver=self._make_call_resolver(active_functions or set()),
+            )
             # PHI内部で複数パスを考慮
             expanded_values = expander.expand_from_varnode(return_varnode, [])
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
-            expander = ExpressionExpander(tracer, condition_tracker, debug=self.debug)
+            expander = ExpressionExpander(
+                tracer,
+                condition_tracker,
+                debug=self.debug,
+                call_resolver=self._make_call_resolver(active_functions or set()),
+            )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:
                 path_condition_sets = [path_conditions] if path_conditions else [[]]
