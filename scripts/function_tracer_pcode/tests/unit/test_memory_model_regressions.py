@@ -11,8 +11,12 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     is_call_effect_summary_allowed,
     build_void_effect_summary_expr,
     canonicalize_param_location,
+    canonicalize_post_state_subexpressions,
+    collapse_post_state_expr_to_canonical_memory,
     rewrite_loads_from_effects,
     substitute_location,
+    _resolve_call_argument_expression,
+    _normalize_call_argument_expression,
     EffectSummary,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -605,6 +609,60 @@ def test_substitute_location_accepts_register_alias_call_arguments():
     assert substituted == CanonicalLocation("param_1", 0, 4)
 
 
+def test_resolve_call_argument_expression_recovers_parameter_from_storage_alias():
+    class FakeVarnode:
+        def getSize(self):
+            return 8
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.variable("tmp_arg", size=8)
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return StorageInfo(
+                is_register=True,
+                space_name="register",
+                register_name="A0",
+                base_register_name="A0",
+                size=8,
+                size_bits=64,
+                base_register_size=8,
+                base_register_size_bits=64,
+                bit_offset_in_base=0,
+            )
+
+    resolved = _resolve_call_argument_expression(
+        FakeVarnode(),
+        FakeTracer(),
+        [_param("param_1", size=8, is_signed=False, storage=_reg_storage("A0"))],
+    )
+
+    assert resolved.expr_type.name == "PARAMETER"
+    assert resolved.name == "param_1"
+
+
+def test_normalize_call_argument_expression_falls_back_to_positional_parameter():
+    unresolved = Expression.variable("opaque_arg", size=8)
+
+    normalized = _normalize_call_argument_expression(
+        unresolved,
+        1,
+        [
+            _param("param_1", size=8, is_signed=False, index=0),
+            _param("param_2", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert normalized.expr_type.name == "PARAMETER"
+    assert normalized.name == "param_2"
+
+
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
     addr_expr = Expression.binary_op(
         "INT_MULT",
@@ -809,6 +867,353 @@ def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
     )
 
     assert rewritten.to_string() == "(MEM[b] - MEM[a])"
+
+
+def test_effect_summary_collapses_post_state_phi_to_canonical_memory_location():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    post_swap_b = Expression.phi(
+        [
+            (swap_taken, Expression.memory(a, size=4)),
+            (None, Expression.memory(b, size=4)),
+        ]
+    )
+    post_swap_b.size = 4
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        post_swap_b,
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[b]"
+
+
+def test_expression_expander_collapses_nested_multiequal_matching_effect_post_state():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    post_swap_b = Expression.phi(
+        [
+            (swap_taken, Expression.memory(a, size=4)),
+            (None, Expression.memory(b, size=4)),
+        ]
+    )
+    post_swap_b.size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeMultiequalOp:
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    class FakeVarnode:
+        def __init__(self, def_op):
+            self._def_op = def_op
+
+        def getSize(self):
+            return 4
+
+        def getDef(self):
+            return self._def_op
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return post_swap_b
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    expanded = expander._expand_input_varnode(
+        FakeVarnode(FakeMultiequalOp()),
+        [],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "MEM[b]"
+
+
+def test_effect_summary_collapses_post_state_phi_with_explicit_complementary_guards():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    post_swap_b = Expression.phi(
+        [
+            (swap_taken, Expression.memory(a, size=4)),
+            (no_swap, Expression.memory(b, size=4)),
+        ]
+    )
+    post_swap_b.size = 4
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        post_swap_b,
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+        return_conditions=[swap_taken],
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[b]"
+
+
+def test_expression_expander_collapses_nested_multiequal_using_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    post_swap_b = Expression.phi(
+        [
+            (swap_taken, Expression.memory(a, size=4)),
+            (no_swap, Expression.memory(b, size=4)),
+        ]
+    )
+    post_swap_b.size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeMultiequalOp:
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    class FakeVarnode:
+        def __init__(self, def_op):
+            self._def_op = def_op
+
+        def getSize(self):
+            return 4
+
+        def getDef(self):
+            return self._def_op
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return post_swap_b
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    expanded = expander._expand_input_varnode(
+        FakeVarnode(FakeMultiequalOp()),
+        [swap_taken],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "MEM[b]"
+
+
+def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull = Condition.combine_and(
+        [
+            Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False),
+            Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False),
+        ]
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.phi(
+            [
+                (Condition.combine_and([nonnull, swap_taken]), Expression.memory(a, size=4)),
+                (Condition.combine_and([nonnull, no_swap]), Expression.memory(b, size=4)),
+            ]
+        ),
+    )
+    expr.operands[1].size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, depth=0, use_cache=False):
+            return expr
+
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return expr
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    conds = [
+        Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False),
+        Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False),
+        swap_taken,
+    ]
+    canonicalized = expander._trace_and_canonicalize_input_value(object(), conds, 0)
+
+    assert canonicalized is not None
+    assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
+
+
+def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_location():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.phi(
+            [
+                (swap_taken, Expression.memory(a, size=4)),
+                (None, Expression.memory(b, size=4)),
+            ]
+        ),
+    )
+    expr.operands[1].size = 4
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    normalized = canonicalize_post_state_subexpressions(
+        expr,
+        [swap_taken],
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert normalized.to_string() == "(MEM[a] - MEM[b])"
 
 
 def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
@@ -1020,6 +1425,72 @@ def test_effect_summary_resolves_call_target_from_traced_constant():
 
         def _get_function_name(self, _addr_varnode):
             return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.constant(0x401000, 8)
+
+    class FakeOp:
+        def __init__(self):
+            self._input = FakeVarnode(is_constant=False)
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input
+
+        def getMnemonic(self):
+            return "CALL"
+
+    assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
+
+
+def test_effect_summary_prefers_traced_constant_over_synthetic_fun_name():
+    class FakeVarnode:
+        def __init__(self, is_constant=False):
+            self._is_constant = is_constant
+
+        def isConstant(self):
+            return self._is_constant
+
+    class FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return FakeAddressSpace()
+
+    class FakeFunction:
+        def __init__(self, name):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class FakeFunctionManager:
+        def getFunctionAt(self, addr):
+            if addr == 0x401000:
+                return FakeFunction("callee")
+            return None
+
+        def getFunctionContaining(self, addr):
+            return self.getFunctionAt(addr)
+
+    class FakeProgram:
+        def getAddressFactory(self):
+            return FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return FakeFunctionManager()
+
+    class FakeTracer:
+        def __init__(self):
+            self.program = FakeProgram()
+
+        def _get_function_name(self, _addr_varnode):
+            return "FUN_401000"
 
         def trace_varnode(self, _varnode, use_cache=False):
             return Expression.constant(0x401000, 8)

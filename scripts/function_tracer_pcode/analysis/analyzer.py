@@ -10,6 +10,7 @@ from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
+    canonicalize_post_state_subexpressions,
     rewrite_loads_from_effects,
     summarize_store_effects,
     substitute_condition,
@@ -26,6 +27,7 @@ class ReturnAnalyzer:
         self.debug = debug
         self._decompiler = None
         self._current_parameters: List[Dict] = []
+        self._current_effect_summary = None
         self._effect_summary_cache: Dict[str, Any] = {}
         self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
     
@@ -207,6 +209,7 @@ class ReturnAnalyzer:
             parameters,
             active_functions={function.getName()},
         )
+        self._current_effect_summary = effect_summary
         
         # 戻り値の型を取得
         return_type = self._get_return_type(high_function)
@@ -731,6 +734,8 @@ class ReturnAnalyzer:
                 condition_tracker,
                 debug=self.debug,
                 call_resolver=self._make_call_resolver(active_functions or set()),
+                effect_summary=self._current_effect_summary,
+                parameters=self._current_parameters,
             )
             # PHI内部で複数パスを考慮
             expanded_values = expander.expand_from_varnode(return_varnode, [])
@@ -741,6 +746,8 @@ class ReturnAnalyzer:
                 condition_tracker,
                 debug=self.debug,
                 call_resolver=self._make_call_resolver(active_functions or set()),
+                effect_summary=self._current_effect_summary,
+                parameters=self._current_parameters,
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:
@@ -769,7 +776,19 @@ class ReturnAnalyzer:
                 continue
             
             simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
-            resolved_value = self._concretize_readonly_loads(ev.value, simplified_conds, self._current_parameters)
+            normalized_value = ev.value
+            if self._current_effect_summary is not None and self._current_effect_summary.effects:
+                normalized_value = canonicalize_post_state_subexpressions(
+                    ev.value,
+                    simplified_conds,
+                    self._current_effect_summary.effects,
+                    self._current_parameters,
+                )
+            resolved_value = self._concretize_readonly_loads(
+                normalized_value,
+                simplified_conds,
+                self._current_parameters,
+            )
             
             if self.debug:
                 cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in simplified_conds]

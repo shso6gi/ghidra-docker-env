@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..model import Condition, Expression, ExpressionType, StorageInfo
@@ -80,7 +81,11 @@ def summarize_store_effects(
                 has_unsupported_call = True
                 continue
             args = [
-                tracer.trace_varnode(op.getInput(i), use_cache=False)
+                _normalize_call_argument_expression(
+                    _resolve_call_argument_expression(op.getInput(i), tracer, parameters),
+                    i - 1,
+                    parameters,
+                )
                 for i in range(1, op.getNumInputs())
             ]
             callee_summary = direct_call_summary(target_name, args)
@@ -134,14 +139,23 @@ def _resolve_call_target_name(tracer, op) -> Optional[str]:
         return None
 
     target_name = tracer._get_function_name(target_varnode)
-    if target_name != "UNKNOWN_FUNC":
+    if target_name != "UNKNOWN_FUNC" and not _is_synthetic_function_name(target_name):
         return target_name
 
     traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
     if traced_target.expr_type != ExpressionType.CONSTANT or not isinstance(traced_target.value, int):
-        return None
+        return target_name if target_name != "UNKNOWN_FUNC" else None
 
-    return _lookup_function_name_by_value(tracer, traced_target.value)
+    resolved = _lookup_function_name_by_value(tracer, traced_target.value)
+    if resolved is not None:
+        return resolved
+    return target_name if target_name != "UNKNOWN_FUNC" else None
+
+
+def _is_synthetic_function_name(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return bool(re.fullmatch(r"(?:thunk_)?FUN_[0-9a-fA-F]+", name))
 
 
 def _lookup_function_name_by_value(tracer, address_value: int) -> Optional[str]:
@@ -155,6 +169,285 @@ def _lookup_function_name_by_value(tracer, address_value: int) -> Optional[str]:
         if func:
             return func.getName()
         return f"FUN_{address_value:x}"
+    except Exception:
+        return None
+
+
+def _resolve_call_argument_expression(
+    varnode,
+    tracer,
+    parameters: Sequence[Dict],
+    depth: int = 0,
+    seen: Optional[Set[int]] = None,
+) -> Expression:
+    expr = tracer.trace_varnode(varnode, use_cache=False)
+    if canonicalize_param_location(expr, parameters, size=max(1, getattr(varnode, "getSize", lambda: 0)())) is not None:
+        return expr
+
+    recovered = _recover_parameter_expression_from_varnode(
+        varnode,
+        tracer,
+        parameters,
+        depth=depth,
+        seen=seen,
+    )
+    if recovered is not None:
+        return recovered
+    return expr
+
+
+def _normalize_call_argument_expression(
+    expr: Expression,
+    arg_index: int,
+    parameters: Sequence[Dict],
+) -> Expression:
+    if expr is None:
+        return expr
+
+    if _expression_maps_to_parameter(expr, parameters):
+        return expr
+
+    if expr.expr_type not in (ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.UNKNOWN):
+        return expr
+    if getattr(expr, "operands", None):
+        return expr
+    if arg_index < 0 or arg_index >= len(parameters):
+        return expr
+
+    fallback = _parameter_expression_from_descriptor(parameters[arg_index], size=expr.size or None)
+    return fallback or expr
+
+
+def _expression_maps_to_parameter(expr: Expression, parameters: Sequence[Dict]) -> bool:
+    if expr is None:
+        return False
+    if _resolve_parameter_name(expr, parameters) is not None:
+        return True
+    size = expr.size or 0
+    try:
+        size = int(size)
+    except Exception:
+        size = 0
+    if size <= 0:
+        size = 8
+    return canonicalize_param_location(expr, parameters, size=size) is not None
+
+
+def _parameter_expression_from_descriptor(param: Dict, size: Optional[int] = None) -> Optional[Expression]:
+    name = param.get("name")
+    if not name:
+        return None
+    try:
+        param_index = int(param.get("index", -1))
+    except Exception:
+        param_index = -1
+    try:
+        param_size = int(size or param.get("size", 8))
+    except Exception:
+        param_size = 8
+    param_size = max(1, param_size)
+    return Expression.parameter(
+        name,
+        param_index,
+        param.get("data_type"),
+        param_size,
+        storage_info=_coerce_storage_info(param.get("storage")),
+    )
+
+
+def _recover_parameter_expression_from_varnode(
+    varnode,
+    tracer,
+    parameters: Sequence[Dict],
+    depth: int = 0,
+    seen: Optional[Set[int]] = None,
+) -> Optional[Expression]:
+    if varnode is None or depth > 12:
+        return None
+
+    if seen is None:
+        seen = set()
+    varnode_id = id(varnode)
+    if varnode_id in seen:
+        return None
+    seen.add(varnode_id)
+
+    direct = _parameter_expression_from_varnode(varnode, tracer, parameters)
+    if direct is not None:
+        return direct
+
+    def_op = varnode.getDef()
+    if def_op is None:
+        return None
+
+    mnemonic = def_op.getMnemonic()
+    if mnemonic in {"COPY", "CAST", "INT_ZEXT", "INT_SEXT"} and def_op.getNumInputs() >= 1:
+        return _recover_parameter_expression_from_varnode(
+            def_op.getInput(0),
+            tracer,
+            parameters,
+            depth=depth + 1,
+            seen=seen,
+        )
+
+    if mnemonic == "SUBPIECE" and def_op.getNumInputs() >= 2:
+        offset_expr = tracer.trace_varnode(def_op.getInput(1), use_cache=False)
+        if offset_expr.expr_type == ExpressionType.CONSTANT and int(offset_expr.value) == 0:
+            return _recover_parameter_expression_from_varnode(
+                def_op.getInput(0),
+                tracer,
+                parameters,
+                depth=depth + 1,
+                seen=seen,
+            )
+
+    if mnemonic == "PIECE" and def_op.getNumInputs() >= 2:
+        for index in range(def_op.getNumInputs()):
+            recovered = _recover_parameter_expression_from_varnode(
+                def_op.getInput(index),
+                tracer,
+                parameters,
+                depth=depth + 1,
+                seen=seen,
+            )
+            if recovered is not None:
+                return recovered
+
+    if mnemonic == "LOAD" and def_op.getNumInputs() >= 2:
+        recovered = _recover_parameter_from_stack_load(
+            def_op,
+            tracer,
+            parameters,
+            depth=depth + 1,
+            seen=seen,
+        )
+        if recovered is not None:
+            return recovered
+
+    return None
+
+
+def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dict]) -> Optional[Expression]:
+    try:
+        high_var = varnode.getHigh()
+    except Exception:
+        high_var = None
+
+    storage_info = tracer._get_storage_info_from_varnode(varnode)
+
+    if high_var is not None:
+        symbol = high_var.getSymbol()
+        if symbol is not None:
+            symbol_name = symbol.getName()
+            for param in parameters:
+                if param.get("name") != symbol_name:
+                    continue
+                try:
+                    param_index = int(param.get("index", -1))
+                except Exception:
+                    param_index = -1
+                return Expression.parameter(
+                    symbol_name,
+                    param_index,
+                    param.get("data_type"),
+                    varnode.getSize(),
+                    storage_info=storage_info,
+                )
+
+    probe = Expression.variable(
+        getattr(high_var, "getName", lambda: None)() or f"var_{id(varnode):x}",
+        size=varnode.getSize(),
+        storage_info=storage_info,
+    )
+    resolved_name = _resolve_parameter_name(probe, parameters)
+    if resolved_name is None:
+        return None
+
+    param = next((item for item in parameters if item.get("name") == resolved_name), None)
+    if param is None:
+        return None
+
+    try:
+        param_index = int(param.get("index", -1))
+    except Exception:
+        param_index = -1
+    return Expression.parameter(
+        resolved_name,
+        param_index,
+        param.get("data_type"),
+        varnode.getSize(),
+        storage_info=storage_info,
+    )
+
+
+def _recover_parameter_from_stack_load(
+    load_op,
+    tracer,
+    parameters: Sequence[Dict],
+    depth: int,
+    seen: Set[int],
+) -> Optional[Expression]:
+    location = _stack_location_key(load_op.getInput(1), size=load_op.getOutput().getSize() if load_op.getOutput() else 0)
+    if location is None:
+        return None
+
+    load_order = _get_order_key(load_op)
+    best_candidate = None
+    best_order = None
+    for op in tracer.get_all_pcode_ops():
+        op_order = _get_order_key(op)
+        if op_order >= load_order:
+            continue
+
+        output = op.getOutput()
+        if output is not None:
+            output_location = _stack_location_key(output, size=output.getSize())
+            if output_location == location:
+                if best_order is None or op_order > best_order:
+                    best_candidate = ("output", op)
+                    best_order = op_order
+
+        if op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
+            store_location = _stack_location_key(op.getInput(1), size=op.getInput(2).getSize())
+            if store_location == location:
+                if best_order is None or op_order > best_order:
+                    best_candidate = ("store", op)
+                    best_order = op_order
+
+    if best_candidate is None:
+        return None
+
+    kind, op = best_candidate
+    if kind == "output" and op.getNumInputs() >= 1:
+        return _recover_parameter_expression_from_varnode(
+            op.getInput(0),
+            tracer,
+            parameters,
+            depth=depth,
+            seen=seen,
+        )
+
+    if kind == "store" and op.getNumInputs() >= 3:
+        return _recover_parameter_expression_from_varnode(
+            op.getInput(2),
+            tracer,
+            parameters,
+            depth=depth,
+            seen=seen,
+        )
+
+    return None
+
+
+def _stack_location_key(varnode, size: int = 0) -> Optional[Tuple[str, int, int]]:
+    if varnode is None:
+        return None
+    try:
+        addr = varnode.getAddress()
+        space = addr.getAddressSpace()
+        if space is None or space.getName() != "stack":
+            return None
+        return ("stack", int(varnode.getOffset()), int(size or varnode.getSize()))
     except Exception:
         return None
 
@@ -457,17 +750,19 @@ def _expression_matches_value_under_conditions(
     value: Expression,
     conditions: Sequence[Condition],
 ) -> bool:
-    if _expressions_equivalent(expr, value):
+    reduced_expr = _reduce_expression_under_conditions(expr, conditions)
+    reduced_value = _reduce_expression_under_conditions(value, conditions)
+    if _expressions_equivalent(reduced_expr, reduced_value):
         return True
-    if value.expr_type != ExpressionType.PHI or not value.value:
+    if reduced_value.expr_type != ExpressionType.PHI or not reduced_value.value:
         return False
-    for cond, branch_value in value.value:
+    for cond, branch_value in reduced_value.value:
         combined = list(conditions)
         if cond is not None:
             combined.append(cond)
         if ConditionSimplifier.is_contradiction(combined):
             continue
-        if _expression_matches_value_under_conditions(expr, branch_value, combined):
+        if _expression_matches_value_under_conditions(reduced_expr, branch_value, combined):
             return True
     return False
 
@@ -692,6 +987,196 @@ def build_void_effect_summary_expr(effects: Sequence[StoreEffect]) -> Optional[E
     for part in summary_parts[1:]:
         result = _concat(result, part)
     return result
+
+
+def collapse_post_state_expr_to_canonical_memory(
+    expr: Optional[Expression],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    if expr is None or not effects or not parameters:
+        return None
+    if expr.expr_type == ExpressionType.MEMORY:
+        return None
+
+    active_conditions = list(return_conditions or [])
+    normalized_expr = _reduce_expression_under_conditions(expr, active_conditions)
+    locations = sorted(
+        {effect.location for effect in effects},
+        key=lambda loc: (loc.base_param, loc.offset, loc.size),
+    )
+    for location in locations:
+        candidate = memory_expression_for_location(location, parameters)
+        if candidate is None:
+            continue
+        rewritten = rewrite_loads_from_effects(
+            candidate,
+            active_conditions,
+            effects,
+            parameters,
+        )
+        normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
+        if _expressions_equivalent(normalized_expr, normalized_rewritten):
+            return candidate
+
+    return None
+
+
+def canonicalize_post_state_subexpressions(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        expr,
+        effects,
+        parameters,
+        return_conditions=return_conditions,
+    )
+    if collapsed is not None:
+        return collapsed
+
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+        new_operands = [
+            canonicalize_post_state_subexpressions(op, return_conditions, effects, parameters)
+            for op in expr.operands
+        ]
+        if all(new is old for new, old in zip(new_operands, expr.operands)):
+            return expr
+        rebuilt = Expression(
+            expr_type=expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=new_operands,
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+        return rebuilt
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = canonicalize_post_state_subexpressions(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
+
+
+def memory_expression_for_location(
+    location: CanonicalLocation,
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    param = next((item for item in parameters if item.get("name") == location.base_param), None)
+    if param is None:
+        return None
+
+    try:
+        param_index = int(param.get("index", -1))
+    except Exception:
+        param_index = -1
+
+    try:
+        param_size = int(param.get("size", 8))
+    except Exception:
+        param_size = 8
+    param_size = max(1, param_size)
+
+    base = Expression.parameter(
+        location.base_param,
+        param_index,
+        param.get("data_type"),
+        param_size,
+        storage_info=_coerce_storage_info(param.get("storage")),
+    )
+    addr = base
+    if location.offset != 0:
+        addr = Expression.binary_op(
+            "INT_ADD",
+            base,
+            Expression.constant(location.offset, param_size),
+        )
+        addr.size = param_size
+
+    return Expression.memory(addr, size=location.size)
+
+
+def _reduce_expression_under_conditions(
+    expr: Expression,
+    conditions: Sequence[Condition],
+) -> Expression:
+    if expr is None:
+        return expr
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is None:
+                continue
+            combined = list(conditions) + [cond]
+            if ConditionSimplifier.is_contradiction(combined):
+                continue
+            if not subtract_implied_conditions([cond], conditions):
+                return _reduce_expression_under_conditions(value, combined)
+
+        surviving = []
+        for cond, value in expr.value:
+            combined = list(conditions)
+            if cond is not None:
+                combined.append(cond)
+            if ConditionSimplifier.is_contradiction(combined):
+                continue
+            reduced_value = _reduce_expression_under_conditions(value, combined)
+            surviving.append((cond, reduced_value))
+
+        if not surviving:
+            return expr
+        if len(surviving) == 1:
+            return surviving[0][1]
+
+        rebuilt = Expression.phi(surviving)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+        new_operands = [_reduce_expression_under_conditions(op, conditions) for op in expr.operands]
+        if all(new is old for new, old in zip(new_operands, expr.operands)):
+            return expr
+        rebuilt = Expression(
+            expr_type=expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=new_operands,
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+        return rebuilt
+
+    return expr
 
 
 def locations_match(

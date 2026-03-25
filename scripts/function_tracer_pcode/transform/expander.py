@@ -4,7 +4,11 @@
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
-from ..analysis.effect_summary import _resolve_call_target_name
+from ..analysis.effect_summary import (
+    _resolve_call_target_name,
+    canonicalize_post_state_subexpressions,
+    collapse_post_state_expr_to_canonical_memory,
+)
 
 
 class ExpandedValue:
@@ -54,11 +58,15 @@ class ExpressionExpander:
         condition_tracker,
         debug: bool = False,
         call_resolver: Optional[Callable[[str, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
+        effect_summary=None,
+        parameters: Optional[List[Dict[str, Any]]] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
         self.debug = debug
         self.call_resolver = call_resolver
+        self.effect_summary = effect_summary
+        self.parameters = list(parameters or [])
         self._expanding_ops: Set[str] = set()
     
     def _debug_print(self, msg: str, indent: int = 0):
@@ -171,6 +179,7 @@ class ExpressionExpander:
             # 値をトレース（デバッグ用）
             try:
                 traced_value = self.tracer.trace_varnode(input_varnode, depth + 1, use_cache=False)
+                traced_value = self._canonicalize_traced_expression(traced_value, input_conditions)
                 value_str = traced_value.to_string()
                 self._debug_print(f"  traced_value: {value_str}", depth + 1)
                 
@@ -215,6 +224,24 @@ class ExpressionExpander:
                 # 矛盾チェック
                 if ConditionSimplifier.is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
+                    continue
+
+                canonical_value = self._trace_and_canonicalize_input_value(
+                    input_varnode,
+                    input_conditions,
+                    depth + 1,
+                )
+                if canonical_value is not None:
+                    all_expanded.append(ExpandedValue(canonical_value, input_conditions))
+                    cases_emitted += 1
+                    if self.debug:
+                        val_str = canonical_value.to_string()
+                        if len(val_str) > 80:
+                            val_str = val_str[:80] + "..."
+                        self._debug_print(
+                            f"  Path[{path_idx}] -> EMIT canonicalized: {val_str}",
+                            depth + 1
+                        )
                     continue
                 
                 # 入力を再帰的に展開
@@ -344,6 +371,9 @@ class ExpressionExpander:
         mnemonic = def_op.getMnemonic()
         
         if mnemonic == "MULTIEQUAL":
+            collapsed = self._collapse_nested_multiequal_to_memory(def_op, conditions, depth)
+            if collapsed is not None:
+                return [ExpandedValue(collapsed, conditions)]
             # ネストされたMULTIEQUALを展開し、条件を組み合わせる
             self._debug_print(f"Nested MULTIEQUAL found", depth)
             nested_expanded = self._expand_multiequal(def_op, depth)
@@ -381,6 +411,92 @@ class ExpressionExpander:
                     if ev.value.size == 0:
                         ev.value.size = output_size
             return result
+
+    def _collapse_nested_multiequal_to_memory(
+        self,
+        multiequal_op,
+        conditions: List[Condition],
+        depth: int,
+    ) -> Optional[Expression]:
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return None
+        if not self.parameters:
+            return None
+
+        try:
+            traced = self.tracer._trace_pcode_op(multiequal_op, depth, use_cache=False)
+        except Exception:
+            return None
+
+        collapsed = collapse_post_state_expr_to_canonical_memory(
+            traced,
+            self.effect_summary.effects,
+            self.parameters,
+            return_conditions=conditions,
+        )
+        if collapsed is not None:
+            self._debug_print(
+                f"Collapsed nested MULTIEQUAL to canonical memory: {collapsed.to_string()}",
+                depth,
+            )
+        return collapsed
+
+    def _trace_and_canonicalize_input_value(
+        self,
+        varnode,
+        conditions: List[Condition],
+        depth: int,
+    ) -> Optional[Expression]:
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return None
+        if not self.parameters:
+            return None
+
+        try:
+            traced = self.tracer.trace_varnode(varnode, depth, use_cache=False)
+        except Exception:
+            return None
+
+        canonicalized = self._canonicalize_traced_expression(traced, conditions)
+        if canonicalized is traced:
+            return None
+        if self._expression_contains_unknown_or_call(canonicalized):
+            return None
+        return canonicalized
+
+    def _canonicalize_traced_expression(
+        self,
+        expr: Expression,
+        conditions: List[Condition],
+    ) -> Expression:
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return expr
+        if not self.parameters:
+            return expr
+        canonicalized = canonicalize_post_state_subexpressions(
+            expr,
+            conditions,
+            self.effect_summary.effects,
+            self.parameters,
+        )
+        return canonicalized if canonicalized is not None else expr
+
+    def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_unknown_or_call(cond.expression):
+                    return True
+                if self._expression_contains_unknown_or_call(value):
+                    return True
+            return False
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unknown_or_call(operand):
+                return True
+        return False
     
     def _expand_input_operation(
         self,
@@ -413,6 +529,7 @@ class ExpressionExpander:
             # 特別な展開が不要なら単純にトレース
             self._debug_print(f"  No recursive expansion target in inputs, simple trace", depth)
             value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
+            value = self._canonicalize_traced_expression(value, conditions)
             # 出力サイズを設定
             if value.size == 0 and output_size > 0:
                 value.size = output_size

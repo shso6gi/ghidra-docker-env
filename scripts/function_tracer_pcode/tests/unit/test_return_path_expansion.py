@@ -71,7 +71,7 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     class FakeExpander:
         calls = []
 
-        def __init__(self, tracer_obj, tracker_obj, debug=False, call_resolver=None):
+        def __init__(self, tracer_obj, tracker_obj, debug=False, call_resolver=None, **kwargs):
             self.tracer = tracer_obj
             self.tracker = tracker_obj
             self.debug = debug
