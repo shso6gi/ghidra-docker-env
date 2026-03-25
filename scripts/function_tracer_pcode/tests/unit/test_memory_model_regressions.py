@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     rewrite_loads_from_effects,
+    summarize_store_effects,
     substitute_location,
     _choose_effect_substitution_args,
     _resolve_call_argument_expression,
@@ -679,6 +680,118 @@ def test_choose_effect_substitution_args_retries_with_positional_parameters():
     assert chosen[0].name == "param_1"
     assert chosen[1].expr_type.name == "PARAMETER"
     assert chosen[1].name == "param_2"
+
+
+def test_summarize_store_effects_recovers_argumentless_call_via_matching_parameter_storage():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def getAddress(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._target = FakeVarnode()
+            self._seqnum = FakeSeqnum(0x401000, 1)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._target
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    class FakeTracer:
+        def __init__(self, op):
+            self._op = op
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def get_all_pcode_ops(self):
+            return [self._op]
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    call_op = FakeCallOp()
+    captured_args = {}
+
+    def _direct_call_summary(_name, args):
+        captured_args["args"] = list(args)
+        return EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[
+                StoreEffect(
+                    location=CanonicalLocation("a", 0, 4),
+                    value=Expression.memory(Expression.parameter("b", 1, size=8), size=4),
+                    conditions=[],
+                    order_key=1,
+                ),
+                StoreEffect(
+                    location=CanonicalLocation("b", 0, 4),
+                    value=Expression.memory(Expression.parameter("a", 0, size=8), size=4),
+                    conditions=[],
+                    order_key=1,
+                ),
+            ],
+        )
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(call_op),
+        FakeConditionTracker(),
+        [
+            _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("param_2", size=8, is_signed=False, index=1, storage=_reg_storage("x1", register_name="x1")),
+        ],
+        direct_call_summary=_direct_call_summary,
+        resolve_callee_parameters=lambda _name: [
+            _param("a", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("b", size=8, is_signed=False, index=1, storage=_reg_storage("x1", register_name="x1")),
+        ],
+        debug=False,
+    )
+
+    assert [arg.name for arg in captured_args["args"]] == ["param_1", "param_2"]
+    assert len(summary.effects) == 2
+    assert summary.effects[0].location == CanonicalLocation("param_1", 0, 4)
+    assert summary.effects[0].value.to_string() == "MEM[param_2]"
+    assert summary.effects[1].location == CanonicalLocation("param_2", 0, 4)
+    assert summary.effects[1].value.to_string() == "MEM[param_1]"
 
 
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():

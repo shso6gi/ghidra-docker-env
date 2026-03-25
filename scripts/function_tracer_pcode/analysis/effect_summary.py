@@ -41,6 +41,7 @@ def summarize_store_effects(
     condition_tracker,
     parameters: Sequence[Dict],
     direct_call_summary: Optional[Callable[[str, Sequence[Expression]], Optional["EffectSummary"]]] = None,
+    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
     debug: bool = False,
 ) -> EffectSummary:
     parameter_names = [param.get("name") for param in parameters if param.get("name")]
@@ -80,7 +81,7 @@ def summarize_store_effects(
             if not target_name:
                 has_unsupported_call = True
                 continue
-            args = [
+            explicit_args = [
                 _normalize_call_argument_expression(
                     _resolve_call_argument_expression(op.getInput(i), tracer, parameters),
                     i - 1,
@@ -88,6 +89,14 @@ def summarize_store_effects(
                 )
                 for i in range(1, op.getNumInputs())
             ]
+            callee_parameters = list(resolve_callee_parameters(target_name) or []) if resolve_callee_parameters else []
+            args = _recover_call_argument_expressions(
+                op,
+                tracer,
+                parameters,
+                callee_parameters,
+                explicit_args,
+            )
             callee_summary = direct_call_summary(target_name, args)
             if callee_summary is None or not is_call_effect_summary_allowed(callee_summary):
                 has_unsupported_call = True
@@ -139,6 +148,53 @@ def summarize_store_effects(
         synthetic_expr=synthetic_expr,
         has_unsupported_call=has_unsupported_call,
     )
+
+
+def _recover_call_argument_expressions(
+    call_op,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> List[Expression]:
+    if not callee_parameters:
+        return list(explicit_args)
+
+    recovered_args: List[Expression] = []
+    for index, callee_param in enumerate(callee_parameters):
+        explicit = explicit_args[index] if index < len(explicit_args) else None
+        if _expression_maps_to_parameter(explicit, caller_parameters):
+            recovered_args.append(explicit)
+            continue
+
+        recovered = _recover_call_argument_from_storage(
+            call_op,
+            tracer,
+            caller_parameters,
+            callee_param,
+        )
+        if recovered is None:
+            recovered = _parameter_expression_from_matching_storage(
+                callee_param,
+                caller_parameters,
+                size=(explicit.size if explicit is not None else None),
+            )
+        if recovered is None and index < len(caller_parameters):
+            recovered = _parameter_expression_from_descriptor(
+                caller_parameters[index],
+                size=(explicit.size if explicit is not None else callee_param.get("size")),
+            )
+
+        if recovered is not None:
+            recovered_args.append(
+                _normalize_call_argument_expression(recovered, index, caller_parameters)
+            )
+        elif explicit is not None:
+            recovered_args.append(explicit)
+
+    for index in range(len(recovered_args), len(explicit_args)):
+        recovered_args.append(explicit_args[index])
+    return recovered_args
 
 
 def _resolve_call_target_name(tracer, op) -> Optional[str]:
@@ -206,6 +262,102 @@ def _resolve_call_argument_expression(
     if recovered is not None:
         return recovered
     return expr
+
+
+def _recover_call_argument_from_storage(
+    call_op,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_param: Dict,
+) -> Optional[Expression]:
+    target_storage = _coerce_storage_info(callee_param.get("storage"))
+    if target_storage is None:
+        return None
+
+    call_order = _get_order_key(call_op)
+    best_candidate = None
+    best_order = None
+
+    for op in tracer.get_all_pcode_ops():
+        op_order = _get_order_key(op)
+        if op_order >= call_order:
+            continue
+
+        output = op.getOutput()
+        if output is not None and _varnode_matches_storage(output, target_storage, tracer):
+            if best_order is None or op_order > best_order:
+                best_candidate = ("output", output)
+                best_order = op_order
+
+        if not target_storage.is_register and op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
+            if _stack_varnode_matches_storage(op.getInput(1), target_storage):
+                if best_order is None or op_order > best_order:
+                    best_candidate = ("store", op.getInput(2))
+                    best_order = op_order
+
+    if best_candidate is None:
+        return None
+
+    _, source_varnode = best_candidate
+    return _resolve_call_argument_expression(source_varnode, tracer, caller_parameters)
+
+
+def _parameter_expression_from_matching_storage(
+    callee_param: Dict,
+    caller_parameters: Sequence[Dict],
+    size: Optional[int] = None,
+) -> Optional[Expression]:
+    callee_storage = _coerce_storage_info(callee_param.get("storage"))
+    if callee_storage is None:
+        return None
+
+    matches: List[Dict] = []
+    for caller_param in caller_parameters:
+        caller_storage = _coerce_storage_info(caller_param.get("storage"))
+        if caller_storage is None:
+            continue
+        if _storage_infos_match(caller_storage, callee_storage):
+            matches.append(caller_param)
+
+    if len(matches) != 1:
+        return None
+    return _parameter_expression_from_descriptor(matches[0], size=size or callee_param.get("size"))
+
+
+def _varnode_matches_storage(varnode, target_storage: StorageInfo, tracer) -> bool:
+    varnode_storage = tracer._get_storage_info_from_varnode(varnode)
+    if varnode_storage is not None:
+        return _storage_infos_match(varnode_storage, target_storage)
+    if target_storage.is_register:
+        return False
+    return _stack_varnode_matches_storage(varnode, target_storage)
+
+
+def _stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool:
+    if varnode is None:
+        return False
+    try:
+        addr = varnode.getAddress()
+        space = addr.getAddressSpace()
+        if space is None:
+            return False
+        return (
+            space.getName() == target_storage.space_name
+            and int(varnode.getOffset()) == target_storage.offset
+            and int(varnode.getSize()) == target_storage.size
+        )
+    except Exception:
+        return False
+
+
+def _storage_infos_match(left: StorageInfo, right: StorageInfo) -> bool:
+    if left.is_register or right.is_register:
+        return _storage_matches_parameter(left, right)
+    return (
+        left.space_name == right.space_name
+        and left.offset == right.offset
+        and left.size == right.size
+    )
 
 
 def _normalize_call_argument_expression(

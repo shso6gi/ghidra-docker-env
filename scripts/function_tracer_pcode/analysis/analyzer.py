@@ -29,6 +29,7 @@ class ReturnAnalyzer:
         self._current_parameters: List[Dict] = []
         self._current_effect_summary = None
         self._effect_summary_cache: Dict[str, Any] = {}
+        self._effect_summary_parameter_cache: Dict[str, List[Dict]] = {}
         self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
     
     def _debug_print(self, msg: str, indent: int = 0):
@@ -311,6 +312,7 @@ class ReturnAnalyzer:
         active_functions: set,
     ):
         cache_key = str(function.getEntryPoint())
+        self._effect_summary_parameter_cache[cache_key] = list(parameters)
         cached = self._effect_summary_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -342,6 +344,7 @@ class ReturnAnalyzer:
             callee_tracer.phi_handler = callee_phi_handler
             callee_tracker.build()
             callee_parameters = self._collect_parameters(callee_high)
+            self._effect_summary_parameter_cache[callee_key] = list(callee_parameters)
             summary = self._build_effect_summary(
                 callee,
                 callee_high,
@@ -352,12 +355,33 @@ class ReturnAnalyzer:
             )
             return summary
 
+        def resolve_callee_parameters(function_name: str):
+            callee = self._find_function_by_name(function_name)
+            if callee is None:
+                return []
+            callee_key = str(callee.getEntryPoint())
+            cached_parameters = self._effect_summary_parameter_cache.get(callee_key)
+            if cached_parameters is not None:
+                return cached_parameters
+
+            decompiler = self._get_decompiler()
+            results = decompiler.decompileFunction(callee, 60, None)
+            if not results.decompileCompleted():
+                return []
+            callee_high = results.getHighFunction()
+            if callee_high is None:
+                return []
+            callee_parameters = self._collect_parameters(callee_high)
+            self._effect_summary_parameter_cache[callee_key] = list(callee_parameters)
+            return callee_parameters
+
         summary = summarize_store_effects(
             condition_tracker.block_by_index.values(),
             tracer,
             condition_tracker,
             parameters,
             direct_call_summary=summarize_call,
+            resolve_callee_parameters=resolve_callee_parameters,
             debug=self.debug,
         )
         self._effect_summary_cache[cache_key] = summary
