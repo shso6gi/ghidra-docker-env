@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     collapse_post_state_expr_to_canonical_memory,
     rewrite_loads_from_effects,
     substitute_location,
+    _choose_effect_substitution_args,
     _resolve_call_argument_expression,
     _normalize_call_argument_expression,
     EffectSummary,
@@ -663,6 +664,23 @@ def test_normalize_call_argument_expression_falls_back_to_positional_parameter()
     assert normalized.name == "param_2"
 
 
+def test_choose_effect_substitution_args_retries_with_positional_parameters():
+    chosen = _choose_effect_substitution_args(
+        CanonicalLocation("a", 0, 4),
+        ["a", "b"],
+        [Expression.variable("opaque0", size=8), Expression.variable("opaque1", size=8)],
+        [
+            _param("param_1", size=8, is_signed=False, index=0),
+            _param("param_2", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert chosen[0].expr_type.name == "PARAMETER"
+    assert chosen[0].name == "param_1"
+    assert chosen[1].expr_type.name == "PARAMETER"
+    assert chosen[1].name == "param_2"
+
+
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
     addr_expr = Expression.binary_op(
         "INT_MULT",
@@ -1168,6 +1186,80 @@ def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
 
     assert canonicalized is not None
     assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
+
+
+def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.phi(
+            [
+                (no_swap, Expression.memory(a, size=4)),
+                (swap_taken, Expression.memory(b, size=4)),
+            ]
+        ),
+        Expression.phi(
+            [
+                (no_swap, Expression.memory(b, size=4)),
+                (swap_taken, Expression.memory(a, size=4)),
+            ]
+        ),
+    )
+    expr.operands[0].size = 4
+    expr.operands[1].size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return expr
+
+    class FakeOp:
+        def getMnemonic(self):
+            return "INT_SUB"
+
+        def getOutput(self):
+            class Out:
+                def getSize(self):
+                    return 4
+            return Out()
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    direct = expander._trace_operation_with_conditions(FakeOp(), [no_swap], 0, output_size=4)
+
+    assert direct is not None
+    assert direct.to_string() == "(MEM[a] - MEM[b])"
 
 
 def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_location():

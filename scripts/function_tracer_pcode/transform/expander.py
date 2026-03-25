@@ -5,6 +5,7 @@ from typing import Callable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.effect_summary import (
+    _reduce_expression_under_conditions,
     _resolve_call_target_name,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
@@ -178,6 +179,7 @@ class ExpressionExpander:
             
             # 値をトレース（デバッグ用）
             try:
+                input_conditions = []
                 traced_value = self.tracer.trace_varnode(input_varnode, depth + 1, use_cache=False)
                 traced_value = self._canonicalize_traced_expression(traced_value, input_conditions)
                 value_str = traced_value.to_string()
@@ -462,6 +464,8 @@ class ExpressionExpander:
             return None
         if self._expression_contains_unknown_or_call(canonicalized):
             return None
+        if self._expression_contains_phi(canonicalized):
+            return None
         return canonicalized
 
     def _canonicalize_traced_expression(
@@ -479,7 +483,11 @@ class ExpressionExpander:
             self.effect_summary.effects,
             self.parameters,
         )
-        return canonicalized if canonicalized is not None else expr
+        reduced = _reduce_expression_under_conditions(
+            canonicalized if canonicalized is not None else expr,
+            conditions,
+        )
+        return reduced if reduced is not None else expr
 
     def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
         if expr is None:
@@ -497,6 +505,39 @@ class ExpressionExpander:
             if self._expression_contains_unknown_or_call(operand):
                 return True
         return False
+
+    def _expression_contains_phi(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.PHI:
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            return True
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_phi(operand):
+                return True
+        return False
+
+    def _trace_operation_with_conditions(
+        self,
+        pcode_op,
+        conditions: List[Condition],
+        depth: int,
+        output_size: int = 0,
+    ) -> Optional[Expression]:
+        try:
+            traced = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
+        except Exception:
+            return None
+
+        canonicalized = self._canonicalize_traced_expression(traced, conditions)
+        if self._expression_contains_unknown_or_call(canonicalized):
+            return None
+        if self._expression_contains_phi(canonicalized):
+            return None
+        if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
+            canonicalized.size = output_size
+        return canonicalized
     
     def _expand_input_operation(
         self,
@@ -521,6 +562,19 @@ class ExpressionExpander:
                 depth,
                 output_size=output_size,
             )
+
+        direct_value = self._trace_operation_with_conditions(
+            pcode_op,
+            conditions,
+            depth,
+            output_size=output_size,
+        )
+        if direct_value is not None:
+            self._debug_print(
+                f"  Direct operation trace resolved: {direct_value.to_string()}",
+                depth,
+            )
+            return [ExpandedValue(direct_value, conditions)]
 
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
@@ -672,6 +726,18 @@ class ExpressionExpander:
                 base_conditions,
                 depth,
             )
+
+        direct_value = self._trace_operation_with_conditions(
+            pcode_op,
+            base_conditions,
+            depth,
+        )
+        if direct_value is not None:
+            self._debug_print(
+                f"  Direct operation trace resolved: {direct_value.to_string()}",
+                depth,
+            )
+            return [ExpandedValue(direct_value, base_conditions)]
 
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)

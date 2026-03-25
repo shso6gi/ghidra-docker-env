@@ -94,12 +94,24 @@ def summarize_store_effects(
                 continue
 
             for effect in callee_summary.effects:
-                substituted_location = substitute_location(effect.location, callee_summary.parameter_names, args, parameters)
+                substitution_args = _choose_effect_substitution_args(
+                    effect.location,
+                    callee_summary.parameter_names,
+                    args,
+                    parameters,
+                )
+                substituted_location = substitute_location(
+                    effect.location,
+                    callee_summary.parameter_names,
+                    substitution_args,
+                    parameters,
+                )
                 if substituted_location is None:
                     continue
-                substituted_value = substitute_expression(effect.value, dict(zip(callee_summary.parameter_names, args)))
+                substitutions = dict(zip(callee_summary.parameter_names, substitution_args))
+                substituted_value = substitute_expression(effect.value, substitutions)
                 substituted_conditions = [
-                    substitute_condition(cond, dict(zip(callee_summary.parameter_names, args)))
+                    substitute_condition(cond, substitutions)
                     for cond in effect.conditions
                 ]
                 for path_conditions in path_sets:
@@ -216,6 +228,54 @@ def _normalize_call_argument_expression(
 
     fallback = _parameter_expression_from_descriptor(parameters[arg_index], size=expr.size or None)
     return fallback or expr
+
+
+def _choose_effect_substitution_args(
+    location: CanonicalLocation,
+    callee_parameter_names: Sequence[str],
+    args: Sequence[Expression],
+    caller_parameters: Sequence[Dict],
+) -> Sequence[Expression]:
+    direct_location = substitute_location(location, callee_parameter_names, args, caller_parameters)
+    if direct_location is not None:
+        return args
+
+    positional_args = _build_positional_parameter_args(args, caller_parameters)
+    if positional_args is None:
+        return args
+
+    positional_location = substitute_location(
+        location,
+        callee_parameter_names,
+        positional_args,
+        caller_parameters,
+    )
+    if positional_location is not None:
+        return positional_args
+    return args
+
+
+def _build_positional_parameter_args(
+    args: Sequence[Expression],
+    parameters: Sequence[Dict],
+) -> Optional[List[Expression]]:
+    if not args:
+        return None
+    positional_args: List[Expression] = []
+    changed = False
+    for index, expr in enumerate(args):
+        fallback = _parameter_expression_from_descriptor(
+            parameters[index],
+            size=(expr.size if expr is not None else None),
+        ) if index < len(parameters) else None
+        if fallback is None:
+            positional_args.append(expr)
+            continue
+        positional_args.append(fallback)
+        changed = changed or not _expressions_equivalent(expr, fallback)
+    if not changed:
+        return None
+    return positional_args
 
 
 def _expression_maps_to_parameter(expr: Expression, parameters: Sequence[Dict]) -> bool:

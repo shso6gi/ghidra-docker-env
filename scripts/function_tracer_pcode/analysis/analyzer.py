@@ -737,8 +737,23 @@ class ReturnAnalyzer:
                 effect_summary=self._current_effect_summary,
                 parameters=self._current_parameters,
             )
-            # PHI内部で複数パスを考慮
-            expanded_values = expander.expand_from_varnode(return_varnode, [])
+            path_condition_sets = all_path_conditions or []
+            if not path_condition_sets:
+                path_condition_sets = [path_conditions] if path_conditions else [[]]
+
+            expanded_values = []
+            for path_idx, conds in enumerate(path_condition_sets):
+                if self.debug and len(path_condition_sets) > 1:
+                    cond_strs = [
+                        ConditionSimplifier.get_simplified_condition_string(c)
+                        for c in conds
+                    ]
+                    self._debug_print(
+                        f"Expanding PHI return with path[{path_idx}]: {cond_strs}"
+                    )
+                expanded_values.extend(
+                    expander.expand_from_varnode(return_varnode, conds)
+                )
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
             expander = ExpressionExpander(
