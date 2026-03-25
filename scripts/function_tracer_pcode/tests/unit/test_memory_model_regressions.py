@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     build_void_effect_summary_expr,
     canonicalize_param_location,
     rewrite_loads_from_effects,
+    substitute_location,
     EffectSummary,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -20,11 +21,38 @@ from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, Ty
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
 
 
-def _param(name: str, size: int = 4, is_signed: bool = True, index: int = 0):
-    return {"name": name, "size": size, "is_signed": is_signed, "index": index}
+def _param(
+    name: str,
+    size: int = 4,
+    is_signed: bool = True,
+    index: int = 0,
+    storage=None,
+):
+    result = {"name": name, "size": size, "is_signed": is_signed, "index": index}
+    if storage is not None:
+        result["storage"] = storage
+    return result
+
+
+def _reg_storage(base_name: str, size_bytes: int = 8, register_name: str = None):
+    register_name = register_name or base_name
+    return {
+        "is_register": True,
+        "space_name": "register",
+        "offset": 0,
+        "size": size_bytes,
+        "size_bits": size_bytes * 8,
+        "register_name": register_name,
+        "base_register_name": base_name,
+        "base_register_offset": 0,
+        "base_register_size": size_bytes,
+        "base_register_size_bits": size_bytes * 8,
+        "bit_offset_in_base": 0,
+    }
 
 
 def test_formula_builder_declares_memory_arrays_for_memory_returns():
@@ -504,6 +532,79 @@ def test_effect_summary_accepts_variable_plus_constant_parameter_addresses():
     assert location == CanonicalLocation("box", 4, 4)
 
 
+def test_effect_summary_accepts_register_alias_parameter_addresses():
+    addr_expr = Expression.variable(
+        "saved_arg",
+        size=8,
+        storage_info=StorageInfo(
+            is_register=True,
+            space_name="register",
+            register_name="A0",
+            base_register_name="A0",
+            size=8,
+            size_bits=64,
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=0,
+        ),
+    )
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("param_1", size=8, is_signed=False, storage=_reg_storage("A0"))],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("param_1", 0, 4)
+
+
+def test_substitute_location_accepts_register_alias_call_arguments():
+    call_args = [
+        Expression.variable(
+            "arg_a",
+            size=8,
+            storage_info=StorageInfo(
+                is_register=True,
+                space_name="register",
+                register_name="A0",
+                base_register_name="A0",
+                size=8,
+                size_bits=64,
+                base_register_size=8,
+                base_register_size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        ),
+        Expression.variable(
+            "arg_b",
+            size=8,
+            storage_info=StorageInfo(
+                is_register=True,
+                space_name="register",
+                register_name="A1",
+                base_register_name="A1",
+                size=8,
+                size_bits=64,
+                base_register_size=8,
+                base_register_size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        ),
+    ]
+
+    substituted = substitute_location(
+        CanonicalLocation("a", 0, 4),
+        ["a", "b"],
+        call_args,
+        [
+            _param("param_1", size=8, is_signed=False, storage=_reg_storage("A0")),
+            _param("param_2", size=8, is_signed=False, index=1, storage=_reg_storage("A1")),
+        ],
+    )
+
+    assert substituted == CanonicalLocation("param_1", 0, 4)
+
+
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
     addr_expr = Expression.binary_op(
         "INT_MULT",
@@ -652,7 +753,7 @@ def test_effect_summary_does_not_reapply_commuted_self_referential_store():
     assert rewritten.to_string() == "(delta + MEM[(box + 4)])"
 
 
-def test_call_effect_summary_policy_rejects_interdependent_swap_writes():
+def test_call_effect_summary_policy_accepts_interdependent_swap_writes():
     summary = EffectSummary(
         parameter_names=["a", "b"],
         effects=[
@@ -671,7 +772,43 @@ def test_call_effect_summary_policy_rejects_interdependent_swap_writes():
         ],
     )
 
-    assert not is_call_effect_summary_allowed(summary)
+    assert is_call_effect_summary_allowed(summary)
+
+
+def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    original = Expression.binary_op("INT_SUB", Expression.memory(a, size=4), Expression.memory(b, size=4))
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    rewritten = rewrite_loads_from_effects(
+        original,
+        [swap_taken],
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert rewritten.to_string() == "(MEM[b] - MEM[a])"
 
 
 def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
@@ -834,6 +971,72 @@ def test_effect_summary_resolves_callind_target_from_traced_constant():
 
         def getMnemonic(self):
             return "CALLIND"
+
+    assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
+
+
+def test_effect_summary_resolves_call_target_from_traced_constant():
+    class FakeVarnode:
+        def __init__(self, is_constant=False):
+            self._is_constant = is_constant
+
+        def isConstant(self):
+            return self._is_constant
+
+    class FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return FakeAddressSpace()
+
+    class FakeFunction:
+        def __init__(self, name):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class FakeFunctionManager:
+        def getFunctionAt(self, addr):
+            if addr == 0x401000:
+                return FakeFunction("callee")
+            return None
+
+        def getFunctionContaining(self, addr):
+            return self.getFunctionAt(addr)
+
+    class FakeProgram:
+        def getAddressFactory(self):
+            return FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return FakeFunctionManager()
+
+    class FakeTracer:
+        def __init__(self):
+            self.program = FakeProgram()
+
+        def _get_function_name(self, _addr_varnode):
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.constant(0x401000, 8)
+
+    class FakeOp:
+        def __init__(self):
+            self._input = FakeVarnode(is_constant=False)
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input
+
+        def getMnemonic(self):
+            return "CALL"
 
     assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
 

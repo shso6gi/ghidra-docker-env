@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
-from ..model import Condition, Expression, ExpressionType
+from ..model import Condition, Expression, ExpressionType, StorageInfo
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
 
@@ -130,11 +130,7 @@ def _resolve_call_target_name(tracer, op) -> Optional[str]:
 
     target_varnode = op.getInput(0)
     mnemonic = op.getMnemonic()
-    if mnemonic == "CALL":
-        target_name = tracer._get_function_name(target_varnode)
-        return None if target_name == "UNKNOWN_FUNC" else target_name
-
-    if mnemonic != "CALLIND":
+    if mnemonic not in {"CALL", "CALLIND"}:
         return None
 
     target_name = tracer._get_function_name(target_varnode)
@@ -145,16 +141,22 @@ def _resolve_call_target_name(tracer, op) -> Optional[str]:
     if traced_target.expr_type != ExpressionType.CONSTANT or not isinstance(traced_target.value, int):
         return None
 
+    return _lookup_function_name_by_value(tracer, traced_target.value)
+
+
+def _lookup_function_name_by_value(tracer, address_value: int) -> Optional[str]:
     try:
         default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
-        addr = default_space.getAddress(traced_target.value)
-        func = tracer.program.getFunctionManager().getFunctionAt(addr)
+        addr = default_space.getAddress(address_value)
+        func_manager = tracer.program.getFunctionManager()
+        func = func_manager.getFunctionAt(addr)
+        if func is None:
+            func = func_manager.getFunctionContaining(addr)
         if func:
             return func.getName()
+        return f"FUN_{address_value:x}"
     except Exception:
         return None
-
-    return None
 
 
 def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
@@ -173,8 +175,6 @@ def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
                 return False
 
     if summary.synthetic_expr is not None and not _expression_is_call_scope_safe(summary.synthetic_expr):
-        return False
-    if _summary_has_interdependent_writes(summary):
         return False
 
     return True
@@ -226,7 +226,7 @@ def canonicalize_param_location(
     parameters: Sequence[Dict],
     size: int = 4,
 ) -> Optional[CanonicalLocation]:
-    const_total, bases = _flatten_param_addition(addr_expr)
+    const_total, bases = _flatten_param_addition(addr_expr, parameters)
     if const_total is None or len(bases) != 1:
         return None
 
@@ -264,11 +264,15 @@ def rewrite_loads_from_effects(
     parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
     blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
+    cycle_components: Optional[Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]] = None,
 ) -> Expression:
     if expr is None:
         return expr
 
     active_blocked_locations = list(blocked_locations or [])
+    active_cycle_components = cycle_components
+    if active_cycle_components is None:
+        active_cycle_components = _compute_effect_cycle_components(effects, parameters)
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = rewrite_loads_from_effects(
@@ -278,6 +282,7 @@ def rewrite_loads_from_effects(
             parameters,
             max_order_key=max_order_key,
             blocked_locations=active_blocked_locations,
+            cycle_components=active_cycle_components,
         )
         location = canonicalize_param_location(rewritten_addr, parameters, size=expr.size)
         candidate = Expression.memory(rewritten_addr, expr.size)
@@ -321,6 +326,10 @@ def rewrite_loads_from_effects(
         matched.sort(key=lambda item: item[0], reverse=True)
         branches = []
         for effect_order, residual, value in matched:
+            preserved_locations = list(active_cycle_components.get(location, frozenset()))
+            if location not in preserved_locations:
+                preserved_locations.append(location)
+            next_blocked_locations = active_blocked_locations + preserved_locations
             if residual:
                 cond = Condition.combine_and(residual)
                 branches.append(
@@ -332,7 +341,8 @@ def rewrite_loads_from_effects(
                             effects,
                             parameters,
                             max_order_key=effect_order,
-                            blocked_locations=active_blocked_locations + [location],
+                            blocked_locations=next_blocked_locations,
+                            cycle_components=active_cycle_components,
                         ),
                     )
                 )
@@ -343,7 +353,8 @@ def rewrite_loads_from_effects(
                     effects,
                     parameters,
                     max_order_key=effect_order,
-                    blocked_locations=active_blocked_locations + [location],
+                    blocked_locations=next_blocked_locations,
+                    cycle_components=active_cycle_components,
                 )
 
         branches.append((None, candidate))
@@ -370,6 +381,7 @@ def rewrite_loads_from_effects(
                 parameters,
                 max_order_key=max_order_key,
                 blocked_locations=active_blocked_locations,
+                cycle_components=active_cycle_components,
             )
             for op in expr.operands
         ]
@@ -401,6 +413,7 @@ def rewrite_loads_from_effects(
                 parameters,
                 max_order_key=max_order_key,
                 blocked_locations=active_blocked_locations,
+                cycle_components=active_cycle_components,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -504,6 +517,76 @@ def _expression_reads_location(
         if _expression_reads_location(operand, location, conditions, parameters):
             return True
     return False
+
+
+def _compute_effect_cycle_components(
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]:
+    locations = sorted({effect.location for effect in effects}, key=lambda loc: (loc.base_param, loc.offset, loc.size))
+    if len(locations) <= 1:
+        return {}
+
+    graph: Dict[CanonicalLocation, Set[CanonicalLocation]] = {location: set() for location in locations}
+    for effect in effects:
+        for candidate in locations:
+            if candidate == effect.location:
+                continue
+            if _expression_reads_location(effect.value, candidate, effect.conditions, parameters):
+                graph[effect.location].add(candidate)
+
+    components: Dict[CanonicalLocation, FrozenSet[CanonicalLocation]] = {}
+    for component in _strongly_connected_components(graph):
+        if len(component) <= 1:
+            continue
+        frozen_component = frozenset(component)
+        for location in component:
+            components[location] = frozen_component
+    return components
+
+
+def _strongly_connected_components(
+    graph: Dict[CanonicalLocation, Set[CanonicalLocation]]
+) -> List[List[CanonicalLocation]]:
+    index = 0
+    stack: List[CanonicalLocation] = []
+    indices: Dict[CanonicalLocation, int] = {}
+    lowlinks: Dict[CanonicalLocation, int] = {}
+    on_stack: Set[CanonicalLocation] = set()
+    components: List[List[CanonicalLocation]] = []
+
+    def strongconnect(node: CanonicalLocation) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for succ in graph.get(node, set()):
+            if succ not in indices:
+                strongconnect(succ)
+                lowlinks[node] = min(lowlinks[node], lowlinks[succ])
+            elif succ in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[succ])
+
+        if lowlinks[node] != indices[node]:
+            return
+
+        component: List[CanonicalLocation] = []
+        while stack:
+            member = stack.pop()
+            on_stack.discard(member)
+            component.append(member)
+            if member == node:
+                break
+        components.append(component)
+
+    for node in graph:
+        if node not in indices:
+            strongconnect(node)
+
+    return components
 
 
 def _expressions_equivalent(left: Optional[Expression], right: Optional[Expression]) -> bool:
@@ -689,12 +772,17 @@ def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]
     return equalities
 
 
-def _flatten_param_addition(expr: Expression) -> Tuple[Optional[int], List[str]]:
-    if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE) and expr.name:
-        return 0, [expr.name]
+def _flatten_param_addition(
+    expr: Expression,
+    parameters: Sequence[Dict],
+) -> Tuple[Optional[int], List[str]]:
+    if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
+        base_name = _resolve_parameter_name(expr, parameters)
+        if base_name is not None:
+            return 0, [base_name]
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and expr.operands:
-        return _flatten_param_addition(expr.operands[0])
+        return _flatten_param_addition(expr.operands[0], parameters)
 
     if (
         expr.expr_type == ExpressionType.BINARY_OP
@@ -703,15 +791,15 @@ def _flatten_param_addition(expr: Expression) -> Tuple[Optional[int], List[str]]
     ):
         source, offset = expr.operands
         if offset.expr_type == ExpressionType.CONSTANT and offset.value == 0:
-            return _flatten_param_addition(source)
+            return _flatten_param_addition(source, parameters)
 
     if (
         expr.expr_type == ExpressionType.BINARY_OP
         and expr.operator == "INT_ADD"
         and len(expr.operands) == 2
     ):
-        left_const, left_bases = _flatten_param_addition(expr.operands[0])
-        right_const, right_bases = _flatten_param_addition(expr.operands[1])
+        left_const, left_bases = _flatten_param_addition(expr.operands[0], parameters)
+        right_const, right_bases = _flatten_param_addition(expr.operands[1], parameters)
         if left_const is None or right_const is None:
             return None, []
         return left_const + right_const, left_bases + right_bases
@@ -724,14 +812,82 @@ def _flatten_param_addition(expr: Expression) -> Tuple[Optional[int], List[str]]
         left_const = _constant_factor(expr.operands[0])
         right_const = _constant_factor(expr.operands[1])
         if left_const == 1:
-            return _flatten_param_addition(expr.operands[1])
+            return _flatten_param_addition(expr.operands[1], parameters)
         if right_const == 1:
-            return _flatten_param_addition(expr.operands[0])
+            return _flatten_param_addition(expr.operands[0], parameters)
 
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return expr.value, []
 
     return None, []
+
+
+def _resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Optional[str]:
+    if expr is None:
+        return None
+
+    if expr.name:
+        for param in parameters:
+            if param.get("name") == expr.name:
+                return expr.name
+
+    expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
+    if expr_storage is None:
+        return None
+
+    matches: List[str] = []
+    for param in parameters:
+        param_name = param.get("name")
+        param_storage = _coerce_storage_info(param.get("storage"))
+        if not param_name or param_storage is None:
+            continue
+        if _storage_matches_parameter(expr_storage, param_storage):
+            matches.append(param_name)
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
+    if storage is None:
+        return None
+    if isinstance(storage, StorageInfo):
+        return storage
+    if isinstance(storage, dict):
+        try:
+            return StorageInfo(
+                is_register=bool(storage.get("is_register", False)),
+                space_name=str(storage.get("space_name", "")),
+                offset=int(storage.get("offset", 0)),
+                size=int(storage.get("size", 0)),
+                size_bits=int(storage.get("size_bits", 0)),
+                register_name=storage.get("register_name"),
+                base_register_name=storage.get("base_register_name"),
+                base_register_offset=int(storage.get("base_register_offset", 0)),
+                base_register_size=int(storage.get("base_register_size", 0)),
+                base_register_size_bits=int(storage.get("base_register_size_bits", 0)),
+                bit_offset_in_base=int(storage.get("bit_offset_in_base", 0)),
+            )
+        except Exception:
+            return None
+    return None
+
+
+def _storage_matches_parameter(expr_storage: StorageInfo, param_storage: StorageInfo) -> bool:
+    if expr_storage.is_register and param_storage.is_register:
+        if expr_storage.shares_base_register_with(param_storage):
+            return expr_storage.bit_range_overlaps_with(param_storage)
+        return (
+            StorageInfo._normalize_reg_name(expr_storage.register_name or "")
+            == StorageInfo._normalize_reg_name(param_storage.register_name or "")
+        )
+
+    return (
+        expr_storage.space_name == param_storage.space_name
+        and expr_storage.offset == param_storage.offset
+        and expr_storage.size == param_storage.size
+    )
 
 
 def _constant_factor(expr: Expression) -> Optional[int]:

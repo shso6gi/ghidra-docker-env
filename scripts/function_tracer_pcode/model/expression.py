@@ -54,7 +54,8 @@ class Expression:
         size: int = 0,
         name: Optional[str] = None,
         data_type: Optional[str] = None,
-        storage_info: Optional[StorageInfo] = None
+        storage_info: Optional[StorageInfo] = None,
+        read_order_key: Optional[int] = None,
     ):
         self.expr_type = expr_type
         self.value = value
@@ -64,6 +65,7 @@ class Expression:
         self.name = name
         self.data_type = data_type
         self.storage_info = storage_info
+        self.read_order_key = read_order_key
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
@@ -147,8 +149,18 @@ class Expression:
         return cls(expr_type=ExpressionType.CALL, name=func_name, operands=arguments)
     
     @classmethod
-    def memory(cls, address: 'Expression', size: int = 4) -> 'Expression':
-        return cls(expr_type=ExpressionType.MEMORY, operands=[address], size=size)
+    def memory(
+        cls,
+        address: 'Expression',
+        size: int = 4,
+        read_order_key: Optional[int] = None,
+    ) -> 'Expression':
+        return cls(
+            expr_type=ExpressionType.MEMORY,
+            operands=[address],
+            size=size,
+            read_order_key=read_order_key,
+        )
     
     @classmethod
     def phi(cls, branches: List[tuple]) -> 'Expression':
@@ -306,6 +318,8 @@ class Expression:
             result["operands"] = [op.to_dict() for op in self.operands]
         if self.storage_info:
             result["storage_info"] = self.storage_info.to_dict()
+        if self.read_order_key is not None:
+            result["read_order_key"] = self.read_order_key
         return result
     
     def get_all_variables(self) -> Set[str]:

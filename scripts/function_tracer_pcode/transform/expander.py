@@ -439,6 +439,7 @@ class ExpressionExpander:
             conditions,
             depth,
             output_size=output_size,
+            read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
         )
     
     def _op_requires_recursive_expansion(self, pcode_op, depth: int = 0) -> bool:
@@ -581,6 +582,7 @@ class ExpressionExpander:
             base_conditions,
             depth,
             output_size=output_size,
+            read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
         )
     
     def _combine_input_expansions_with_conditions(
@@ -590,6 +592,7 @@ class ExpressionExpander:
         base_conditions: List[Condition],
         depth: int,
         output_size: int = 0,
+        read_order_key: Optional[int] = None,
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
         self._debug_print(f"Combining expansions for {mnemonic}", depth)
@@ -623,6 +626,7 @@ class ExpressionExpander:
                         new_value = Expression.memory(
                             right_ev.value,
                             output_size if output_size > 0 else 4,
+                            read_order_key=read_order_key,
                         )
                     else:
                         new_value = Expression.binary_op(mnemonic, left_ev.value, right_ev.value)

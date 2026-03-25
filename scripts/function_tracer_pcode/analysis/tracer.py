@@ -81,6 +81,14 @@ class PcodeTracer:
             return f"{target}:{order}:{obj_id}"
         obj_id = id(pcode_op)
         return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{obj_id}"
+
+    def _get_op_order_key(self, pcode_op) -> Optional[int]:
+        """PcodeOp の単調順序キーを返す。"""
+        seq = pcode_op.getSeqnum()
+        if seq is None:
+            return None
+        target = seq.getTarget()
+        return (target.getOffset() << 8) | seq.getOrder()
     
     def _collect_debug_info(self):
         """デバッグ用の情報を収集"""
@@ -469,7 +477,11 @@ class PcodeTracer:
                 addr = self.trace_varnode(inputs[1], depth, use_cache)
                 output = pcode_op.getOutput()
                 size = output.getSize() if output else 4
-                return Expression.memory(addr, size)
+                return Expression.memory(
+                    addr,
+                    size,
+                    read_order_key=self._get_op_order_key(pcode_op),
+                )
             return Expression.unknown("load_insufficient_inputs")
         
         # STORE
