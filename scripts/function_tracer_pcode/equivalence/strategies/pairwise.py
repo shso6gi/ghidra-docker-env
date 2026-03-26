@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import time
 
 from ...model import FunctionReturnAnalysis
+from ...analysis.condition.simplifier import ConditionSimplifier
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
 from .pairwise_models import QueryResult, ReturnCase
@@ -113,6 +114,14 @@ class PairwiseStrategy(CheckStrategy):
         for i, case1 in enumerate(cases1):
             for j, case2 in enumerate(cases2):
                 pair_id = f"({i},{j})"
+                if self._cases_are_contradictory(case1, case2):
+                    unsat_count += 1
+                    if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
+                        self._debug_print(
+                            f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
+                        )
+                    continue
+
                 result = self._solve_query_twostage(
                     base_ctx,
                     case1,
@@ -384,6 +393,16 @@ class PairwiseStrategy(CheckStrategy):
             model=counterexample_raw,
         )
         return ParallelResult(results=[solver_result])
+
+    def _cases_are_contradictory(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> bool:
+        combined_conditions = list(case1.conditions) + list(case2.conditions)
+        if not combined_conditions:
+            return False
+        return ConditionSimplifier.is_contradiction(combined_conditions)
 
     def _create_empty_result(self) -> StrategyResult:
         return StrategyResult(

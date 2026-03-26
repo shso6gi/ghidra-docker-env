@@ -305,20 +305,47 @@ def rewrite_analysis_returns(
     Returns:
         (リライトされた解析結果, 各return値のリライト結果リスト)
     """
-    from ...model import ReturnInfo, FunctionReturnAnalysis
+    from ...model import Condition, ReturnInfo, FunctionReturnAnalysis
     
     rewrite_results = []
     new_returns = []
     
     for ret_info in analysis.returns:
-        result = rewriter.rewrite(ret_info.value)
-        rewrite_results.append(result)
+        value_result = rewriter.rewrite(ret_info.value)
+        combined_history = list(value_result.history)
+        new_conditions = []
+
+        for cond_index, condition in enumerate(ret_info.conditions):
+            condition_result = rewriter.rewrite(condition.expression)
+            if condition_result.was_rewritten:
+                combined_history.extend(
+                    (
+                        f"condition[{cond_index}]:{rule_name}",
+                        before,
+                        after,
+                    )
+                    for rule_name, before, after in condition_result.history
+                )
+            new_conditions.append(
+                Condition(
+                    expression=condition_result.expression,
+                    negated=condition.negated,
+                )
+            )
+
+        rewrite_results.append(
+            RewriteResult(
+                expression=value_result.expression,
+                was_rewritten=bool(combined_history),
+                history=combined_history,
+            )
+        )
         
         # 新しいReturnInfoを作成
         new_ret = ReturnInfo(
             address=ret_info.address,
-            value=result.expression,
-            conditions=ret_info.conditions,
+            value=value_result.expression,
+            conditions=new_conditions,
             branch_index=ret_info.branch_index
         )
         new_returns.append(new_ret)
@@ -329,7 +356,8 @@ def rewrite_analysis_returns(
         entry_point=analysis.entry_point,
         parameters=analysis.parameters,
         returns=new_returns,
-        return_type=analysis.return_type
+        return_type=analysis.return_type,
+        signedness_result=analysis.signedness_result,
     )
     
     return new_analysis, rewrite_results
