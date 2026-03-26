@@ -68,6 +68,10 @@ def try_normalization_equivalence(
     pos_original = _translate_fact_names(combined_facts.pos_vars, smt_to_original)
     neg_original = _translate_fact_names(combined_facts.neg_vars, smt_to_original)
     nonzero_original = _translate_fact_names(combined_facts.nonzero_vars, smt_to_original)
+    nonneg_exprs = set(combined_facts.nonneg_exprs)
+    pos_exprs = set(combined_facts.pos_exprs)
+    neg_exprs = set(combined_facts.neg_exprs)
+    nonzero_exprs = set(combined_facts.nonzero_exprs)
     upper_bounds_original = _merge_upper_bounds(
         upper_bounds_original,
         _translate_upper_bounds(combined_facts.upper_bounds, smt_to_original),
@@ -82,6 +86,10 @@ def try_normalization_equivalence(
             strategy._debug_print(f"Sign facts: neg={neg_original}")
         if nonzero_original:
             strategy._debug_print(f"Sign facts: nonzero={nonzero_original}")
+        if nonneg_exprs:
+            strategy._debug_print(f"Expr facts: nonneg={sorted(nonneg_exprs)}")
+        if neg_exprs:
+            strategy._debug_print(f"Expr facts: neg={sorted(neg_exprs)}")
         if upper_bounds_original:
             strategy._debug_print(f"Range facts: upper_bounds={upper_bounds_original}")
 
@@ -92,6 +100,10 @@ def try_normalization_equivalence(
         pos_vars=pos_original,
         neg_vars=neg_original,
         nonzero_vars=nonzero_original,
+        nonneg_exprs=nonneg_exprs,
+        pos_exprs=pos_exprs,
+        neg_exprs=neg_exprs,
+        nonzero_exprs=nonzero_exprs,
         upper_bounds=upper_bounds_original,
         allow_unsafe=False,
     )

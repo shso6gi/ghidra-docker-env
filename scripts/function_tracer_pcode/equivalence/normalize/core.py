@@ -4,8 +4,10 @@
 from typing import Optional
 from ...model import Expression, ExpressionType
 from .negation import normalize_double_negation
+from .modulo import normalize_modulo_patterns
 from .arithmetic import normalize_arithmetic
 from .shift import normalize_shift_amounts
+from .abs import normalize_bitwise_abs
 from .division import normalize_division_signs
 from .division_signedness import normalize_division_signedness
 from .context import NormalizationContext
@@ -21,10 +23,12 @@ def normalize_expression(
     適用順序：
     1. 子要素の再帰的正規化（ボトムアップ）
     2. 二重否定の除去
-    3. 加算・減算の正規形化（常に安全な bit-vector 恒等変形）
-    4. shift amount の正規化（range/origin facts付き）
-    5. 除算の符号正規化（安全性チェック付き）
-    6. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
+    3. 剰余展開の正規化
+    4. 加算・減算の正規形化（常に安全な bit-vector 恒等変形）
+    5. shift amount の正規化（range/origin facts付き）
+    6. abs ビットハックの簡約（facts付き）
+    7. 除算の符号正規化（安全性チェック付き）
+    8. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
     
     Args:
         expr: 正規化対象の式
@@ -63,20 +67,28 @@ def normalize_expression(
             reason="Removed double negation"
         )
 
-    # 2. 加算・減算の正規形化
+    # 2. 剰余展開の正規化
+    expr_before = expr
+    expr = normalize_modulo_patterns(expr, context)
+
+    # 3. 加算・減算の正規形化
     expr_before = expr
     expr = normalize_arithmetic(expr, context)
 
-    # 3. shift amount の正規化
+    # 4. shift amount の正規化
     expr_before = expr
     expr = normalize_shift_amounts(expr, context)
 
-    # 4. 除算の符号正規化（安全性チェック付き）
+    # 5. abs ビットハックの簡約
+    expr_before = expr
+    expr = normalize_bitwise_abs(expr, context)
+
+    # 6. 除算の符号正規化（安全性チェック付き）
     expr_before = expr
     expr = normalize_division_signs(expr, context)
     # ルール記録はnormalize_division_signs内で行われる
     
-    # 5. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
+    # 7. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
     expr_before = expr
     expr = normalize_division_signedness(expr, context)
     # ルール記録はnormalize_division_signedness内で行われる

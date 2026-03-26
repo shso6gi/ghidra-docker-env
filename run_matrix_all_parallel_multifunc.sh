@@ -7,51 +7,12 @@
 # ---------------------- 設定 ----------------------
 # 対象関数を配列で指定
 TARGET_FUNCS=(
-    "branch_eq"
-    "branch_ne"
-    "branch_lt"
-    "branch_le"
-    "branch_gt"
-    "branch_ge"
-    "branch_zero"
-    "branch_nonzero"
-    "branch_not"
-    "branch_closed_range"
-    "branch_half_open_range"
-    "branch_disjoint_range"
-    "branch_signed_compare"
-    "branch_unsigned_compare"
-    "branch_signed_unsigned_mix"
-    # "branch_short_circuit_and"
-    # "branch_short_circuit_or"
-    "branch_nested_boolean"
-    "branch_sign_bucket"
-    "branch_priority_select"
-    "branch_nested_if"
-    "branch_guard_clauses"
-    "branch_ternary_basic"
-    "branch_ternary_nested"
-    # "branch_ternary_with_side_effect"
-    "branch_switch_dense"
-    "branch_switch_sparse"
-    "branch_switch_fallthrough"
-    "branch_for_accumulate"
-    "branch_continue_break"
-    # "branch_while_state"
-    # "branch_do_while"
-    # "branch_pointer_check"
-    # "branch_array_scan"
-    "branch_bitmask"
-    "branch_shift_sign"
-    "branch_difference_check"
-    "branch_sum_parity"
-    "branch_multi_guard"
-    "branch_probe"
+    "ternary_modulo"
     # 必要に応じて追加
 )
 
-OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/branch_condition_test"
-BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/branch_condition_test"
+OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/arithmetic_long_test"
+BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test"
 PARALLEL_JOBS=${PARALLEL_JOBS:-10}  # 同時実行数。環境変数で上書き可能
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
@@ -62,32 +23,32 @@ fi
 
 # ---------------------- バイナリ定義 ----------------------
 declare -A BINARY_MAP=(
-    [B1]="branch_condition_test-arm64-clang-O0"
-    [B2]="branch_condition_test-arm64-clang-O1"
-    [B3]="branch_condition_test-arm64-clang-O2"
-    [B4]="branch_condition_test-arm64-clang-O3"
-    [B5]="branch_condition_test-arm64-gcc-O0"
-    [B6]="branch_condition_test-arm64-gcc-O1"
-    [B7]="branch_condition_test-arm64-gcc-O2"
-    [B8]="branch_condition_test-arm64-gcc-O3"
+    [B1]="arithmetic_long_test-arm64-clang-O0"
+    [B2]="arithmetic_long_test-arm64-clang-O1"
+    [B3]="arithmetic_long_test-arm64-clang-O2"
+    [B4]="arithmetic_long_test-arm64-clang-O3"
+    [B5]="arithmetic_long_test-arm64-gcc-O0"
+    [B6]="arithmetic_long_test-arm64-gcc-O1"
+    [B7]="arithmetic_long_test-arm64-gcc-O2"
+    [B8]="arithmetic_long_test-arm64-gcc-O3"
 
-    [B9]="branch_condition_test-mips64-clang-O0"
-    [B10]="branch_condition_test-mips64-clang-O1"
-    [B11]="branch_condition_test-mips64-clang-O2"
-    [B12]="branch_condition_test-mips64-clang-O3"
-    [B13]="branch_condition_test-mips64-gcc-O0"
-    [B14]="branch_condition_test-mips64-gcc-O1"
-    [B15]="branch_condition_test-mips64-gcc-O2"
-    [B16]="branch_condition_test-mips64-gcc-O3"
+    [B9]="arithmetic_long_test-mips64-clang-O0"
+    [B10]="arithmetic_long_test-mips64-clang-O1"
+    [B11]="arithmetic_long_test-mips64-clang-O2"
+    [B12]="arithmetic_long_test-mips64-clang-O3"
+    [B13]="arithmetic_long_test-mips64-gcc-O0"
+    [B14]="arithmetic_long_test-mips64-gcc-O1"
+    [B15]="arithmetic_long_test-mips64-gcc-O2"
+    [B16]="arithmetic_long_test-mips64-gcc-O3"
 
-    # [B17]="branch_condition_test-x86_64-clang-O0"
-    # [B18]="branch_condition_test-x86_64-clang-O1"
-    # [B19]="branch_condition_test-x86_64-clang-O2"
-    # [B20]="branch_condition_test-x86_64-clang-O3"
-    # [B21]="branch_condition_test-x86_64-gcc-O0"
-    # [B22]="branch_condition_test-x86_64-gcc-O1"
-    # [B23]="branch_condition_test-x86_64-gcc-O2"
-    # [B24]="branch_condition_test-x86_64-gcc-O3"
+    # [B17]="arithmetic_long_test-x86_64-clang-O0"
+    # [B18]="arithmetic_long_test-x86_64-clang-O1"
+    # [B19]="arithmetic_long_test-x86_64-clang-O2"
+    # [B20]="arithmetic_long_test-x86_64-clang-O3"
+    # [B21]="arithmetic_long_test-x86_64-gcc-O0"
+    # [B22]="arithmetic_long_test-x86_64-gcc-O1"
+    # [B23]="arithmetic_long_test-x86_64-gcc-O2"
+    # [B24]="arithmetic_long_test-x86_64-gcc-O3"
 )
 
 IDS=(${!BINARY_MAP[@]})
@@ -131,8 +92,10 @@ run_pair() {
         status="NOT EQUIVALENT ✗"
     elif grep -q "^Result: ERROR" "$LOG_FILE"; then
         status="ERROR !"
+    elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
+        status="TIMEOUT"
     else
-        status="UNKNOWN / TIMEOUT"
+        status="UNKNOWN"
     fi
 
     local msg="[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $status"
@@ -143,6 +106,37 @@ run_pair() {
 export -f run_pair
 export BASE_PATH
 
+calculate_elapsed_seconds() {
+    local start_ts="$1"
+    local end_ts="$2"
+
+    awk -v start="$start_ts" -v end="$end_ts" 'BEGIN {
+        elapsed = end - start
+        if (elapsed < 0) {
+            elapsed = 0
+        }
+        printf "%.3f", elapsed
+    }'
+}
+
+format_duration() {
+    local total_seconds="${1:-0}"
+
+    awk -v total="$total_seconds" 'BEGIN {
+        hours = int(total / 3600)
+        minutes = int((total - (hours * 3600)) / 60)
+        seconds = total - (hours * 3600) - (minutes * 60)
+
+        if (hours > 0) {
+            printf "%dh %02dm %06.3fs", hours, minutes, seconds
+        } else if (minutes > 0) {
+            printf "%dm %06.3fs", minutes, seconds
+        } else {
+            printf "%.3fs", seconds
+        }
+    }'
+}
+
 classify_log_result() {
     local log_file="$1"
 
@@ -152,9 +146,62 @@ classify_log_result() {
         echo "NOT_EQ"
     elif grep -q "^Result: ERROR" "$log_file"; then
         echo "ERROR"
+    elif grep -q "^Result: TIMEOUT" "$log_file"; then
+        echo "TIMEOUT"
+    elif grep -q "^Result: UNKNOWN" "$log_file"; then
+        echo "UNKNOWN"
     else
         echo "UNKNOWN"
     fi
+}
+
+summarize_log_time_lines() {
+    local -a log_files=("$@")
+
+    if (( ${#log_files[@]} == 0 )); then
+        return 0
+    fi
+
+    awk '
+        /^Total time: [0-9.]+ seconds$/ {
+            value = $3 + 0
+            count++
+            sum += value
+
+            if (count == 1 || value < min) {
+                min = value
+            }
+            if (count == 1 || value > max) {
+                max = value
+            }
+        }
+        END {
+            if (count > 0) {
+                printf "%d\t%.3f\t%.3f\t%.3f\t%.3f\n", \
+                    count, sum, sum / count, min, max
+            }
+        }
+    ' "${log_files[@]}"
+}
+
+print_log_time_summary_block() {
+    local indent="$1"
+    shift
+    local -a log_files=("$@")
+    local summary_line
+
+    summary_line=$(summarize_log_time_lines "${log_files[@]}")
+    if [[ -z "$summary_line" ]]; then
+        return 0
+    fi
+
+    local timed_logs sum_seconds avg_seconds min_seconds max_seconds
+    IFS=$'\t' read -r timed_logs sum_seconds avg_seconds min_seconds max_seconds <<< "$summary_line"
+
+    echo ""
+    echo "${indent}Per-pair Solver Time Summary:"
+    printf "%s  LOGS=%3d | SUM=%8.3fs, AVG=%7.3fs, MIN=%7.3fs, MAX=%7.3fs\n" \
+        "$indent" "$timed_logs" "$sum_seconds" "$avg_seconds" "$min_seconds" "$max_seconds"
 }
 
 summarize_phase_usage_lines() {
@@ -297,9 +344,11 @@ print_pairwise_normalization_summary_block() {
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
 TOTAL_FUNCS=${#TARGET_FUNCS[@]}
+declare -A FUNC_WALL_TIME_SECONDS=()
 
 for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     FUNC_INDEX=$((FUNC_INDEX + 1))
+    func_start_ts=$(date +%s.%N)
     
     # 関数ごとの出力ディレクトリを設定
     OUTPUT_DIR="${OUTPUT_BASE_DIR}/${TARGET_FUNC}"
@@ -349,6 +398,9 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
 
     wait
     echo ""
+    func_end_ts=$(date +%s.%N)
+    func_elapsed_seconds=$(calculate_elapsed_seconds "$func_start_ts" "$func_end_ts")
+    FUNC_WALL_TIME_SECONDS["$TARGET_FUNC"]="$func_elapsed_seconds"
 
     # ---------------------- 結果集計 ----------------------
     # 結果集計ファイルのパス
@@ -360,6 +412,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     declare -a NON_EQ_PAIRS=()
     declare -a ERROR_PAIRS=()
     declare -a UNKNOWN_PAIRS=()
+    declare -a TIMEOUT_PAIRS=()
 
     for ((i=0; i<${#IDS[@]}-1; i++)); do
         ROW_ID="${IDS[$i]}"
@@ -381,6 +434,9 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
                 ERROR)
                 ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
                 ;;
+                TIMEOUT)
+                TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
+                ;;
                 *)
                 UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
                 ;;
@@ -396,11 +452,14 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     {
         echo "--- Results for $TARGET_FUNC ---"
         echo "  Total pairs     : ${#FUNC_LOG_FILES[@]}"
+        echo "  Elapsed wall time: $(format_duration "$func_elapsed_seconds")"
         echo "  Equivalent     : ${#EQ_PAIRS[@]}"
         echo "  Not equivalent : ${#NON_EQ_PAIRS[@]}"
         echo "  Error          : ${#ERROR_PAIRS[@]}"
-        echo "  Unknown/Timeout: ${#UNKNOWN_PAIRS[@]}"
+        echo "  Unknown        : ${#UNKNOWN_PAIRS[@]}"
+        echo "  Timeout        : ${#TIMEOUT_PAIRS[@]}"
 
+        print_log_time_summary_block "  " "${FUNC_LOG_FILES[@]}"
         print_phase_usage_summary_block "  " "${FUNC_LOG_FILES[@]}"
         print_pairwise_normalization_summary_block "  " "${FUNC_LOG_FILES[@]}"
 
@@ -422,13 +481,21 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
 
         if (( ${#UNKNOWN_PAIRS[@]} > 0 )); then
             echo ""
-            echo "  UNKNOWN / TIMEOUT pairs:"
+            echo "  UNKNOWN pairs:"
             for pair in "${UNKNOWN_PAIRS[@]}"; do
                 echo "    - $pair"
             done
         fi
 
-        if (( ${#NON_EQ_PAIRS[@]} == 0 && ${#ERROR_PAIRS[@]} == 0 && ${#UNKNOWN_PAIRS[@]} == 0 )); then
+        if (( ${#TIMEOUT_PAIRS[@]} > 0 )); then
+            echo ""
+            echo "  TIMEOUT pairs:"
+            for pair in "${TIMEOUT_PAIRS[@]}"; do
+                echo "    - $pair"
+            done
+        fi
+
+        if (( ${#NON_EQ_PAIRS[@]} == 0 && ${#ERROR_PAIRS[@]} == 0 && ${#UNKNOWN_PAIRS[@]} == 0 && ${#TIMEOUT_PAIRS[@]} == 0 )); then
             echo ""
             echo "  ✓ All compared pairs are EQUIVALENT."
         fi
@@ -458,6 +525,7 @@ mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sor
         non_eq_count=0
         error_count=0
         unknown_count=0
+        timeout_count=0
         total_logs=${#FUNC_LOG_FILES[@]}
 
         for LOG_FILE in "${FUNC_LOG_FILES[@]}"; do
@@ -471,15 +539,25 @@ mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sor
                 ERROR)
                     error_count=$((error_count + 1))
                     ;;
+                TIMEOUT)
+                    timeout_count=$((timeout_count + 1))
+                    ;;
                 *)
                     unknown_count=$((unknown_count + 1))
                     ;;
             esac
         done
 
-        printf "  %-30s : TOTAL=%3d, EQ=%3d, NOT_EQ=%3d, ERROR=%3d, UNKNOWN=%3d\n" \
-            "$TARGET_FUNC" "$total_logs" "$eq_count" "$non_eq_count" "$error_count" "$unknown_count"
+        printf "  %-30s : TOTAL=%3d, EQ=%3d, NOT_EQ=%3d, ERROR=%3d, UNKNOWN=%3d, TIMEOUT=%3d, WALL=%s\n" \
+            "$TARGET_FUNC" "$total_logs" "$eq_count" "$non_eq_count" "$error_count" "$unknown_count" "$timeout_count" \
+            "$(format_duration "${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")"
     done
+    echo ""
+    echo "  Function Timing Summary:"
+    for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
+        printf "    %-28s %s\n" "$TARGET_FUNC" "$(format_duration "${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")"
+    done
+    print_log_time_summary_block "  " "${ALL_LOG_FILES[@]}"
     print_phase_usage_summary_block "  " "${ALL_LOG_FILES[@]}"
     print_pairwise_normalization_summary_block "  " "${ALL_LOG_FILES[@]}"
     echo "============================================================"

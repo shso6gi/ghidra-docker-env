@@ -27,6 +27,10 @@ class NormalizationContext:
     pos_vars: Set[str] = field(default_factory=set)
     neg_vars: Set[str] = field(default_factory=set)
     nonzero_vars: Set[str] = field(default_factory=set)
+    nonneg_exprs: Set[str] = field(default_factory=set)
+    pos_exprs: Set[str] = field(default_factory=set)
+    neg_exprs: Set[str] = field(default_factory=set)
+    nonzero_exprs: Set[str] = field(default_factory=set)
     upper_bounds: Dict[str, int] = field(default_factory=dict)
     allow_unsafe: bool = False
     
@@ -57,6 +61,38 @@ class NormalizationContext:
             or var_name in self.neg_vars
         )
 
+    def is_expr_nonneg(self, expr) -> bool:
+        """式が非負と保証されるか"""
+        key = self._expr_key(expr)
+        if key in self.nonneg_exprs or key in self.pos_exprs:
+            return True
+        var_name = getattr(expr, "name", None)
+        return bool(var_name) and self.is_nonneg(var_name)
+
+    def is_expr_pos(self, expr) -> bool:
+        """式が正と保証されるか"""
+        key = self._expr_key(expr)
+        if key in self.pos_exprs:
+            return True
+        var_name = getattr(expr, "name", None)
+        return bool(var_name) and self.is_pos(var_name)
+
+    def is_expr_neg(self, expr) -> bool:
+        """式が負と保証されるか"""
+        key = self._expr_key(expr)
+        if key in self.neg_exprs:
+            return True
+        var_name = getattr(expr, "name", None)
+        return bool(var_name) and self.is_neg(var_name)
+
+    def is_expr_nonzero(self, expr) -> bool:
+        """式が非ゼロと保証されるか"""
+        key = self._expr_key(expr)
+        if key in self.nonzero_exprs or key in self.pos_exprs or key in self.neg_exprs:
+            return True
+        var_name = getattr(expr, "name", None)
+        return bool(var_name) and self.is_nonzero(var_name)
+
     def get_upper_bound(self, var_name: str) -> Optional[int]:
         """変数の既知の上限（排他的）を取得"""
         return self.upper_bounds.get(var_name)
@@ -83,3 +119,11 @@ class NormalizationContext:
         
         if self.debug:
             print(f"[Normalize] Applied: {rule_name} ({reason})")
+
+    def _expr_key(self, expr) -> str:
+        if expr is None:
+            return ""
+        try:
+            return expr.to_smt()
+        except Exception:
+            return ""

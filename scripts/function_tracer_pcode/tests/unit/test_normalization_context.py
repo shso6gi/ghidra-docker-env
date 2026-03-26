@@ -47,6 +47,10 @@ def test_normalization_context_fact_queries():
         pos_vars={"param_3"},
         neg_vars={"param_4"},
         nonzero_vars={"param_5"},
+        nonneg_exprs={"expr_nonneg"},
+        pos_exprs={"expr_pos"},
+        neg_exprs={"expr_neg"},
+        nonzero_exprs={"expr_nz"},
     )
 
     assert context.is_min_excluded("param_1") is True
@@ -62,6 +66,15 @@ def test_normalization_context_fact_queries():
     assert context.is_nonzero("param_4") is True
     assert context.is_nonzero("param_5") is True
     assert context.is_nonzero("param_2") is False
+    dummy_expr = Expression(ExpressionType.VARIABLE, name="x", size=8)
+    dummy_expr.to_smt = lambda: "expr_nonneg"
+    assert context.is_expr_nonneg(dummy_expr) is True
+    dummy_expr.to_smt = lambda: "expr_pos"
+    assert context.is_expr_pos(dummy_expr) is True
+    dummy_expr.to_smt = lambda: "expr_neg"
+    assert context.is_expr_neg(dummy_expr) is True
+    dummy_expr.to_smt = lambda: "expr_nz"
+    assert context.is_expr_nonzero(dummy_expr) is True
 
 
 def test_normalize_division_signs_uses_min_exclusion_safely():
@@ -265,3 +278,110 @@ def test_normalize_expression_flattens_and_sorts_add_tree():
     normalized = normalize_expression(expr, NormalizationContext())
 
     assert normalized.to_smt() == "(bvadd param_1 param_2)"
+
+
+def test_normalize_expression_canonicalizes_modulo_expansion():
+    dividend = _param("param_1")
+    divisor = _param("param_2")
+    div_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SDIV",
+        operands=[dividend, divisor],
+        size=8,
+    )
+    mult_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[div_expr, divisor],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[dividend, mult_expr],
+        size=8,
+    )
+
+    context = NormalizationContext()
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.operator == "INT_SREM"
+    assert normalized.to_smt() == "(bvsrem param_1 param_2)"
+    assert [rule.rule_name for rule in context.applied_rules] == [
+        "MODULO_CANONICALIZATION"
+    ]
+
+
+def test_normalize_expression_reduces_abs_bit_hack_when_expr_nonnegative():
+    value = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SREM",
+        operands=[_param("param_1"), _param("param_2")],
+        size=8,
+    )
+    shift = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SRIGHT",
+        operands=[value, Expression.constant(63, size=8)],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_XOR",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[shift, value],
+                size=8,
+            ),
+            shift,
+        ],
+        size=8,
+    )
+
+    context = NormalizationContext(nonneg_exprs={value.to_smt()})
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.to_smt() == value.to_smt()
+    assert "BITWISE_ABS_CANONICALIZATION" in [
+        rule.rule_name for rule in context.applied_rules
+    ]
+
+
+def test_normalize_expression_reduces_abs_bit_hack_when_expr_negative():
+    value = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SREM",
+        operands=[_param("param_1"), _param("param_2")],
+        size=8,
+    )
+    shift = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SRIGHT",
+        operands=[value, Expression.constant(63, size=8)],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_XOR",
+        operands=[
+            shift,
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[value, shift],
+                size=8,
+            ),
+        ],
+        size=8,
+    )
+
+    context = NormalizationContext(neg_exprs={value.to_smt()})
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.operator == "INT_2COMP"
+    assert normalized.operands[0].to_smt() == value.to_smt()
+    assert "BITWISE_ABS_CANONICALIZATION" in [
+        rule.rule_name for rule in context.applied_rules
+    ]

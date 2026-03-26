@@ -14,6 +14,10 @@ class SignFacts:
     pos_vars: Set[str]      # 0 < x が保証される変数
     neg_vars: Set[str]      # x < 0 が保証される変数
     nonzero_vars: Set[str]  # x != 0 が保証される変数
+    nonneg_exprs: Set[str]  # 0 <= expr が保証される式
+    pos_exprs: Set[str]      # 0 < expr が保証される式
+    neg_exprs: Set[str]      # expr < 0 が保証される式
+    nonzero_exprs: Set[str]  # expr != 0 が保証される式
     upper_bounds: Dict[str, int]  # x < C が保証される変数
     
     def __init__(self):
@@ -21,6 +25,10 @@ class SignFacts:
         self.pos_vars = set()
         self.neg_vars = set()
         self.nonzero_vars = set()
+        self.nonneg_exprs = set()
+        self.pos_exprs = set()
+        self.neg_exprs = set()
+        self.nonzero_exprs = set()
         self.upper_bounds = {}
     
     def merge(self, other: 'SignFacts') -> None:
@@ -29,6 +37,10 @@ class SignFacts:
         self.pos_vars.update(other.pos_vars)
         self.neg_vars.update(other.neg_vars)
         self.nonzero_vars.update(other.nonzero_vars)
+        self.nonneg_exprs.update(other.nonneg_exprs)
+        self.pos_exprs.update(other.pos_exprs)
+        self.neg_exprs.update(other.neg_exprs)
+        self.nonzero_exprs.update(other.nonzero_exprs)
         for var_name, bound in other.upper_bounds.items():
             current = self.upper_bounds.get(var_name)
             if current is None or bound < current:
@@ -49,6 +61,20 @@ class SignFacts:
     def is_nonzero(self, var_name: str) -> bool:
         """変数が非ゼロか"""
         return var_name in self.nonzero_vars or var_name in self.pos_vars or var_name in self.neg_vars
+
+    def is_expr_nonneg(self, expr: Expression) -> bool:
+        key = _expr_key(expr)
+        return key in self.nonneg_exprs or key in self.pos_exprs
+
+    def is_expr_pos(self, expr: Expression) -> bool:
+        return _expr_key(expr) in self.pos_exprs
+
+    def is_expr_neg(self, expr: Expression) -> bool:
+        return _expr_key(expr) in self.neg_exprs
+
+    def is_expr_nonzero(self, expr: Expression) -> bool:
+        key = _expr_key(expr)
+        return key in self.nonzero_exprs or key in self.pos_exprs or key in self.neg_exprs
 
     def get_upper_bound(self, var_name: str) -> Optional[int]:
         """変数の既知の上限（排他的）を取得"""
@@ -97,8 +123,8 @@ def extract_sign_facts(
         if len(expr.operands) < 2:
             continue
         
-        left = expr.operands[0]
-        right = expr.operands[1]
+        left = _normalize_fact_expr(expr.operands[0])
+        right = _normalize_fact_expr(expr.operands[1])
         
         # 基本的な比較パターン
         _extract_from_comparison(expr.operator, left, right, facts, debug)
@@ -116,8 +142,8 @@ def extract_sign_facts(
         if len(expr.operands) < 2:
             continue
         
-        left = expr.operands[0]
-        right = expr.operands[1]
+        left = _normalize_fact_expr(expr.operands[0])
+        right = _normalize_fact_expr(expr.operands[1])
         
         # AND演算を含む比較パターン
         _extract_from_and_comparison(expr.operator, left, right, facts, debug)
@@ -144,6 +170,7 @@ def _extract_from_comparison(
                 facts.nonneg_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is nonneg (0 <= {var_name})")
+            _record_expr_fact(facts.nonneg_exprs, right, debug, "expr is nonneg (0 <= expr)")
         
         elif _is_zero(right):
             # param <= 0 -> nonpos（今は使わない）
@@ -163,6 +190,8 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is neg ({var_name} <= -1)")
+            _record_expr_fact(facts.neg_exprs, left, debug, "expr is neg (expr <= -1)")
+            _record_expr_fact(facts.nonzero_exprs, left, debug, "expr is nonzero (expr <= -1)")
     
     # param > 0 または 0 < param
     elif operator == "INT_SLESS":  # <
@@ -176,6 +205,9 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is pos (0 < {var_name})")
+            _record_expr_fact(facts.pos_exprs, right, debug, "expr is pos (0 < expr)")
+            _record_expr_fact(facts.nonneg_exprs, right, debug, "expr is nonneg (0 < expr)")
+            _record_expr_fact(facts.nonzero_exprs, right, debug, "expr is nonzero (0 < expr)")
         
         elif _is_zero(right):
             # param < 0 -> neg
@@ -185,6 +217,8 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is neg ({var_name} < 0)")
+            _record_expr_fact(facts.neg_exprs, left, debug, "expr is neg (expr < 0)")
+            _record_expr_fact(facts.nonzero_exprs, left, debug, "expr is nonzero (expr < 0)")
 
         elif _is_nonneg_constant(right):
             # param < C -> upper_bound=C
@@ -199,6 +233,12 @@ def _extract_from_comparison(
                 facts.nonneg_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is nonneg (-1 < {var_name}, integral)")
+            _record_integral_expr_fact(
+                facts.nonneg_exprs,
+                right,
+                debug,
+                "expr is nonneg (-1 < expr, integral)",
+            )
     
     # param != 0 または 0 != param
     elif operator in ("INT_NOTEQUAL", "distinct"):
@@ -208,12 +248,14 @@ def _extract_from_comparison(
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is nonzero (0 != {var_name})")
+            _record_expr_fact(facts.nonzero_exprs, right, debug, "expr is nonzero (0 != expr)")
         elif _is_zero(right):
             var_name = _get_var_name(left)
             if var_name:
                 facts.nonzero_vars.add(var_name)
                 if debug:
                     print(f"[Facts] {var_name} is nonzero ({var_name} != 0)")
+            _record_expr_fact(facts.nonzero_exprs, left, debug, "expr is nonzero (expr != 0)")
 
 
 def _extract_from_and_comparison(
@@ -324,6 +366,52 @@ def _get_integral_var_name(expr: Expression) -> Optional[str]:
         return None
 
     return var_name
+
+
+def _normalize_fact_expr(expr: Expression) -> Expression:
+    from .core import normalize_expression
+    from .context import NormalizationContext
+
+    return normalize_expression(expr, NormalizationContext())
+
+
+def _record_expr_fact(
+    target: Set[str],
+    expr: Expression,
+    debug: bool,
+    message: str,
+) -> None:
+    key = _expr_key(expr)
+    if not key:
+        return
+    target.add(key)
+    if debug:
+        print(f"[Facts] {message}: {key}")
+
+
+def _record_integral_expr_fact(
+    target: Set[str],
+    expr: Expression,
+    debug: bool,
+    message: str,
+) -> None:
+    if not _is_integral_expression(expr):
+        return
+    _record_expr_fact(target, expr, debug, message)
+
+
+def _is_integral_expression(expr: Expression) -> bool:
+    data_type = (expr.data_type or "").lower()
+    if "float" in data_type or "double" in data_type:
+        return False
+    return True
+
+
+def _expr_key(expr: Expression) -> str:
+    try:
+        return expr.to_smt()
+    except Exception:
+        return ""
 
 
 def _record_upper_bound(

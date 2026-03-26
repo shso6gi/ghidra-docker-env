@@ -113,3 +113,47 @@ def test_less_equal_constant_implies_exclusive_upper_bound_plus_one():
     facts = extract_sign_facts(conditions)
 
     assert facts.get_upper_bound("param_2") == 63
+
+
+def test_minus_one_less_than_modulo_expansion_records_nonnegative_expr_fact():
+    dividend = _param("param_1", data_type="long")
+    divisor = _param("param_2", data_type="long")
+    div_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SDIV",
+        operands=[dividend, divisor],
+        size=8,
+    )
+    mult_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[div_expr, divisor],
+        size=8,
+    )
+    modulo_expansion = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[dividend, mult_expr],
+        size=8,
+    )
+    canonical_mod = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SREM",
+        operands=[dividend, divisor],
+        size=8,
+    )
+
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_const(-1), modulo_expansion],
+                size=1,
+            )
+        )
+    ]
+
+    facts = extract_sign_facts(conditions)
+
+    assert facts.is_expr_nonneg(canonical_mod) is True
