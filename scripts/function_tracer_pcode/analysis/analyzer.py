@@ -249,12 +249,6 @@ class ReturnAnalyzer:
             signedness_result=signedness_result
         )
 
-        result.returns = self._finalize_returns_with_effect_summary(
-            result.returns,
-            effect_summary,
-            parameters,
-        )
-
         if (
             return_type
             and return_type.strip().lower() == "void"
@@ -289,21 +283,6 @@ class ReturnAnalyzer:
             print(f"  Use --debug flag for detailed report")
         
         return result
-
-    def _finalize_returns_with_effect_summary(
-        self,
-        returns: List[ReturnInfo],
-        effect_summary,
-        parameters: List[Dict],
-    ) -> List[ReturnInfo]:
-        """
-        Return values are already normalized in _analyze_return_op().
-
-        Re-applying effect-summary rewriting here can convert canonical post-state
-        expressions back into observed pre-state values, which is unsound for
-        swap-style memory effects. Keep the finalized returns as-is.
-        """
-        return returns
 
     def _build_effect_summary(
         self,

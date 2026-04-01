@@ -186,7 +186,7 @@ def test_expand_input_operation_skips_direct_shortcut_for_recursive_subgraphs():
     fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
 
     expander._op_requires_recursive_expansion = Mock(return_value=True)
-    expander._trace_operation_with_conditions = Mock(side_effect=AssertionError("direct shortcut must not run"))
+    expander._trace_operation_expression = Mock(side_effect=AssertionError("direct shortcut must not run"))
     expander._expand_input_varnode = Mock(
         return_value=[ExpandedValue(Expression.constant(1, 4), [])]
     )
@@ -231,7 +231,7 @@ def test_expand_operation_skips_direct_shortcut_for_recursive_subgraphs():
     fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
 
     expander._op_requires_recursive_expansion = Mock(return_value=True)
-    expander._trace_operation_with_conditions = Mock(side_effect=AssertionError("top-level direct shortcut must not run"))
+    expander._trace_operation_expression = Mock(side_effect=AssertionError("top-level direct shortcut must not run"))
     expander.expand_from_varnode = Mock(
         side_effect=[
             [ExpandedValue(Expression.constant(1, 4), [])],

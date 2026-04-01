@@ -1756,7 +1756,7 @@ def test_expression_expander_uses_multiequal_canonical_location_per_branch():
     }
 
 
-def test_return_analyzer_does_not_reapply_effect_summary_to_canonical_post_state_return():
+def test_return_analyzer_keeps_canonical_post_state_return_unchanged():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
     swap_taken = Condition(
@@ -1780,24 +1780,18 @@ def test_return_analyzer_does_not_reapply_effect_summary_to_canonical_post_state
             ),
         ],
     )
-    returns = [
-        ReturnInfo(
-            address="0x1",
-            branch_index=101,
-            conditions=[swap_taken],
-            value=Expression.binary_op("INT_SUB", Expression.memory(b, size=4), Expression.memory(a, size=4)),
-        )
-    ]
-
     analyzer = ReturnAnalyzer(program=object(), debug=False)
-    finalized = analyzer._finalize_returns_with_effect_summary(
-        returns,
-        effect_summary,
-        [_param("a", size=8, is_signed=False), _param("b", size=8, is_signed=False, index=1)],
+    analyzer._current_effect_summary = effect_summary
+    analyzer._current_parameters = [
+        _param("a", size=8, is_signed=False),
+        _param("b", size=8, is_signed=False, index=1),
+    ]
+    normalized = analyzer._normalize_expanded_return_value(
+        Expression.binary_op("INT_SUB", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        [swap_taken],
     )
 
-    assert len(finalized) == 1
-    assert finalized[0].value.to_string() == "(MEM[b] - MEM[a])"
+    assert normalized.to_string() == "(MEM[b] - MEM[a])"
 
 
 def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonicalizing():
@@ -1862,6 +1856,134 @@ def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonical
 
     assert normalized_less.to_string() == "(MEM[param_2] - MEM[param_1])"
     assert normalized_not_less.to_string() == "(MEM[param_1] - MEM[param_2])"
+
+
+def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.phi(
+            [
+                (no_swap, Expression.memory(a, size=4)),
+                (swap_taken, Expression.memory(b, size=4)),
+            ]
+        ),
+        Expression.phi(
+            [
+                (no_swap, Expression.memory(b, size=4)),
+                (swap_taken, Expression.memory(a, size=4)),
+            ]
+        ),
+    )
+    expr.operands[0].size = 4
+    expr.operands[1].size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return expr
+
+    class FakeOp:
+        def getMnemonic(self):
+            return "INT_SUB"
+
+        def getOutput(self):
+            class Out:
+                def getSize(self):
+                    return 4
+            return Out()
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    direct = expander._trace_operation_expression(FakeOp(), [no_swap], 0, output_size=4)
+
+    assert direct is not None
+    assert direct.to_string() == "(MEM[a] - MEM[b])"
+
+
+def test_expression_expander_rewrites_observed_loads_before_post_state_canonicalization():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+
+    class FakeTracer:
+        pass
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        traced,
+        [nonnull_a, nonnull_b],
+    )
+
+    assert canonicalized.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
 
 
 def test_phi_handler_merge_preserves_same_value_with_distinct_conditions():
@@ -2056,7 +2178,7 @@ def test_expression_expander_reduces_full_operation_trace_under_active_condition
         ],
     )
 
-    direct = expander._trace_operation_with_conditions(FakeOp(), [no_swap], 0, output_size=4)
+    direct = expander._trace_operation_expression(FakeOp(), [no_swap], 0, output_size=4)
 
     assert direct is not None
     assert direct.to_string() == "(MEM[a] - MEM[b])"

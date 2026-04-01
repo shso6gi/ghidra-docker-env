@@ -946,27 +946,6 @@ class ExpressionExpander:
 
         return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
 
-    def _trace_operation_with_conditions(
-        self,
-        pcode_op,
-        conditions: List[Condition],
-        depth: int,
-        output_size: int = 0,
-    ) -> Optional[Expression]:
-        canonicalized = self._trace_operation_expression(
-            pcode_op,
-            conditions,
-            depth,
-            output_size=output_size,
-        )
-        if canonicalized is None:
-            return None
-        if self._expression_contains_unknown_or_call(canonicalized):
-            return None
-        if self._expression_contains_phi(canonicalized):
-            return None
-        return canonicalized
-
     def _trace_operation_expression(
         self,
         pcode_op,
