@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """条件の簡略化・矛盾検出モジュール（強化版）"""
 
-from typing import List, Dict, Set, Optional, Tuple
+from typing import Any, List, Dict, Set, Optional, Tuple
 from ...model import Expression, Condition, ExpressionType
 from .normalizer import ConditionNormalizer
 
@@ -28,6 +28,470 @@ class ConditionSimplifier:
         Returns: (left_operand, operator, right_operand, is_positive)
         """
         return ConditionNormalizer.normalize(condition)
+
+    @classmethod
+    def _normalize_raw_value(cls, value: int, bits: int) -> int:
+        if bits <= 0:
+            return value
+        return value % (1 << bits)
+
+    @classmethod
+    def _to_signed_value(cls, value: int, bits: int) -> int:
+        if bits <= 0:
+            return value
+        sign_bit = 1 << (bits - 1)
+        if value & sign_bit:
+            return value - (1 << bits)
+        return value
+
+    @classmethod
+    def _eval_constant_raw(cls, expr: Expression) -> Optional[Tuple[int, int]]:
+        if expr is None:
+            return None
+
+        bits = expr.get_bit_width()
+
+        if expr.expr_type == ExpressionType.CONSTANT:
+            return (cls._normalize_raw_value(int(expr.value), bits), bits)
+
+        if expr.expr_type == ExpressionType.LITERAL:
+            try:
+                return (cls._normalize_raw_value(int(expr.value, 0), bits), bits)
+            except (TypeError, ValueError):
+                return None
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            operand_eval = cls._eval_constant_raw(expr.operands[0])
+            if operand_eval is None:
+                return None
+            operand_raw, operand_bits = operand_eval
+            operand_signed = cls._to_signed_value(operand_raw, operand_bits)
+
+            if expr.operator in ("COPY", "CAST", "INT_ZEXT"):
+                return (cls._normalize_raw_value(operand_raw, bits), bits)
+            if expr.operator == "INT_SEXT":
+                return (cls._normalize_raw_value(operand_signed, bits), bits)
+            if expr.operator == "INT_NEGATE":
+                return (cls._normalize_raw_value(~operand_raw, bits), bits)
+            if expr.operator == "INT_2COMP":
+                return (cls._normalize_raw_value(-operand_signed, bits), bits)
+            if expr.operator == "BOOL_NEGATE":
+                return (0 if operand_raw else 1, 1)
+            return None
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left_eval = cls._eval_constant_raw(expr.operands[0])
+            right_eval = cls._eval_constant_raw(expr.operands[1])
+            if left_eval is None or right_eval is None:
+                return None
+
+            left_raw, left_bits = left_eval
+            right_raw, right_bits = right_eval
+            left_signed = cls._to_signed_value(left_raw, left_bits)
+            right_signed = cls._to_signed_value(right_raw, right_bits)
+
+            if expr.operator == "INT_ADD":
+                return (cls._normalize_raw_value(left_raw + right_raw, bits), bits)
+            if expr.operator == "INT_SUB":
+                return (cls._normalize_raw_value(left_raw - right_raw, bits), bits)
+            if expr.operator == "INT_MULT":
+                return (cls._normalize_raw_value(left_raw * right_raw, bits), bits)
+            if expr.operator == "INT_AND":
+                return (cls._normalize_raw_value(left_raw & right_raw, bits), bits)
+            if expr.operator == "INT_OR":
+                return (cls._normalize_raw_value(left_raw | right_raw, bits), bits)
+            if expr.operator in ("INT_XOR", "BOOL_XOR"):
+                return (cls._normalize_raw_value(left_raw ^ right_raw, bits), bits)
+            if expr.operator == "INT_LEFT":
+                return (cls._normalize_raw_value(left_raw << right_raw, bits), bits)
+            if expr.operator == "INT_RIGHT":
+                return (cls._normalize_raw_value(left_raw >> right_raw, bits), bits)
+            if expr.operator == "INT_SRIGHT":
+                return (cls._normalize_raw_value(left_signed >> right_raw, bits), bits)
+            if expr.operator in ("INT_DIV", "DIV"):
+                if right_raw == 0:
+                    return None
+                return (cls._normalize_raw_value(left_raw // right_raw, bits), bits)
+            if expr.operator in ("INT_SDIV", "SDIV"):
+                if right_signed == 0:
+                    return None
+                quotient = abs(left_signed) // abs(right_signed)
+                if (left_signed < 0) ^ (right_signed < 0):
+                    quotient = -quotient
+                return (
+                    cls._normalize_raw_value(quotient, bits),
+                    bits,
+                )
+            if expr.operator == "INT_EQUAL":
+                return (1 if left_raw == right_raw else 0, 1)
+            if expr.operator == "INT_NOTEQUAL":
+                return (1 if left_raw != right_raw else 0, 1)
+            if expr.operator == "INT_LESS":
+                return (1 if left_raw < right_raw else 0, 1)
+            if expr.operator == "INT_LESSEQUAL":
+                return (1 if left_raw <= right_raw else 0, 1)
+            if expr.operator == "INT_SLESS":
+                return (1 if left_signed < right_signed else 0, 1)
+            if expr.operator == "INT_SLESSEQUAL":
+                return (1 if left_signed <= right_signed else 0, 1)
+            if expr.operator == "BOOL_AND":
+                return (1 if left_raw and right_raw else 0, 1)
+            if expr.operator == "BOOL_OR":
+                return (1 if left_raw or right_raw else 0, 1)
+
+        return None
+
+    @classmethod
+    def evaluate_condition_truth(cls, condition: Condition) -> Optional[bool]:
+        expr = condition.expression
+        negated = condition.negated
+
+        while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
+            negated = not negated
+            if expr.operands:
+                expr = expr.operands[0]
+            else:
+                break
+
+        evaluated = cls._eval_constant_raw(expr)
+        if evaluated is None:
+            return None
+
+        raw_value, _bits = evaluated
+        truth = raw_value != 0
+        return not truth if negated else truth
+
+    @classmethod
+    def _extract_scalar_constraint(
+        cls,
+        condition: Condition,
+    ) -> Optional[Dict[str, Any]]:
+        expr = condition.expression
+        negated = condition.negated
+
+        while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
+            negated = not negated
+            if expr.operands:
+                expr = expr.operands[0]
+            else:
+                break
+
+        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+
+        left = expr.operands[0]
+        right = expr.operands[1]
+        left_eval = cls._eval_constant_raw(left)
+        right_eval = cls._eval_constant_raw(right)
+
+        if (left_eval is None) == (right_eval is None):
+            return None
+
+        if right_eval is not None:
+            variable_expr = left
+            const_raw, const_bits = right_eval
+            const_on_left = False
+        else:
+            variable_expr = right
+            const_raw, const_bits = left_eval
+            const_on_left = True
+
+        variable_key = variable_expr.to_string()
+        bits = max(variable_expr.get_bit_width(), const_bits)
+        signed = expr.operator in ("INT_SLESS", "INT_SLESSEQUAL")
+        constant_raw = cls._normalize_raw_value(const_raw, bits)
+        constant_value = (
+            cls._to_signed_value(constant_raw, bits)
+            if signed
+            else constant_raw
+        )
+
+        if expr.operator == "INT_EQUAL":
+            fact_kind = "ne" if negated else "eq"
+            return {
+                "key": (variable_key, bits),
+                "kind": fact_kind,
+                "raw_value": constant_raw,
+            }
+
+        if expr.operator == "INT_NOTEQUAL":
+            fact_kind = "eq" if negated else "ne"
+            return {
+                "key": (variable_key, bits),
+                "kind": fact_kind,
+                "raw_value": constant_raw,
+            }
+
+        if expr.operator not in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
+            return None
+
+        is_lessequal = expr.operator in ("INT_SLESSEQUAL", "INT_LESSEQUAL")
+        if const_on_left:
+            if negated:
+                fact_kind = "upper"
+                inclusive = not is_lessequal
+            else:
+                fact_kind = "lower"
+                inclusive = is_lessequal
+        else:
+            if negated:
+                fact_kind = "lower"
+                inclusive = not is_lessequal
+            else:
+                fact_kind = "upper"
+                inclusive = is_lessequal
+
+        return {
+            "key": (variable_key, bits),
+            "kind": fact_kind,
+            "value": constant_value,
+            "inclusive": inclusive,
+            "signed": signed,
+        }
+
+    @classmethod
+    def _effective_lower_bound(
+        cls,
+        value: int,
+        inclusive: bool,
+        signed: bool,
+        bits: int,
+    ) -> int:
+        minimum = -(1 << (bits - 1)) if signed else 0
+        return max(minimum, value if inclusive else value + 1)
+
+    @classmethod
+    def _effective_upper_bound(
+        cls,
+        value: int,
+        inclusive: bool,
+        signed: bool,
+        bits: int,
+    ) -> int:
+        maximum = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
+        return min(maximum, value if inclusive else value - 1)
+
+    @classmethod
+    def _bounds_contradict(
+        cls,
+        lower: Optional[Tuple[int, bool]],
+        upper: Optional[Tuple[int, bool]],
+        signed: bool,
+        bits: int,
+    ) -> bool:
+        if lower is None or upper is None:
+            return False
+        lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
+        upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
+        return lower_effective > upper_effective
+
+    @classmethod
+    def _select_stronger_lower(
+        cls,
+        current: Optional[Tuple[int, bool, int]],
+        candidate: Tuple[int, bool, int],
+    ) -> Tuple[int, bool, int]:
+        if current is None:
+            return candidate
+
+        current_effective = cls._effective_lower_bound(
+            current[0],
+            current[1],
+            signed=False,
+            bits=128,
+        )
+        candidate_effective = cls._effective_lower_bound(
+            candidate[0],
+            candidate[1],
+            signed=False,
+            bits=128,
+        )
+
+        if candidate_effective > current_effective:
+            return candidate
+        if candidate_effective < current_effective:
+            return current
+        return candidate if candidate[2] < current[2] else current
+
+    @classmethod
+    def _select_stronger_upper(
+        cls,
+        current: Optional[Tuple[int, bool, int]],
+        candidate: Tuple[int, bool, int],
+    ) -> Tuple[int, bool, int]:
+        if current is None:
+            return candidate
+
+        current_effective = cls._effective_upper_bound(
+            current[0],
+            current[1],
+            signed=False,
+            bits=128,
+        )
+        candidate_effective = cls._effective_upper_bound(
+            candidate[0],
+            candidate[1],
+            signed=False,
+            bits=128,
+        )
+
+        if candidate_effective < current_effective:
+            return candidate
+        if candidate_effective > current_effective:
+            return current
+        return candidate if candidate[2] < current[2] else current
+
+    @classmethod
+    def _has_scalar_contradiction(cls, conditions: List[Condition]) -> bool:
+        grouped: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+        for index, cond in enumerate(conditions):
+            fact = cls._extract_scalar_constraint(cond)
+            if fact is None:
+                continue
+
+            group = grouped.setdefault(
+                fact["key"],
+                {
+                    "eq_raw_values": set(),
+                    "ne_raw_values": set(),
+                    "lower": {False: None, True: None},
+                    "upper": {False: None, True: None},
+                },
+            )
+
+            if fact["kind"] == "eq":
+                group["eq_raw_values"].add(fact["raw_value"])
+            elif fact["kind"] == "ne":
+                group["ne_raw_values"].add(fact["raw_value"])
+            elif fact["kind"] == "lower":
+                signed = fact["signed"]
+                current = group["lower"][signed]
+                candidate = (fact["value"], fact["inclusive"], index)
+                if current is None:
+                    group["lower"][signed] = candidate
+                else:
+                    current_effective = cls._effective_lower_bound(
+                        current[0],
+                        current[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    candidate_effective = cls._effective_lower_bound(
+                        candidate[0],
+                        candidate[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    if (
+                        candidate_effective > current_effective
+                        or (
+                            candidate_effective == current_effective
+                            and candidate[2] < current[2]
+                        )
+                    ):
+                        group["lower"][signed] = candidate
+            elif fact["kind"] == "upper":
+                signed = fact["signed"]
+                current = group["upper"][signed]
+                candidate = (fact["value"], fact["inclusive"], index)
+                if current is None:
+                    group["upper"][signed] = candidate
+                else:
+                    current_effective = cls._effective_upper_bound(
+                        current[0],
+                        current[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    candidate_effective = cls._effective_upper_bound(
+                        candidate[0],
+                        candidate[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    if (
+                        candidate_effective < current_effective
+                        or (
+                            candidate_effective == current_effective
+                            and candidate[2] < current[2]
+                        )
+                    ):
+                        group["upper"][signed] = candidate
+
+        for key, group in grouped.items():
+            bits = key[1]
+            eq_raw_values = group["eq_raw_values"]
+            ne_raw_values = group["ne_raw_values"]
+
+            if len(eq_raw_values) > 1:
+                cls._debug_print(
+                    f"  CONTRADICTION DETECTED: multiple equality constants for {key[0]} -> {sorted(eq_raw_values)}",
+                    1,
+                )
+                return True
+
+            if eq_raw_values:
+                eq_raw_value = next(iter(eq_raw_values))
+                if eq_raw_value in ne_raw_values:
+                    cls._debug_print(
+                        f"  CONTRADICTION DETECTED: {key[0]} == {eq_raw_value} and != {eq_raw_value}",
+                        1,
+                    )
+                    return True
+            for signed in (False, True):
+                lower = group["lower"][signed]
+                upper = group["upper"][signed]
+
+                if cls._bounds_contradict(
+                    (lower[0], lower[1]) if lower is not None else None,
+                    (upper[0], upper[1]) if upper is not None else None,
+                    signed,
+                    bits,
+                ):
+                    cls._debug_print(
+                        f"  CONTRADICTION DETECTED: incompatible bounds for {key[0]}",
+                        1,
+                    )
+                    return True
+
+                if eq_raw_values:
+                    eq_value = (
+                        cls._to_signed_value(eq_raw_value, bits)
+                        if signed
+                        else eq_raw_value
+                    )
+                    if lower is not None:
+                        lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
+                        if eq_value < lower_effective:
+                            cls._debug_print(
+                                f"  CONTRADICTION DETECTED: {key[0]} == {eq_value} violates lower bound",
+                                1,
+                            )
+                            return True
+                    if upper is not None:
+                        upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
+                        if eq_value > upper_effective:
+                            cls._debug_print(
+                                f"  CONTRADICTION DETECTED: {key[0]} == {eq_value} violates upper bound",
+                                1,
+                            )
+                            return True
+                    continue
+
+                if lower is not None and upper is not None:
+                    lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
+                    upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
+                    if lower_effective == upper_effective:
+                        collapsed_raw = cls._normalize_raw_value(lower_effective, bits)
+                        if collapsed_raw in ne_raw_values:
+                            cls._debug_print(
+                                f"  CONTRADICTION DETECTED: {key[0]} forced to excluded value {lower_effective}",
+                                1,
+                            )
+                            return True
+
+        return False
     
     @classmethod
     def flatten_condition(cls, condition: Condition) -> List[Condition]:
@@ -100,7 +564,18 @@ class ConditionSimplifier:
         cls._debug_print(f"Input conditions ({len(conditions)}):")
         for i, cond in enumerate(conditions):
             cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
-        
+
+        for i, cond in enumerate(conditions):
+            truth_value = cls.evaluate_condition_truth(cond)
+            if truth_value is False:
+                cls._debug_print(
+                    f"  CONTRADICTION DETECTED: condition {i} is constant false",
+                    1
+                )
+                cls._debug_print(f"    {i}: {cond.to_string()}", 2)
+                cls._debug_print("=" * 60)
+                return True
+
         # Step 1: 条件を平坦化（論理演算を展開）
         flattened = []
         for cond in conditions:
@@ -165,6 +640,10 @@ class ConditionSimplifier:
                     cls._debug_print(f"    {j}: {cond_j.to_string()}", 2)
                     cls._debug_print("=" * 60)
                     return True
+
+        if cls._has_scalar_contradiction(flattened):
+            cls._debug_print("=" * 60)
+            return True
         
         cls._debug_print("  -> No contradiction detected")
         cls._debug_print("=" * 60)
@@ -194,19 +673,120 @@ class ConditionSimplifier:
         if not conditions:
             return []
         
+        flattened = []
+        for cond in conditions:
+            truth_value = cls.evaluate_condition_truth(cond)
+            if truth_value is True:
+                continue
+            flattened.extend(cls.flatten_condition(cond))
+
         result = []
         seen: Set[Tuple[str, str, str, bool]] = set()
-        
-        for cond in conditions:
+        scalar_groups: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        unsupported_indices: List[int] = []
+
+        for index, cond in enumerate(flattened):
+            truth_value = cls.evaluate_condition_truth(cond)
+            if truth_value is True:
+                continue
+
             canonical = ConditionNormalizer.normalize_for_contradiction(cond)
-            
+
             if canonical in seen:
                 continue
             
             seen.add(canonical)
             result.append(cond)
-        
-        return result
+
+            fact = cls._extract_scalar_constraint(cond)
+            if fact is None:
+                unsupported_indices.append(len(result) - 1)
+                continue
+
+            group = scalar_groups.setdefault(
+                fact["key"],
+                {
+                    "eq": {},
+                    "ne": {},
+                    "lower": {False: None, True: None},
+                    "upper": {False: None, True: None},
+                },
+            )
+            current_index = len(result) - 1
+
+            if fact["kind"] == "eq":
+                group["eq"].setdefault(fact["raw_value"], current_index)
+            elif fact["kind"] == "ne":
+                group["ne"].setdefault(fact["raw_value"], current_index)
+            elif fact["kind"] == "lower":
+                signed = fact["signed"]
+                candidate = (fact["value"], fact["inclusive"], current_index)
+                current = group["lower"][signed]
+                if current is None:
+                    group["lower"][signed] = candidate
+                else:
+                    current_effective = cls._effective_lower_bound(
+                        current[0],
+                        current[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    candidate_effective = cls._effective_lower_bound(
+                        candidate[0],
+                        candidate[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    if (
+                        candidate_effective > current_effective
+                        or (
+                            candidate_effective == current_effective
+                            and candidate[2] < current[2]
+                        )
+                    ):
+                        group["lower"][signed] = candidate
+            elif fact["kind"] == "upper":
+                signed = fact["signed"]
+                candidate = (fact["value"], fact["inclusive"], current_index)
+                current = group["upper"][signed]
+                if current is None:
+                    group["upper"][signed] = candidate
+                else:
+                    current_effective = cls._effective_upper_bound(
+                        current[0],
+                        current[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    candidate_effective = cls._effective_upper_bound(
+                        candidate[0],
+                        candidate[1],
+                        signed=signed,
+                        bits=fact["key"][1],
+                    )
+                    if (
+                        candidate_effective < current_effective
+                        or (
+                            candidate_effective == current_effective
+                            and candidate[2] < current[2]
+                        )
+                    ):
+                        group["upper"][signed] = candidate
+
+        keep_indices: Set[int] = set(unsupported_indices)
+        for group in scalar_groups.values():
+            if group["eq"]:
+                keep_indices.add(min(group["eq"].values()))
+                continue
+
+            keep_indices.update(group["ne"].values())
+            for signed in (False, True):
+                if group["lower"][signed] is not None:
+                    keep_indices.add(group["lower"][signed][2])
+                if group["upper"][signed] is not None:
+                    keep_indices.add(group["upper"][signed][2])
+
+        return [cond for idx, cond in enumerate(result) if idx in keep_indices]
     
     @classmethod
     def get_simplified_condition_string(cls, condition: Condition) -> str:

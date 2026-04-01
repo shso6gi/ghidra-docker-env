@@ -4,6 +4,7 @@
 from typing import Dict, List, Optional
 
 from ...model import Condition, ReturnInfo
+from ...analysis.condition.simplifier import ConditionSimplifier
 from ..formula.returns import coerce_value_to_bitvec_width
 
 
@@ -66,13 +67,16 @@ class ReturnCase:
 
         cond_strs = []
         for cond in self.conditions[:3]:
-            cond_str = str(cond)
+            cond_str = ConditionSimplifier.get_simplified_condition_string(cond)
             if cond_str:
                 cond_strs.append(cond_str)
 
         if not cond_strs:
             return "unconditional"
-        return " AND ".join(cond_strs)
+        summary = " AND ".join(cond_strs)
+        if len(self.source_indices) > 1:
+            summary = f"{summary} [sources={self.source_indices}]"
+        return summary
 
 
 class QueryResult:

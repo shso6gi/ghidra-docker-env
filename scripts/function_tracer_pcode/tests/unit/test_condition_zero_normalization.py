@@ -94,3 +94,142 @@ def test_negated_zero_comparison_matches_zero_condition():
     ]
 
     assert ConditionSimplifier.is_contradiction(conditions) is False
+
+
+def test_constant_false_condition_is_contradiction():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_EQUAL",
+                operands=[_neg(_const(2)), _const(0)],
+                size=1,
+            )
+        ),
+    ]
+
+    assert ConditionSimplifier.is_contradiction(conditions) is True
+
+
+def test_simplify_conditions_drops_constant_true_conditions():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_EQUAL",
+                operands=[_neg(_const(2)), _const(0)],
+                size=1,
+            ),
+            negated=True,
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[_param("param_2"), _const(0)],
+                size=1,
+            )
+        ),
+    ]
+
+    simplified = ConditionSimplifier.simplify_conditions(conditions)
+
+    assert [cond.to_string() for cond in simplified] == ["(param_2 != 0)"]
+
+
+def test_interval_contradiction_detects_incompatible_signed_bounds():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_const(0), _param("param_1")],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_param("param_1"), _const(-1)],
+                size=1,
+            )
+        ),
+    ]
+
+    assert ConditionSimplifier.is_contradiction(conditions) is True
+
+
+def test_interval_contradiction_detects_singleton_excluded_by_nonzero():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[_param("param_2"), _const(0)],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_const(0), _param("param_2")],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_param("param_2"), _const(1)],
+                size=1,
+            )
+        ),
+    ]
+
+    assert ConditionSimplifier.is_contradiction(conditions) is True
+
+
+def test_simplify_conditions_keeps_only_strongest_interval_bounds():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_const(0), _param("param_2")],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_const(0), _param("param_2")],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_param("param_2"), _const(8)],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESSEQUAL",
+                operands=[_param("param_2"), _const(10)],
+                size=1,
+            )
+        ),
+    ]
+
+    simplified = ConditionSimplifier.simplify_conditions(conditions)
+
+    assert [ConditionSimplifier.get_simplified_condition_string(cond) for cond in simplified] == [
+        "(0 < param_2)",
+        "(param_2 < 8)",
+    ]

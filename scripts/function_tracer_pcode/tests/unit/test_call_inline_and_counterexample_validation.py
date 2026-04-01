@@ -150,10 +150,219 @@ def test_expression_expander_inlines_direct_call_results():
 
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "(arg0 + 1)"
-    assert [cond.to_string() for cond in expanded[0].conditions] == [
-        "(arg0 == 7)",
-        "(arg0 != 0)",
-    ]
+    assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 == 7)"]
+
+
+def test_expand_input_operation_skips_direct_shortcut_for_recursive_subgraphs():
+    class _FakeOutput:
+        def getSize(self):
+            return 4
+
+    class _FakeVarnode:
+        def __init__(self, def_op=None):
+            self._def_op = def_op
+
+        def getDef(self):
+            return self._def_op
+
+    class _FakeOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return _FakeOutput()
+
+    tracer = Mock()
+    expander = ExpressionExpander(tracer, condition_tracker=None, debug=False)
+    fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
+
+    expander._op_requires_recursive_expansion = Mock(return_value=True)
+    expander._trace_operation_with_conditions = Mock(side_effect=AssertionError("direct shortcut must not run"))
+    expander._expand_input_varnode = Mock(
+        return_value=[ExpandedValue(Expression.constant(1, 4), [])]
+    )
+    expander._combine_input_expansions_with_conditions = Mock(
+        return_value=[ExpandedValue(Expression.constant(2, 4), [])]
+    )
+
+    expanded = expander._expand_input_operation(fake_op, [], depth=0)
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "2"
+    assert expander._expand_input_varnode.call_count == 2
+    expander._combine_input_expansions_with_conditions.assert_called_once()
+
+
+def test_expand_operation_skips_direct_shortcut_for_recursive_subgraphs():
+    class _FakeVarnode:
+        def __init__(self, def_op=None):
+            self._def_op = def_op
+
+        def getDef(self):
+            return self._def_op
+
+    class _FakeOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+    tracer = Mock()
+    expander = ExpressionExpander(tracer, condition_tracker=None, debug=False)
+    fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
+
+    expander._op_requires_recursive_expansion = Mock(return_value=True)
+    expander._trace_operation_with_conditions = Mock(side_effect=AssertionError("top-level direct shortcut must not run"))
+    expander.expand_from_varnode = Mock(
+        side_effect=[
+            [ExpandedValue(Expression.constant(1, 4), [])],
+            [ExpandedValue(Expression.constant(2, 4), [])],
+        ]
+    )
+    expander._combine_input_expansions_with_conditions = Mock(
+        return_value=[ExpandedValue(Expression.constant(3, 4), [])]
+    )
+
+    expanded = expander._expand_operation(fake_op, [], depth=0)
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "3"
+    assert expander.expand_from_varnode.call_count == 2
+    expander._combine_input_expansions_with_conditions.assert_called_once()
+
+
+def test_expand_multiequal_input_skips_canonical_shortcut_for_recursive_varnode():
+    class _FakeParent:
+        def __init__(self, pred):
+            self._pred = pred
+
+        def getInSize(self):
+            return 1
+
+        def getIn(self, index):
+            assert index == 0
+            return self._pred
+
+    class _FakeOp:
+        def __init__(self, parent, input_varnode):
+            self._parent = parent
+            self._input_varnode = input_varnode
+
+        def getParent(self):
+            return self._parent
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input_varnode
+
+    input_varnode = Mock()
+    pred_block = object()
+    block_info = Mock(index=3)
+    condition_tracker = Mock()
+    condition_tracker.get_block_by_hash.return_value = block_info
+    condition_tracker.get_all_valid_paths_to_block.return_value = [[]]
+
+    expander = ExpressionExpander(Mock(), condition_tracker=condition_tracker, debug=False)
+    expander._get_edge_condition = Mock(return_value=None)
+    expander._varnode_requires_recursive_expansion = Mock(return_value=True)
+    expander._trace_and_canonicalize_input_value = Mock(
+        side_effect=AssertionError("canonical shortcut must not run")
+    )
+    expander._expand_input_varnode = Mock(
+        return_value=[ExpandedValue(Expression.constant(3, 4), [])]
+    )
+    expander._deduplicate_expanded_values = Mock(
+        return_value=[ExpandedValue(Expression.constant(3, 4), [])]
+    )
+
+    expanded = expander._expand_multiequal_internal(
+        _FakeOp(_FakeParent(pred_block), input_varnode),
+        [],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "3"
+    expander._expand_input_varnode.assert_called_once()
+
+
+def test_expand_multiequal_carries_base_conditions_into_predicate_filtering():
+    class _FakeParent:
+        def __init__(self, pred):
+            self._pred = pred
+
+        def getInSize(self):
+            return 1
+
+        def getIn(self, index):
+            assert index == 0
+            return self._pred
+
+    class _FakeOp:
+        def __init__(self, parent, input_varnode):
+            self._parent = parent
+            self._input_varnode = input_varnode
+
+        def getParent(self):
+            return self._parent
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input_varnode
+
+    input_varnode = Mock()
+    pred_block = object()
+    block_info = Mock(index=3)
+    condition_tracker = Mock()
+    condition_tracker.get_block_by_hash.return_value = block_info
+
+    param = Expression.parameter("param_1", size=8)
+    zero = Expression.constant(0, 8)
+    base_condition = Condition(Expression.binary_op("INT_SLESSEQUAL", zero, param))
+    pred_condition = Condition(Expression.binary_op("INT_SLESSEQUAL", param, Expression.constant(-1, 8)))
+    condition_tracker.get_all_valid_paths_to_block.return_value = [[pred_condition]]
+
+    expander = ExpressionExpander(Mock(), condition_tracker=condition_tracker, debug=False)
+    expander._get_edge_condition = Mock(return_value=None)
+    expander._varnode_requires_recursive_expansion = Mock(return_value=True)
+    expander._expand_input_varnode = Mock(
+        return_value=[ExpandedValue(Expression.constant(3, 4), [])]
+    )
+    expander._deduplicate_expanded_values = Mock(return_value=[])
+
+    expanded = expander._expand_multiequal_internal(
+        _FakeOp(_FakeParent(pred_block), input_varnode),
+        [base_condition],
+        depth=0,
+    )
+
+    assert expanded[0].value.to_string() == "phi_no_valid_branch"
+    expander._expand_input_varnode.assert_not_called()
 
 
 def test_counterexample_validation_rejects_ambiguous_sat_model():

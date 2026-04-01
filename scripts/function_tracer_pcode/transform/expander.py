@@ -100,7 +100,7 @@ class ExpressionExpander:
         
         if mnemonic == "MULTIEQUAL":
             # MULTIEQUALは制御フローの合流点
-            return self._expand_multiequal(def_op, depth)
+            return self._expand_multiequal(def_op, base_conditions, depth)
         
         elif mnemonic in ("COPY", "CAST"):
             if def_op.getNumInputs() >= 1:
@@ -113,6 +113,7 @@ class ExpressionExpander:
     def _expand_multiequal(
         self,
         multiequal_op,
+        base_conditions: List[Condition],
         depth: int
     ) -> List[ExpandedValue]:
         """MULTIEQUALを展開"""
@@ -125,13 +126,14 @@ class ExpressionExpander:
         self._expanding_ops.add(op_key)
         
         try:
-            return self._expand_multiequal_internal(multiequal_op, depth)
+            return self._expand_multiequal_internal(multiequal_op, base_conditions, depth)
         finally:
             self._expanding_ops.discard(op_key)
     
     def _expand_multiequal_internal(
         self,
         multiequal_op,
+        base_conditions: List[Condition],
         depth: int
     ) -> List[ExpandedValue]:
         """
@@ -213,7 +215,7 @@ class ExpressionExpander:
             cases_emitted = 0
             for path_idx, path_conditions in enumerate(all_valid_paths):
                 # パス条件 + エッジ条件を結合
-                input_conditions = path_conditions.copy()
+                input_conditions = list(base_conditions) + path_conditions.copy()
                 if edge_cond:
                     input_conditions.append(edge_cond)
                 
@@ -228,23 +230,24 @@ class ExpressionExpander:
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
 
-                canonical_value = self._trace_and_canonicalize_input_value(
-                    input_varnode,
-                    input_conditions,
-                    depth + 1,
-                )
-                if canonical_value is not None:
-                    all_expanded.append(ExpandedValue(canonical_value, input_conditions))
-                    cases_emitted += 1
-                    if self.debug:
-                        val_str = canonical_value.to_string()
-                        if len(val_str) > 80:
-                            val_str = val_str[:80] + "..."
-                        self._debug_print(
-                            f"  Path[{path_idx}] -> EMIT canonicalized: {val_str}",
-                            depth + 1
-                        )
-                    continue
+                if not self._varnode_requires_recursive_expansion(input_varnode):
+                    canonical_value = self._trace_and_canonicalize_input_value(
+                        input_varnode,
+                        input_conditions,
+                        depth + 1,
+                    )
+                    if canonical_value is not None:
+                        all_expanded.append(ExpandedValue(canonical_value, input_conditions))
+                        cases_emitted += 1
+                        if self.debug:
+                            val_str = canonical_value.to_string()
+                            if len(val_str) > 80:
+                                val_str = val_str[:80] + "..."
+                            self._debug_print(
+                                f"  Path[{path_idx}] -> EMIT canonicalized: {val_str}",
+                                depth + 1
+                            )
+                        continue
                 
                 # 入力を再帰的に展開
                 expanded_inputs = self._expand_input_varnode(
@@ -378,7 +381,7 @@ class ExpressionExpander:
                 return [ExpandedValue(collapsed, conditions)]
             # ネストされたMULTIEQUALを展開し、条件を組み合わせる
             self._debug_print(f"Nested MULTIEQUAL found", depth)
-            nested_expanded = self._expand_multiequal(def_op, depth)
+            nested_expanded = self._expand_multiequal(def_op, conditions, depth)
             result = []
             for ev in nested_expanded:
                 combined_conditions = conditions + ev.conditions
@@ -467,6 +470,14 @@ class ExpressionExpander:
         if self._expression_contains_phi(canonicalized):
             return None
         return canonicalized
+
+    def _varnode_requires_recursive_expansion(self, varnode) -> bool:
+        if varnode is None:
+            return False
+        def_op = varnode.getDef()
+        if def_op is None:
+            return False
+        return self._op_requires_recursive_expansion(def_op)
 
     def _canonicalize_traced_expression(
         self,
@@ -563,21 +574,22 @@ class ExpressionExpander:
                 output_size=output_size,
             )
 
-        direct_value = self._trace_operation_with_conditions(
-            pcode_op,
-            conditions,
-            depth,
-            output_size=output_size,
-        )
-        if direct_value is not None:
-            self._debug_print(
-                f"  Direct operation trace resolved: {direct_value.to_string()}",
-                depth,
-            )
-            return [ExpandedValue(direct_value, conditions)]
-
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
+
+        if not requires_recursive_expansion:
+            direct_value = self._trace_operation_with_conditions(
+                pcode_op,
+                conditions,
+                depth,
+                output_size=output_size,
+            )
+            if direct_value is not None:
+                self._debug_print(
+                    f"  Direct operation trace resolved: {direct_value.to_string()}",
+                    depth,
+                )
+                return [ExpandedValue(direct_value, conditions)]
 
         if not requires_recursive_expansion:
             # 特別な展開が不要なら単純にトレース
@@ -727,20 +739,21 @@ class ExpressionExpander:
                 depth,
             )
 
-        direct_value = self._trace_operation_with_conditions(
-            pcode_op,
-            base_conditions,
-            depth,
-        )
-        if direct_value is not None:
-            self._debug_print(
-                f"  Direct operation trace resolved: {direct_value.to_string()}",
-                depth,
-            )
-            return [ExpandedValue(direct_value, base_conditions)]
-
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
+
+        if not requires_recursive_expansion:
+            direct_value = self._trace_operation_with_conditions(
+                pcode_op,
+                base_conditions,
+                depth,
+            )
+            if direct_value is not None:
+                self._debug_print(
+                    f"  Direct operation trace resolved: {direct_value.to_string()}",
+                    depth,
+                )
+                return [ExpandedValue(direct_value, base_conditions)]
 
         if not requires_recursive_expansion:
             value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
