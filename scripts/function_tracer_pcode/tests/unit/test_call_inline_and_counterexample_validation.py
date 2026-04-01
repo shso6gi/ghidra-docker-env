@@ -250,6 +250,112 @@ def test_expand_operation_skips_direct_shortcut_for_recursive_subgraphs():
     expander._combine_input_expansions_with_conditions.assert_called_once()
 
 
+def test_expand_input_operation_expands_phi_direct_trace_without_recursive_pcode_fallback():
+    class _FakeOutput:
+        def getSize(self):
+            return 4
+
+    class _FakeVarnode:
+        def __init__(self, def_op=None):
+            self._def_op = def_op
+
+        def getDef(self):
+            return self._def_op
+
+    class _FakeOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return _FakeOutput()
+
+    tracer = Mock()
+    expander = ExpressionExpander(tracer, condition_tracker=None, debug=False)
+    fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
+    phi_expr = Expression.phi(
+        [
+            (None, Expression.constant(1, 4)),
+            (None, Expression.constant(2, 4)),
+        ]
+    )
+    phi_expr.size = 4
+
+    expander._op_requires_recursive_expansion = Mock(return_value=False)
+    expander._trace_operation_expression = Mock(return_value=phi_expr)
+    expander._expand_expression_cases = Mock(
+        return_value=[
+            ExpandedValue(Expression.constant(1, 4), []),
+            ExpandedValue(Expression.constant(2, 4), []),
+        ]
+    )
+
+    expanded = expander._expand_input_operation(fake_op, [], depth=0)
+
+    assert len(expanded) == 2
+    assert [ev.value.to_string() for ev in expanded] == ["1", "2"]
+    expander._expand_expression_cases.assert_called_once()
+
+
+def test_expand_operation_expands_phi_direct_trace_without_recursive_pcode_fallback():
+    class _FakeVarnode:
+        def __init__(self, def_op=None):
+            self._def_op = def_op
+
+        def getDef(self):
+            return self._def_op
+
+    class _FakeOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+    tracer = Mock()
+    expander = ExpressionExpander(tracer, condition_tracker=None, debug=False)
+    fake_op = _FakeOp([_FakeVarnode(), _FakeVarnode()])
+    phi_expr = Expression.phi(
+        [
+            (None, Expression.constant(1, 4)),
+            (None, Expression.constant(2, 4)),
+        ]
+    )
+    phi_expr.size = 4
+
+    expander._op_requires_recursive_expansion = Mock(return_value=False)
+    expander._trace_operation_expression = Mock(return_value=phi_expr)
+    expander._expand_expression_cases = Mock(
+        return_value=[
+            ExpandedValue(Expression.constant(1, 4), []),
+            ExpandedValue(Expression.constant(2, 4), []),
+        ]
+    )
+
+    expanded = expander._expand_operation(fake_op, [], depth=0)
+
+    assert len(expanded) == 2
+    assert [ev.value.to_string() for ev in expanded] == ["1", "2"]
+    expander._expand_expression_cases.assert_called_once()
+
+
 def test_expand_multiequal_input_skips_canonical_shortcut_for_recursive_varnode():
     class _FakeParent:
         def __init__(self, pred):

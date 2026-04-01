@@ -3,7 +3,7 @@
 
 from typing import List, Optional, Set, Dict, Any
 from ..model import Expression, Condition, ExpressionType
-from .condition import ConditionSimplifier
+from .condition import ConditionSimplifier, ConditionNormalizer
 
 
 class ExpandedBranch:
@@ -24,6 +24,15 @@ class ExpandedBranch:
     def __repr__(self):
         conds = [c.to_string() for c in self.conditions]
         return f"ExpandedBranch(conds={conds}, value={self.value.to_string()})"
+
+    def get_condition_signature(self) -> str:
+        canonical_strs = []
+        for cond in self.conditions:
+            canonical = ConditionNormalizer.normalize(cond)
+            canonical_str = f"{canonical[0]}|{canonical[1]}|{canonical[2]}|{canonical[3]}"
+            canonical_strs.append(canonical_str)
+        canonical_strs.sort()
+        return ";;".join(canonical_strs)
 
 
 class PhiBranch:
@@ -383,19 +392,24 @@ class PhiHandler:
         return [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_too_many_inputs"))]
     
     def _merge_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
-        """同じ値を持つ分岐をマージ"""
+        """同じ値かつ同じ条件集合を持つ分岐のみマージ"""
         if not branches:
             return []
         
-        value_groups: Dict[str, List[ExpandedBranch]] = {}
+        value_groups: Dict[tuple, List[ExpandedBranch]] = {}
         for branch in branches:
-            val_str = branch.value.to_string()
-            if val_str not in value_groups:
-                value_groups[val_str] = []
-            value_groups[val_str].append(branch)
+            try:
+                value_key = branch.value.to_smt()
+            except Exception:
+                value_key = branch.value.to_string()
+            cond_key = branch.get_condition_signature()
+            group_key = (value_key, cond_key)
+            if group_key not in value_groups:
+                value_groups[group_key] = []
+            value_groups[group_key].append(branch)
         
         result = []
-        for val_str, group in value_groups.items():
+        for _group_key, group in value_groups.items():
             best = min(group, key=lambda b: len(b.conditions))
             result.append(best)
         

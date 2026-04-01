@@ -931,6 +931,103 @@ def rewrite_loads_from_effects(
     return expr
 
 
+def rewrite_observed_loads_from_effects(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    """
+    Rewrite raw observed LOAD expressions into pre-state equivalents.
+
+    This pass is intentionally narrower than rewrite_loads_from_effects():
+    it only rewrites MEMORY leaves that still carry a read_order_key from the
+    traced LOAD op. Canonical MEMORY expressions synthesized by effect-summary
+    logic do not carry that key, so they are left untouched.
+    """
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = rewrite_observed_loads_from_effects(
+            expr.operands[0],
+            return_conditions,
+            effects,
+            parameters,
+        )
+        current = expr
+        if rewritten_addr is not expr.operands[0]:
+            current = Expression.memory(
+                rewritten_addr,
+                expr.size,
+                read_order_key=expr.read_order_key,
+            )
+
+        if expr.read_order_key is None:
+            return current
+
+        rewritten = rewrite_loads_from_effects(
+            current,
+            return_conditions,
+            effects,
+            parameters,
+            max_order_key=expr.read_order_key,
+        )
+        return rewritten
+
+    if expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        new_operands = [
+            rewrite_observed_loads_from_effects(
+                op,
+                return_conditions,
+                effects,
+                parameters,
+            )
+            for op in expr.operands
+        ]
+        if all(new is old for new, old in zip(new_operands, expr.operands)):
+            return expr
+        rebuilt = Expression(
+            expr_type=expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=new_operands,
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+        return rebuilt
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = rewrite_observed_loads_from_effects(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
+
+
 def _matches_existing_effect_value(
     expr: Expression,
     location: CanonicalLocation,
@@ -1235,6 +1332,47 @@ def collapse_post_state_expr_to_canonical_memory(
     return None
 
 
+def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+    expr: Optional[Expression],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    """
+    Resolve a bare MEMORY leaf back to the canonical post-state location.
+
+    This is only sound when the leaf is known to come from a pruned post-state
+    PHI/MULTIEQUAL, such as a nested MULTIEQUAL that a prior simplifier already
+    reduced to one surviving branch.
+    """
+    if expr is None or not effects or not parameters:
+        return None
+    if expr.expr_type != ExpressionType.MEMORY:
+        return None
+
+    active_conditions = list(return_conditions or [])
+    normalized_expr = _reduce_expression_under_conditions(expr, active_conditions)
+    locations = sorted(
+        {effect.location for effect in effects},
+        key=lambda loc: (loc.base_param, loc.offset, loc.size),
+    )
+    for location in locations:
+        candidate = memory_expression_for_location(location, parameters)
+        if candidate is None:
+            continue
+        rewritten = rewrite_loads_from_effects(
+            candidate,
+            active_conditions,
+            effects,
+            parameters,
+        )
+        normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
+        if _expressions_equivalent(normalized_expr, normalized_rewritten):
+            return candidate
+
+    return None
+
+
 def canonicalize_post_state_subexpressions(
     expr: Optional[Expression],
     return_conditions: Sequence[Condition],
@@ -1408,15 +1546,72 @@ def subtract_implied_conditions(
     effect_conditions: Sequence[Condition],
     return_conditions: Sequence[Condition],
 ) -> List[Condition]:
-    implied = {
-        ConditionNormalizer.normalize_for_contradiction(cond)
-        for cond in return_conditions
-    }
+    implied = _collect_implied_condition_norms(return_conditions)
     residual = []
     for cond in effect_conditions:
-        if ConditionNormalizer.normalize_for_contradiction(cond) not in implied:
+        if not _condition_is_implied(cond, implied):
             residual.append(cond)
     return residual
+
+
+def _collect_implied_condition_norms(
+    conditions: Sequence[Condition],
+):
+    implied = set()
+    stack = list(conditions or [])
+    while stack:
+        condition = stack.pop()
+        if condition is None:
+            continue
+        normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+        implied.add(normalized)
+
+        expr = condition.expression
+        if (
+            not condition.negated
+            and expr is not None
+            and expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == "BOOL_AND"
+        ):
+            stack.append(Condition(expr.operands[0], False))
+            stack.append(Condition(expr.operands[1], False))
+
+    return implied
+
+
+def _condition_is_implied(
+    condition: Condition,
+    implied_conditions,
+) -> bool:
+    normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+    if normalized in implied_conditions:
+        return True
+
+    expr = condition.expression
+    if (
+        not condition.negated
+        and expr is not None
+        and expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator == "BOOL_AND"
+    ):
+        stack = [Condition(expr.operands[0], False), Condition(expr.operands[1], False)]
+        while stack:
+            current = stack.pop()
+            current_expr = current.expression
+            if (
+                not current.negated
+                and current_expr is not None
+                and current_expr.expr_type == ExpressionType.BINARY_OP
+                and current_expr.operator == "BOOL_AND"
+            ):
+                stack.append(Condition(current_expr.operands[0], False))
+                stack.append(Condition(current_expr.operands[1], False))
+                continue
+            if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
+                return False
+        return True
+
+    return False
 
 
 def substitute_condition(condition: Condition, replacements: Dict[str, Expression]) -> Condition:

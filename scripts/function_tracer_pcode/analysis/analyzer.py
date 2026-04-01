@@ -10,8 +10,8 @@ from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
+    _reduce_expression_under_conditions,
     canonicalize_post_state_subexpressions,
-    rewrite_loads_from_effects,
     summarize_store_effects,
     substitute_condition,
     substitute_expression,
@@ -249,23 +249,11 @@ class ReturnAnalyzer:
             signedness_result=signedness_result
         )
 
-        if effect_summary.effects and not effect_summary.has_unsupported_call:
-            rewritten_returns = []
-            for ret in result.returns:
-                rewritten_returns.append(
-                    ReturnInfo(
-                        address=ret.address,
-                        conditions=ret.conditions,
-                        branch_index=ret.branch_index,
-                        value=rewrite_loads_from_effects(
-                            ret.value,
-                            ret.conditions,
-                            effect_summary.effects,
-                            parameters,
-                        ),
-                    )
-                )
-            result.returns = rewritten_returns
+        result.returns = self._finalize_returns_with_effect_summary(
+            result.returns,
+            effect_summary,
+            parameters,
+        )
 
         if (
             return_type
@@ -301,6 +289,21 @@ class ReturnAnalyzer:
             print(f"  Use --debug flag for detailed report")
         
         return result
+
+    def _finalize_returns_with_effect_summary(
+        self,
+        returns: List[ReturnInfo],
+        effect_summary,
+        parameters: List[Dict],
+    ) -> List[ReturnInfo]:
+        """
+        Return values are already normalized in _analyze_return_op().
+
+        Re-applying effect-summary rewriting here can convert canonical post-state
+        expressions back into observed pre-state values, which is unsound for
+        swap-style memory effects. Keep the finalized returns as-is.
+        """
+        return returns
 
     def _build_effect_summary(
         self,
@@ -531,6 +534,16 @@ class ReturnAnalyzer:
             if self._expression_contains_unknown_or_call(operand):
                 return True
 
+        return False
+
+    def _expression_contains_phi(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.PHI:
+            return True
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_phi(operand):
+                return True
         return False
 
     def _expression_uses_only_allowed_names(
@@ -815,14 +828,10 @@ class ReturnAnalyzer:
                 continue
             
             simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
-            normalized_value = ev.value
-            if self._current_effect_summary is not None and self._current_effect_summary.effects:
-                normalized_value = canonicalize_post_state_subexpressions(
-                    ev.value,
-                    simplified_conds,
-                    self._current_effect_summary.effects,
-                    self._current_parameters,
-                )
+            normalized_value = self._normalize_expanded_return_value(
+                ev.value,
+                simplified_conds,
+            )
             resolved_value = self._concretize_readonly_loads(
                 normalized_value,
                 simplified_conds,
@@ -854,6 +863,38 @@ class ReturnAnalyzer:
             )]
         
         return results
+
+    def _normalize_expanded_return_value(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+    ) -> Expression:
+        normalized_value = value
+        started_with_phi = self._expression_contains_phi(value)
+
+        if started_with_phi:
+            reduced_value = _reduce_expression_under_conditions(value, conditions)
+            if reduced_value is not None:
+                normalized_value = reduced_value
+            if self.debug and normalized_value is not value:
+                self._debug_print(
+                    "Reduced PHI-bearing expanded return under active conditions: "
+                    f"{value.to_string()} -> {normalized_value.to_string()}"
+                )
+
+        if (
+            not started_with_phi
+            and self._current_effect_summary is not None
+            and self._current_effect_summary.effects
+        ):
+            normalized_value = canonicalize_post_state_subexpressions(
+                normalized_value,
+                conditions,
+                self._current_effect_summary.effects,
+                self._current_parameters,
+            )
+
+        return normalized_value
 
     def _contains_multiequal(self, varnode, depth: int = 0) -> bool:
         """Return値のチェーン内にMULTIEQUALが含まれるかチェック"""

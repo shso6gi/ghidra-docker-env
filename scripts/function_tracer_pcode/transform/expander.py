@@ -7,8 +7,14 @@ from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_name,
+    _expressions_equivalent,
+    canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
+    collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    memory_expression_for_location,
+    rewrite_loads_from_effects,
+    rewrite_observed_loads_from_effects,
 )
 
 
@@ -156,6 +162,11 @@ class ExpressionExpander:
         self._debug_print("=" * 50, depth)
         
         all_expanded: List[ExpandedValue] = []
+        canonical_multiequal_location = self._infer_multiequal_location_for_expansion(
+            multiequal_op,
+            base_conditions,
+            depth,
+        )
         
         for i in range(num_inputs):
             input_varnode = multiequal_op.getInput(i)
@@ -229,6 +240,25 @@ class ExpressionExpander:
                 if ConditionSimplifier.is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
+
+                if canonical_multiequal_location is not None:
+                    canonical_value = self._resolve_canonical_location_under_conditions(
+                        canonical_multiequal_location,
+                        input_conditions,
+                        depth + 1,
+                    )
+                    if canonical_value is not None:
+                        all_expanded.append(ExpandedValue(canonical_value, input_conditions))
+                        cases_emitted += 1
+                        if self.debug:
+                            val_str = canonical_value.to_string()
+                            if len(val_str) > 80:
+                                val_str = val_str[:80] + "..."
+                            self._debug_print(
+                                f"  Path[{path_idx}] -> EMIT multiequal canonical: {val_str}",
+                                depth + 1
+                            )
+                        continue
 
                 if not self._varnode_requires_recursive_expansion(input_varnode):
                     canonical_value = self._trace_and_canonicalize_input_value(
@@ -345,6 +375,73 @@ class ExpressionExpander:
         
         self._debug_print(f"  Final result: {len(result)} unique cases", depth)
         return result
+
+    def _infer_multiequal_location_for_expansion(
+        self,
+        multiequal_op,
+        base_conditions: List[Condition],
+        depth: int,
+    ):
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return None
+        if not self.parameters or self.condition_tracker is None:
+            return None
+
+        observations = self._collect_multiequal_branch_observations(
+            multiequal_op,
+            base_conditions,
+            depth + 1,
+        )
+        if not observations:
+            return None
+
+        inferred = self._infer_multiequal_canonical_location(
+            observations,
+            depth + 1,
+        )
+        if inferred is not None and self.debug:
+            candidate = memory_expression_for_location(inferred, self.parameters)
+            if candidate is not None:
+                self._debug_print(
+                    "Using canonical MULTIEQUAL location for branch expansion: "
+                    f"{candidate.to_string()}",
+                    depth,
+                )
+        return inferred
+
+    def _resolve_canonical_location_under_conditions(
+        self,
+        location,
+        conditions: List[Condition],
+        depth: int,
+    ) -> Optional[Expression]:
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return None
+        if not self.parameters:
+            return None
+
+        candidate = memory_expression_for_location(location, self.parameters)
+        if candidate is None:
+            return None
+
+        rewritten = rewrite_loads_from_effects(
+            candidate,
+            conditions,
+            self.effect_summary.effects,
+            self.parameters,
+        )
+        reduced = _reduce_expression_under_conditions(rewritten, conditions)
+        resolved = reduced if reduced is not None else rewritten
+        if self._expression_contains_unknown_or_call(resolved):
+            return None
+        if self._expression_contains_phi(resolved):
+            if self.debug:
+                self._debug_print(
+                    "Canonical MULTIEQUAL location still contains PHI under current conditions",
+                    depth,
+                )
+            return None
+        return resolved
     
     def _expand_input_varnode(
         self,
@@ -428,6 +525,14 @@ class ExpressionExpander:
         if not self.parameters:
             return None
 
+        resolved_post_state = self._resolve_nested_multiequal_via_effect_summary(
+            multiequal_op,
+            conditions,
+            depth,
+        )
+        if resolved_post_state is not None:
+            return resolved_post_state
+
         try:
             traced = self.tracer._trace_pcode_op(multiequal_op, depth, use_cache=False)
         except Exception:
@@ -439,12 +544,198 @@ class ExpressionExpander:
             self.parameters,
             return_conditions=conditions,
         )
+        if collapsed is None:
+            collapsed = collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+                traced,
+                self.effect_summary.effects,
+                self.parameters,
+                return_conditions=conditions,
+            )
         if collapsed is not None:
             self._debug_print(
                 f"Collapsed nested MULTIEQUAL to canonical memory: {collapsed.to_string()}",
                 depth,
             )
         return collapsed
+
+    def _resolve_nested_multiequal_via_effect_summary(
+        self,
+        multiequal_op,
+        current_conditions: List[Condition],
+        depth: int,
+    ) -> Optional[Expression]:
+        observations = self._collect_multiequal_branch_observations(
+            multiequal_op,
+            current_conditions,
+            depth + 1,
+        )
+        if not observations:
+            return None
+
+        inferred_location = self._infer_multiequal_canonical_location(
+            observations,
+            depth + 1,
+        )
+        if inferred_location is None:
+            if self.debug:
+                branch_summaries = [
+                    f"{ev.value.to_string()} @ {[c.to_string() for c in ev.conditions]}"
+                    for ev in observations
+                ]
+                self._debug_print(
+                    f"Effect-summary inference failed for nested MULTIEQUAL: {branch_summaries}",
+                    depth,
+                )
+            return None
+
+        candidate = memory_expression_for_location(inferred_location, self.parameters)
+        if candidate is None:
+            return None
+
+        rewritten = rewrite_loads_from_effects(
+            candidate,
+            current_conditions,
+            self.effect_summary.effects,
+            self.parameters,
+        )
+        reduced = _reduce_expression_under_conditions(rewritten, current_conditions)
+        resolved = reduced if reduced is not None else rewritten
+        if self.debug:
+            self._debug_print(
+                "Resolved nested MULTIEQUAL via effect summary: "
+                f"{candidate.to_string()} -> {resolved.to_string()}",
+                depth,
+            )
+        return resolved
+
+    def _collect_multiequal_branch_observations(
+        self,
+        multiequal_op,
+        base_conditions: List[Condition],
+        depth: int,
+    ) -> List[ExpandedValue]:
+        if not hasattr(multiequal_op, "getParent"):
+            if self.debug:
+                self._debug_print(
+                    "Skipping effect-summary inference for nested MULTIEQUAL without parent block",
+                    depth,
+                )
+            return []
+        phi_parent = multiequal_op.getParent()
+        if not phi_parent or self.condition_tracker is None:
+            return []
+
+        observations: List[ExpandedValue] = []
+        num_inputs = multiequal_op.getNumInputs()
+        in_size = phi_parent.getInSize()
+
+        for i in range(num_inputs):
+            input_varnode = multiequal_op.getInput(i)
+            if i >= in_size:
+                continue
+
+            in_block = phi_parent.getIn(i)
+            if not in_block:
+                continue
+
+            in_block_info = self.condition_tracker.get_block_by_hash(in_block)
+            if not in_block_info:
+                continue
+
+            all_valid_paths = self.condition_tracker.get_all_valid_paths_to_block(
+                target_block=in_block_info
+            )
+            edge_cond = self._get_edge_condition(in_block_info, phi_parent)
+
+            for path_conditions in all_valid_paths:
+                branch_conditions = list(base_conditions) + path_conditions.copy()
+                if edge_cond:
+                    branch_conditions.append(edge_cond)
+                if ConditionSimplifier.is_contradiction(branch_conditions):
+                    continue
+                try:
+                    branch_value = self.tracer.trace_varnode(
+                        input_varnode,
+                        depth,
+                        use_cache=False,
+                    )
+                except Exception:
+                    continue
+                if self._expression_contains_unknown_or_call(branch_value):
+                    continue
+                observations.append(ExpandedValue(branch_value, branch_conditions))
+
+        return observations
+
+    def _infer_multiequal_canonical_location(
+        self,
+        observations: List[ExpandedValue],
+        depth: int,
+    ):
+        if not observations or self.effect_summary is None:
+            return None
+
+        candidate_locations = sorted(
+            {effect.location for effect in self.effect_summary.effects},
+            key=lambda loc: (loc.base_param, loc.offset, loc.size),
+        )
+
+        for location in candidate_locations:
+            candidate = memory_expression_for_location(location, self.parameters)
+            if candidate is None:
+                continue
+
+            all_match = True
+            for ev in observations:
+                expected = rewrite_loads_from_effects(
+                    candidate,
+                    ev.conditions,
+                    self.effect_summary.effects,
+                    self.parameters,
+                )
+                reduced_expected = _reduce_expression_under_conditions(expected, ev.conditions)
+                observed = _reduce_expression_under_conditions(ev.value, ev.conditions)
+                observed = observed if observed is not None else ev.value
+                reduced_expected = reduced_expected if reduced_expected is not None else expected
+                if not _expressions_equivalent(observed, reduced_expected):
+                    all_match = False
+                    break
+
+            if all_match:
+                if self.debug:
+                    self._debug_print(
+                        f"Inferred MULTIEQUAL canonical location by branch match: {candidate.to_string()}",
+                        depth,
+                    )
+                return location
+
+        observed_locations = []
+        for ev in observations:
+            if ev.value.expr_type != ExpressionType.MEMORY or not ev.value.operands:
+                return None
+            location = canonicalize_param_location(
+                ev.value.operands[0],
+                self.parameters,
+                size=ev.value.size,
+            )
+            if location is None:
+                return None
+            observed_locations.append(location)
+
+        if not observed_locations:
+            return None
+
+        first = observed_locations[0]
+        if all(loc == first for loc in observed_locations[1:]):
+            if self.debug:
+                self._debug_print(
+                    "Inferred MULTIEQUAL canonical location by identical observed load "
+                    f"location: {first.base_param}+{first.offset}",
+                    depth,
+                )
+            return first
+
+        return None
 
     def _trace_and_canonicalize_input_value(
         self,
@@ -463,6 +754,26 @@ class ExpressionExpander:
             return None
 
         canonicalized = self._canonicalize_traced_expression(traced, conditions)
+        if (
+            traced is not None
+            and canonicalized is traced
+            and traced.expr_type == ExpressionType.MEMORY
+        ):
+            pruned_leaf = collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+                traced,
+                self.effect_summary.effects,
+                self.parameters,
+                return_conditions=conditions,
+            )
+            if pruned_leaf is not None:
+                reduced = _reduce_expression_under_conditions(pruned_leaf, conditions)
+                canonicalized = reduced if reduced is not None else pruned_leaf
+                if self.debug and not _expressions_equivalent(traced, canonicalized):
+                    self._debug_print(
+                        "Canonicalized MULTIEQUAL branch memory leaf: "
+                        f"{traced.to_string()} -> {canonicalized.to_string()}",
+                        depth,
+                    )
         if canonicalized is traced:
             return None
         if self._expression_contains_unknown_or_call(canonicalized):
@@ -488,6 +799,24 @@ class ExpressionExpander:
             return expr
         if not self.parameters:
             return expr
+        rewritten_observed = rewrite_observed_loads_from_effects(
+            expr,
+            conditions,
+            self.effect_summary.effects,
+            self.parameters,
+        )
+        if rewritten_observed is not expr:
+            if self.debug:
+                self._debug_print(
+                    "Observed-load rewrite resolved: "
+                    f"{expr.to_string()} -> {rewritten_observed.to_string()}",
+                    0,
+                )
+            reduced = _reduce_expression_under_conditions(
+                rewritten_observed if rewritten_observed is not None else expr,
+                conditions,
+            )
+            return reduced if reduced is not None else rewritten_observed
         canonicalized = canonicalize_post_state_subexpressions(
             expr,
             conditions,
@@ -529,7 +858,116 @@ class ExpressionExpander:
                 return True
         return False
 
+    def _expand_expression_cases(
+        self,
+        expr: Optional[Expression],
+        base_conditions: List[Condition],
+        depth: int,
+    ) -> List[ExpandedValue]:
+        if expr is None:
+            return []
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            expanded: List[ExpandedValue] = []
+            prior_guards: List[Condition] = []
+            for cond, value in expr.value:
+                combined_conditions = list(base_conditions)
+                for prior in prior_guards:
+                    combined_conditions.append(prior.negate())
+                if cond is not None:
+                    combined_conditions.append(cond)
+                    prior_guards.append(cond)
+                simplified = ConditionSimplifier.simplify_conditions(combined_conditions)
+                if ConditionSimplifier.is_contradiction(simplified):
+                    continue
+                expanded.extend(
+                    self._expand_expression_cases(
+                        value,
+                        simplified,
+                        depth + 1,
+                    )
+                )
+            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+
+        if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+            addr_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
+            if not addr_cases:
+                return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+            expanded = []
+            for addr_case in addr_cases:
+                simplified = ConditionSimplifier.simplify_conditions(addr_case.conditions)
+                if ConditionSimplifier.is_contradiction(simplified):
+                    continue
+                rebuilt = Expression.memory(
+                    addr_case.value,
+                    expr.size,
+                    read_order_key=expr.read_order_key,
+                )
+                expanded.append(ExpandedValue(rebuilt, simplified))
+            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            operand_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
+            if not operand_cases:
+                return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+            expanded = []
+            for operand_case in operand_cases:
+                simplified = ConditionSimplifier.simplify_conditions(operand_case.conditions)
+                if ConditionSimplifier.is_contradiction(simplified):
+                    continue
+                rebuilt = Expression.unary_op(expr.operator, operand_case.value)
+                rebuilt.size = expr.size
+                expanded.append(ExpandedValue(rebuilt, simplified))
+            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
+            right_cases = self._expand_expression_cases(expr.operands[1], base_conditions, depth + 1)
+            if not left_cases:
+                left_cases = [ExpandedValue(expr.operands[0], ConditionSimplifier.simplify_conditions(base_conditions))]
+            if not right_cases:
+                right_cases = [ExpandedValue(expr.operands[1], ConditionSimplifier.simplify_conditions(base_conditions))]
+            expanded = []
+            for left_case in left_cases:
+                for right_case in right_cases:
+                    combined_conditions = ConditionSimplifier.simplify_conditions(
+                        list(left_case.conditions) + list(right_case.conditions)
+                    )
+                    if ConditionSimplifier.is_contradiction(combined_conditions):
+                        continue
+                    rebuilt = Expression.binary_op(
+                        expr.operator,
+                        left_case.value,
+                        right_case.value,
+                    )
+                    rebuilt.size = expr.size
+                    expanded.append(ExpandedValue(rebuilt, combined_conditions))
+            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+
+        return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+
     def _trace_operation_with_conditions(
+        self,
+        pcode_op,
+        conditions: List[Condition],
+        depth: int,
+        output_size: int = 0,
+    ) -> Optional[Expression]:
+        canonicalized = self._trace_operation_expression(
+            pcode_op,
+            conditions,
+            depth,
+            output_size=output_size,
+        )
+        if canonicalized is None:
+            return None
+        if self._expression_contains_unknown_or_call(canonicalized):
+            return None
+        if self._expression_contains_phi(canonicalized):
+            return None
+        return canonicalized
+
+    def _trace_operation_expression(
         self,
         pcode_op,
         conditions: List[Condition],
@@ -542,10 +980,6 @@ class ExpressionExpander:
             return None
 
         canonicalized = self._canonicalize_traced_expression(traced, conditions)
-        if self._expression_contains_unknown_or_call(canonicalized):
-            return None
-        if self._expression_contains_phi(canonicalized):
-            return None
         if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
             canonicalized.size = output_size
         return canonicalized
@@ -578,28 +1012,42 @@ class ExpressionExpander:
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
         if not requires_recursive_expansion:
-            direct_value = self._trace_operation_with_conditions(
+            traced_value = self._trace_operation_expression(
                 pcode_op,
                 conditions,
                 depth,
                 output_size=output_size,
             )
-            if direct_value is not None:
+            if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
                 self._debug_print(
-                    f"  Direct operation trace resolved: {direct_value.to_string()}",
+                    f"  Direct operation trace resolved: {traced_value.to_string()}",
                     depth,
                 )
-                return [ExpandedValue(direct_value, conditions)]
-
-        if not requires_recursive_expansion:
-            # 特別な展開が不要なら単純にトレース
-            self._debug_print(f"  No recursive expansion target in inputs, simple trace", depth)
-            value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
-            value = self._canonicalize_traced_expression(value, conditions)
-            # 出力サイズを設定
-            if value.size == 0 and output_size > 0:
-                value.size = output_size
-            return [ExpandedValue(value, conditions)]
+                return [ExpandedValue(traced_value, conditions)]
+            if traced_value is not None and self._expression_contains_phi(traced_value):
+                self._debug_print(
+                    "  Direct operation trace still contains PHI, expanding traced expression cases",
+                    depth,
+                )
+                expanded_traced = self._expand_expression_cases(
+                    traced_value,
+                    conditions,
+                    depth + 1,
+                )
+                if expanded_traced:
+                    return expanded_traced
+                requires_recursive_expansion = True
+            elif traced_value is not None:
+                return [ExpandedValue(traced_value, conditions)]
+            else:
+                # 特別な展開が不要なら単純にトレース
+                self._debug_print(f"  No recursive expansion target in inputs, simple trace", depth)
+                value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
+                value = self._canonicalize_traced_expression(value, conditions)
+                # 出力サイズを設定
+                if value.size == 0 and output_size > 0:
+                    value.size = output_size
+                return [ExpandedValue(value, conditions)]
 
         self._debug_print(f"  Recursive expansion target found in inputs, expanding recursively", depth)
         
@@ -743,21 +1191,35 @@ class ExpressionExpander:
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
         if not requires_recursive_expansion:
-            direct_value = self._trace_operation_with_conditions(
+            traced_value = self._trace_operation_expression(
                 pcode_op,
                 base_conditions,
                 depth,
             )
-            if direct_value is not None:
+            if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
                 self._debug_print(
-                    f"  Direct operation trace resolved: {direct_value.to_string()}",
+                    f"  Direct operation trace resolved: {traced_value.to_string()}",
                     depth,
                 )
-                return [ExpandedValue(direct_value, base_conditions)]
-
-        if not requires_recursive_expansion:
-            value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
-            return [ExpandedValue(value, base_conditions)]
+                return [ExpandedValue(traced_value, base_conditions)]
+            if traced_value is not None and self._expression_contains_phi(traced_value):
+                self._debug_print(
+                    "  Top-level direct trace still contains PHI, expanding traced expression cases",
+                    depth,
+                )
+                expanded_traced = self._expand_expression_cases(
+                    traced_value,
+                    base_conditions,
+                    depth + 1,
+                )
+                if expanded_traced:
+                    return expanded_traced
+                requires_recursive_expansion = True
+            elif traced_value is not None:
+                return [ExpandedValue(traced_value, base_conditions)]
+            else:
+                value = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
+                return [ExpandedValue(value, base_conditions)]
         
         # 各入力を展開
         input_expansions: List[List[ExpandedValue]] = []

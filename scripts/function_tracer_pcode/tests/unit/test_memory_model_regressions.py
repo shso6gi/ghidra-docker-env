@@ -8,12 +8,15 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     StoreEffect,
     _resolve_call_target_name,
+    subtract_implied_conditions,
     is_call_effect_summary_allowed,
     build_void_effect_summary_expr,
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
+    collapse_pruned_post_state_memory_leaf_to_canonical_memory,
     rewrite_loads_from_effects,
+    rewrite_observed_loads_from_effects,
     summarize_store_effects,
     substitute_location,
     _choose_effect_substitution_args,
@@ -22,6 +25,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     EffectSummary,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
@@ -1000,6 +1004,48 @@ def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
     assert rewritten.to_string() == "(MEM[b] - MEM[a])"
 
 
+def test_effect_summary_rewrites_observed_post_call_loads_into_phi_difference():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    original = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=11,
+        ),
+    ]
+
+    rewritten = rewrite_observed_loads_from_effects(
+        original,
+        [nonnull_a, nonnull_b],
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert rewritten.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
+
+
 def test_effect_summary_collapses_post_state_phi_to_canonical_memory_location():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -1157,6 +1203,42 @@ def test_effect_summary_collapses_post_state_phi_with_explicit_complementary_gua
     assert collapsed.to_string() == "MEM[b]"
 
 
+def test_effect_summary_collapses_pruned_post_state_memory_leaf_to_canonical_location():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    collapsed = collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+        Expression.memory(a, size=4),
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+        return_conditions=[swap_taken],
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[b]"
+
+
 def test_expression_expander_collapses_nested_multiequal_using_active_conditions():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -1301,6 +1383,611 @@ def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
     assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
 
 
+def test_expression_expander_canonicalizes_multiequal_branch_memory_leaf_using_effects():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, depth=0, use_cache=False):
+            return Expression.memory(a, size=4)
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    canonicalized = expander._trace_and_canonicalize_input_value(object(), [swap_taken], 0)
+
+    assert canonicalized is not None
+    assert canonicalized.to_string() == "MEM[b]"
+
+
+def test_effect_summary_treats_composite_guard_as_implied_by_split_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    composite = Condition.combine_and([nonnull_a, nonnull_b, swap_taken])
+
+    residual = subtract_implied_conditions([composite], [nonnull_a, nonnull_b, swap_taken])
+
+    assert residual == []
+
+
+def test_effect_summary_treats_composite_guard_as_implied_by_grouped_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    nonnull = Condition.combine_and([nonnull_a, nonnull_b])
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    composite = Condition.combine_and([nonnull, swap_taken])
+
+    residual = subtract_implied_conditions([composite], [nonnull, swap_taken])
+
+    assert residual == []
+
+
+def test_canonicalize_post_state_subexpressions_handles_composite_guard_without_self_subtraction():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.phi(
+            [
+                (Condition.combine_and([nonnull_a, nonnull_b, swap_taken]), Expression.memory(a, size=4)),
+                (Condition.combine_and([nonnull_a, nonnull_b, no_swap]), Expression.memory(b, size=4)),
+            ]
+        ),
+    )
+    expr.operands[1].size = 4
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    normalized = canonicalize_post_state_subexpressions(
+        expr,
+        [nonnull_a, nonnull_b, swap_taken],
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    assert normalized.to_string() == "(MEM[a] - MEM[b])"
+
+
+def test_expression_expander_collapses_nested_multiequal_with_grouped_active_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    nonnull = Condition.combine_and([nonnull_a, nonnull_b])
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = Condition(swap_taken.expression, True)
+    post_swap_b = Expression.phi(
+        [
+            (Condition.combine_and([nonnull, swap_taken]), Expression.memory(a, size=4)),
+            (Condition.combine_and([nonnull, no_swap]), Expression.memory(b, size=4)),
+        ]
+    )
+    post_swap_b.size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeMultiequalOp:
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    class FakeVarnode:
+        def __init__(self, def_op):
+            self._def_op = def_op
+
+        def getSize(self):
+            return 4
+
+        def getDef(self):
+            return self._def_op
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return post_swap_b
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    expanded = expander._expand_input_varnode(
+        FakeVarnode(FakeMultiequalOp()),
+        [nonnull, swap_taken],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "MEM[b]"
+
+
+def test_expression_expander_collapses_nested_multiequal_after_phi_handler_prunes_to_memory_leaf():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeMultiequalOp:
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    class FakeVarnode:
+        def __init__(self, def_op):
+            self._def_op = def_op
+
+        def getSize(self):
+            return 4
+
+        def getDef(self):
+            return self._def_op
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return Expression.memory(a, size=4)
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    expanded = expander._expand_input_varnode(
+        FakeVarnode(FakeMultiequalOp()),
+        [swap_taken],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "MEM[b]"
+
+
+def test_expression_expander_uses_multiequal_canonical_location_per_branch():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = swap_taken.negate()
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    pred_no_swap = object()
+    pred_swap = object()
+
+    class FakeInputVarnode:
+        def __init__(self, expr):
+            self.expr = expr
+
+        def getDef(self):
+            return None
+
+    class FakeParent:
+        def getInSize(self):
+            return 2
+
+        def getIn(self, index):
+            return [pred_no_swap, pred_swap][index]
+
+    class FakeMultiequalOp:
+        def getParent(self):
+            return FakeParent()
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return [
+                FakeInputVarnode(Expression.memory(b, size=4)),
+                FakeInputVarnode(Expression.memory(a, size=4)),
+            ][index]
+
+    class FakeBlockInfo:
+        def __init__(self, index):
+            self.index = index
+
+    class FakeConditionTracker:
+        def get_block_by_hash(self, block):
+            if block is pred_no_swap:
+                return FakeBlockInfo(3)
+            if block is pred_swap:
+                return FakeBlockInfo(4)
+            return None
+
+        def get_all_valid_paths_to_block(self, target_block):
+            return [[]]
+
+    class FakeTracer:
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            return varnode.expr
+
+        def _get_op_key(self, _op):
+            return "fake-multiequal"
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=FakeConditionTracker(),
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+    expander._get_edge_condition = lambda block_info, _parent: no_swap if block_info.index == 3 else swap_taken
+
+    expanded = expander._expand_multiequal_internal(
+        FakeMultiequalOp(),
+        [],
+        depth=0,
+    )
+
+    observed = {
+        (ev.value.to_string(), tuple(cond.to_string() for cond in ev.conditions))
+        for ev in expanded
+    }
+    assert observed == {
+        ("MEM[b]", (no_swap.to_string(),)),
+        ("MEM[a]", (swap_taken.to_string(),)),
+    }
+
+
+def test_return_analyzer_does_not_reapply_effect_summary_to_canonical_post_state_return():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+    returns = [
+        ReturnInfo(
+            address="0x1",
+            branch_index=101,
+            conditions=[swap_taken],
+            value=Expression.binary_op("INT_SUB", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        )
+    ]
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    finalized = analyzer._finalize_returns_with_effect_summary(
+        returns,
+        effect_summary,
+        [_param("a", size=8, is_signed=False), _param("b", size=8, is_signed=False, index=1)],
+    )
+
+    assert len(finalized) == 1
+    assert finalized[0].value.to_string() == "(MEM[b] - MEM[a])"
+
+
+def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonicalizing():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    composite_less = Condition.combine_and([nonnull_a, nonnull_b, swap_taken])
+    composite_not_less = Condition.combine_and([nonnull_a, nonnull_b, swap_taken.negate()])
+    value = Expression.binary_op(
+        "INT_SUB",
+        Expression.phi(
+            [
+                (composite_less, Expression.memory(b, size=4)),
+                (composite_not_less, Expression.memory(a, size=4)),
+            ]
+        ),
+        Expression.phi(
+            [
+                (composite_less, Expression.memory(a, size=4)),
+                (composite_not_less, Expression.memory(b, size=4)),
+            ]
+        ),
+    )
+    value.operands[0].size = 4
+    value.operands[1].size = 4
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_2", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+
+    normalized_less = analyzer._normalize_expanded_return_value(
+        value,
+        [nonnull_a, nonnull_b, swap_taken],
+    )
+    normalized_not_less = analyzer._normalize_expanded_return_value(
+        value,
+        [nonnull_a, nonnull_b, swap_taken.negate()],
+    )
+
+    assert normalized_less.to_string() == "(MEM[param_2] - MEM[param_1])"
+    assert normalized_not_less.to_string() == "(MEM[param_1] - MEM[param_2])"
+
+
+def test_phi_handler_merge_preserves_same_value_with_distinct_conditions():
+    a = Expression.parameter("a", 0, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    no_swap = swap_taken.negate()
+
+    class FakeTracer:
+        debug = False
+
+    handler = PhiHandler(FakeTracer(), condition_tracker=None)
+    merged = handler._merge_branches(
+        [
+            PhiExpandedBranch([swap_taken], Expression.memory(a, size=4)),
+            PhiExpandedBranch([no_swap], Expression.memory(a, size=4)),
+        ]
+    )
+
+    assert len(merged) == 2
+
+
+def test_expression_expander_infers_multiequal_location_by_branch_match():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = swap_taken.negate()
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        debug = False
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    inferred = expander._infer_multiequal_canonical_location(
+        [
+            ExpandedValue(Expression.memory(a, size=4), [swap_taken]),
+            ExpandedValue(Expression.memory(b, size=4), [no_swap]),
+        ],
+        depth=0,
+    )
+
+    assert inferred == CanonicalLocation("b", 0, 4)
+
+
+def test_expression_expander_infers_multiequal_location_by_identical_observed_load():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    no_swap = swap_taken.negate()
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=2,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        debug = False
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    inferred = expander._infer_multiequal_canonical_location(
+        [
+            ExpandedValue(Expression.memory(a, size=4), [swap_taken]),
+            ExpandedValue(Expression.memory(a, size=4), [no_swap]),
+        ],
+        depth=0,
+    )
+
+    assert inferred == CanonicalLocation("a", 0, 4)
+
+
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -1373,6 +2060,190 @@ def test_expression_expander_reduces_full_operation_trace_under_active_condition
 
     assert direct is not None
     assert direct.to_string() == "(MEM[a] - MEM[b])"
+
+
+def test_expression_expander_rewrites_observed_loads_before_post_state_canonicalization():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+
+    class FakeTracer:
+        pass
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        traced,
+        [nonnull_a, nonnull_b],
+    )
+
+    assert canonicalized.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
+
+
+def test_expression_expander_keeps_canonical_memory_without_read_order_key_unchanged():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+    canonical = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(b, size=4),
+        Expression.memory(a, size=4),
+    )
+
+    class FakeTracer:
+        pass
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        canonical,
+        [swap_taken],
+    )
+
+    assert canonicalized.to_string() == "(MEM[b] - MEM[a])"
+
+
+def test_expression_expander_expands_observed_load_phi_difference_into_cases():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return traced
+
+    class FakeOp:
+        def getMnemonic(self):
+            return "INT_SUB"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            class In:
+                def getDef(self):
+                    return None
+            return In()
+
+        def getOutput(self):
+            class Out:
+                def getSize(self):
+                    return 4
+            return Out()
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    expanded = expander._expand_input_operation(
+        FakeOp(),
+        [nonnull_a, nonnull_b],
+        depth=0,
+    )
+
+    assert len(expanded) == 2
+    values = sorted(ev.value.to_string() for ev in expanded)
+    assert values == ["(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"]
+    assert any("(MEM[b] < MEM[a])" in " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded)
 
 
 def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_location():
