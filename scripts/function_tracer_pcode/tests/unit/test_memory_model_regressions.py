@@ -304,6 +304,47 @@ def test_memory_resolver_accepts_unsigned_lessequal_range_conditions():
     assert values == [5, 7, 11, 13, 17, 19]
 
 
+def test_memory_resolver_accepts_cast_wrapped_parameter_range_conditions():
+    param = Expression.parameter("param_1", 0, size=4)
+    index = Expression.unary_op("INT_ZEXT", param)
+    index.size = 8
+    address_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.constant(0, 8), Expression.constant(0x1009EC, 8)),
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.binary_op("INT_MULT", index, Expression.constant(1, 8)),
+            Expression.constant(4, 8),
+        ),
+    )
+    load_expr = Expression.memory(address_expr, size=4)
+    widened_param = Expression.unary_op("INT_ZEXT", param)
+    widened_param.size = 8
+    cond = Condition(
+        Expression.binary_op("INT_LESS", widened_param, Expression.constant(4, 8)),
+        False,
+    )
+
+    table = {
+        0x1009EC + 0: 5,
+        0x1009EC + 4: 7,
+        0x1009EC + 8: 11,
+        0x1009EC + 12: 13,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [cond],
+        [_param("param_1", size=4, is_signed=False)],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "PHI"
+    values = [branch_value.value for _, branch_value in resolved.value[:-1]]
+    assert values == [5, 7, 11, 13]
+
+
 def test_memory_resolver_accepts_negated_less_condition_as_upper_bound():
     param = Expression.parameter("param_1", 0, size=4)
     index = Expression.unary_op("INT_ZEXT", param)

@@ -311,6 +311,12 @@ def _try_resolve_readonly_load(
 
     candidate_indices = _enumerate_candidate_indices(pattern, conditions, param_info, debug)
     if not candidate_indices:
+        if debug:
+            cond_strs = [cond.to_string() for cond in conditions]
+            print(
+                "[MemoryResolver] no candidate indices for "
+                f"{pattern.index_param_name} with conditions {cond_strs}"
+            )
         return None
 
     branches = []
@@ -564,10 +570,20 @@ def _enumerate_candidate_indices(
 ) -> List[int]:
     nonneg, upper_bound = _extract_index_range(conditions, pattern.index_param_name)
     if upper_bound is None or upper_bound <= 0:
+        if debug:
+            print(
+                "[MemoryResolver] upper bound unavailable for "
+                f"{pattern.index_param_name} (nonneg={nonneg}, upper_bound={upper_bound})"
+            )
         return []
 
     is_unsigned = not param_info.get("is_signed", True)
     if not is_unsigned and not nonneg:
+        if debug:
+            print(
+                "[MemoryResolver] signed index lacks non-negative proof for "
+                f"{pattern.index_param_name}"
+            )
         return []
 
     if upper_bound > MAX_ENUMERATED_INDEX_VALUES:
@@ -590,35 +606,38 @@ def _extract_index_range(
     upper_bound: Optional[int] = None
 
     for cond in conditions:
-        left_str, op, right_str, is_positive = ConditionNormalizer.normalize(cond)
-        if not is_positive or not op:
+        comparison = _extract_positive_comparison(cond)
+        if comparison is None:
             continue
+        left_expr, op, right_expr = comparison
 
         if op == "INT_SLESS":
-            if left_str in {"0", "-1"} and right_str == param_name:
+            if (_is_zero_constant(left_expr) or _is_minus_one_constant(left_expr)) and _matches_index_param(
+                right_expr, param_name
+            ):
                 nonneg = True
-            elif left_str == param_name:
-                bound = _parse_nonnegative_int(right_str)
+            elif _matches_index_param(left_expr, param_name):
+                bound = _extract_nonnegative_constant_value(right_expr)
                 if bound is not None:
                     upper_bound = bound if upper_bound is None else min(upper_bound, bound)
         elif op == "INT_LESS":
-            if left_str == param_name:
-                bound = _parse_nonnegative_int(right_str)
+            if _matches_index_param(left_expr, param_name):
+                bound = _extract_nonnegative_constant_value(right_expr)
                 if bound is not None:
                     upper_bound = bound if upper_bound is None else min(upper_bound, bound)
         elif op == "INT_LESSEQUAL":
-            if left_str == param_name:
-                bound = _parse_nonnegative_int(right_str)
+            if _matches_index_param(left_expr, param_name):
+                bound = _extract_nonnegative_constant_value(right_expr)
                 if bound is not None:
                     upper_bound_value = bound + 1
                     upper_bound = (
                         upper_bound_value if upper_bound is None else min(upper_bound, upper_bound_value)
                     )
         elif op == "INT_SLESSEQUAL":
-            if left_str == "0" and right_str == param_name:
+            if _is_zero_constant(left_expr) and _matches_index_param(right_expr, param_name):
                 nonneg = True
-            elif left_str == param_name:
-                bound = _parse_nonnegative_int(right_str)
+            elif _matches_index_param(left_expr, param_name):
+                bound = _extract_nonnegative_constant_value(right_expr)
                 if bound is not None:
                     upper_bound_value = bound + 1
                     upper_bound = (
@@ -628,25 +647,85 @@ def _extract_index_range(
     return nonneg, upper_bound
 
 
-def _parse_nonnegative_int(value: str) -> Optional[int]:
-    try:
-        parsed = int(value, 0)
-    except (TypeError, ValueError):
+def _extract_positive_comparison(
+    condition: Condition,
+) -> Optional[Tuple[Expression, str, Expression]]:
+    expr = condition.expression
+    negated = condition.negated
+
+    while (
+        expr is not None
+        and expr.expr_type == ExpressionType.UNARY_OP
+        and expr.operator == "BOOL_NEGATE"
+        and expr.operands
+    ):
+        negated = not negated
+        expr = expr.operands[0]
+
+    if (
+        expr is None
+        or expr.expr_type != ExpressionType.BINARY_OP
+        or len(expr.operands) != 2
+        or expr.operator not in {"INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"}
+    ):
         return None
-    return parsed if parsed >= 0 else None
+
+    left_expr, right_expr = expr.operands
+    op = expr.operator
+    if negated:
+        return right_expr, ConditionNormalizer._negate_comparison_op(op), left_expr
+    return left_expr, op, right_expr
+
+
+def _extract_nonnegative_constant_value(expr: Expression) -> Optional[int]:
+    value = _extract_integer_constant(expr)
+    if value is None or value < 0:
+        return None
+    return value
+
+
+def _extract_integer_constant(expr: Optional[Expression]) -> Optional[int]:
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+        return int(expr.value)
+
+    if (
+        expr.expr_type == ExpressionType.UNARY_OP
+        and expr.operator in {"CAST", "COPY", "INT_ZEXT", "INT_SEXT"}
+        and expr.operands
+    ):
+        return _extract_integer_constant(expr.operands[0])
+
+    return None
 
 
 def _is_named_param(expr: Expression, param_name: str) -> bool:
     return expr.expr_type == ExpressionType.PARAMETER and expr.name == param_name
 
 
+def _matches_index_param(expr: Expression, param_name: str) -> bool:
+    name, _ = _extract_index_param(expr)
+    return name == param_name
+
+
 def _is_zero_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and expr.value == 0
+    value = _extract_integer_constant(expr)
+    return value == 0
 
 
 def _is_minus_one_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and expr.value == -1
+    value = _extract_integer_constant(expr)
+    if value == -1:
+        return True
+    if value is None:
+        return False
+    bit_width = max(1, expr.get_bit_width())
+    mask = (1 << bit_width) - 1
+    return value == mask
 
 
 def _is_nonnegative_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int) and expr.value >= 0
+    value = _extract_integer_constant(expr)
+    return value is not None and value >= 0

@@ -2,6 +2,7 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
+from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Set, Tuple
 
 from ..model.expression import Expression, ExpressionType, Condition
@@ -31,6 +32,7 @@ class ReturnAnalyzer:
         self._effect_summary_cache: Dict[str, Any] = {}
         self._effect_summary_parameter_cache: Dict[str, List[Dict]] = {}
         self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
+        self._local_target_cache: Dict[int, Optional[List[Any]]] = {}
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -43,6 +45,22 @@ class ReturnAnalyzer:
             self._decompiler = DecompInterface()
             self._decompiler.openProgram(self.program)
         return self._decompiler
+
+    @contextmanager
+    def _program_transaction(self, description: str):
+        start_transaction = getattr(self.program, "startTransaction", None)
+        end_transaction = getattr(self.program, "endTransaction", None)
+        if not callable(start_transaction) or not callable(end_transaction):
+            yield
+            return
+
+        tx_id = start_transaction(description)
+        try:
+            yield
+            end_transaction(tx_id, True)
+        except Exception:
+            end_transaction(tx_id, False)
+            raise
     
     def dispose(self):
         if self._decompiler is not None:
@@ -236,6 +254,7 @@ class ReturnAnalyzer:
                 tracer,
                 condition_tracker,
                 i,
+                current_function=function,
                 active_functions=active_functions,
             )
             return_infos.extend(infos)
@@ -906,9 +925,9 @@ class ReturnAnalyzer:
         self._effect_summary_cache[cache_key] = summary
         return summary
 
-    def _make_call_resolver(self, active_functions: Set[str]):
+    def _make_call_resolver(self, active_functions: Set[str], current_function=None):
         def resolve_call(function_name: str, args):
-            return self._resolve_call_expansions(function_name, args, active_functions)
+            return self._resolve_call_expansions(function_name, args, active_functions, current_function)
 
         return resolve_call
 
@@ -917,8 +936,13 @@ class ReturnAnalyzer:
         function_name: str,
         args: List[Expression],
         active_functions: Set[str],
+        current_function=None,
     ):
         from ..transform.expander import ExpandedValue
+
+        local_address = self._parse_local_target_address(function_name)
+        if local_address is not None:
+            return self._resolve_local_code_target_expansions(local_address, active_functions, current_function)
 
         if function_name in active_functions:
             self._debug_print(f"Skipping recursive call expansion for '{function_name}'")
@@ -964,6 +988,531 @@ class ReturnAnalyzer:
             )
 
         return expanded
+
+    def _parse_local_target_address(self, function_name: str) -> Optional[int]:
+        match = re.fullmatch(r"ADDR_([0-9a-fA-F]+)", function_name or "")
+        if not match:
+            return None
+        try:
+            return int(match.group(1), 16)
+        except Exception:
+            return None
+
+    def _resolve_local_code_target_expansions(
+        self,
+        address_value: int,
+        active_functions: Set[str],
+        current_function=None,
+    ):
+        from ..transform.expander import ExpandedValue
+
+        if address_value in self._local_target_cache:
+            return self._local_target_cache[address_value]
+
+        try:
+            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
+            addr = default_space.getAddress(address_value)
+        except Exception:
+            self._debug_print(f"Local target resolution failed: invalid address 0x{address_value:x}")
+            self._local_target_cache[address_value] = None
+            return None
+
+        function_manager = self.program.getFunctionManager()
+        containing = function_manager.getFunctionContaining(addr)
+        if containing is None and current_function is not None:
+            try:
+                body = current_function.getBody()
+                body_contains = body is not None and body.contains(addr)
+                if not body_contains and body is not None:
+                    min_addr = body.getMinAddress()
+                    max_addr = body.getMaxAddress()
+                    if min_addr is not None and max_addr is not None:
+                        try:
+                            body_contains = (
+                                min_addr.getOffset() <= addr.getOffset() <= max_addr.getOffset()
+                            )
+                        except Exception:
+                            body_contains = False
+                if body_contains:
+                    containing = current_function
+                    self._debug_print(
+                        f"Local target {addr} falling back to current function '{current_function.getName()}'"
+                    )
+            except Exception:
+                containing = current_function
+                self._debug_print(
+                    f"Local target {addr} falling back to current function "
+                    f"'{current_function.getName()}' after body check failure"
+                )
+        if containing is None and current_function is not None:
+            containing = current_function
+            self._debug_print(
+                f"Local target {addr} using current function '{current_function.getName()}' as fallback"
+            )
+        if containing is None:
+            self._debug_print(f"Local target resolution failed: no containing function for 0x{address_value:x}")
+            self._local_target_cache[address_value] = None
+            return None
+
+        decompiler = self._get_decompiler()
+        results = decompiler.decompileFunction(containing, 60, None)
+        if not results.decompileCompleted():
+            self._debug_print(
+                f"Local target resolution failed: decompilation incomplete for 0x{address_value:x}"
+            )
+            self._local_target_cache[address_value] = None
+            return None
+        high_function = results.getHighFunction()
+        if high_function is None:
+            self._debug_print(f"Local target resolution failed: HighFunction unavailable for 0x{address_value:x}")
+            self._local_target_cache[address_value] = None
+            return None
+
+        tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        expanded = self._expand_linear_code_target(addr, tracer, containing)
+        self._local_target_cache[address_value] = expanded
+        return expanded
+
+    def _expand_linear_code_target(self, addr, tracer, current_function=None):
+        from ..transform.expander import ExpandedValue
+
+        instruction = self._get_instruction_with_fallback(addr)
+        if instruction is None:
+            self._debug_print(f"Local target resolution failed: no instruction at {addr}")
+            return None
+
+        self._debug_print(f"Attempting linear local target expansion from {addr}")
+        max_steps = 16
+        visited_offsets: Set[int] = set()
+        local_values: Dict[Tuple[str, int, int], Expression] = {}
+        local_storages: Dict[Tuple[str, int, int], Any] = {}
+        local_memory: Dict[Tuple[str, int], Expression] = {}
+
+        for _ in range(max_steps):
+            try:
+                current_offset = instruction.getAddress().getOffset()
+            except Exception:
+                current_offset = None
+            if current_offset is not None:
+                if current_offset in visited_offsets:
+                    self._debug_print(
+                        f"Local target resolution aborted at {instruction.getAddress()}: cycle detected"
+                    )
+                    return None
+                visited_offsets.add(current_offset)
+
+            try:
+                pcode_ops = instruction.getPcode()
+            except Exception:
+                self._debug_print(f"Local target resolution failed: unable to get pcode at {instruction.getAddress()}")
+                return None
+
+            branch_target = None
+            for pcode_op in pcode_ops:
+                mnemonic = pcode_op.getMnemonic()
+                if mnemonic == "RETURN":
+                    value = self._resolve_local_return_expression(
+                        pcode_op,
+                        tracer,
+                        local_values,
+                        local_storages,
+                        local_memory,
+                        current_function,
+                    )
+                    self._debug_print(
+                        f"Resolved local target {instruction.getAddress()} to return expression {value.to_string()}"
+                    )
+                    return [ExpandedValue(value=value, conditions=[])]
+
+                if mnemonic == "STORE":
+                    self._apply_local_store_effect(
+                        pcode_op,
+                        tracer,
+                        local_values,
+                        local_storages,
+                        local_memory,
+                    )
+                    continue
+
+                if mnemonic == "BRANCH":
+                    branch_target = self._resolve_local_branch_target(instruction)
+                    if branch_target is None:
+                        self._debug_print(
+                            f"Local target resolution aborted at {instruction.getAddress()}: "
+                            "unresolved BRANCH target"
+                        )
+                        return None
+                    continue
+
+                if mnemonic in {"CALL", "CALLIND", "CBRANCH", "BRANCHIND", "MULTIEQUAL"}:
+                    self._debug_print(
+                        f"Local target resolution aborted at {instruction.getAddress()}: unsupported {mnemonic}"
+                    )
+                    return None
+
+                output = getattr(pcode_op, "getOutput", lambda: None)()
+                if output is not None:
+                    value = self._evaluate_local_pcode_expression(
+                        pcode_op,
+                        tracer,
+                        local_values,
+                        local_storages,
+                        local_memory,
+                    )
+                    if value is not None:
+                        output_key = self._local_varnode_key(output)
+                        local_values[output_key] = value
+                        try:
+                            local_storages[output_key] = tracer._get_storage_info_from_varnode(output)
+                        except Exception:
+                            pass
+
+            if branch_target is not None:
+                self._debug_print(
+                    f"Local target {instruction.getAddress()} following BRANCH to {branch_target}"
+                )
+                instruction = self._get_instruction_with_fallback(branch_target)
+                if instruction is None:
+                    self._debug_print(
+                        f"Local target resolution failed: no instruction at branch target {branch_target}"
+                    )
+                    return None
+                continue
+
+            next_instruction = instruction.getNext()
+            if next_instruction is None:
+                break
+            instruction = next_instruction
+
+        self._debug_print(f"Local target resolution failed: no RETURN found from {addr}")
+        return None
+
+    def _local_varnode_key(self, varnode) -> Tuple[str, int, int]:
+        try:
+            addr = varnode.getAddress()
+            return (addr.getAddressSpace().getName(), int(varnode.getOffset()), int(varnode.getSize()))
+        except Exception:
+            return ("synthetic", id(varnode), int(getattr(varnode, "getSize", lambda: 0)()))
+
+    def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[str, int]:
+        return (addr_expr.to_string(), int(size))
+
+    def _evaluate_local_varnode_expression(
+        self,
+        varnode,
+        tracer,
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+        local_memory: Dict[Tuple[str, int], Expression],
+        visiting: Optional[Set[int]] = None,
+    ) -> Expression:
+        if varnode is None:
+            return Expression.unknown("local_none")
+
+        key = self._local_varnode_key(varnode)
+        cached = local_values.get(key)
+        if cached is not None:
+            return cached
+
+        aliased = self._lookup_local_alias_expression(varnode, tracer, local_values, local_storages)
+        if aliased is not None:
+            local_values[key] = aliased
+            return aliased
+
+        is_constant = getattr(varnode, "isConstant", None)
+        if callable(is_constant) and is_constant():
+            return Expression.constant(varnode.getOffset(), varnode.getSize())
+
+        if visiting is None:
+            visiting = set()
+        marker = id(varnode)
+        if marker in visiting:
+            return Expression.unknown("local_cycle")
+        visiting.add(marker)
+        try:
+            get_def = getattr(varnode, "getDef", None)
+            def_op = get_def() if callable(get_def) else None
+            if def_op is not None:
+                evaluated = self._evaluate_local_pcode_expression(
+                    def_op,
+                    tracer,
+                    local_values,
+                    local_storages,
+                    local_memory,
+                    visiting,
+                )
+                if evaluated is not None:
+                    local_values[key] = evaluated
+                    return evaluated
+        finally:
+            visiting.discard(marker)
+
+        return tracer.trace_varnode(varnode, use_cache=False)
+
+    def _evaluate_local_pcode_expression(
+        self,
+        pcode_op,
+        tracer,
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+        local_memory: Dict[Tuple[str, int], Expression],
+        visiting: Optional[Set[int]] = None,
+    ) -> Optional[Expression]:
+        mnemonic = pcode_op.getMnemonic()
+
+        def _input(index: int) -> Expression:
+            return self._evaluate_local_varnode_expression(
+                pcode_op.getInput(index),
+                tracer,
+                local_values,
+                local_storages,
+                local_memory,
+                visiting,
+            )
+
+        if mnemonic in {"COPY", "CAST"} and pcode_op.getNumInputs() >= 1:
+            expr = _input(0)
+            output = pcode_op.getOutput()
+            if output is not None:
+                expr = self._clone_expression(expr)
+                expr.size = output.getSize()
+            return expr
+
+        binary_ops = {
+            "INT_ADD", "INT_SUB", "INT_MULT", "INT_DIV", "INT_SDIV",
+            "INT_REM", "INT_SREM", "INT_AND", "INT_OR", "INT_XOR",
+            "INT_LEFT", "INT_RIGHT", "INT_SRIGHT",
+            "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_SLESS",
+            "INT_LESSEQUAL", "INT_SLESSEQUAL",
+            "FLOAT_ADD", "FLOAT_SUB", "FLOAT_MULT", "FLOAT_DIV",
+            "FLOAT_EQUAL", "FLOAT_NOTEQUAL", "FLOAT_LESS", "FLOAT_LESSEQUAL",
+            "BOOL_AND", "BOOL_OR", "BOOL_XOR", "PIECE", "SUBPIECE",
+            "PTRADD", "PTRSUB",
+        }
+        if mnemonic in binary_ops and pcode_op.getNumInputs() >= 2:
+            if mnemonic == "PTRADD" and pcode_op.getNumInputs() >= 3:
+                base = _input(0)
+                index = _input(1)
+                element_size = _input(2)
+                return Expression.binary_op(
+                    "INT_ADD",
+                    base,
+                    Expression.binary_op("INT_MULT", index, element_size),
+                )
+            return Expression.binary_op(mnemonic, _input(0), _input(1))
+
+        unary_ops = {
+            "INT_NEGATE", "INT_2COMP", "BOOL_NEGATE", "INT_ZEXT", "INT_SEXT",
+            "FLOAT_NEG", "FLOAT_ABS", "FLOAT_SQRT",
+            "TRUNC", "FLOAT_FLOAT2FLOAT", "FLOAT_INT2FLOAT", "FLOAT_CEIL", "FLOAT_FLOOR",
+            "POPCOUNT", "LZCOUNT",
+        }
+        if mnemonic in unary_ops and pcode_op.getNumInputs() >= 1:
+            expr = Expression.unary_op(mnemonic, _input(0))
+            output = pcode_op.getOutput()
+            if output is not None:
+                expr.size = output.getSize()
+            return expr
+
+        if mnemonic == "LOAD" and pcode_op.getNumInputs() >= 2:
+            output = pcode_op.getOutput()
+            size = output.getSize() if output is not None else 4
+            addr_expr = _input(1)
+            cached = local_memory.get(self._local_memory_key(addr_expr, size))
+            if cached is not None:
+                return cached
+            return Expression.memory(addr_expr, size)
+
+        return None
+
+    def _apply_local_store_effect(
+        self,
+        pcode_op,
+        tracer,
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+        local_memory: Dict[Tuple[str, int], Expression],
+    ) -> None:
+        if pcode_op.getNumInputs() < 3:
+            return
+        addr_expr = self._evaluate_local_varnode_expression(
+            pcode_op.getInput(1),
+            tracer,
+            local_values,
+            local_storages,
+            local_memory,
+        )
+        value_expr = self._evaluate_local_varnode_expression(
+            pcode_op.getInput(2),
+            tracer,
+            local_values,
+            local_storages,
+            local_memory,
+        )
+        size = pcode_op.getInput(2).getSize()
+        local_memory[self._local_memory_key(addr_expr, size)] = value_expr
+
+    def _resolve_local_return_expression(
+        self,
+        pcode_op,
+        tracer,
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+        local_memory: Dict[Tuple[str, int], Expression],
+        current_function=None,
+    ) -> Expression:
+        if pcode_op.getNumInputs() >= 2:
+            return self._evaluate_local_varnode_expression(
+                pcode_op.getInput(1),
+                tracer,
+                local_values,
+                local_storages,
+                local_memory,
+            )
+
+        for return_varnode in self._get_function_return_varnodes(current_function):
+            expr = self._evaluate_local_varnode_expression(
+                return_varnode,
+                tracer,
+                local_values,
+                local_storages,
+                local_memory,
+            )
+            if expr is not None and expr.expr_type != ExpressionType.UNKNOWN:
+                self._debug_print(
+                    f"Local target RETURN without explicit value; using return storage {return_varnode}"
+                )
+                return expr
+
+        self._debug_print("Local target RETURN without explicit value; defaulting to 0")
+        return Expression.constant(0, 1)
+
+    def _lookup_local_alias_expression(
+        self,
+        varnode,
+        tracer,
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+    ) -> Optional[Expression]:
+        try:
+            target_storage = tracer._get_storage_info_from_varnode(varnode)
+        except Exception:
+            return None
+        if target_storage is None or not getattr(target_storage, "is_register", False):
+            return None
+
+        for key, candidate_storage in local_storages.items():
+            if candidate_storage is None:
+                continue
+            try:
+                same_base = candidate_storage.shares_base_register_with(target_storage)
+                overlaps = candidate_storage.bit_range_overlaps_with(target_storage)
+            except Exception:
+                continue
+            if not same_base or not overlaps:
+                continue
+            candidate_expr = local_values.get(key)
+            if candidate_expr is None:
+                continue
+            aliased = self._clone_expression(candidate_expr)
+            aliased.size = target_storage.size
+            self._debug_print(
+                "Local alias resolution: "
+                f"{getattr(candidate_storage, 'register_name', None)} -> "
+                f"{getattr(target_storage, 'register_name', None)} as {aliased.to_string()}"
+            )
+            return aliased
+        return None
+
+    def _get_function_return_varnodes(self, function) -> List[Any]:
+        if function is None:
+            return []
+        try:
+            return_var = function.getReturn()
+            if return_var is None:
+                return []
+            storage = return_var.getVariableStorage()
+            if storage is None:
+                return []
+            get_varnodes = getattr(storage, "getVarnodes", None)
+            if callable(get_varnodes):
+                return [vn for vn in get_varnodes() if vn is not None]
+        except Exception:
+            return []
+        return []
+
+    def _get_instruction_with_fallback(self, addr):
+        listing = self.program.getListing()
+        instruction = listing.getInstructionAt(addr)
+        if instruction is not None:
+            return instruction
+
+        containing_instruction = getattr(listing, "getInstructionContaining", None)
+        if callable(containing_instruction):
+            instruction = containing_instruction(addr)
+            if instruction is not None:
+                return instruction
+
+        if self._attempt_disassemble_at(addr):
+            instruction = listing.getInstructionAt(addr)
+            if instruction is not None:
+                return instruction
+            if callable(containing_instruction):
+                instruction = containing_instruction(addr)
+                if instruction is not None:
+                    return instruction
+
+        return None
+
+    def _attempt_disassemble_at(self, addr) -> bool:
+        try:
+            from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import]
+        except Exception:
+            self._debug_print(f"Local target disassembly unavailable at {addr}: import failed")
+            return False
+
+        try:
+            command = DisassembleCommand(addr, None, True)
+        except TypeError:
+            try:
+                command = DisassembleCommand(addr, None)
+            except Exception as exc:
+                self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+                return False
+        except Exception as exc:
+            self._debug_print(f"Local target disassembly setup failed at {addr}: {exc}")
+            return False
+
+        try:
+            with self._program_transaction(f"Disassemble local target {addr}"):
+                applied = command.applyTo(self.program)
+        except Exception as exc:
+            self._debug_print(f"Local target disassembly failed at {addr}: {exc}")
+            return False
+
+        if applied:
+            self._debug_print(f"Local target disassembly materialized instructions at {addr}")
+        else:
+            self._debug_print(f"Local target disassembly produced no instructions at {addr}")
+        return bool(applied)
+
+    def _resolve_local_branch_target(self, instruction):
+        try:
+            flows = instruction.getFlows()
+        except Exception:
+            flows = None
+        if flows:
+            try:
+                if len(flows) == 1 and flows[0] is not None:
+                    return flows[0]
+            except Exception:
+                pass
+
+        try:
+            fallthrough = instruction.getFallThrough()
+        except Exception:
+            fallthrough = None
+        return fallthrough
 
     def _get_or_analyze_call_target(
         self,
@@ -1218,6 +1767,7 @@ class ReturnAnalyzer:
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
         return_index: int,
+        current_function,
         active_functions: Set[str],
     ) -> List[ReturnInfo]:
         """単一のRETURNを解析"""
@@ -1250,6 +1800,7 @@ class ReturnAnalyzer:
                 return_index,
                 all_path_conditions=all_valid_path_conditions,
                 active_functions=active_functions,
+                current_function=current_function,
             )
         else:
             # void return
@@ -1271,6 +1822,7 @@ class ReturnAnalyzer:
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
         active_functions: Optional[Set[str]] = None,
+        current_function=None,
     ) -> List[ReturnInfo]:
         """Return値を解析"""
         from ..transform import ExpressionExpander
@@ -1286,9 +1838,11 @@ class ReturnAnalyzer:
                 tracer,
                 condition_tracker,
                 debug=self.debug,
-                call_resolver=self._make_call_resolver(active_functions or set()),
+                call_resolver=self._make_call_resolver(active_functions or set(), current_function),
                 effect_summary=self._current_effect_summary,
                 parameters=self._current_parameters,
+                read_memory_value=self._read_memory_value,
+                image_base=self.program.getImageBase().getOffset(),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:
@@ -1313,9 +1867,11 @@ class ReturnAnalyzer:
                 tracer,
                 condition_tracker,
                 debug=self.debug,
-                call_resolver=self._make_call_resolver(active_functions or set()),
+                call_resolver=self._make_call_resolver(active_functions or set(), current_function),
                 effect_summary=self._current_effect_summary,
                 parameters=self._current_parameters,
+                read_memory_value=self._read_memory_value,
+                image_base=self.program.getImageBase().getOffset(),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:

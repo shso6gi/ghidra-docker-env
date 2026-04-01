@@ -10,6 +10,7 @@ from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence
 from ..model import Condition, Expression, ExpressionType, StorageInfo
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
+from .memory_resolver import concretize_readonly_loads
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,250 @@ def _resolve_call_target_name(tracer, op) -> Optional[str]:
     return target_name if target_name != "UNKNOWN_FUNC" else None
 
 
+def resolve_call_targets(
+    tracer,
+    op,
+    conditions: Optional[Sequence[Condition]] = None,
+    parameters: Optional[Sequence[Dict]] = None,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
+    debug: bool = False,
+) -> List[Tuple[str, List[Condition]]]:
+    """Resolve CALL/CALLIND targets into finite (callee_name, branch_conditions) pairs."""
+    direct_name = _resolve_call_target_name(tracer, op)
+    if direct_name and direct_name != "UNKNOWN_FUNC" and not _is_synthetic_function_name(direct_name):
+        return [(direct_name, [])]
+
+    if op is None or op.getNumInputs() < 1:
+        return []
+
+    target_varnode = op.getInput(0)
+    target_expr = tracer.trace_varnode(target_varnode, use_cache=False)
+    if debug:
+        print(f"[CallTargetResolver] traced target expr: {target_expr.to_string()}")
+
+    if read_memory_value is not None:
+        try:
+            target_expr = concretize_readonly_loads(
+                target_expr,
+                list(conditions or []),
+                list(parameters or []),
+                read_memory_value,
+                image_base=image_base,
+                debug=debug,
+            )
+        except Exception:
+            if debug:
+                print("[CallTargetResolver] readonly target concretization failed")
+    if debug:
+        print(f"[CallTargetResolver] rewritten target expr: {target_expr.to_string()}")
+
+    resolved: List[Tuple[str, List[Condition]]] = []
+    for branch_conditions, address_value in _enumerate_constant_expression_branches(target_expr):
+        target_name = _lookup_exact_function_name_by_value(tracer, address_value)
+        if not target_name or target_name == "UNKNOWN_FUNC":
+            raw_target_name = _lookup_raw_code_target_name(tracer, address_value)
+            if raw_target_name is not None:
+                simplified = ConditionSimplifier.simplify_conditions(branch_conditions)
+                resolved.append((raw_target_name, simplified))
+                if debug:
+                    cond_strs = [cond.to_string() for cond in simplified]
+                    print(
+                        "[CallTargetResolver] resolved raw code target "
+                        f"0x{address_value:x} -> {raw_target_name} under {cond_strs}"
+                    )
+                continue
+            if debug:
+                print(
+                    "[CallTargetResolver] enumerated indirect target "
+                    f"0x{address_value:x} has no exact function entry"
+                )
+            continue
+        simplified = ConditionSimplifier.simplify_conditions(branch_conditions)
+        resolved.append((target_name, simplified))
+        if debug:
+            cond_strs = [cond.to_string() for cond in simplified]
+            print(
+                "[CallTargetResolver] resolved indirect target "
+                f"0x{address_value:x} -> {target_name} under {cond_strs}"
+            )
+
+    if resolved:
+        return _deduplicate_resolved_call_targets(resolved)
+
+    if direct_name and direct_name != "UNKNOWN_FUNC":
+        return [(direct_name, [])]
+    return []
+
+
+def _deduplicate_resolved_call_targets(
+    targets: Sequence[Tuple[str, List[Condition]]],
+) -> List[Tuple[str, List[Condition]]]:
+    deduped: List[Tuple[str, List[Condition]]] = []
+    seen = set()
+    for target_name, conditions in targets:
+        key = (
+            target_name,
+            tuple(cond.to_string() for cond in conditions),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((target_name, list(conditions)))
+    return deduped
+
+
+def _enumerate_constant_expression_branches(
+    expr: Optional[Expression],
+) -> List[Tuple[List[Condition], int]]:
+    if expr is None:
+        return []
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        resolved: List[Tuple[List[Condition], int]] = []
+        for cond, value in expr.value:
+            for branch_conditions, branch_value in _enumerate_constant_expression_branches(value):
+                merged = list(branch_conditions)
+                if cond is not None:
+                    merged.insert(0, cond)
+                resolved.append((merged, branch_value))
+        return resolved
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        operand_branches = _enumerate_constant_expression_branches(expr.operands[0])
+        if operand_branches:
+            resolved: List[Tuple[List[Condition], int]] = []
+            for branch_conditions, operand_value in operand_branches:
+                applied = _apply_unary_constant_op(expr, operand_value)
+                if applied is None:
+                    continue
+                resolved.append((list(branch_conditions), applied))
+            if resolved:
+                return resolved
+
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left_branches = _enumerate_constant_expression_branches(expr.operands[0])
+        right_branches = _enumerate_constant_expression_branches(expr.operands[1])
+        if left_branches and right_branches:
+            resolved: List[Tuple[List[Condition], int]] = []
+            for left_conditions, left_value in left_branches:
+                for right_conditions, right_value in right_branches:
+                    applied = _apply_binary_constant_op(expr, left_value, right_value)
+                    if applied is None:
+                        continue
+                    resolved.append((list(left_conditions) + list(right_conditions), applied))
+            if resolved:
+                return resolved
+
+    const_value = _evaluate_constant_expression(expr)
+    if const_value is None:
+        return []
+    return [([], const_value)]
+
+
+def _evaluate_constant_expression(expr: Optional[Expression]) -> Optional[int]:
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+        return int(expr.value)
+
+    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
+        return _extract_address_suffix(expr.name, ("PTR_", "DAT_", "LAB_", "FUN_"))
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        operand_value = _evaluate_constant_expression(expr.operands[0])
+        if operand_value is None:
+            return None
+        target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+        if expr.operator in {"CAST", "COPY", "INT_ZEXT"}:
+            return operand_value & ((1 << target_bits) - 1)
+        if expr.operator == "INT_SEXT":
+            return _sign_extend_value(operand_value, expr.operands[0].get_bit_width(), target_bits)
+        if expr.operator == "SUBPIECE" and len(expr.operands) >= 2:
+            offset_value = _evaluate_constant_expression(expr.operands[1])
+            if offset_value is None:
+                return None
+            shifted = operand_value >> (int(offset_value) * 8)
+            return shifted & ((1 << target_bits) - 1)
+        return None
+
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left_value = _evaluate_constant_expression(expr.operands[0])
+        right_value = _evaluate_constant_expression(expr.operands[1])
+        if left_value is None or right_value is None:
+            return None
+
+        if expr.operator == "INT_ADD":
+            return _mask_to_expr_width(expr, left_value + right_value)
+        if expr.operator == "INT_SUB":
+            return _mask_to_expr_width(expr, left_value - right_value)
+        if expr.operator == "INT_MULT":
+            return _mask_to_expr_width(expr, left_value * right_value)
+        if expr.operator == "INT_AND":
+            return _mask_to_expr_width(expr, left_value & right_value)
+        if expr.operator == "INT_OR":
+            return _mask_to_expr_width(expr, left_value | right_value)
+        if expr.operator == "INT_XOR":
+            return _mask_to_expr_width(expr, left_value ^ right_value)
+        if expr.operator == "PIECE":
+            low_bits = expr.operands[1].get_bit_width()
+            return _mask_to_expr_width(
+                expr,
+                (left_value << low_bits) | (right_value & ((1 << low_bits) - 1)),
+            )
+        return None
+
+    return None
+
+
+def _apply_unary_constant_op(expr: Expression, operand_value: int) -> Optional[int]:
+    target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+    if expr.operator in {"CAST", "COPY", "INT_ZEXT"}:
+        return operand_value & ((1 << target_bits) - 1)
+    if expr.operator == "INT_SEXT":
+        return _sign_extend_value(operand_value, expr.operands[0].get_bit_width(), target_bits)
+    return None
+
+
+def _apply_binary_constant_op(expr: Expression, left_value: int, right_value: int) -> Optional[int]:
+    if expr.operator == "INT_ADD":
+        return _mask_to_expr_width(expr, left_value + right_value)
+    if expr.operator == "INT_SUB":
+        return _mask_to_expr_width(expr, left_value - right_value)
+    if expr.operator == "INT_MULT":
+        return _mask_to_expr_width(expr, left_value * right_value)
+    if expr.operator == "INT_AND":
+        return _mask_to_expr_width(expr, left_value & right_value)
+    if expr.operator == "INT_OR":
+        return _mask_to_expr_width(expr, left_value | right_value)
+    if expr.operator == "INT_XOR":
+        return _mask_to_expr_width(expr, left_value ^ right_value)
+    if expr.operator == "PIECE":
+        low_bits = expr.operands[1].get_bit_width()
+        return _mask_to_expr_width(
+            expr,
+            (left_value << low_bits) | (right_value & ((1 << low_bits) - 1)),
+        )
+    return None
+
+
+def _sign_extend_value(value: int, source_bits: int, target_bits: int) -> int:
+    source_bits = max(1, int(source_bits))
+    target_bits = max(source_bits, int(target_bits))
+    mask = (1 << source_bits) - 1
+    value &= mask
+    sign_bit = 1 << (source_bits - 1)
+    if value & sign_bit:
+        value -= 1 << source_bits
+    return value & ((1 << target_bits) - 1)
+
+
+def _mask_to_expr_width(expr: Expression, value: int) -> int:
+    bit_width = max(1, expr.get_bit_width())
+    return value & ((1 << bit_width) - 1)
+
+
 def _is_synthetic_function_name(name: Optional[str]) -> bool:
     if not name:
         return False
@@ -237,6 +482,28 @@ def _lookup_function_name_by_value(tracer, address_value: int) -> Optional[str]:
         if func:
             return func.getName()
         return f"FUN_{address_value:x}"
+    except Exception:
+        return None
+
+
+def _lookup_exact_function_name_by_value(tracer, address_value: int) -> Optional[str]:
+    try:
+        default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
+        addr = default_space.getAddress(address_value)
+        func_manager = tracer.program.getFunctionManager()
+        func = func_manager.getFunctionAt(addr)
+        if func:
+            return func.getName()
+        return None
+    except Exception:
+        return None
+
+
+def _lookup_raw_code_target_name(tracer, address_value: int) -> Optional[str]:
+    try:
+        if not isinstance(address_value, int) or address_value < 0:
+            return None
+        return f"ADDR_{address_value:x}"
     except Exception:
         return None
 

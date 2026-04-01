@@ -7,6 +7,7 @@ from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_name,
+    resolve_call_targets,
     _expressions_equivalent,
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
@@ -67,6 +68,8 @@ class ExpressionExpander:
         call_resolver: Optional[Callable[[str, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
         effect_summary=None,
         parameters: Optional[List[Dict[str, Any]]] = None,
+        read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+        image_base: Optional[int] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -74,6 +77,8 @@ class ExpressionExpander:
         self.call_resolver = call_resolver
         self.effect_summary = effect_summary
         self.parameters = list(parameters or [])
+        self.read_memory_value = read_memory_value
+        self.image_base = image_base
         self._expanding_ops: Set[str] = set()
     
     def _debug_print(self, msg: str, indent: int = 0):
@@ -1081,8 +1086,25 @@ class ExpressionExpander:
         output_size: int = 0,
     ) -> List[ExpandedValue]:
         """CALL/CALLIND を callee の return case に展開する。"""
-        target_name = _resolve_call_target_name(self.tracer, pcode_op)
-        if not target_name or self.call_resolver is None:
+        resolved_targets = resolve_call_targets(
+            self.tracer,
+            pcode_op,
+            conditions=base_conditions,
+            parameters=self.parameters,
+            read_memory_value=self.read_memory_value,
+            image_base=self.image_base,
+            debug=self.debug,
+        )
+        if self.debug and resolved_targets:
+            for target_name, target_conditions in resolved_targets:
+                cond_strs = [cond.to_string() for cond in target_conditions]
+                self._debug_print(
+                    f"Resolved {pcode_op.getMnemonic()} target -> {target_name} with conditions {cond_strs}",
+                    depth,
+                )
+
+        if not resolved_targets or self.call_resolver is None:
+            target_name = _resolve_call_target_name(self.tracer, pcode_op)
             self.tracer.emit_unknown_event(
                 reason="call_out_of_scope",
                 varnode=pcode_op.getOutput(),
@@ -1107,19 +1129,31 @@ class ExpressionExpander:
             current_conditions: List[Condition],
         ) -> None:
             if arg_index >= len(arg_expansions):
-                resolved = self.call_resolver(target_name, current_args)
-                if not resolved:
-                    return
-                for ev in resolved:
-                    merged_conditions = ConditionSimplifier.simplify_conditions(
-                        current_conditions + ev.conditions
+                for target_name, target_conditions in resolved_targets:
+                    merged_target_conditions = ConditionSimplifier.simplify_conditions(
+                        current_conditions + target_conditions
                     )
-                    if ConditionSimplifier.is_contradiction(merged_conditions):
+                    if ConditionSimplifier.is_contradiction(merged_target_conditions):
                         continue
-                    value = ev.value
-                    if output_size > 0 and getattr(value, "size", 0) == 0:
-                        value.size = output_size
-                    result.append(ExpandedValue(value, merged_conditions))
+
+                    resolved = self.call_resolver(target_name, current_args)
+                    if not resolved:
+                        if self.debug:
+                            self._debug_print(
+                                f"Call summary unavailable for resolved target '{target_name}'",
+                                depth,
+                            )
+                        continue
+                    for ev in resolved:
+                        merged_conditions = ConditionSimplifier.simplify_conditions(
+                            merged_target_conditions + ev.conditions
+                        )
+                        if ConditionSimplifier.is_contradiction(merged_conditions):
+                            continue
+                        value = ev.value
+                        if output_size > 0 and getattr(value, "size", 0) == 0:
+                            value.size = output_size
+                        result.append(ExpandedValue(value, merged_conditions))
                 return
 
             for ev in arg_expansions[arg_index]:
@@ -1137,15 +1171,16 @@ class ExpressionExpander:
         if result:
             return self._deduplicate_expanded_values(result, depth)
 
+        fallback_name = _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
         self.tracer.emit_unknown_event(
             reason="call_out_of_scope",
             varnode=pcode_op.getOutput(),
             def_op=pcode_op,
             depth=depth,
-            note=f"{pcode_op.getMnemonic()} target={target_name}",
+            note=f"{pcode_op.getMnemonic()} target={fallback_name}",
             context="expander",
         )
-        return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{target_name}"), base_conditions)]
+        return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{fallback_name}"), base_conditions)]
     
     def _expand_operation(
         self,
