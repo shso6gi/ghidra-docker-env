@@ -586,6 +586,11 @@ class EquivalenceChecker:
             else:
                 # UNKNOWN/TIMEOUT
                 if stage_id == StageID.S_PAIRWISE:
+                    if self._should_skip_monolithic_fallback(analysis1, analysis2):
+                        self._debug_print(
+                            "Stage S_MONOLITHIC_FALLBACK: skipped due to incomplete control-flow summary"
+                        )
+                        return result
                     self._debug_print(f"Stage {stage_id.value}: UNKNOWN - proceeding to fallback")
                     continue
                 else:
@@ -599,6 +604,17 @@ class EquivalenceChecker:
             )
         
         return result
+
+    def _should_skip_monolithic_fallback(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        """monolithic 化で誤判定しやすい不完全要約を検出する。"""
+        return (
+            analysis1.should_skip_monolithic_fallback()
+            or analysis2.should_skip_monolithic_fallback()
+        )
     
     def check(
         self,

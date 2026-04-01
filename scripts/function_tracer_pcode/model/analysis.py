@@ -85,7 +85,12 @@ class FunctionReturnAnalysis:
     returns: List[ReturnInfo]
     return_type: Optional[str] = None
     signedness_result: Optional[SignednessResult] = None
-    
+    unknown_event_count: int = 0
+    unknown_event_reasons: List[str] = field(default_factory=list)
+    analysis_notes: List[str] = field(default_factory=list)
+    recovered_from_decompiler: bool = False
+    incomplete_control_flow: bool = False
+
     def to_dict(self) -> Dict:
         result = {
             "function_name": self.function_name,
@@ -93,6 +98,11 @@ class FunctionReturnAnalysis:
             "parameters": self.parameters,
             "returns": [r.to_dict() for r in self.returns],
             "return_type": self.return_type,
+            "unknown_event_count": self.unknown_event_count,
+            "unknown_event_reasons": list(self.unknown_event_reasons),
+            "analysis_notes": list(self.analysis_notes),
+            "recovered_from_decompiler": self.recovered_from_decompiler,
+            "incomplete_control_flow": self.incomplete_control_flow,
         }
         
         if self.signedness_result:
@@ -129,3 +139,27 @@ class FunctionReturnAnalysis:
                 return True
         
         return False
+
+    def has_unknown_return(self) -> bool:
+        """UNKNOWN 式を含む戻り値候補があるか。"""
+        return any(
+            getattr(ret.value, "expr_type", None) is not None
+            and ret.value.expr_type.name == "UNKNOWN"
+            for ret in self.returns
+        )
+
+    def count_unconditional_returns(self) -> int:
+        """条件なしの return 候補数を返す。"""
+        return sum(1 for ret in self.returns if not ret.conditions)
+
+    def has_overlapping_unconditional_returns(self) -> bool:
+        """条件なし return が複数あり、monolithic 化が危険か。"""
+        return self.count_unconditional_returns() > 1
+
+    def should_skip_monolithic_fallback(self) -> bool:
+        """解析が不完全で monolithic fallback を避けるべきか。"""
+        if self.recovered_from_decompiler:
+            return False
+        if not self.incomplete_control_flow:
+            return False
+        return self.has_unknown_return() or self.has_overlapping_unconditional_returns()

@@ -2,7 +2,7 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any, Set, Tuple
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
@@ -248,6 +248,13 @@ class ReturnAnalyzer:
             return_type=return_type,
             signedness_result=signedness_result
         )
+        result.unknown_event_count = len(tracer.unknown_tracker.events)
+        result.unknown_event_reasons = sorted(
+            {
+                getattr(event, "reason_str", None) or getattr(event.reason, "value", "unknown")
+                for event in tracer.unknown_tracker.events
+            }
+        )
 
         if (
             return_type
@@ -263,6 +270,17 @@ class ReturnAnalyzer:
                     value=effect_summary.synthetic_expr,
                 )
             ]
+
+        recovered_returns = self._recover_switch_like_returns_from_decompiler(
+            results,
+            result,
+        )
+        if recovered_returns is not None:
+            result.returns = recovered_returns
+            result.recovered_from_decompiler = True
+            result.analysis_notes.append("switch_like_return_recovery")
+
+        self._mark_incomplete_control_flow(result)
 
         # デバッグダンプ（解析結果の可視化）
         self._dump_return_infos(result)
@@ -283,6 +301,525 @@ class ReturnAnalyzer:
             print(f"  Use --debug flag for detailed report")
         
         return result
+
+    def _mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
+        """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
+        reasons = []
+
+        if analysis.has_unknown_return():
+            reasons.append("unknown_return")
+        if analysis.has_overlapping_unconditional_returns():
+            reasons.append("overlapping_unconditional_returns")
+        if any(
+            reason in {"call_out_of_scope", "callind_out_of_scope"}
+            for reason in analysis.unknown_event_reasons
+        ):
+            reasons.append("indirect_control_flow_unresolved")
+
+        if analysis.recovered_from_decompiler:
+            reasons = [reason for reason in reasons if reason == "unknown_return"]
+
+        seen = set(analysis.analysis_notes)
+        for reason in reasons:
+            if reason not in seen:
+                analysis.analysis_notes.append(reason)
+                seen.add(reason)
+        analysis.incomplete_control_flow = bool(reasons)
+
+    def _recover_switch_like_returns_from_decompiler(
+        self,
+        decompile_results,
+        analysis: FunctionReturnAnalysis,
+    ) -> Optional[List[ReturnInfo]]:
+        """decompiler の structured switch を補助的に return case へ復元する。"""
+        if not self._should_attempt_switch_recovery(analysis):
+            if self.debug:
+                self._debug_print(
+                    "Switch-like recovery skipped: analysis does not look incomplete"
+                )
+            return None
+        if self.debug:
+            self._debug_print(
+                "Attempting switch-like recovery from decompiler text "
+                f"(returns={len(analysis.returns)}, "
+                f"unconditional={analysis.count_unconditional_returns()}, "
+                f"unknown_reasons={analysis.unknown_event_reasons})"
+            )
+
+        c_text = self._get_decompiled_c_text(decompile_results)
+        if not c_text:
+            if self.debug:
+                self._debug_print("Switch-like recovery failed: decompiler C text unavailable")
+            return None
+        if self.debug:
+            preview_lines = [line.rstrip() for line in c_text.splitlines() if line.strip()][:12]
+            if preview_lines:
+                self._debug_print("Decompiler preview for switch-like recovery:")
+                for line in preview_lines:
+                    self._debug_print(line, indent=1)
+
+        recovered = self._parse_switch_returns_from_c_text(
+            c_text,
+            analysis.parameters,
+            analysis.return_type,
+            analysis.entry_point,
+        )
+        if recovered and self.debug:
+            self._debug_print(
+                f"Recovered {len(recovered)} switch-like return cases from decompiler text"
+            )
+        elif self.debug:
+            self._debug_print("Switch-like recovery failed: parser did not match decompiler text")
+        return recovered
+
+    def _should_attempt_switch_recovery(self, analysis: FunctionReturnAnalysis) -> bool:
+        if analysis.recovered_from_decompiler:
+            return False
+        if analysis.has_unknown_return():
+            return True
+        if analysis.has_overlapping_unconditional_returns():
+            return True
+        return any(
+            reason in {"call_out_of_scope", "callind_out_of_scope"}
+            for reason in analysis.unknown_event_reasons
+        )
+
+    def _get_decompiled_c_text(self, decompile_results) -> Optional[str]:
+        """DecompileResults から C テキストを安全に取得する。"""
+        if decompile_results is None:
+            return None
+
+        try:
+            decompiled = decompile_results.getDecompiledFunction()
+            if decompiled is not None:
+                c_text = decompiled.getC()
+                if c_text:
+                    return str(c_text)
+        except Exception:
+            pass
+
+        for attr_name in ("getC", "getDecompiledFunction"):
+            try:
+                candidate = getattr(decompile_results, attr_name, None)
+                if candidate is None:
+                    continue
+                value = candidate()
+                if isinstance(value, str) and value.strip():
+                    return value
+            except Exception:
+                continue
+
+        return None
+
+    def _parse_switch_returns_from_c_text(
+        self,
+        c_text: str,
+        parameters: List[Dict],
+        return_type: Optional[str],
+        address: str,
+    ) -> Optional[List[ReturnInfo]]:
+        """単純な switch-return 形式を ReturnInfo 群へ変換する。"""
+        lines = [line.rstrip() for line in c_text.splitlines()]
+        switch_blocks = self._extract_switch_blocks_with_spans(lines)
+        if len(switch_blocks) != 1:
+            if self.debug:
+                self._debug_print(
+                    f"Switch-like parser aborted: expected 1 switch block, found {len(switch_blocks)}"
+                )
+            return None
+
+        subject_raw, block_lines, _start_index, end_index = switch_blocks[0]
+        subject_expr = self._parse_switch_subject_expr(subject_raw, parameters)
+        if subject_expr is None:
+            if self.debug:
+                self._debug_print(
+                    f"Switch-like parser aborted: unsupported switch subject '{subject_raw}'"
+                )
+            return None
+
+        parsed_arms = self._parse_switch_arms(block_lines)
+        if parsed_arms is None:
+            shared_return_name = self._find_shared_return_variable(lines[end_index + 1:])
+            if self.debug:
+                if shared_return_name:
+                    self._debug_print(
+                        "Direct switch-return parse failed; "
+                        f"retrying shared-return variable mode with '{shared_return_name}'"
+                    )
+                else:
+                    self._debug_print(
+                        "Switch-like parser aborted: no direct return arms and no shared return variable"
+                    )
+            if not shared_return_name:
+                return None
+            parsed_arms = self._parse_switch_assignment_arms(block_lines, shared_return_name)
+            if parsed_arms is None:
+                if self.debug:
+                    self._debug_print(
+                        "Switch-like parser aborted: shared-return assignment arms unsupported"
+                    )
+                return None
+
+        case_values = []
+        return_size = self._get_return_size_bytes(return_type)
+        recovered: List[ReturnInfo] = []
+
+        branch_index = 0
+        for labels, return_value, is_default in parsed_arms:
+            if is_default:
+                conditions: List[Condition] = []
+                if not case_values:
+                    continue
+                for case_value in case_values:
+                    conditions.append(
+                        Condition(
+                            Expression.binary_op(
+                                "INT_NOTEQUAL",
+                                self._clone_expression(subject_expr),
+                                Expression.constant(case_value, size=subject_expr.size or return_size),
+                            ),
+                            False,
+                        )
+                    )
+                value_expr = Expression.constant(return_value, size=return_size)
+                recovered.append(
+                    ReturnInfo(
+                        address=address,
+                        value=value_expr,
+                        conditions=conditions,
+                        branch_index=branch_index,
+                    )
+                )
+                branch_index += 1
+                continue
+
+            for label in labels:
+                case_values.append(label)
+                conditions = [
+                    Condition(
+                        Expression.binary_op(
+                            "INT_EQUAL",
+                            self._clone_expression(subject_expr),
+                            Expression.constant(label, size=subject_expr.size or return_size),
+                        ),
+                        False,
+                    )
+                ]
+                value_expr = Expression.constant(return_value, size=return_size)
+                recovered.append(
+                    ReturnInfo(
+                        address=address,
+                        value=value_expr,
+                        conditions=conditions,
+                        branch_index=branch_index,
+                    )
+                )
+                branch_index += 1
+
+        if len(recovered) < 2:
+            if self.debug:
+                self._debug_print(
+                    f"Switch-like parser aborted: recovered only {len(recovered)} case(s)"
+                )
+            return None
+        return recovered
+
+    def _extract_switch_blocks(self, c_text: str) -> List[Tuple[str, List[str]]]:
+        """decompiler C テキストから switch ブロックを抽出する。"""
+        return [
+            (subject, block_lines)
+            for subject, block_lines, _start_index, _end_index
+            in self._extract_switch_blocks_with_spans([line.rstrip() for line in c_text.splitlines()])
+        ]
+
+    def _extract_switch_blocks_with_spans(
+        self,
+        lines: List[str],
+    ) -> List[Tuple[str, List[str], int, int]]:
+        """decompiler C テキストから switch ブロックを抽出し、行範囲も返す。"""
+        blocks: List[Tuple[str, List[str], int, int]] = []
+        current_subject: Optional[str] = None
+        pending_subject: Optional[str] = None
+        current_lines: List[str] = []
+        brace_depth = 0
+        start_index = -1
+
+        for index, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            if current_subject is None:
+                match = re.search(r"\bswitch\s*\((.+)\)\s*\{", line)
+                if match:
+                    current_subject = match.group(1).strip()
+                    brace_depth = line.count("{") - line.count("}")
+                    current_lines = []
+                    start_index = index
+                    continue
+                match = re.search(r"\bswitch\s*\((.+)\)\s*$", line)
+                if match:
+                    pending_subject = match.group(1).strip()
+                    continue
+                if pending_subject is not None and line == "{":
+                    current_subject = pending_subject
+                    pending_subject = None
+                    brace_depth = 1
+                    current_lines = []
+                    start_index = index
+                continue
+
+            brace_depth += line.count("{")
+            brace_depth -= line.count("}")
+            current_lines.append(line)
+            if brace_depth <= 0:
+                blocks.append((current_subject, current_lines[:-1], start_index, index))
+                current_subject = None
+                current_lines = []
+                start_index = -1
+
+        return blocks
+
+    def _parse_switch_arms(
+        self,
+        block_lines: List[str],
+    ) -> Optional[List[Tuple[List[int], int, bool]]]:
+        """switch ブロック本体から case/default -> constant return を抽出する。"""
+        arms: List[Tuple[List[int], int, bool]] = []
+        pending_labels: List[int] = []
+        pending_default = False
+
+        for raw_line in block_lines:
+            line = raw_line.strip()
+            if not line or line in {"{", "}"}:
+                continue
+
+            line = line.split("//", 1)[0].strip()
+            if not line:
+                continue
+
+            while True:
+                case_match = re.match(r"case\s+(-?(?:0x[0-9a-fA-F]+|\d+))\s*:\s*(.*)", line)
+                if case_match:
+                    pending_labels.append(int(case_match.group(1), 0))
+                    line = case_match.group(2).strip()
+                    if not line:
+                        break
+                    continue
+
+                default_match = re.match(r"default\s*:\s*(.*)", line)
+                if default_match:
+                    pending_default = True
+                    line = default_match.group(1).strip()
+                    if not line:
+                        break
+                    continue
+                break
+
+            if not line:
+                continue
+
+            if line.startswith("break;"):
+                pending_labels = []
+                pending_default = False
+                continue
+
+            return_match = re.match(r"return\s+(-?(?:0x[0-9a-fA-F]+|\d+))\s*;", line)
+            if return_match and (pending_labels or pending_default):
+                arms.append(
+                    (
+                        list(pending_labels),
+                        int(return_match.group(1), 0),
+                        pending_default,
+                    )
+                )
+                pending_labels = []
+                pending_default = False
+                continue
+
+            return None
+
+        return arms or None
+
+    def _find_shared_return_variable(self, suffix_lines: List[str]) -> Optional[str]:
+        """switch 後の `return var;` から共有 return 変数名を取得する。"""
+        for raw_line in suffix_lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = line.split("//", 1)[0].strip()
+            if not line:
+                continue
+            return_match = re.match(r"return\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", line)
+            if return_match:
+                return return_match.group(1)
+            if line.startswith("}"):
+                break
+        return None
+
+    def _parse_switch_assignment_arms(
+        self,
+        block_lines: List[str],
+        target_name: str,
+    ) -> Optional[List[Tuple[List[int], int, bool]]]:
+        """`case: tmp = CONST; break;` + `return tmp;` 形式を抽出する。"""
+        arms: List[Tuple[List[int], int, bool]] = []
+        pending_labels: List[int] = []
+        pending_default = False
+        pending_value: Optional[int] = None
+
+        for raw_line in block_lines:
+            line = raw_line.strip()
+            if not line or line in {"{", "}"}:
+                continue
+
+            line = line.split("//", 1)[0].strip()
+            if not line:
+                continue
+
+            while True:
+                case_match = re.match(r"case\s+(-?(?:0x[0-9a-fA-F]+|\d+))\s*:\s*(.*)", line)
+                if case_match:
+                    if pending_value is not None and (pending_labels or pending_default):
+                        return None
+                    pending_labels.append(int(case_match.group(1), 0))
+                    line = case_match.group(2).strip()
+                    if not line:
+                        break
+                    continue
+
+                default_match = re.match(r"default\s*:\s*(.*)", line)
+                if default_match:
+                    if pending_value is not None and (pending_labels or pending_default):
+                        return None
+                    pending_default = True
+                    line = default_match.group(1).strip()
+                    if not line:
+                        break
+                    continue
+                break
+
+            if not line:
+                continue
+
+            assign_match = re.match(
+                rf"{re.escape(target_name)}\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))\s*;",
+                line,
+            )
+            if assign_match and (pending_labels or pending_default):
+                pending_value = int(assign_match.group(1), 0)
+                continue
+
+            return_match = re.match(r"return\s+(-?(?:0x[0-9a-fA-F]+|\d+))\s*;", line)
+            if return_match and (pending_labels or pending_default):
+                pending_value = int(return_match.group(1), 0)
+                arms.append((list(pending_labels), pending_value, pending_default))
+                pending_labels = []
+                pending_default = False
+                pending_value = None
+                continue
+
+            if line.startswith("break;"):
+                if pending_value is None or not (pending_labels or pending_default):
+                    pending_labels = []
+                    pending_default = False
+                    pending_value = None
+                    continue
+                arms.append((list(pending_labels), pending_value, pending_default))
+                pending_labels = []
+                pending_default = False
+                pending_value = None
+                continue
+
+            return None
+
+        if pending_value is not None and (pending_labels or pending_default):
+            arms.append((list(pending_labels), pending_value, pending_default))
+
+        return arms or None
+
+    def _parse_switch_subject_expr(
+        self,
+        subject_raw: str,
+        parameters: List[Dict],
+    ) -> Optional[Expression]:
+        """switch 対象式を parameter/variable の範囲で復元する。"""
+        subject = subject_raw.strip()
+        previous = None
+        while subject != previous:
+            previous = subject
+            subject = self._strip_outer_parentheses(subject)
+            cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", subject)
+            if cast_match:
+                subject = cast_match.group(1).strip()
+
+        for index, param in enumerate(parameters):
+            param_name = param.get("name")
+            if param_name and subject == param_name:
+                size = param.get("size", 4)
+                return Expression.parameter(
+                    param_name,
+                    index=index,
+                    data_type=param.get("data_type"),
+                    size=size,
+                )
+
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", subject):
+            return Expression.variable(subject, size=4)
+
+        return None
+
+    def _strip_outer_parentheses(self, text: str) -> str:
+        text = text.strip()
+        while text.startswith("(") and text.endswith(")"):
+            depth = 0
+            valid = True
+            for index, char in enumerate(text):
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0 and index != len(text) - 1:
+                        valid = False
+                        break
+            if not valid or depth != 0:
+                break
+            text = text[1:-1].strip()
+        return text
+
+    def _get_return_size_bytes(self, return_type: Optional[str]) -> int:
+        type_lower = (return_type or "").lower().strip()
+        if "undefined8" in type_lower or "long" in type_lower:
+            return 8
+        if "undefined2" in type_lower or "short" in type_lower:
+            return 2
+        if "undefined1" in type_lower or "char" in type_lower:
+            return 1
+        return 4
+
+    def _clone_expression(self, expr: Expression) -> Expression:
+        if expr.expr_type == ExpressionType.PARAMETER:
+            return Expression.parameter(
+                expr.name or "",
+                index=expr.value if isinstance(expr.value, int) else -1,
+                data_type=expr.data_type,
+                size=expr.size or 4,
+                storage_info=expr.storage_info,
+            )
+        if expr.expr_type == ExpressionType.VARIABLE:
+            return Expression.variable(
+                expr.name or "",
+                data_type=expr.data_type,
+                size=expr.size or 4,
+                storage_info=expr.storage_info,
+            )
+        return Expression(
+            expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=[self._clone_expression(op) for op in expr.operands],
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+        )
 
     def _build_effect_summary(
         self,
