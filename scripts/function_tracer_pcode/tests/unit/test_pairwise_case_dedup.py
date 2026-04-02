@@ -271,3 +271,41 @@ def test_build_pair_query_sign_extends_ambiguous_negative_constant_with_signed_e
     )
 
     assert "(_ bv18446744073709551613 64)" in query
+
+
+def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension():
+    param = Expression(ExpressionType.PARAMETER, name="param_1", size=4)
+    wide_seven = Expression(ExpressionType.CONSTANT, value=7, size=8)
+    inner_add = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[param, wide_seven],
+        size=4,
+    )
+    inner_zext = Expression(
+        ExpressionType.UNARY_OP,
+        operator="INT_ZEXT",
+        operands=[inner_add],
+        size=8,
+    )
+    mult_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[
+            Expression(ExpressionType.CONSTANT, value=2, size=8),
+            inner_zext,
+        ],
+        size=4,
+    )
+    outer_zext = Expression(
+        ExpressionType.UNARY_OP,
+        operator="INT_ZEXT",
+        operands=[mult_expr],
+        size=8,
+    )
+
+    smt = outer_zext.to_smt()
+
+    assert "((_ zero_extend 32) (bvadd" not in smt
+    assert "((_ zero_extend 32) (bvmul" not in smt
+    assert smt == "(bvmul (_ bv2 64) (bvadd ((_ zero_extend 32) param_1) (_ bv7 64)))"

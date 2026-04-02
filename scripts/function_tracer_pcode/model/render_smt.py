@@ -186,7 +186,7 @@ def _coerce_expr_to_bitvec_width(
         expr, expr_smt, target_bits, prefer_sign_extension
     )
 
-    expr_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else target_bits
+    expr_bits = expression_smt_bit_width(expr) or target_bits
     if expr_bits == target_bits:
         return expr_smt
     if expr_bits < target_bits:
@@ -230,8 +230,8 @@ def _to_smt_internal(expr) -> str:
                 return f"((_ extract {high_bit} {low_bit}) {source_smt})"
             return f"(subpiece {source_smt} {right._to_smt_internal()})"
 
-        left_bits = left.get_bit_width()
-        right_bits = right.get_bit_width()
+        left_bits = expression_smt_bit_width(left)
+        right_bits = expression_smt_bit_width(right)
         left_smt = left._to_smt_internal()
         right_smt = right._to_smt_internal()
 
@@ -293,7 +293,7 @@ def _to_smt_internal(expr) -> str:
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0]
         operand_smt = operand._to_smt_internal()
-        operand_bits = operand.get_bit_width()
+        operand_bits = expression_smt_bit_width(operand)
 
         if expr.operator == "INT_ZEXT":
             output_bits = (expr.size if expr.size else 8) * 8
@@ -336,7 +336,7 @@ def _to_smt_internal(expr) -> str:
         return f"{expr.name}"
 
     if expr_type == expr_kind.MEMORY:
-        mem_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 32
+        mem_bits = expression_smt_bit_width(expr) or 32
         if mem_bits not in _MEMORY_ARRAY_WIDTHS:
             mem_bits = 32
         addr_expr = expr.operands[0]
@@ -355,7 +355,7 @@ def _to_smt_internal(expr) -> str:
             return "undefined"
 
         phi_returns_bool = expression_returns_bool(expr)
-        target_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        target_bits = expression_smt_bit_width(expr)
         prefer_sign_extension = expression_contains_signed_comparison(expr)
 
         def render_branch_value(branch_expr):

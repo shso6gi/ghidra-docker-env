@@ -1092,6 +1092,48 @@ def test_return_analyzer_falls_back_to_terminal_call_wrapper_recovery():
     assert mock_recover.call_args.args[0] is call_op
 
 
+def test_return_analyzer_uses_last_terminal_call_for_implicit_return_wrapper():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+    return_op = Mock()
+    call_op_1 = Mock()
+    call_op_2 = Mock()
+
+    call_op_1.getMnemonic.return_value = "CALL"
+    call_op_1.getOutput.return_value = None
+    call_op_2.getMnemonic.return_value = "CALL"
+    call_op_2.getOutput.return_value = None
+    return_op.getParent.return_value = Mock()
+
+    block_info = Mock()
+    block_info.pcode_ops = [call_op_1, call_op_2, return_op]
+    condition_tracker.get_block_by_hash.return_value = block_info
+
+    recovered = [ReturnInfo(address="0x1000", value=Expression.constant(9, 4), conditions=[], branch_index=0)]
+
+    with patch.object(analyzer, "_find_implicit_return_source_varnode", return_value=None):
+        with patch.object(
+            analyzer,
+            "_recover_implicit_return_from_terminal_call",
+            return_value=recovered,
+        ) as mock_recover:
+            result = analyzer._analyze_implicit_return_value(
+                return_op,
+                "0x1000",
+                tracer,
+                condition_tracker,
+                [],
+                0,
+                all_path_conditions=[[]],
+                active_functions=set(),
+                current_function=Mock(),
+            )
+
+    assert result == recovered
+    assert mock_recover.call_args.args[0] is call_op_2
+
+
 def test_return_analyzer_parses_simple_decompiler_call_wrapper():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     parsed = analyzer._parse_call_wrapper_from_c_text(
@@ -1146,6 +1188,61 @@ def test_return_analyzer_recovers_call_wrapper_from_decompiler_text():
     assert [ret.value.to_string() for ret in recovered] == ["42"]
     assert mock_expand.call_args.args[0] == "ptr_add_bias"
     assert [arg.to_string() for arg in mock_expand.call_args.args[1]] == ["param_1", "7"]
+
+
+def test_return_analyzer_recovers_straightline_call_chain_wrapper_from_decompiler_text():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_call_chain",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "undefined4"}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    c_text = """void ptr_call_chain(undefined4 param_1)
+{
+  undefined8 uVar1;
+  uVar1 = ptr_call_leaf(param_1);
+  ptr_scale_then_bias(uVar1,2,0xfffffffffffffffd);
+  return;
+}
+"""
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_call_leaf":
+            return [
+                ExpandedValue(
+                    Expression.binary_op("INT_ADD", args[0], Expression.constant(7, 4)),
+                    [],
+                )
+            ]
+        if function_name == "ptr_scale_then_bias":
+            return [
+                ExpandedValue(
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op("INT_MULT", args[0], args[1]),
+                        args[2],
+                    ),
+                    [],
+                )
+            ]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                Mock(),
+                analysis,
+                Mock(),
+                set(),
+            )
+
+    assert recovered is not None
+    assert [ret.value.to_string() for ret in recovered] == ["(((param_1 + 7) * 2) + 18446744073709551613)"]
 
 
 def test_solve_query_twostage_skips_full_query_for_unresolved_values():

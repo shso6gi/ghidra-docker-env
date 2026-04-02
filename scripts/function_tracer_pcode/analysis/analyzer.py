@@ -416,6 +416,21 @@ class ReturnAnalyzer:
         c_text = self._get_decompiled_c_text(decompile_results)
         if not c_text:
             return None
+        recovered_chain = self._recover_straightline_call_chain_from_c_text(
+            c_text,
+            analysis.parameters,
+            analysis.entry_point,
+            current_function,
+            active_functions or set(),
+        )
+        if recovered_chain is not None:
+            if self.debug:
+                self._debug_print(
+                    f"Call-wrapper recovery reconstructed {len(recovered_chain)} return case(s) "
+                    "from straight-line call chain"
+                )
+            return recovered_chain
+
         recovered = self._parse_call_wrapper_from_c_text(
             c_text,
             analysis.parameters,
@@ -450,6 +465,192 @@ class ReturnAnalyzer:
             expanded,
             0,
         )
+
+    def _recover_straightline_call_chain_from_c_text(
+        self,
+        c_text: str,
+        parameters: List[Dict],
+        address: str,
+        current_function,
+        active_functions: Set[str],
+    ) -> Optional[List[ReturnInfo]]:
+        from ..transform.expander import ExpandedValue
+
+        statements = self._extract_wrapper_body_statements(c_text)
+        if not statements or statements[-1] != "return;":
+            return None
+
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]] = [
+            ({}, [], None)
+        ]
+
+        for index, statement in enumerate(statements):
+            if statement == "return;":
+                if index != len(statements) - 1:
+                    return None
+                break
+
+            if self._is_wrapper_declaration_line(statement):
+                continue
+
+            assign_call = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;",
+                statement,
+            )
+            if assign_call:
+                target_name = assign_call.group(1)
+                callee_name = assign_call.group(2)
+                arg_blob = assign_call.group(3).strip()
+                next_states = self._expand_wrapper_call_states(
+                    states,
+                    target_name,
+                    callee_name,
+                    arg_blob,
+                    parameters,
+                    active_functions,
+                    current_function,
+                    assign_to_last_call=False,
+                )
+                if next_states is None:
+                    return None
+                states = next_states
+                continue
+
+            bare_call = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", statement)
+            if bare_call:
+                callee_name = bare_call.group(1)
+                arg_blob = bare_call.group(2).strip()
+                next_states = self._expand_wrapper_call_states(
+                    states,
+                    None,
+                    callee_name,
+                    arg_blob,
+                    parameters,
+                    active_functions,
+                    current_function,
+                    assign_to_last_call=True,
+                )
+                if next_states is None:
+                    return None
+                states = next_states
+                continue
+
+            simple_assign = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)\s*;", statement)
+            if simple_assign:
+                target_name = simple_assign.group(1)
+                expr_text = simple_assign.group(2)
+                next_states = []
+                for bindings, conditions, _last_call in states:
+                    parsed_expr = self._parse_wrapper_argument_expr(
+                        expr_text,
+                        parameters,
+                        fallback_index=0,
+                        local_bindings=bindings,
+                    )
+                    if parsed_expr is None:
+                        return None
+                    new_bindings = dict(bindings)
+                    new_bindings[target_name] = self._clone_expression(parsed_expr)
+                    next_states.append((new_bindings, list(conditions), None))
+                states = next_states
+                continue
+
+            return None
+
+        expanded_values = []
+        for _bindings, conditions, last_call in states:
+            if last_call is None:
+                continue
+            simplified_conds = ConditionSimplifier.simplify_conditions(conditions)
+            if ConditionSimplifier.is_contradiction(simplified_conds):
+                continue
+            expanded_values.append(ExpandedValue(last_call, simplified_conds))
+
+        if not expanded_values:
+            return None
+
+        return self._build_return_infos_from_expansions(address, expanded_values, 0)
+
+    def _extract_wrapper_body_statements(self, c_text: str) -> Optional[List[str]]:
+        lines = []
+        for raw_line in c_text.splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if line:
+                lines.append(line)
+        if not lines:
+            return None
+
+        body_lines = [
+            line
+            for line in lines
+            if line not in {"{", "}"} and not line.endswith("{")
+        ]
+        if len(body_lines) < 2:
+            return None
+        return body_lines[1:]
+
+    def _is_wrapper_declaration_line(self, line: str) -> bool:
+        if not line.endswith(";"):
+            return False
+        if "=" in line or "(" in line or ")" in line:
+            return False
+        tokens = line[:-1].split()
+        return len(tokens) >= 2
+
+    def _expand_wrapper_call_states(
+        self,
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        target_name: Optional[str],
+        callee_name: str,
+        arg_blob: str,
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+        assign_to_last_call: bool,
+    ) -> Optional[List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]]]:
+        arg_texts = self._split_call_arguments(arg_blob) if arg_blob else []
+        if arg_texts is None:
+            return None
+
+        next_states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]] = []
+        for bindings, conditions, _last_call in states:
+            parsed_args: List[Expression] = []
+            for arg_index, arg_text in enumerate(arg_texts):
+                parsed_arg = self._parse_wrapper_argument_expr(
+                    arg_text,
+                    parameters,
+                    fallback_index=arg_index,
+                    local_bindings=bindings,
+                )
+                if parsed_arg is None:
+                    return None
+                parsed_args.append(parsed_arg)
+
+            expanded = self._resolve_call_expansions(
+                callee_name,
+                parsed_args,
+                active_functions,
+                current_function=current_function,
+            )
+            if not expanded:
+                return None
+
+            for ev in expanded:
+                merged_conditions = ConditionSimplifier.simplify_conditions(
+                    list(conditions) + list(ev.conditions)
+                )
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                new_bindings = dict(bindings)
+                cloned_value = self._clone_expression(ev.value)
+                last_call_value = None
+                if target_name is not None:
+                    new_bindings[target_name] = cloned_value
+                if assign_to_last_call:
+                    last_call_value = cloned_value
+                next_states.append((new_bindings, merged_conditions, last_call_value))
+
+        return next_states or None
 
     def _should_attempt_switch_recovery(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis.recovered_from_decompiler:
@@ -552,6 +753,7 @@ class ReturnAnalyzer:
         text: str,
         parameters: List[Dict],
         fallback_index: int,
+        local_bindings: Optional[Dict[str, Expression]] = None,
     ) -> Optional[Expression]:
         expr_text = self._strip_outer_parentheses(text.strip())
         previous = None
@@ -560,6 +762,9 @@ class ReturnAnalyzer:
             cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", expr_text)
             if cast_match:
                 expr_text = self._strip_outer_parentheses(cast_match.group(1).strip())
+
+        if local_bindings and expr_text in local_bindings:
+            return self._clone_expression(local_bindings[expr_text])
 
         for index, param in enumerate(parameters):
             if expr_text == param.get("name"):
@@ -2130,18 +2335,19 @@ class ReturnAnalyzer:
                 break
             ops_before_return.append(pcode_op)
 
-        call_positions = [
-            index
-            for index, pcode_op in enumerate(ops_before_return)
-            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}
-        ]
-        if len(call_positions) != 1:
+        candidate = None
+        candidate_index = -1
+        for index in range(len(ops_before_return) - 1, -1, -1):
+            pcode_op = ops_before_return[index]
+            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}:
+                candidate = pcode_op
+                candidate_index = index
+                break
+
+        if candidate is None:
             return None
 
-        call_index = call_positions[0]
-        candidate = ops_before_return[call_index]
-
-        for later_op in ops_before_return[call_index + 1:]:
+        for later_op in ops_before_return[candidate_index + 1:]:
             mnemonic = later_op.getMnemonic()
             output = getattr(later_op, "getOutput", lambda: None)()
             if mnemonic in {"CALL", "CALLIND", "STORE", "BRANCH", "CBRANCH", "BRANCHIND"}:
