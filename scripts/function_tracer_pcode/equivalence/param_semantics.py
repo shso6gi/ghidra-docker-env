@@ -13,6 +13,7 @@ from .typing.helpers import get_type_name_from_param, is_unsigned_type
 SIGNED_COMPARE_OPS = {"INT_SLESS", "INT_SLESSEQUAL"}
 UNSIGNED_COMPARE_OPS = {"INT_LESS", "INT_LESSEQUAL"}
 TRANSPARENT_UNARY_OPS = {"INT_SEXT", "INT_ZEXT", "CAST", "COPY"}
+SIGNEDNESS_PROPAGATING_BINARY_OPS = {"INT_AND", "INT_OR", "INT_XOR"}
 
 
 @dataclass(frozen=True)
@@ -156,22 +157,22 @@ def _record_compare_signedness(
         return
 
     score_key = "signed_score" if expr.operator in SIGNED_COMPARE_OPS else "unsigned_score"
-    left_ref = _extract_param_reference(expr.operands[0])
-    right_ref = _extract_param_reference(expr.operands[1])
+    left_refs = _collect_param_references(expr.operands[0])
+    right_refs = _collect_param_references(expr.operands[1])
 
-    if left_ref is not None and _supports_signedness_inference(expr.operands[1]):
-        param_name, narrow_bits = left_ref
-        if narrow_bits is not None:
-            _record_width_evidence(evidence, param_name, narrow_bits)
-        _record_signedness_evidence(
-            evidence,
-            param_name,
-            signed_score=2 if score_key == "signed_score" else 0,
-            unsigned_score=2 if score_key == "unsigned_score" else 0,
-        )
+    if left_refs and _supports_signedness_inference(expr.operands[1]):
+        _record_compare_refs(left_refs, evidence, score_key)
 
-    if right_ref is not None and _supports_signedness_inference(expr.operands[0]):
-        param_name, narrow_bits = right_ref
+    if right_refs and _supports_signedness_inference(expr.operands[0]):
+        _record_compare_refs(right_refs, evidence, score_key)
+
+
+def _record_compare_refs(
+    refs: Dict[str, Optional[int]],
+    evidence: Dict[str, Dict[str, Any]],
+    score_key: str,
+) -> None:
+    for param_name, narrow_bits in refs.items():
         if narrow_bits is not None:
             _record_width_evidence(evidence, param_name, narrow_bits)
         _record_signedness_evidence(
@@ -185,7 +186,70 @@ def _record_compare_signedness(
 def _supports_signedness_inference(expr: Expression) -> bool:
     if expr.expr_type == ExpressionType.CONSTANT:
         return True
-    return _extract_param_reference(expr) is not None
+    refs = _collect_param_references(expr)
+    return refs is not None and bool(refs)
+
+
+def _collect_param_references(
+    expr: Expression,
+) -> Optional[Dict[str, Optional[int]]]:
+    """Collect parameter references from signedness-safe expression shapes.
+
+    The collector is intentionally conservative: it only walks through operators
+    whose comparison signedness can be meaningfully propagated to their leaf
+    parameters without assuming arithmetic identities.
+    """
+    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+        return {expr.name: None}
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        if expr.operator in TRANSPARENT_UNARY_OPS:
+            return _collect_param_references(expr.operands[0])
+        return None
+
+    if expr.expr_type != ExpressionType.BINARY_OP:
+        return None
+
+    if expr.operator == "SUBPIECE":
+        ref = _extract_subpiece_reference(expr)
+        if ref is None:
+            return None
+        param_name, narrow_bits = ref
+        return {param_name: narrow_bits}
+
+    if expr.operator == "INT_AND":
+        ref = _extract_masked_param_reference(expr)
+        if ref is not None:
+            param_name, narrow_bits = ref
+            return {param_name: narrow_bits}
+
+    if expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
+        return None
+
+    merged: Dict[str, Optional[int]] = {}
+    for operand in expr.operands:
+        if operand.expr_type == ExpressionType.CONSTANT:
+            continue
+        operand_refs = _collect_param_references(operand)
+        if operand_refs is None:
+            return None
+        _merge_param_reference_maps(merged, operand_refs)
+
+    return merged
+
+
+def _merge_param_reference_maps(
+    merged: Dict[str, Optional[int]],
+    refs: Dict[str, Optional[int]],
+) -> None:
+    for param_name, narrow_bits in refs.items():
+        current = merged.get(param_name)
+        if current is None:
+            merged[param_name] = narrow_bits
+            continue
+        if narrow_bits is None:
+            continue
+        merged[param_name] = min(current, narrow_bits) if current is not None else narrow_bits
 
 
 def _extract_param_reference(
