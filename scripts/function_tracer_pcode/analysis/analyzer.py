@@ -298,6 +298,17 @@ class ReturnAnalyzer:
             result.returns = recovered_returns
             result.recovered_from_decompiler = True
             result.analysis_notes.append("switch_like_return_recovery")
+        else:
+            recovered_returns = self._recover_call_wrapper_returns_from_decompiler(
+                results,
+                result,
+                function,
+                active_functions,
+            )
+            if recovered_returns is not None:
+                result.returns = recovered_returns
+                result.recovered_from_decompiler = True
+                result.analysis_notes.append("call_wrapper_return_recovery")
 
         self._mark_incomplete_control_flow(result)
 
@@ -391,6 +402,55 @@ class ReturnAnalyzer:
             self._debug_print("Switch-like recovery failed: parser did not match decompiler text")
         return recovered
 
+    def _recover_call_wrapper_returns_from_decompiler(
+        self,
+        decompile_results,
+        analysis: FunctionReturnAnalysis,
+        current_function,
+        active_functions: Optional[Set[str]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        """decompiler の `callee(args); return;` 形式を戻り値 wrapper として補助復元する。"""
+        if not analysis.has_unknown_return():
+            return None
+
+        c_text = self._get_decompiled_c_text(decompile_results)
+        if not c_text:
+            return None
+        recovered = self._parse_call_wrapper_from_c_text(
+            c_text,
+            analysis.parameters,
+        )
+        if recovered is None:
+            if self.debug:
+                self._debug_print("Call-wrapper recovery failed: parser did not match decompiler text")
+            return None
+
+        callee_name, args = recovered
+        if self.debug:
+            arg_preview = [arg.to_string() for arg in args]
+            self._debug_print(
+                f"Call-wrapper recovery matched callee '{callee_name}' with args {arg_preview}"
+            )
+
+        expanded = self._resolve_call_expansions(
+            callee_name,
+            args,
+            active_functions or set(),
+            current_function=current_function,
+        )
+        if not expanded:
+            if self.debug:
+                self._debug_print(
+                    f"Call-wrapper recovery failed: no safe call summary available for '{callee_name}'"
+                )
+            return None
+
+        return self._build_return_infos_from_expansions(
+            analysis.entry_point,
+            expanded,
+            0,
+        )
+
     def _should_attempt_switch_recovery(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis.recovered_from_decompiler:
             return False
@@ -402,6 +462,123 @@ class ReturnAnalyzer:
             reason in {"call_out_of_scope", "callind_out_of_scope"}
             for reason in analysis.unknown_event_reasons
         )
+
+    def _parse_call_wrapper_from_c_text(
+        self,
+        c_text: str,
+        parameters: List[Dict],
+    ) -> Optional[Tuple[str, List[Expression]]]:
+        """`callee(args); return;` だけの単純 wrapper を解析する。"""
+        lines = []
+        for raw_line in c_text.splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if line:
+                lines.append(line)
+        if not lines:
+            return None
+
+        body_lines = [
+            line
+            for line in lines
+            if line not in {"{", "}"} and not line.endswith("{")
+        ]
+        if len(body_lines) < 3:
+            return None
+
+        call_line = None
+        return_seen = False
+        for line in body_lines[1:]:
+            if line == "return;":
+                return_seen = True
+                continue
+            if return_seen:
+                return None
+            if call_line is not None:
+                return None
+            call_line = line
+
+        if call_line is None or not return_seen:
+            return None
+
+        call_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", call_line)
+        if not call_match:
+            return None
+
+        callee_name = call_match.group(1)
+        arg_blob = call_match.group(2).strip()
+        if not arg_blob:
+            return callee_name, []
+
+        arg_texts = self._split_call_arguments(arg_blob)
+        if arg_texts is None:
+            return None
+
+        parsed_args: List[Expression] = []
+        for index, arg_text in enumerate(arg_texts):
+            parsed = self._parse_wrapper_argument_expr(arg_text, parameters, index)
+            if parsed is None:
+                return None
+            parsed_args.append(parsed)
+        return callee_name, parsed_args
+
+    def _split_call_arguments(self, arg_blob: str) -> Optional[List[str]]:
+        parts: List[str] = []
+        current: List[str] = []
+        depth = 0
+        for char in arg_blob:
+            if char == "," and depth == 0:
+                part = "".join(current).strip()
+                if not part:
+                    return None
+                parts.append(part)
+                current = []
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+            current.append(char)
+        if depth != 0:
+            return None
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+        return parts or None
+
+    def _parse_wrapper_argument_expr(
+        self,
+        text: str,
+        parameters: List[Dict],
+        fallback_index: int,
+    ) -> Optional[Expression]:
+        expr_text = self._strip_outer_parentheses(text.strip())
+        previous = None
+        while expr_text != previous:
+            previous = expr_text
+            cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", expr_text)
+            if cast_match:
+                expr_text = self._strip_outer_parentheses(cast_match.group(1).strip())
+
+        for index, param in enumerate(parameters):
+            if expr_text == param.get("name"):
+                return Expression.parameter(
+                    expr_text,
+                    index=index,
+                    data_type=param.get("data_type"),
+                    size=param.get("size", 4),
+                )
+
+        const_match = re.fullmatch(r"(-?(?:0x[0-9a-fA-F]+|\d+))", expr_text)
+        if const_match:
+            value = int(const_match.group(1), 0)
+            size = 4
+            if 0 <= fallback_index < len(parameters):
+                size = parameters[fallback_index].get("size", 4)
+            return Expression.constant(value, size=size)
+
+        return None
 
     def _get_decompiled_c_text(self, decompile_results) -> Optional[str]:
         """DecompileResults から C テキストを安全に取得する。"""

@@ -1092,6 +1092,62 @@ def test_return_analyzer_falls_back_to_terminal_call_wrapper_recovery():
     assert mock_recover.call_args.args[0] is call_op
 
 
+def test_return_analyzer_parses_simple_decompiler_call_wrapper():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    parsed = analyzer._parse_call_wrapper_from_c_text(
+        """void ptr_call_leaf(undefined4 param_1)
+{
+  ptr_add_bias(param_1,7);
+  return;
+}
+""",
+        [{"name": "param_1", "size": 4, "data_type": "undefined4"}],
+    )
+
+    assert parsed is not None
+    callee_name, args = parsed
+    assert callee_name == "ptr_add_bias"
+    assert [arg.to_string() for arg in args] == ["param_1", "7"]
+
+
+def test_return_analyzer_recovers_call_wrapper_from_decompiler_text():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_call_leaf",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "undefined4"}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+    )
+
+    with patch.object(
+        analyzer,
+        "_get_decompiled_c_text",
+        return_value="""void ptr_call_leaf(undefined4 param_1)
+{
+  ptr_add_bias(param_1,7);
+  return;
+}
+""",
+    ):
+        with patch.object(
+            analyzer,
+            "_resolve_call_expansions",
+            return_value=[ExpandedValue(Expression.constant(42, 4), [])],
+        ) as mock_expand:
+            recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                Mock(),
+                analysis,
+                Mock(),
+                set(),
+            )
+
+    assert recovered is not None
+    assert [ret.value.to_string() for ret in recovered] == ["42"]
+    assert mock_expand.call_args.args[0] == "ptr_add_bias"
+    assert [arg.to_string() for arg in mock_expand.call_args.args[1]] == ["param_1", "7"]
+
+
 def test_solve_query_twostage_skips_full_query_for_unresolved_values():
     class _FakeStrategy:
         def __init__(self):
