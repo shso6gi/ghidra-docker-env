@@ -533,7 +533,11 @@ def _extract_index_param(expr: Expression) -> Tuple[Optional[str], int]:
     if expr.expr_type == ExpressionType.PARAMETER and expr.name:
         return expr.name, expr.get_bit_width()
 
-    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_SEXT", "INT_ZEXT"} and expr.operands:
+    if (
+        expr.expr_type == ExpressionType.UNARY_OP
+        and expr.operator in {"INT_SEXT", "INT_ZEXT", "CAST", "COPY", "TRUNC"}
+        and expr.operands
+    ):
         return _extract_index_param(expr.operands[0])
 
     if expr.expr_type == ExpressionType.BINARY_OP:
@@ -577,7 +581,10 @@ def _enumerate_candidate_indices(
             )
         return []
 
-    is_unsigned = not param_info.get("is_signed", True)
+    is_unsigned = (
+        not param_info.get("is_signed", True)
+        or _index_expr_guarantees_nonnegative(pattern.index_expr, pattern.index_param_name)
+    )
     if not is_unsigned and not nonneg:
         if debug:
             print(
@@ -595,6 +602,39 @@ def _enumerate_candidate_indices(
             f"[MemoryResolver] candidate indices for {pattern.index_param_name}: {indices}"
         )
     return indices
+
+
+def _index_expr_guarantees_nonnegative(expr: Optional[Expression], param_name: str) -> bool:
+    if expr is None:
+        return False
+
+    if expr.expr_type == ExpressionType.PARAMETER and expr.name == param_name:
+        return False
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        if expr.operator == "INT_ZEXT":
+            inner_name, _ = _extract_index_param(expr.operands[0])
+            return inner_name == param_name
+        if expr.operator in {"CAST", "COPY", "TRUNC"}:
+            return _index_expr_guarantees_nonnegative(expr.operands[0], param_name)
+        return False
+
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left, right = expr.operands
+        if expr.operator == "INT_AND":
+            left_name, _ = _extract_index_param(left)
+            right_name, _ = _extract_index_param(right)
+            if left_name == param_name and _extract_integer_constant(right) is not None:
+                return True
+            if right_name == param_name and _extract_integer_constant(left) is not None:
+                return True
+        if expr.operator == "SUBPIECE":
+            offset = _extract_integer_constant(right)
+            left_name, _ = _extract_index_param(left)
+            if left_name == param_name and offset == 0:
+                return True
+
+    return False
 
 
 def _extract_index_range(
