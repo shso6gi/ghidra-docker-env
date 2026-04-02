@@ -18,6 +18,8 @@ class ParameterInfo:
     bit_width: int
     index: int
     is_signed: bool = True
+    semantic_narrow_bits: Optional[int] = None
+    semantic_signedness: Optional[str] = None
 
 
 @dataclass

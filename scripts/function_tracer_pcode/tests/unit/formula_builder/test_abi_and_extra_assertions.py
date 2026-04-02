@@ -25,6 +25,28 @@ def _analysis(func_name: str, param_name: str, size: int) -> FunctionReturnAnaly
     )
 
 
+def _semantic_analysis(
+    func_name: str,
+    param_name: str,
+    data_type: str,
+    value_expr: Expression,
+) -> FunctionReturnAnalysis:
+    return FunctionReturnAnalysis(
+        function_name=func_name,
+        entry_point="0x00401000",
+        parameters=[
+            {
+                "name": param_name,
+                "size": 8,
+                "index": 0,
+                "is_signed": True,
+                "data_type": data_type,
+            }
+        ],
+        returns=[ReturnInfo(address="0x00401000", conditions=[], value=value_expr)],
+    )
+
+
 class TestExtraAssertions:
     """extra_assertions 機能のテスト"""
 
@@ -184,6 +206,29 @@ class TestABIConstraints:
         ).formula
 
         assert formula_wrapper == formula_direct
+
+    def test_semantic_width_constraints_are_emitted_for_narrowed_same_width_parameters(self):
+        builder = FormulaBuilder(debug=False)
+        subpiece_value = Expression(
+            ExpressionType.BINARY_OP,
+            operator="SUBPIECE",
+            operands=[
+                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                Expression(ExpressionType.CONSTANT, value=0, size=8),
+            ],
+            size=4,
+        )
+        analysis1 = _semantic_analysis("func1", "x", "long", subpiece_value)
+        analysis2 = _semantic_analysis("func2", "x", "long", subpiece_value)
+
+        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
+        formula = result.formula
+
+        assert "Parameter semantic-width constraints" in formula
+        assert "constrain to signed 32-bit semantic value" in formula
+        assert "semantic lower 32 bits must match" in formula
+        assert "((_ extract 31 0) x_1)" in formula
+        assert "((_ extract 31 0) x_2)" in formula
 
 
 class TestNoRsplit:

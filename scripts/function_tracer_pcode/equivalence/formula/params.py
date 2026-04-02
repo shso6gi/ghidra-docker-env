@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .types import ExtraVariableInfo, ParameterInfo, ParameterPair
 
@@ -70,6 +70,19 @@ def build_parameter_constraint(pair: ParameterPair) -> List[str]:
     param1 = pair.param1
     param2 = pair.param2
 
+    semantic_overlap = _get_semantic_overlap_bits(param1, param2)
+    if semantic_overlap is not None:
+        return [
+            (
+                f"; {param1.smt_name} and {param2.smt_name}: "
+                f"semantic lower {semantic_overlap} bits must match"
+            ),
+            (
+                f"(assert (= ((_ extract {semantic_overlap - 1} 0) {param1.smt_name}) "
+                f"((_ extract {semantic_overlap - 1} 0) {param2.smt_name})))"
+            ),
+        ]
+
     if not pair.has_width_mismatch():
         return [
             f"; {param1.smt_name} and {param2.smt_name}: same width ({param1.bit_width}bit)",
@@ -99,6 +112,51 @@ def build_parameter_constraint(pair: ParameterPair) -> List[str]:
         )
 
     return lines
+
+
+def build_parameter_semantic_constraints(params: List[ParameterInfo]) -> List[str]:
+    """Build self-consistency constraints for narrowed parameter semantics."""
+    lines: List[str] = []
+    for param in params:
+        semantic_bits = param.semantic_narrow_bits
+        signedness = param.semantic_signedness
+        if (
+            semantic_bits is None
+            or signedness not in {"signed", "unsigned"}
+            or semantic_bits >= param.bit_width
+        ):
+            continue
+
+        extend_bits = param.bit_width - semantic_bits
+        ext_op = "sign_extend" if signedness == "signed" else "zero_extend"
+        lines.append(
+            f"; {param.smt_name}: constrain to {signedness} {semantic_bits}-bit semantic value"
+        )
+        lines.append(
+            f"(assert (= {param.smt_name} ((_ {ext_op} {extend_bits}) "
+            f"((_ extract {semantic_bits - 1} 0) {param.smt_name}))))"
+        )
+    return lines
+
+
+def _get_semantic_overlap_bits(
+    param1: ParameterInfo,
+    param2: ParameterInfo,
+) -> Optional[int]:
+    candidates = []
+    if param1.semantic_narrow_bits is not None:
+        candidates.append(param1.semantic_narrow_bits)
+    if param2.semantic_narrow_bits is not None:
+        candidates.append(param2.semantic_narrow_bits)
+    if not candidates:
+        return None
+
+    overlap_bits = min(candidates)
+    if overlap_bits <= 0:
+        return None
+    if overlap_bits > min(param1.bit_width, param2.bit_width):
+        return None
+    return overlap_bits
 
 
 def merge_param_and_extra_vars(

@@ -6,11 +6,13 @@ from typing import List, Dict, Optional, Tuple, Set, Any
 from ...model import FunctionReturnAnalysis
 from .params import (
     build_parameter_constraint,
+    build_parameter_semantic_constraints,
     build_parameter_pairs,
     collect_param_info,
     merge_param_and_extra_vars,
 )
 from .returns import build_return_definition, get_return_size
+from ..param_semantics import infer_parameter_semantics
 from .types import (
     ExtraVariableInfo,
     FormulaBuildContext,
@@ -166,6 +168,8 @@ class FormulaBuilder:
         """宣言・制約・補助情報をまとめて構築する"""
         params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
         params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
+        self._apply_semantic_hints(params1, infer_parameter_semantics(analysis1))
+        self._apply_semantic_hints(params2, infer_parameter_semantics(analysis2))
 
         param_names1 = {p.original_name for p in params1}
         param_names2 = {p.original_name for p in params2}
@@ -254,6 +258,10 @@ class FormulaBuilder:
             lines.extend(
                 self._build_extra_var_declarations(analysis2.function_name, extra_vars2)
             )
+
+        semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
+        if semantic_lines:
+            lines.extend(semantic_lines)
 
         lines.extend(self._build_param_constraints_section(param_pairs))
 
@@ -361,7 +369,10 @@ class FormulaBuilder:
         print(f"[FormulaBuilder] Function 1 parameters:")
         for p in params1:
             signed_str = "signed" if p.is_signed else "unsigned"
-            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str})")
+            semantic_str = ""
+            if p.semantic_narrow_bits is not None and p.semantic_signedness:
+                semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars1:
             print(f"[FormulaBuilder] Function 1 extra variables:")
             for v in extra_vars1:
@@ -377,7 +388,10 @@ class FormulaBuilder:
         print(f"[FormulaBuilder] Function 2 parameters:")
         for p in params2:
             signed_str = "signed" if p.is_signed else "unsigned"
-            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str})")
+            semantic_str = ""
+            if p.semantic_narrow_bits is not None and p.semantic_signedness:
+                semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
+            print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars2:
             print(f"[FormulaBuilder] Function 2 extra variables:")
             for v in extra_vars2:
@@ -460,7 +474,7 @@ class FormulaBuilder:
         lines = []
         lines.append("; " + "-" * 40)
         lines.append("; Parameter equality constraints")
-        lines.append("; For matching bit widths: direct equality")
+        lines.append("; For matching bit widths: direct equality unless semantic narrowing is inferred")
         lines.append("; For different bit widths: overlapping bits equal, upper bits free")
         lines.append("; " + "-" * 40)
         
@@ -470,6 +484,40 @@ class FormulaBuilder:
         
         lines.append("")
         return lines
+
+    def _build_param_semantic_constraints_section(
+        self,
+        params1: List[ParameterInfo],
+        params2: List[ParameterInfo],
+    ) -> List[str]:
+        """パラメータの意味幅整合制約を構築"""
+        lines = build_parameter_semantic_constraints(params1)
+        lines.extend(build_parameter_semantic_constraints(params2))
+        if not lines:
+            return []
+
+        return [
+            "; " + "-" * 40,
+            "; Parameter semantic-width constraints",
+            "; Constrain parameters that are used as narrower integers",
+            "; " + "-" * 40,
+            *lines,
+            "",
+        ]
+
+    def _apply_semantic_hints(
+        self,
+        params: List[ParameterInfo],
+        hints: Dict[int, Any],
+    ) -> None:
+        """Attach inferred semantic-width hints to parameter metadata."""
+        params_by_index = {param.index: param for param in params}
+        for index, hint in hints.items():
+            param = params_by_index.get(index)
+            if param is None:
+                continue
+            param.semantic_narrow_bits = hint.narrow_bits
+            param.semantic_signedness = hint.signedness
     
     def _build_extra_var_constraints(
         self,

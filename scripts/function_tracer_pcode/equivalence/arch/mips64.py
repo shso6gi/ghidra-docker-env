@@ -3,6 +3,7 @@
 
 from typing import Dict, List, Optional, Tuple, Any
 from ...model import FunctionReturnAnalysis, Expression, ExpressionType
+from ..param_semantics import ParameterSemanticHint, hint_objects_by_name
 
 
 class MIPS64Handler:
@@ -222,8 +223,8 @@ class MIPS64Handler:
         is_mips64_1: bool,
         is_mips64_2: bool,
         counterexample: Dict[str, Any],
-        usage1: Dict[str, Tuple[str, int]],
-        usage2: Dict[str, Tuple[str, int]],
+        usage1: Dict[str, ParameterSemanticHint],
+        usage2: Dict[str, ParameterSemanticHint],
     ) -> Optional[Tuple[str, str, int]]:
         """幅不一致のパラメータについて偽反例をチェック"""
         if size1 == 8 and size2 == 4:
@@ -275,44 +276,14 @@ class MIPS64Handler:
     def _analyze_parameter_usage(
         self,
         analysis: FunctionReturnAnalysis
-    ) -> Dict[str, Tuple[str, int]]:
+    ) -> Dict[str, ParameterSemanticHint]:
         """
         関数の式からパラメータの使用パターンを分析
         
         Returns:
-            param_name -> (signedness, narrow_bits) のマップ
+            param_name -> semantic hint のマップ
         """
-        evidence: Dict[str, Dict[str, Any]] = {}
-        
-        for ret_info in analysis.returns:
-            if ret_info.value:
-                self._detect_extension_patterns(ret_info.value, evidence)
-            
-            for cond in ret_info.conditions:
-                if cond.expression:
-                    self._detect_extension_patterns(cond.expression, evidence)
-
-        usage: Dict[str, Tuple[str, int]] = {}
-        params_by_name = {
-            param.get("name", f"param{index}"): param
-            for index, param in enumerate(analysis.parameters)
-        }
-
-        for param_name, param_evidence in evidence.items():
-            narrow_bits = self._resolve_narrow_bits(param_evidence)
-            if narrow_bits is None:
-                continue
-
-            signedness = self._resolve_usage_signedness(
-                param_evidence,
-                params_by_name.get(param_name),
-            )
-            if signedness is None:
-                continue
-
-            usage[param_name] = (signedness, narrow_bits)
-
-        return usage
+        return hint_objects_by_name(analysis)
     
     def _detect_extension_patterns(
         self,
@@ -462,7 +433,7 @@ class MIPS64Handler:
     def _check_extension_pattern_violation(
         self,
         param_key: str,
-        pattern: Tuple[str, int],
+        pattern: Any,
         counterexample: Dict[str, Any]
     ) -> Optional[Tuple[str, int]]:
         """拡張パターンに基づいてSATモデルの値が違反しているかチェック"""
@@ -470,7 +441,12 @@ class MIPS64Handler:
             return None
         
         val = counterexample[param_key]
-        signedness, narrow_bits = pattern
+        hint = self._coerce_semantic_hint(pattern)
+        if hint is None:
+            return None
+
+        signedness = hint.signedness
+        narrow_bits = hint.narrow_bits
         
         mask = (1 << narrow_bits) - 1
         lower = val & mask
@@ -511,19 +487,19 @@ class MIPS64Handler:
         p1: Dict[str, Any],
         p2: Dict[str, Any],
         narrow_param: Dict[str, Any],
-        usage1: Dict[str, Tuple[str, int]],
-        usage2: Dict[str, Tuple[str, int]],
+        usage1: Dict[str, ParameterSemanticHint],
+        usage2: Dict[str, ParameterSemanticHint],
     ) -> str:
-        """幅不一致時に使う signedness を、usage 証拠優先で決める。"""
+        """幅不一致時に使う signedness を、明示的な usage 証拠優先で決める。"""
         usage_signedness = []
 
-        pattern1 = usage1.get(param_name_1)
-        if pattern1 is not None:
-            usage_signedness.append(pattern1[0])
+        pattern1 = self._coerce_semantic_hint(usage1.get(param_name_1))
+        if pattern1 is not None and pattern1.signedness_source == "explicit":
+            usage_signedness.append(pattern1.signedness)
 
-        pattern2 = usage2.get(param_name_2)
-        if pattern2 is not None:
-            usage_signedness.append(pattern2[0])
+        pattern2 = self._coerce_semantic_hint(usage2.get(param_name_2))
+        if pattern2 is not None and pattern2.signedness_source == "explicit":
+            usage_signedness.append(pattern2.signedness)
 
         unique = set(usage_signedness)
         if len(unique) == 1:
@@ -534,13 +510,27 @@ class MIPS64Handler:
         if "unsigned" in unique and "signed" not in unique:
             return "unsigned"
 
-        if pattern1 is not None and pattern2 is None:
-            return pattern1[0]
-        if pattern2 is not None and pattern1 is None:
-            return pattern2[0]
+        if (
+            pattern1 is not None
+            and pattern2 is None
+            and pattern1.signedness_source == "explicit"
+        ):
+            return pattern1.signedness
+        if (
+            pattern2 is not None
+            and pattern1 is None
+            and pattern2.signedness_source == "explicit"
+        ):
+            return pattern2.signedness
 
-        if pattern1 is not None and pattern2 is not None and pattern1[0] == pattern2[0]:
-            return pattern1[0]
+        if (
+            pattern1 is not None
+            and pattern2 is not None
+            and pattern1.signedness_source == "explicit"
+            and pattern2.signedness_source == "explicit"
+            and pattern1.signedness == pattern2.signedness
+        ):
+            return pattern1.signedness
 
         fallback_candidates = [self._infer_signedness(p1), self._infer_signedness(p2)]
         if "signed" in fallback_candidates and "unsigned" not in fallback_candidates:
@@ -549,6 +539,25 @@ class MIPS64Handler:
             return "unsigned"
 
         return self._infer_signedness(narrow_param)
+
+    def _coerce_semantic_hint(self, pattern: Any) -> Optional[ParameterSemanticHint]:
+        """Accept both new hint objects and legacy tuple hints used in tests."""
+        if isinstance(pattern, ParameterSemanticHint):
+            return pattern
+
+        if (
+            isinstance(pattern, tuple)
+            and len(pattern) == 2
+            and isinstance(pattern[0], str)
+            and isinstance(pattern[1], int)
+        ):
+            return ParameterSemanticHint(
+                signedness=pattern[0],
+                narrow_bits=pattern[1],
+                signedness_source="explicit",
+            )
+
+        return None
 
     def _record_param_evidence(
         self,

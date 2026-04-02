@@ -24,6 +24,24 @@ def _subpiece(name: str, source_size: int = 8) -> Expression:
     )
 
 
+def _zext_subpiece(name: str, source_size: int = 8, result_size: int = 8) -> Expression:
+    return Expression(
+        ExpressionType.UNARY_OP,
+        operator="INT_ZEXT",
+        operands=[_subpiece(name, source_size)],
+        size=result_size,
+    )
+
+
+def _and_mask(name: str, source_size: int = 8, mask: int = 0xFFFFFFFF) -> Expression:
+    return Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_AND",
+        operands=[_param(name, source_size), _const(mask, source_size)],
+        size=source_size,
+    )
+
+
 def _signed_lt_zero(name: str, size: int = 8) -> Condition:
     return Condition(
         Expression(
@@ -42,6 +60,18 @@ def _minus_one_lt_param(name: str, size: int = 8) -> Condition:
             ExpressionType.BINARY_OP,
             operator="INT_SLESS",
             operands=[_const(-1, size), _param(name, size)],
+            size=1,
+        ),
+        negated=False,
+    )
+
+
+def _signed_lt_const(expr: Expression, value: int, size: int = 4) -> Condition:
+    return Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_SLESS",
+            operands=[expr, _const(value, size)],
             size=1,
         ),
         negated=False,
@@ -204,3 +234,47 @@ def test_width_mismatch_detects_spurious_upper_bits_even_when_non_mips_side_is_w
     )
 
     assert constraints == {"param_1_1": ("unsigned", 32)}
+
+
+def test_signed_compare_outweighs_transport_only_zext_patterns():
+    handler = MIPS64Handler(debug=True)
+
+    analysis_wide = create_mock_analysis(
+        function_name="branch_switch_sparse",
+        parameters=[
+            {"name": "param_1", "data_type": "long", "size": 8, "index": 0},
+        ],
+    )
+    analysis_transport = create_mock_analysis(
+        function_name="branch_switch_sparse",
+        parameters=[
+            {"name": "param_1", "data_type": "ulong", "size": 8, "index": 0},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[_signed_lt_const(_subpiece("param_1", 8), 101, 4)],
+                value=_zext_subpiece("param_1", 8, 8),
+            ),
+            ReturnInfo(
+                address="0x1004",
+                conditions=[],
+                value=_and_mask("param_1", 8),
+            ),
+        ],
+    )
+
+    counterexample = {
+        "param_1_1": 0x00000000FFFFFFF9,
+        "param_1_2": 0x00000000FFFFFFF9,
+    }
+
+    constraints = handler.detect_spurious_counterexample(
+        counterexample,
+        analysis_wide,
+        analysis_transport,
+        is_mips64_1=True,
+        is_mips64_2=False,
+    )
+
+    assert constraints == {"param_1_1": ("signed", 32)}
