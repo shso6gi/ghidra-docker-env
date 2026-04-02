@@ -56,6 +56,62 @@ def expression_returns_bool(expr) -> bool:
     return False
 
 
+def expression_smt_bit_width(expr) -> int:
+    """式を SMT 化したときの bitvector 幅を推定する。"""
+    if expr is None:
+        return 0
+
+    if expression_returns_bool(expr):
+        return 1
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type in {expr_kind.CONSTANT, expr_kind.PARAMETER, expr_kind.VARIABLE, expr_kind.MEMORY}:
+        return expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+
+    if expr_type == expr_kind.UNKNOWN:
+        return expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+
+    if expr_type == expr_kind.UNARY_OP:
+        operand = expr.operands[0] if getattr(expr, "operands", None) else None
+        operand_bits = expression_smt_bit_width(operand)
+        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+            explicit_bits = (expr.size or 0) * 8
+            return explicit_bits or operand_bits
+        if expr.operator == "BOOL_NEGATE":
+            return 1
+        return operand_bits
+
+    if expr_type == expr_kind.BINARY_OP:
+        left = expr.operands[0] if len(getattr(expr, "operands", [])) >= 1 else None
+        right = expr.operands[1] if len(getattr(expr, "operands", [])) >= 2 else None
+        left_bits = expression_smt_bit_width(left)
+        right_bits = expression_smt_bit_width(right)
+
+        if expr.operator == "PIECE":
+            return left_bits + right_bits
+        if expr.operator == "SUBPIECE":
+            explicit_bits = (expr.size or 0) * 8
+            return explicit_bits or max(left_bits, right_bits)
+        if expr.operator in {"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}:
+            return left_bits
+        if expr.operator in _BOOLEAN_BINARY_OPERATORS:
+            return 1
+        return max(left_bits, right_bits)
+
+    if expr_type == expr_kind.PHI:
+        branches = expr.value or []
+        explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        branch_bits = max(
+            (expression_smt_bit_width(branch_value) for _, branch_value in branches),
+            default=0,
+        )
+        return max(explicit_bits, branch_bits)
+
+    return expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+
+
 def expression_contains_signed_comparison(expr) -> bool:
     """式木のどこかに signed 比較が含まれるか判定する。"""
     if expr is None:

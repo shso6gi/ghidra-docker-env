@@ -10,6 +10,7 @@ from ...model import Expression, FunctionReturnAnalysis
 from ...model.render_smt import (
     expression_contains_signed_comparison,
     expression_returns_bool,
+    expression_smt_bit_width,
 )
 from ..typing.helpers import is_unsigned_type
 from .params import replace_symbol_names
@@ -119,6 +120,35 @@ def should_sign_extend_value(
     return has_signed_branch_evidence(expr, conditions)
 
 
+def expression_has_unresolved_value(expr: Optional[Expression]) -> bool:
+    """ソルバへ流せない未解決値を含むか判定する。"""
+    if expr is None:
+        return True
+
+    expr_type = getattr(expr, "expr_type", None)
+    expr_kind = getattr(expr_type, "__class__", None)
+    if expr_type is None or expr_kind is None:
+        return True
+
+    if expr_type in {expr_kind.UNKNOWN, expr_kind.CALL}:
+        return True
+
+    if expr_type == expr_kind.PHI and expr.value:
+        for cond, value in expr.value:
+            cond_expr = getattr(cond, "expression", None) if cond is not None else None
+            if cond_expr is not None and expression_has_unresolved_value(cond_expr):
+                return True
+            if expression_has_unresolved_value(value):
+                return True
+        return False
+
+    for operand in getattr(expr, "operands", []) or []:
+        if expression_has_unresolved_value(operand):
+            return True
+
+    return False
+
+
 def _rewrite_ambiguous_negative_constant(
     expr: Expression,
     value_smt: str,
@@ -156,7 +186,7 @@ def coerce_value_to_bitvec_width(
         use_sign_extension,
     )
 
-    expr_bits = expr.get_bit_width()
+    expr_bits = expression_smt_bit_width(expr)
     if expr_bits == target_size:
         return value_smt
 

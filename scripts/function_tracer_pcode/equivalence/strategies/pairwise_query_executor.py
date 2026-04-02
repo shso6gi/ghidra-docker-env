@@ -4,7 +4,10 @@
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...smt import SolverStatus
-from ..formula.returns import should_sign_extend_value
+from ..formula.returns import (
+    expression_has_unresolved_value,
+    should_sign_extend_value,
+)
 from .pairwise_models import QueryResult
 
 
@@ -71,6 +74,20 @@ def solve_query_twostage(
         stage1_result.last_query = cond_query
         stage1_result.pair_stage = "conds-only"
         return stage1_result
+
+    if (
+        expression_has_unresolved_value(case1.value_expr)
+        or expression_has_unresolved_value(case2.value_expr)
+    ):
+        strategy._debug_print(
+            f"  Pair {pair_id} with-ineq skipped: unresolved value expression detected"
+        )
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["unknown_results"] += 1
+        result = QueryResult(is_equivalent=None)
+        result.last_query = cond_query
+        result.pair_stage = "with-ineq-skipped"
+        return result
 
     full_query = strategy._build_pair_query(
         base_ctx,

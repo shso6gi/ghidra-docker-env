@@ -5,8 +5,9 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    solve_query_twostage,
     validate_counterexample_across_cases,
 )
 from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
@@ -979,6 +980,167 @@ def test_return_analyzer_resolves_return_register_alias_from_local_output():
     assert aliased is not None
     assert aliased.value == 1000
     assert aliased.size == 4
+
+
+def test_return_analyzer_recovers_implicit_return_from_same_block_output():
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._parent = object()
+            self._seq = Mock()
+            self._seq.getTarget.return_value = "0x1000"
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getParent(self):
+            return self._parent
+
+        def getSeqnum(self):
+            return self._seq
+
+        def getNumInputs(self):
+            return 1
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+    condition_tracker.get_path_conditions_to_return.return_value = []
+    condition_tracker.get_all_valid_paths_to_return.return_value = [[]]
+
+    source_varnode = Mock(name="source_varnode")
+    return_varnode = Mock(name="return_varnode")
+    return_op = _FakeOp("RETURN")
+
+    block_info = Mock()
+    block_info.pcode_ops = [_FakeOp("COPY", output=source_varnode), return_op]
+    condition_tracker.get_block_by_hash.return_value = block_info
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: (
+        _FakeStorage("x0", "x0", 64, 0)
+        if vn is source_varnode
+        else _FakeStorage("w0", "x0", 32, 0)
+    )
+
+    current_function = Mock()
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    recovered = [ReturnInfo(address="0x1000", value=Expression.constant(7, 4), conditions=[], branch_index=0)]
+    with patch.object(analyzer, "_analyze_return_value", return_value=recovered) as mock_analyze:
+        result = analyzer._analyze_return_op(
+            return_op,
+            tracer,
+            condition_tracker,
+            0,
+            current_function=current_function,
+            active_functions=set(),
+        )
+
+    assert result == recovered
+    assert mock_analyze.call_args.args[0] is source_varnode
+
+
+def test_return_analyzer_falls_back_to_terminal_call_wrapper_recovery():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+    return_op = Mock()
+    call_op = Mock()
+    recovered = [ReturnInfo(address="0x1000", value=Expression.constant(9, 4), conditions=[], branch_index=0)]
+
+    with patch.object(analyzer, "_find_implicit_return_source_varnode", return_value=None):
+        with patch.object(analyzer, "_find_terminal_call_before_return", return_value=call_op):
+            with patch.object(
+                analyzer,
+                "_recover_implicit_return_from_terminal_call",
+                return_value=recovered,
+            ) as mock_recover:
+                result = analyzer._analyze_implicit_return_value(
+                    return_op,
+                    "0x1000",
+                    tracer,
+                    condition_tracker,
+                    [],
+                    0,
+                    all_path_conditions=[[]],
+                    active_functions=set(),
+                    current_function=Mock(),
+                )
+
+    assert result == recovered
+    assert mock_recover.call_args.args[0] is call_op
+
+
+def test_solve_query_twostage_skips_full_query_for_unresolved_values():
+    class _FakeStrategy:
+        def __init__(self):
+            self.messages = []
+            self._active_normalization_stats = None
+
+        def _build_condition_only_query(self, *_args, **_kwargs):
+            return "(check-sat)"
+
+        def _build_pair_query(self, *_args, **_kwargs):
+            raise AssertionError("full query should not be built for unresolved values")
+
+        def _solve_query_internal(self, query, pair_id, stage="full", use_hard_timeout=False):
+            assert query == "(check-sat)"
+            assert stage == "conds-only"
+            return QueryResult(is_equivalent=False)
+
+        def _debug_print(self, message):
+            self.messages.append(message)
+
+    strategy = _FakeStrategy()
+    resolved_case = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression.constant(1, 4),
+        return_info=ReturnInfo(address="0x1000", value=Expression.constant(1, 4)),
+        return_type="int",
+    )
+    unresolved_case = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression.unknown("void"),
+        return_info=ReturnInfo(address="0x1001", value=Expression.unknown("void")),
+        return_type="void",
+    )
+
+    result = solve_query_twostage(
+        strategy,
+        {"header_lines": [], "return_size1": 32, "return_size2": 32},
+        unresolved_case,
+        resolved_case,
+        lambda text: text,
+        lambda text: text,
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.pair_stage == "with-ineq-skipped"
+    assert any("unresolved value expression" in message for message in strategy.messages)
 
 
 def test_expand_input_operation_skips_direct_shortcut_for_recursive_subgraphs():

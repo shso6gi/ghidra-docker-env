@@ -1803,6 +1803,19 @@ class ReturnAnalyzer:
                 current_function=current_function,
             )
         else:
+            implicit_results = self._analyze_implicit_return_value(
+                return_op,
+                address,
+                tracer,
+                condition_tracker,
+                path_conditions,
+                return_index,
+                all_path_conditions=all_valid_path_conditions,
+                active_functions=active_functions,
+                current_function=current_function,
+            )
+            if implicit_results is not None:
+                return implicit_results
             # void return
             simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
             return [ReturnInfo(
@@ -1811,6 +1824,228 @@ class ReturnAnalyzer:
                 conditions=simplified_conds,
                 branch_index=return_index
             )]
+
+    def _analyze_implicit_return_value(
+        self,
+        return_op,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        path_conditions: List[Condition],
+        return_index: int,
+        all_path_conditions: Optional[List[List[Condition]]] = None,
+        active_functions: Optional[Set[str]] = None,
+        current_function=None,
+    ) -> Optional[List[ReturnInfo]]:
+        """RETURN オペランドが欠落している場合に、返り値レジスタ由来の値を復元する。"""
+        source_varnode = self._find_implicit_return_source_varnode(
+            return_op,
+            tracer,
+            condition_tracker,
+            current_function,
+        )
+        if source_varnode is None:
+            if self.debug:
+                self._debug_print(
+                    "Implicit return storage recovery did not find a matching source varnode"
+                )
+        else:
+            self._debug_print(
+                "RETURN has no explicit value; retrying via implicit return storage source"
+            )
+            return self._analyze_return_value(
+                source_varnode,
+                address,
+                tracer,
+                condition_tracker,
+                path_conditions,
+                return_index,
+                all_path_conditions=all_path_conditions,
+                active_functions=active_functions,
+                current_function=current_function,
+            )
+
+        terminal_call = self._find_terminal_call_before_return(
+            return_op,
+            condition_tracker,
+        )
+        if terminal_call is None:
+            if self.debug:
+                self._debug_print(
+                    "Implicit return call-wrapper recovery did not find a safe terminal CALL/CALLIND"
+                )
+            return None
+
+        return self._recover_implicit_return_from_terminal_call(
+            terminal_call,
+            address,
+            tracer,
+            condition_tracker,
+            path_conditions,
+            return_index,
+            all_path_conditions=all_path_conditions,
+            active_functions=active_functions,
+            current_function=current_function,
+        )
+
+    def _find_implicit_return_source_varnode(
+        self,
+        return_op,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        current_function=None,
+    ):
+        """同一 basic block 内で返り値レジスタへ最後に書いた varnode を探す。"""
+        return_varnodes = self._get_function_return_varnodes(current_function)
+        if not return_varnodes:
+            return None
+
+        return_parent = getattr(return_op, "getParent", lambda: None)()
+        return_block = condition_tracker.get_block_by_hash(return_parent)
+        if return_block is None:
+            return None
+
+        target_storages = []
+        for return_varnode in return_varnodes:
+            storage = tracer._get_storage_info_from_varnode(return_varnode)
+            if storage is not None:
+                target_storages.append(storage)
+        if not target_storages:
+            return None
+
+        candidate = None
+        for pcode_op in return_block.pcode_ops:
+            if pcode_op is return_op:
+                break
+            output = getattr(pcode_op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            output_storage = tracer._get_storage_info_from_varnode(output)
+            if output_storage is None:
+                continue
+            if not any(
+                self._storages_overlap_for_return_recovery(output_storage, target_storage)
+                for target_storage in target_storages
+            ):
+                continue
+            candidate = output
+
+        if candidate is not None and self.debug:
+            self._debug_print(
+                f"Implicit return source matched to block-local output {candidate}"
+            )
+        return candidate
+
+    def _find_terminal_call_before_return(
+        self,
+        return_op,
+        condition_tracker: ConditionTracker,
+    ):
+        """同一 basic block 内で wrapper return とみなせる末尾 CALL/CALLIND を探す。"""
+        return_parent = getattr(return_op, "getParent", lambda: None)()
+        return_block = condition_tracker.get_block_by_hash(return_parent)
+        if return_block is None:
+            return None
+
+        ops_before_return = []
+        for pcode_op in return_block.pcode_ops:
+            if pcode_op is return_op:
+                break
+            ops_before_return.append(pcode_op)
+
+        call_positions = [
+            index
+            for index, pcode_op in enumerate(ops_before_return)
+            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}
+        ]
+        if len(call_positions) != 1:
+            return None
+
+        call_index = call_positions[0]
+        candidate = ops_before_return[call_index]
+
+        for later_op in ops_before_return[call_index + 1:]:
+            mnemonic = later_op.getMnemonic()
+            output = getattr(later_op, "getOutput", lambda: None)()
+            if mnemonic in {"CALL", "CALLIND", "STORE", "BRANCH", "CBRANCH", "BRANCHIND"}:
+                return None
+            if output is not None:
+                return None
+
+        if self.debug:
+            self._debug_print(
+                f"Implicit return wrapper recovery selected terminal {candidate.getMnemonic()} before RETURN"
+            )
+        return candidate
+
+    def _recover_implicit_return_from_terminal_call(
+        self,
+        call_op,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        path_conditions: List[Condition],
+        return_index: int,
+        all_path_conditions: Optional[List[List[Condition]]] = None,
+        active_functions: Optional[Set[str]] = None,
+        current_function=None,
+    ) -> Optional[List[ReturnInfo]]:
+        """`call foo(...); return;` 形式の wrapper を callee summary から復元する。"""
+        from ..transform import ExpressionExpander
+
+        expander = ExpressionExpander(
+            tracer,
+            condition_tracker,
+            debug=self.debug,
+            call_resolver=self._make_call_resolver(active_functions or set(), current_function),
+            effect_summary=self._current_effect_summary,
+            parameters=self._current_parameters,
+            read_memory_value=self._read_memory_value,
+            image_base=self.program.getImageBase().getOffset(),
+        )
+
+        path_condition_sets = all_path_conditions or []
+        if not path_condition_sets:
+            path_condition_sets = [path_conditions] if path_conditions else [[]]
+
+        expanded_values = []
+        for conds in path_condition_sets:
+            expanded_values.extend(
+                expander._expand_call_operation(
+                    call_op,
+                    conds,
+                    depth=0,
+                    output_size=0,
+                )
+            )
+
+        if not expanded_values:
+            return None
+
+        results = self._build_return_infos_from_expansions(
+            address,
+            expanded_values,
+            return_index,
+        )
+        return results or None
+
+    def _storages_overlap_for_return_recovery(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            if getattr(left, "is_register", False) and getattr(right, "is_register", False):
+                return (
+                    left.shares_base_register_with(right)
+                    and left.bit_range_overlaps_with(right)
+                )
+        except Exception:
+            return False
+
+        return (
+            getattr(left, "space_name", None) == getattr(right, "space_name", None)
+            and getattr(left, "offset", None) == getattr(right, "offset", None)
+            and getattr(left, "size", None) == getattr(right, "size", None)
+        )
     
     def _analyze_return_value(
         self,
@@ -1892,35 +2127,12 @@ class ReturnAnalyzer:
                 )
         
         self._debug_print(f"Expanded to {len(expanded_values)} candidate(s)")
-        
-        results = []
-        for i, ev in enumerate(expanded_values):
-            if not ev.is_valid():
-                self._debug_print(f"Skipping contradictory expansion {i}")
-                continue
-            
-            simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
-            normalized_value = self._normalize_expanded_return_value(
-                ev.value,
-                simplified_conds,
-            )
-            resolved_value = self._concretize_readonly_loads(
-                normalized_value,
-                simplified_conds,
-                self._current_parameters,
-            )
-            
-            if self.debug:
-                cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in simplified_conds]
-                self._debug_print(f"Expansion {i}: value={resolved_value.to_string()}")
-                self._debug_print(f"  conditions={cond_strs}")
-            
-            results.append(ReturnInfo(
-                address=address,
-                value=resolved_value,
-                conditions=simplified_conds,
-                branch_index=return_index * 100 + i
-            ))
+
+        results = self._build_return_infos_from_expansions(
+            address,
+            expanded_values,
+            return_index,
+        )
         
         if not results:
             self._debug_print("WARNING: No valid expansions, falling back to simple trace")
@@ -1934,6 +2146,47 @@ class ReturnAnalyzer:
                 branch_index=return_index
             )]
         
+        return results
+
+    def _build_return_infos_from_expansions(
+        self,
+        address: str,
+        expanded_values,
+        return_index: int,
+    ) -> List[ReturnInfo]:
+        results = []
+        for i, ev in enumerate(expanded_values):
+            if not ev.is_valid():
+                self._debug_print(f"Skipping contradictory expansion {i}")
+                continue
+
+            simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
+            normalized_value = self._normalize_expanded_return_value(
+                ev.value,
+                simplified_conds,
+            )
+            resolved_value = self._concretize_readonly_loads(
+                normalized_value,
+                simplified_conds,
+                self._current_parameters,
+            )
+
+            if self.debug:
+                cond_strs = [
+                    ConditionSimplifier.get_simplified_condition_string(c)
+                    for c in simplified_conds
+                ]
+                self._debug_print(f"Expansion {i}: value={resolved_value.to_string()}")
+                self._debug_print(f"  conditions={cond_strs}")
+
+            results.append(
+                ReturnInfo(
+                    address=address,
+                    value=resolved_value,
+                    conditions=simplified_conds,
+                    branch_index=return_index * 100 + i,
+                )
+            )
         return results
 
     def _normalize_expanded_return_value(

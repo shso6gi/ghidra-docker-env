@@ -196,6 +196,43 @@ def test_build_normalized_inequality_query_coerces_normalized_values_to_return_w
     assert "(assert (not (= ((_ zero_extend 32) (_ bv2 32)) ((_ zero_extend 32) (_ bv2 32)))))" in query
 
 
+def test_build_pair_query_extracts_rendered_wide_value_back_to_declared_return_width():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=4),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=4)),
+        return_type="int",
+    )
+    wide_add = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(ExpressionType.PARAMETER, name="param_1", size=4),
+            Expression(ExpressionType.CONSTANT, value=7, size=8),
+        ],
+        size=4,
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=wide_add,
+        return_info=ReturnInfo(address="0x1002", value=wide_add),
+        return_type="int",
+    )
+
+    query = build_pair_query(
+        {"header_lines": [], "return_size1": 32, "return_size2": 32},
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert "(assert (not (= param_1 ((_ extract 31 0) (bvadd ((_ zero_extend 32) param_1) (_ bv7 64))))))" in query
+
+
 def test_build_pair_query_sign_extends_ambiguous_negative_constant_with_signed_evidence():
     signed_case = ReturnCase(
         index=0,
