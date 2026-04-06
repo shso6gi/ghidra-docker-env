@@ -416,6 +416,21 @@ class ReturnAnalyzer:
         c_text = self._get_decompiled_c_text(decompile_results)
         if not c_text:
             return None
+        recovered_structured = self._recover_structured_call_wrapper_from_c_text(
+            c_text,
+            analysis.parameters,
+            analysis.entry_point,
+            current_function,
+            active_functions or set(),
+        )
+        if recovered_structured is not None:
+            if self.debug:
+                self._debug_print(
+                    f"Call-wrapper recovery reconstructed {len(recovered_structured)} return case(s) "
+                    "from structured wrapper body"
+                )
+            return recovered_structured
+
         recovered_chain = self._recover_straightline_call_chain_from_c_text(
             c_text,
             analysis.parameters,
@@ -466,6 +481,45 @@ class ReturnAnalyzer:
             0,
         )
 
+    def _recover_structured_call_wrapper_from_c_text(
+        self,
+        c_text: str,
+        parameters: List[Dict],
+        address: str,
+        current_function,
+        active_functions: Set[str],
+    ) -> Optional[List[ReturnInfo]]:
+        from ..transform.expander import ExpandedValue
+
+        body_lines = self._extract_structured_wrapper_body_lines(c_text)
+        if not body_lines:
+            return None
+
+        next_index, live_states, terminated_states, ok = self._execute_structured_wrapper_block(
+            body_lines,
+            0,
+            [({}, [], None)],
+            parameters,
+            active_functions,
+            current_function,
+        )
+        if not ok or next_index != len(body_lines) or live_states:
+            return None
+
+        expanded_values = []
+        for _bindings, conditions, last_call in terminated_states:
+            if last_call is None:
+                return None
+            simplified = ConditionSimplifier.simplify_conditions(conditions)
+            if ConditionSimplifier.is_contradiction(simplified):
+                continue
+            expanded_values.append(ExpandedValue(self._clone_expression(last_call), simplified))
+
+        if not expanded_values:
+            return None
+
+        return self._build_return_infos_from_expansions(address, expanded_values, 0)
+
     def _recover_straightline_call_chain_from_c_text(
         self,
         c_text: str,
@@ -475,6 +529,10 @@ class ReturnAnalyzer:
         active_functions: Set[str],
     ) -> Optional[List[ReturnInfo]]:
         from ..transform.expander import ExpandedValue
+
+        structured_body_lines = self._extract_structured_wrapper_body_lines(c_text)
+        if structured_body_lines and self._has_structured_control_flow_markers(structured_body_lines):
+            return None
 
         statements = self._extract_wrapper_body_statements(c_text)
         if not statements or statements[-1] != "return;":
@@ -571,6 +629,396 @@ class ReturnAnalyzer:
 
         return self._build_return_infos_from_expansions(address, expanded_values, 0)
 
+    def _execute_structured_wrapper_block(
+        self,
+        body_lines: List[str],
+        start_index: int,
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+        stop_on_closing_brace: bool = False,
+    ) -> Tuple[
+        int,
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        bool,
+    ]:
+        live_states = [
+            (dict(bindings), list(conditions), last_call)
+            for bindings, conditions, last_call in states
+        ]
+        terminated_states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]] = []
+        index = start_index
+
+        while index < len(body_lines):
+            line = body_lines[index]
+
+            if line == "}":
+                if stop_on_closing_brace:
+                    return index + 1, live_states, terminated_states, True
+                return index, live_states, terminated_states, False
+
+            if line == "{":
+                return index, live_states, terminated_states, False
+
+            if not live_states and terminated_states:
+                return index, live_states, terminated_states, False
+
+            if self._is_wrapper_declaration_line(line):
+                index += 1
+                continue
+
+            if line == "return;":
+                if not live_states or any(last_call is None for _bindings, _conditions, last_call in live_states):
+                    return index, live_states, terminated_states, False
+                terminated_states.extend(
+                    (dict(bindings), list(conditions), self._clone_expression(last_call))
+                    for bindings, conditions, last_call in live_states
+                )
+                return index + 1, [], terminated_states, True
+
+            if_match = re.fullmatch(r"if\s*\((.+)\)\s*(\{)?", line)
+            if if_match:
+                next_index, live_states, branch_terminated, ok = self._execute_structured_wrapper_if(
+                    body_lines,
+                    index,
+                    live_states,
+                    if_match.group(1).strip(),
+                    bool(if_match.group(2)),
+                    parameters,
+                    active_functions,
+                    current_function,
+                )
+                if not ok:
+                    return index, live_states, terminated_states, False
+                terminated_states.extend(branch_terminated)
+                index = next_index
+                continue
+
+            assign_call = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;",
+                line,
+            )
+            if assign_call:
+                live_states = self._expand_wrapper_call_states(
+                    live_states,
+                    assign_call.group(1),
+                    assign_call.group(2),
+                    assign_call.group(3).strip(),
+                    parameters,
+                    active_functions,
+                    current_function,
+                    assign_to_last_call=False,
+                )
+                if live_states is None:
+                    return index, [], terminated_states, False
+                index += 1
+                continue
+
+            bare_call = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", line)
+            if bare_call:
+                live_states = self._expand_wrapper_call_states(
+                    live_states,
+                    None,
+                    bare_call.group(1),
+                    bare_call.group(2).strip(),
+                    parameters,
+                    active_functions,
+                    current_function,
+                    assign_to_last_call=True,
+                )
+                if live_states is None:
+                    return index, [], terminated_states, False
+                index += 1
+                continue
+
+            simple_assign = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)\s*;", line)
+            if simple_assign:
+                target_name = simple_assign.group(1)
+                expr_text = simple_assign.group(2)
+                next_states = []
+                for bindings, conditions, _last_call in live_states:
+                    parsed_expr = self._parse_wrapper_argument_expr(
+                        expr_text,
+                        parameters,
+                        fallback_index=0,
+                        local_bindings=bindings,
+                    )
+                    if parsed_expr is None:
+                        return index, [], terminated_states, False
+                    new_bindings = dict(bindings)
+                    new_bindings[target_name] = self._clone_expression(parsed_expr)
+                    next_states.append((new_bindings, list(conditions), None))
+                live_states = next_states
+                index += 1
+                continue
+
+            return index, live_states, terminated_states, False
+
+        return index, live_states, terminated_states, True
+
+    def _execute_structured_wrapper_if(
+        self,
+        body_lines: List[str],
+        if_index: int,
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        condition_text: str,
+        header_has_brace: bool,
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+    ) -> Tuple[
+        int,
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        bool,
+    ]:
+        then_start = if_index + 1
+        if not header_has_brace:
+            if then_start >= len(body_lines) or body_lines[then_start] != "{":
+                return if_index, states, [], False
+            then_start += 1
+
+        then_inputs = []
+        else_inputs = []
+        for bindings, conditions, last_call in states:
+            ok_then, refined_then = self._refine_wrapper_state_conditions(
+                conditions,
+                condition_text,
+                parameters,
+                bindings,
+                negated=False,
+            )
+            if not ok_then:
+                return if_index, states, [], False
+            if refined_then is not None:
+                then_inputs.append((dict(bindings), refined_then, last_call))
+
+            ok_else, refined_else = self._refine_wrapper_state_conditions(
+                conditions,
+                condition_text,
+                parameters,
+                bindings,
+                negated=True,
+            )
+            if not ok_else:
+                return if_index, states, [], False
+            if refined_else is not None:
+                else_inputs.append((dict(bindings), refined_else, last_call))
+
+        next_index, then_live, then_terminated, ok = self._execute_structured_wrapper_block(
+            body_lines,
+            then_start,
+            then_inputs,
+            parameters,
+            active_functions,
+            current_function,
+            stop_on_closing_brace=True,
+        )
+        if not ok:
+            return if_index, states, [], False
+
+        all_terminated = list(then_terminated)
+        merged_live = list(then_live)
+
+        if next_index < len(body_lines):
+            else_match = re.fullmatch(r"else\s*(\{)?", body_lines[next_index])
+            if else_match:
+                else_start = next_index + 1
+                if not else_match.group(1):
+                    if else_start >= len(body_lines) or body_lines[else_start] != "{":
+                        return if_index, states, [], False
+                    else_start += 1
+
+                next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_block(
+                    body_lines,
+                    else_start,
+                    else_inputs,
+                    parameters,
+                    active_functions,
+                    current_function,
+                    stop_on_closing_brace=True,
+                )
+                if not ok:
+                    return if_index, states, [], False
+                merged_live.extend(else_live)
+                all_terminated.extend(else_terminated)
+            elif else_inputs:
+                merged_live.extend(else_inputs)
+        elif else_inputs:
+            merged_live.extend(else_inputs)
+
+        return next_index, merged_live, all_terminated, True
+
+    def _refine_wrapper_state_conditions(
+        self,
+        existing_conditions: List[Condition],
+        condition_text: str,
+        parameters: List[Dict],
+        local_bindings: Dict[str, Expression],
+        negated: bool = False,
+    ) -> Tuple[bool, Optional[List[Condition]]]:
+        condition_expr = self._parse_wrapper_condition_expr(
+            condition_text,
+            parameters,
+            local_bindings,
+        )
+        if condition_expr is None:
+            return False, None
+
+        simplified = ConditionSimplifier.simplify_conditions(
+            list(existing_conditions) + [Condition(condition_expr, negated=negated)]
+        )
+        if ConditionSimplifier.is_contradiction(simplified):
+            return True, None
+        return True, simplified
+
+    def _parse_wrapper_condition_expr(
+        self,
+        text: str,
+        parameters: List[Dict],
+        local_bindings: Optional[Dict[str, Expression]] = None,
+    ) -> Optional[Expression]:
+        expr_text = self._strip_outer_parentheses(text.strip())
+        if not expr_text:
+            return None
+
+        for operator in ("||", "&&"):
+            parts = self._split_top_level_binary(expr_text, operator)
+            if parts is not None:
+                left_part, right_part = parts
+                left_expr = self._parse_wrapper_condition_expr(left_part, parameters, local_bindings)
+                right_expr = self._parse_wrapper_condition_expr(right_part, parameters, local_bindings)
+                if left_expr is None or right_expr is None:
+                    return None
+                return Expression.binary_op(
+                    "BOOL_OR" if operator == "||" else "BOOL_AND",
+                    left_expr,
+                    right_expr,
+                )
+
+        if expr_text.startswith("!"):
+            operand = self._parse_wrapper_condition_expr(expr_text[1:].strip(), parameters, local_bindings)
+            if operand is None:
+                return None
+            return Expression.unary_op("BOOL_NEGATE", operand)
+
+        for operator in ("==", "!=", "<=", ">=", "<", ">"):
+            parts = self._split_top_level_binary(expr_text, operator)
+            if parts is None:
+                continue
+            left_text, right_text = parts
+            left_expr = self._parse_wrapper_argument_expr(
+                left_text,
+                parameters,
+                fallback_index=0,
+                local_bindings=local_bindings,
+            )
+            right_expr = self._parse_wrapper_argument_expr(
+                right_text,
+                parameters,
+                fallback_index=0,
+                local_bindings=local_bindings,
+            )
+            if left_expr is None or right_expr is None:
+                return None
+
+            if left_expr.expr_type == ExpressionType.CONSTANT and right_expr.size:
+                left_expr = Expression.constant(left_expr.value, max(1, right_expr.size))
+            if right_expr.expr_type == ExpressionType.CONSTANT and left_expr.size:
+                right_expr = Expression.constant(right_expr.value, max(1, left_expr.size))
+
+            if operator == "==":
+                return Expression.binary_op("INT_EQUAL", left_expr, right_expr)
+            if operator == "!=":
+                return Expression.binary_op("INT_NOTEQUAL", left_expr, right_expr)
+
+            prefer_signed = self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
+            prefer_signed = prefer_signed or self._wrapper_expr_prefers_signed_compare(right_expr, parameters)
+            less_op = "INT_SLESS" if prefer_signed else "INT_LESS"
+            less_equal_op = "INT_SLESSEQUAL" if prefer_signed else "INT_LESSEQUAL"
+            if operator == "<":
+                return Expression.binary_op(less_op, left_expr, right_expr)
+            if operator == "<=":
+                return Expression.binary_op(less_equal_op, left_expr, right_expr)
+            if operator == ">":
+                return Expression.binary_op(less_op, right_expr, left_expr)
+            return Expression.binary_op(less_equal_op, right_expr, left_expr)
+
+        operand = self._parse_wrapper_argument_expr(
+            expr_text,
+            parameters,
+            fallback_index=0,
+            local_bindings=local_bindings,
+        )
+        if operand is None:
+            return None
+
+        return Expression.binary_op(
+            "INT_NOTEQUAL",
+            operand,
+            Expression.constant(0, max(1, operand.size or 4)),
+        )
+
+    def _split_top_level_binary(
+        self,
+        text: str,
+        operator: str,
+    ) -> Optional[Tuple[str, str]]:
+        depth = 0
+        index = 0
+        while index <= len(text) - len(operator):
+            char = text[index]
+            if char == "(":
+                depth += 1
+                index += 1
+                continue
+            if char == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+                index += 1
+                continue
+            if depth == 0 and text.startswith(operator, index):
+                left = text[:index].strip()
+                right = text[index + len(operator):].strip()
+                if not left or not right:
+                    return None
+                return left, right
+            index += 1
+        return None
+
+    def _wrapper_expr_prefers_signed_compare(
+        self,
+        expr: Expression,
+        parameters: List[Dict],
+    ) -> bool:
+        if expr.data_type:
+            type_lower = expr.data_type.lower()
+            if "unsigned" in type_lower or type_lower.startswith("u"):
+                return False
+            if any(token in type_lower for token in ("int", "long", "short", "char")):
+                return True
+
+        if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+            for param in parameters:
+                if expr.name != param.get("name"):
+                    continue
+                if "is_signed" in param:
+                    return bool(param.get("is_signed"))
+                data_type = str(param.get("data_type") or "").lower()
+                if "unsigned" in data_type or data_type.startswith("u"):
+                    return False
+                if any(token in data_type for token in ("int", "long", "short", "char")):
+                    return True
+                return False
+
+        if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+            return int(expr.value) < 0
+
+        return False
+
     def _extract_wrapper_body_statements(self, c_text: str) -> Optional[List[str]]:
         lines = []
         for raw_line in c_text.splitlines():
@@ -588,6 +1036,51 @@ class ReturnAnalyzer:
         if len(body_lines) < 2:
             return None
         return body_lines[1:]
+
+    def _extract_structured_wrapper_body_lines(self, c_text: str) -> Optional[List[str]]:
+        lines = self._normalize_wrapper_c_lines(c_text)
+        if not lines:
+            return None
+
+        body_lines: List[str] = []
+        body_started = False
+        body_depth = 0
+        for index, line in enumerate(lines):
+            if not body_started:
+                if line == "{":
+                    body_started = True
+                    body_depth = 1
+                    continue
+                if index == 0 and line.endswith("{"):
+                    body_started = True
+                    body_depth = 1
+                continue
+
+            if line == "}" and body_depth == 1:
+                return body_lines
+
+            body_lines.append(line)
+            body_depth += line.count("{") - line.count("}")
+            if body_depth <= 0:
+                return None
+
+        return None
+
+    def _normalize_wrapper_c_lines(self, c_text: str) -> List[str]:
+        normalized: List[str] = []
+        for raw_line in c_text.splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if not line:
+                continue
+            if re.fullmatch(r"\}\s*else\s*\{", line):
+                normalized.extend(["}", "else {"])
+                continue
+            normalized.append(line)
+        return normalized
+
+    def _has_structured_control_flow_markers(self, body_lines: List[str]) -> bool:
+        markers = ("if ", "if(", "else", "switch", "while", "for", "do ")
+        return any(line.startswith(markers) for line in body_lines)
 
     def _is_wrapper_declaration_line(self, line: str) -> bool:
         if not line.endswith(";"):

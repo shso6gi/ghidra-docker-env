@@ -1245,6 +1245,103 @@ def test_return_analyzer_recovers_straightline_call_chain_wrapper_from_decompile
     assert [ret.value.to_string() for ret in recovered] == ["(((param_1 + 7) * 2) + 18446744073709551613)"]
 
 
+def test_return_analyzer_recovers_branching_call_wrapper_from_decompiler_text():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_select_path",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "size": 4, "data_type": "undefined4"},
+            {"name": "param_2", "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+    )
+
+    c_text = """void ptr_select_path(undefined4 param_1,undefined4 param_2,int param_3)
+{
+  if (param_3 == 0) {
+    ptr_scale_then_bias(param_2,3,1);
+  }
+  else {
+    ptr_add_bias(param_1,10);
+  }
+  return;
+}
+"""
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_scale_then_bias":
+            return [
+                ExpandedValue(
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op("INT_MULT", args[0], args[1]),
+                        args[2],
+                    ),
+                    [],
+                )
+            ]
+        if function_name == "ptr_add_bias":
+            return [
+                ExpandedValue(
+                    Expression.binary_op("INT_ADD", args[0], args[1]),
+                    [],
+                )
+            ]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                Mock(),
+                analysis,
+                Mock(),
+                set(),
+            )
+
+    assert recovered is not None
+    assert len(recovered) == 2
+    recovered_by_condition = {
+        ret.conditions[0].to_string() if ret.conditions else "(unconditional)": ret.value.to_string()
+        for ret in recovered
+    }
+    assert recovered_by_condition["(param_3 == 0)"] == "((param_2 * 3) + 1)"
+    assert recovered_by_condition.get("(param_3 != 0)") == "(param_1 + 10)" or recovered_by_condition.get(
+        "(not (param_3 == 0))"
+    ) == "(param_1 + 10)"
+
+
+def test_return_analyzer_straightline_wrapper_recovery_rejects_branching_body():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    c_text = """void ptr_select_path(undefined4 param_1,undefined4 param_2,int param_3)
+{
+  if (param_3 == 0) {
+    ptr_scale_then_bias(param_2,3,1);
+  }
+  else {
+    ptr_add_bias(param_1,10);
+  }
+  return;
+}
+"""
+
+    recovered = analyzer._recover_straightline_call_chain_from_c_text(
+        c_text,
+        [
+            {"name": "param_1", "size": 4, "data_type": "undefined4"},
+            {"name": "param_2", "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "size": 4, "data_type": "int"},
+        ],
+        "0x1000",
+        Mock(),
+        set(),
+    )
+
+    assert recovered is None
+
+
 def test_solve_query_twostage_skips_full_query_for_unresolved_values():
     class _FakeStrategy:
         def __init__(self):
