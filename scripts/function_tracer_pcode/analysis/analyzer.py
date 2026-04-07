@@ -310,10 +310,13 @@ class ReturnAnalyzer:
             result.recovered_from_decompiler = True
             result.analysis_notes.append("switch_like_return_recovery")
         else:
-            recovered_returns = self._recover_call_wrapper_returns_from_decompiler(
+            recovered_returns = self._recover_call_wrapper_returns(
                 results,
                 result,
                 function,
+                tracer,
+                condition_tracker,
+                return_ops,
                 active_functions,
             )
             if recovered_returns is not None:
@@ -413,6 +416,113 @@ class ReturnAnalyzer:
             self._debug_print("Switch-like recovery failed: parser did not match decompiler text")
         return recovered
 
+    def _recover_call_wrapper_returns(
+        self,
+        decompile_results,
+        analysis: FunctionReturnAnalysis,
+        current_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        active_functions: Optional[Set[str]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        """wrapper らしい unknown return を P-code 優先で復元し、必要なら decompiler へフォールバックする。"""
+        recovered_from_pcode = self._recover_call_wrapper_returns_from_pcode(
+            analysis,
+            tracer,
+            condition_tracker,
+            return_ops,
+            current_function,
+            active_functions or set(),
+        )
+        if recovered_from_pcode is not None:
+            if self.debug:
+                self._debug_print(
+                    f"Call-wrapper recovery reconstructed {len(recovered_from_pcode)} return case(s) "
+                    "from P-code block paths"
+                )
+            return recovered_from_pcode
+
+        return self._recover_call_wrapper_returns_from_decompiler(
+            decompile_results,
+            analysis,
+            current_function,
+            active_functions or set(),
+        )
+
+    def _recover_call_wrapper_returns_from_pcode(
+        self,
+        analysis: FunctionReturnAnalysis,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        current_function,
+        active_functions: Set[str],
+    ) -> Optional[List[ReturnInfo]]:
+        """entry -> RETURN の block path 上の terminal CALL を callee summary から復元する。"""
+        if not analysis.has_unknown_return():
+            return None
+
+        if any(ret.value.expr_type != ExpressionType.UNKNOWN for ret in analysis.returns):
+            if self.debug:
+                self._debug_print(
+                    "P-code call-wrapper recovery skipped: analysis already contains "
+                    "non-unknown returns"
+                )
+            return None
+
+        recovered: List[ReturnInfo] = []
+        for return_index, return_op in enumerate(return_ops):
+            path_entries = condition_tracker.get_all_valid_block_paths_to_return(return_op)
+            if not path_entries:
+                if self.debug:
+                    self._debug_print(
+                        f"P-code call-wrapper recovery aborted: no valid block path to RETURN #{return_index}"
+                    )
+                return None
+
+            seq = getattr(return_op, "getSeqnum", lambda: None)()
+            address = str(seq.getTarget()) if seq else analysis.entry_point
+            return_results: List[ReturnInfo] = []
+
+            for path_index, (block_path, path_conditions) in enumerate(path_entries):
+                terminal_call = self._find_terminal_call_on_block_path(block_path, return_op)
+                if terminal_call is None:
+                    if self.debug:
+                        block_indexes = [block.index for block in block_path]
+                        self._debug_print(
+                            "P-code call-wrapper recovery aborted: no safe terminal CALL/CALLIND "
+                            f"found on path {path_index} to RETURN #{return_index} "
+                            f"(blocks={block_indexes})"
+                        )
+                    return None
+
+                path_recovered = self._recover_implicit_return_from_terminal_call(
+                    terminal_call,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    path_conditions,
+                    return_index,
+                    all_path_conditions=[path_conditions],
+                    active_functions=active_functions,
+                    current_function=current_function,
+                )
+                if not path_recovered:
+                    if self.debug:
+                        self._debug_print(
+                            "P-code call-wrapper recovery aborted: terminal call expansion "
+                            f"failed on path {path_index} to RETURN #{return_index}"
+                        )
+                    return None
+                return_results.extend(path_recovered)
+
+            if not return_results:
+                return None
+            recovered.extend(return_results)
+
+        return recovered or None
+
     def _recover_call_wrapper_returns_from_decompiler(
         self,
         decompile_results,
@@ -491,6 +601,48 @@ class ReturnAnalyzer:
             expanded,
             0,
         )
+
+    def _find_terminal_call_on_block_path(
+        self,
+        block_path: List[Any],
+        return_op,
+    ):
+        """block path 上で RETURN に至る直前の wrapper 候補 CALL/CALLIND を探す。"""
+        linear_ops = []
+        for block_info in block_path:
+            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
+                linear_ops.append(pcode_op)
+                if pcode_op is return_op:
+                    break
+            if linear_ops and linear_ops[-1] is return_op:
+                break
+
+        if not linear_ops or linear_ops[-1] is not return_op:
+            return None
+
+        terminal_index = None
+        for index, pcode_op in enumerate(linear_ops[:-1]):
+            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}:
+                terminal_index = index
+
+        if terminal_index is None:
+            return None
+
+        for pcode_op in linear_ops[terminal_index + 1:-1]:
+            if not self._is_wrapper_passthrough_pcode_op(pcode_op):
+                return None
+
+        return linear_ops[terminal_index]
+
+    def _is_wrapper_passthrough_pcode_op(self, pcode_op) -> bool:
+        """terminal CALL の後ろに許容できる op だけを通す。"""
+        mnemonic = pcode_op.getMnemonic()
+        return mnemonic in {
+            "BRANCH",
+            "CBRANCH",
+            "BRANCHIND",
+            "MULTIEQUAL",
+        }
 
     def _recover_structured_call_wrapper_from_c_text(
         self,

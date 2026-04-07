@@ -374,71 +374,41 @@ class ConditionTracker:
             2. 条件数が多すぎるパスを除外
             3. 短い順にソートして上位N件を返す
         """
-        from .simplifier import ConditionSimplifier
-        
+        path_entries = self.get_all_valid_block_paths_to_block(
+            target_block,
+            limit_paths=limit_paths,
+        )
+        return [conditions for _blocks, conditions in path_entries]
+
+    def get_all_valid_block_paths_to_block(
+        self,
+        target_block: BasicBlockInfo,
+        limit_paths: Optional[int] = None,
+    ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
+        """エントリーから target_block までの block path と条件列を返す。"""
         if limit_paths is None:
             limit_paths = self.MAX_VALID_PATHS
-        
+
         if self.entry_block is None:
             return []
-        
+
         if target_block.index == self.entry_block.index:
-            return [[]]
-        
-        all_paths: List[List[Condition]] = []
-        self._find_paths_with_conditions(
+            return [([self.entry_block], [])]
+
+        all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]] = []
+        self._find_block_paths_with_conditions(
             current=self.entry_block,
             target=target_block,
+            current_blocks=[self.entry_block],
             current_conditions=[],
             all_paths=all_paths,
-            visited=set()
+            visited=set(),
         )
-        
-        self._debug_print(f"get_all_valid_paths_to_block for block {target_block.index}:")
-        self._debug_print(f"  Found {len(all_paths)} total paths", 1)
-        
-        # Step 1: 矛盾しないパスのみ
-        valid_paths = []
-        for i, path in enumerate(all_paths):
-            if not ConditionSimplifier.is_contradiction(path):
-                valid_paths.append(path)
-            elif self.debug:
-                self._debug_print(f"  Path {i} rejected (contradiction)", 2)
-        
-        self._debug_print(f"  {len(valid_paths)} paths are valid (non-contradictory)", 1)
-        
-        # Step 2: 条件数が多すぎるパスを除外
-        filtered_paths = []
-        for path in valid_paths:
-            if len(path) <= self.MAX_CONDITIONS_PER_PATH:
-                filtered_paths.append(path)
-            elif self.debug:
-                self._debug_print(f"  Path with {len(path)} conditions rejected (exceeds limit {self.MAX_CONDITIONS_PER_PATH})", 2)
-        
-        valid_paths = filtered_paths
-        self._debug_print(f"  {len(valid_paths)} paths remain after condition limit filter", 1)
-        
-        if not valid_paths:
-            self._debug_print(f"  WARNING: No valid paths found!", 1)
-            return []
-        
-        # Step 3: 短い順にソート（条件が少ない = よりシンプル）
-        valid_paths = sorted(valid_paths, key=len)
-        
-        # Step 4: パス数制限
-        if len(valid_paths) > limit_paths:
-            self._debug_print(f"  Limiting to {limit_paths} paths (shortest first)", 1)
-            valid_paths = valid_paths[:limit_paths]
-        
-        # デバッグ出力
-        if self.debug:
-            self._debug_print(f"  Returning {len(valid_paths)} valid paths:", 1)
-            for i, path in enumerate(valid_paths):
-                conds = [ConditionSimplifier.get_simplified_condition_string(c) 
-                        for c in path]
-                self._debug_print(f"    Path {i} ({len(path)} conditions): {conds}", 2)
-        
-        return valid_paths
+        return self._filter_valid_block_paths(
+            all_paths,
+            target_index=target_block.index,
+            limit_paths=limit_paths,
+        )
     
     def _find_paths_with_conditions(
         self,
@@ -487,6 +457,99 @@ class ConditionTracker:
                 all_paths=all_paths,
                 visited=visited
             )
+
+    def _find_block_paths_with_conditions(
+        self,
+        current: BasicBlockInfo,
+        target: BasicBlockInfo,
+        current_blocks: List[BasicBlockInfo],
+        current_conditions: List[Condition],
+        all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]],
+        visited: Set[int],
+    ) -> None:
+        if current.index in visited:
+            return
+
+        visited = visited | {current.index}
+
+        if current.index == target.index:
+            all_paths.append((list(current_blocks), current_conditions.copy()))
+            return
+
+        for out_block in current.out_edges:
+            out_info = self.get_block_by_hash(out_block)
+            if out_info is None:
+                continue
+
+            new_conditions = current_conditions.copy()
+
+            if current.has_conditional_branch():
+                out_index = out_block.getIndex()
+                branch_cond = current.branch_condition
+                if branch_cond is not None:
+                    if out_index == current.true_out_index:
+                        new_conditions.append(Condition(branch_cond, negated=False))
+                    elif out_index == current.false_out_index:
+                        new_conditions.append(Condition(branch_cond, negated=True))
+
+            self._find_block_paths_with_conditions(
+                current=out_info,
+                target=target,
+                current_blocks=current_blocks + [out_info],
+                current_conditions=new_conditions,
+                all_paths=all_paths,
+                visited=visited,
+            )
+
+    def _filter_valid_block_paths(
+        self,
+        all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]],
+        target_index: int,
+        limit_paths: int,
+    ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
+        from .simplifier import ConditionSimplifier
+
+        self._debug_print(f"get_all_valid_block_paths_to_block for block {target_index}:")
+        self._debug_print(f"  Found {len(all_paths)} total paths", 1)
+
+        valid_paths = []
+        for i, (blocks, conditions) in enumerate(all_paths):
+            if ConditionSimplifier.is_contradiction(conditions):
+                if self.debug:
+                    self._debug_print(f"  Path {i} rejected (contradiction)", 2)
+                continue
+            if len(conditions) > self.MAX_CONDITIONS_PER_PATH:
+                if self.debug:
+                    self._debug_print(
+                        "  Path rejected (exceeds condition limit "
+                        f"{self.MAX_CONDITIONS_PER_PATH})",
+                        2,
+                    )
+                continue
+            valid_paths.append((blocks, conditions))
+
+        self._debug_print(f"  {len(valid_paths)} paths are valid (non-contradictory)", 1)
+
+        if not valid_paths:
+            self._debug_print("  WARNING: No valid paths found!", 1)
+            return []
+
+        valid_paths = sorted(valid_paths, key=lambda entry: (len(entry[1]), len(entry[0])))
+
+        if len(valid_paths) > limit_paths:
+            self._debug_print(f"  Limiting to {limit_paths} paths (shortest first)", 1)
+            valid_paths = valid_paths[:limit_paths]
+
+        if self.debug:
+            self._debug_print(f"  Returning {len(valid_paths)} valid paths:", 1)
+            for i, (_blocks, conditions) in enumerate(valid_paths):
+                conds = [
+                    ConditionSimplifier.get_simplified_condition_string(c)
+                    for c in conditions
+                ]
+                self._debug_print(f"    Path {i} ({len(conditions)} conditions): {conds}", 2)
+
+        return valid_paths
     
     def get_path_conditions_to_return(self, return_op) -> List[Condition]:
         """RETURNに至るパス条件を収集"""
@@ -510,6 +573,23 @@ class ConditionTracker:
             if return_block_info:
                 self._debug_print(f"RETURN block: index={return_block_info.index}")
                 return self.get_all_valid_paths_to_block(
+                    return_block_info,
+                    limit_paths=limit_paths,
+                )
+        return []
+
+    def get_all_valid_block_paths_to_return(
+        self,
+        return_op,
+        limit_paths: Optional[int] = None,
+    ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
+        """RETURN に至る block path と条件列を収集する。"""
+        return_parent = return_op.getParent()
+        if return_parent:
+            return_block_info = self.get_block_by_hash(return_parent)
+            if return_block_info:
+                self._debug_print(f"RETURN block: index={return_block_info.index}")
+                return self.get_all_valid_block_paths_to_block(
                     return_block_info,
                     limit_paths=limit_paths,
                 )

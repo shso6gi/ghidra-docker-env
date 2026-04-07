@@ -53,6 +53,68 @@ def test_condition_tracker_collects_all_valid_paths_to_return():
     )
 
 
+def test_condition_tracker_collects_all_valid_block_paths_to_return():
+    class _FakeBlock:
+        def __init__(self, index):
+            self._index = index
+
+        def getIndex(self):
+            return self._index
+
+    tracer = Mock()
+    tracer.high_function = Mock()
+    tracer.debug = False
+
+    tracker = ConditionTracker(tracer)
+
+    entry_block = _FakeBlock(0)
+    true_block = _FakeBlock(1)
+    false_block = _FakeBlock(2)
+    return_block = _FakeBlock(3)
+
+    selector = _param("param_1")
+    zero = Expression.constant(0, 4)
+    branch_condition = Expression.binary_op("INT_NOTEQUAL", selector, zero)
+
+    entry_info = Mock(
+        index=0,
+        out_edges=[true_block, false_block],
+        branch_condition=branch_condition,
+        true_out_index=1,
+        false_out_index=2,
+    )
+    entry_info.has_conditional_branch.return_value = True
+    true_info = Mock(index=1, out_edges=[return_block])
+    true_info.has_conditional_branch.return_value = False
+    false_info = Mock(index=2, out_edges=[return_block])
+    false_info.has_conditional_branch.return_value = False
+    return_info = Mock(index=3, out_edges=[])
+    return_info.has_conditional_branch.return_value = False
+
+    mapping = {
+        true_block: true_info,
+        false_block: false_info,
+        return_block: return_info,
+    }
+
+    tracker.entry_block = entry_info
+    tracker.get_block_by_hash = Mock(side_effect=lambda block: mapping.get(block))
+
+    return_op = Mock()
+    return_op.getParent.return_value = return_block
+
+    path_entries = tracker.get_all_valid_block_paths_to_return(return_op)
+
+    assert len(path_entries) == 2
+    assert [[block.index for block in blocks] for blocks, _conds in path_entries] == [
+        [0, 1, 3],
+        [0, 2, 3],
+    ]
+    condition_strings = [[cond.to_string() for cond in conds] for _blocks, conds in path_entries]
+    assert condition_strings[0] == ["(param_1 != 0)"]
+    assert condition_strings[1] in (["(param_1 == 0)"], ["(not (param_1 != 0))"])
+
+
 def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 

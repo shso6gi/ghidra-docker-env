@@ -1264,6 +1264,123 @@ def test_return_analyzer_uses_last_terminal_call_for_implicit_return_wrapper():
     assert mock_recover.call_args.args[0] is call_op_2
 
 
+def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+    current_function = Mock()
+
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_select_path",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int"}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+    )
+
+    class _Seq:
+        def getTarget(self):
+            return "0x1000"
+
+    class _FakeOp:
+        def __init__(self, mnemonic):
+            self._mnemonic = mnemonic
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+    call_then = _FakeOp("CALL")
+    call_else = _FakeOp("CALL")
+    branch = _FakeOp("BRANCH")
+    return_op = _FakeOp("RETURN")
+    return_op.getSeqnum = Mock(return_value=_Seq())
+
+    then_block = Mock(index=1, pcode_ops=[call_then, branch])
+    else_block = Mock(index=2, pcode_ops=[call_else, branch])
+    return_block = Mock(index=3, pcode_ops=[return_op])
+
+    cond_then = Condition(
+        Expression.binary_op("INT_NOTEQUAL", _param_expr("param_1", 0), Expression.constant(0, 4))
+    )
+    cond_else = Condition(
+        Expression.binary_op("INT_EQUAL", _param_expr("param_1", 0), Expression.constant(0, 4))
+    )
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([then_block, return_block], [cond_then]),
+        ([else_block, return_block], [cond_else]),
+    ]
+
+    recovered_then = [
+        ReturnInfo(
+            address="0x1000",
+            value=Expression.constant(11, 4),
+            conditions=[cond_then],
+            branch_index=0,
+        )
+    ]
+    recovered_else = [
+        ReturnInfo(
+            address="0x1000",
+            value=Expression.constant(22, 4),
+            conditions=[cond_else],
+            branch_index=1,
+        )
+    ]
+
+    with patch.object(
+        analyzer,
+        "_recover_implicit_return_from_terminal_call",
+        side_effect=[recovered_then, recovered_else],
+    ) as mock_recover:
+        recovered = analyzer._recover_call_wrapper_returns_from_pcode(
+            analysis,
+            tracer,
+            condition_tracker,
+            [return_op],
+            current_function,
+            set(),
+        )
+
+    assert recovered == recovered_then + recovered_else
+    assert mock_recover.call_args_list[0].args[0] is call_then
+    assert mock_recover.call_args_list[1].args[0] is call_else
+
+
+def test_return_analyzer_prefers_pcode_wrapper_recovery_before_decompiler_fallback():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_call_leaf",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int"}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+    )
+    recovered = [ReturnInfo(address="0x1000", value=Expression.constant(9, 4), conditions=[], branch_index=0)]
+
+    with patch.object(
+        analyzer,
+        "_recover_call_wrapper_returns_from_pcode",
+        return_value=recovered,
+    ) as mock_pcode:
+        with patch.object(
+            analyzer,
+            "_recover_call_wrapper_returns_from_decompiler",
+            side_effect=AssertionError("decompiler fallback must not run"),
+        ):
+            result = analyzer._recover_call_wrapper_returns(
+                Mock(),
+                analysis,
+                Mock(),
+                Mock(),
+                Mock(),
+                [],
+                set(),
+            )
+
+    assert result == recovered
+    mock_pcode.assert_called_once()
+
+
 def test_return_analyzer_parses_simple_decompiler_call_wrapper():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     parsed = analyzer._parse_call_wrapper_from_c_text(
