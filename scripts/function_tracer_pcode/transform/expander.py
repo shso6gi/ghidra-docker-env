@@ -85,6 +85,32 @@ class ExpressionExpander:
         if self.debug:
             prefix = "  " * indent
             print(f"{prefix}[Expander] {msg}")
+
+    def _coerce_value_to_output_size(self, value: Expression, output_size: int) -> Expression:
+        """CALL 出力サイズに合わせて値式を正規化する。"""
+        if value is None or output_size <= 0:
+            return value
+
+        current_size = getattr(value, "size", 0) or 0
+        if current_size <= 0:
+            value.size = output_size
+            return value
+
+        if current_size == output_size:
+            return value
+
+        # callee summary が内部で幅拡張された式を返しても、CALL 出力 varnode が
+        # 実際の幅を決める。広すぎる値は下位バイトへ切り詰める。
+        if current_size > output_size:
+            truncated = Expression.binary_op(
+                "SUBPIECE",
+                value,
+                Expression.constant(0, size=max(1, current_size)),
+            )
+            truncated.size = output_size
+            return truncated
+
+        return value
     
     def expand_from_varnode(
         self,
@@ -1150,9 +1176,7 @@ class ExpressionExpander:
                         )
                         if ConditionSimplifier.is_contradiction(merged_conditions):
                             continue
-                        value = ev.value
-                        if output_size > 0 and getattr(value, "size", 0) == 0:
-                            value.size = output_size
+                        value = self._coerce_value_to_output_size(ev.value, output_size)
                         result.append(ExpandedValue(value, merged_conditions))
                 return
 

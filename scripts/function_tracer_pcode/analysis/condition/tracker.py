@@ -17,6 +17,7 @@ class BasicBlockInfo:
         self.in_edges = []
         self.out_edges = []
         self.branch_condition: Optional[Expression] = None
+        self.branch_condition_varnode = None
         self.true_out_index: int = -1
         self.false_out_index: int = -1
     
@@ -136,8 +137,155 @@ class ConditionTracker:
                     cond_varnode = pcode_op.getInput(1)
                     cond_expr = self.tracer.trace_varnode(cond_varnode)
                     block_info.branch_condition = cond_expr
+                    block_info.branch_condition_varnode = cond_varnode
                     self._debug_print(f"  CBRANCH condition: {cond_expr.to_string()}", 1)
                     break
+
+    def refine_branch_conditions(
+        self,
+        call_resolver=None,
+        parameters: Optional[List[Dict[str, Any]]] = None,
+        effect_summary=None,
+        read_memory_value=None,
+        image_base: Optional[int] = None,
+    ) -> int:
+        """CALL を含む分岐条件を、安全な要約が得られる場合のみ再構築する。"""
+        from ...transform import ExpressionExpander
+        from ...analysis.condition.simplifier import ConditionSimplifier
+        from ...model.render_smt import expression_returns_bool
+
+        expander = ExpressionExpander(
+            self.tracer,
+            self,
+            debug=self.debug,
+            call_resolver=call_resolver,
+            effect_summary=effect_summary,
+            parameters=parameters,
+            read_memory_value=read_memory_value,
+            image_base=image_base,
+        )
+
+        changed = 0
+        for block_info in self.block_by_index.values():
+            raw_condition = block_info.branch_condition
+            cond_varnode = block_info.branch_condition_varnode
+            if raw_condition is None or cond_varnode is None:
+                continue
+            if not self._expression_contains_unknown_or_call(raw_condition):
+                continue
+
+            expanded_values = expander.expand_from_varnode(cond_varnode, [])
+            refined = self._build_refined_branch_condition(
+                expanded_values,
+                output_size=cond_varnode.getSize() if hasattr(cond_varnode, "getSize") else 1,
+                expression_returns_bool=expression_returns_bool,
+                condition_simplifier=ConditionSimplifier,
+            )
+            if refined is None:
+                continue
+
+            if self.debug:
+                self._debug_print(
+                    f"  Refined branch condition for block {block_info.index}: "
+                    f"{raw_condition.to_string()} -> {refined.to_string()}",
+                    1,
+                )
+            block_info.branch_condition = refined
+            changed += 1
+
+        if self.debug:
+            self._debug_print(f"Refined {changed} branch condition(s)")
+        return changed
+
+    def _build_refined_branch_condition(
+        self,
+        expanded_values,
+        output_size: int,
+        expression_returns_bool,
+        condition_simplifier,
+    ) -> Optional[Expression]:
+        valid_branches = []
+        seen = set()
+
+        for expanded in expanded_values:
+            value = getattr(expanded, "value", None)
+            conditions = list(getattr(expanded, "conditions", []) or [])
+            if value is None:
+                continue
+            if not expression_returns_bool(value):
+                continue
+            if self._expression_contains_unknown_or_call(value):
+                continue
+
+            simplified_conditions = condition_simplifier.simplify_conditions(conditions)
+            if condition_simplifier.is_contradiction(simplified_conditions):
+                continue
+            if any(
+                self._expression_contains_unknown_or_call(cond.expression)
+                for cond in simplified_conditions
+            ):
+                continue
+
+            key = (
+                tuple(cond.to_string() for cond in simplified_conditions),
+                value.to_string(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            valid_branches.append((simplified_conditions, value))
+
+        if not valid_branches:
+            return None
+
+        if len(valid_branches) == 1:
+            only_conditions, only_value = valid_branches[0]
+            if only_conditions:
+                return None
+            only_value.size = only_value.size or output_size
+            return only_value
+
+        branches = []
+        conditional_branches = []
+        fallback_branches = []
+        for branch_conditions, branch_value in valid_branches:
+            branch_condition = Condition.combine_and(branch_conditions)
+            if branch_condition is None:
+                fallback_branches.append((None, branch_value))
+            else:
+                conditional_branches.append((branch_condition, branch_value))
+
+        if not conditional_branches:
+            return None
+
+        branches.extend(conditional_branches)
+        branches.extend(fallback_branches)
+
+        phi_expr = Expression.phi(branches)
+        phi_expr.size = output_size or phi_expr.size
+        return phi_expr
+
+    def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+
+        expr_kind = expr.expr_type.__class__
+        if expr.expr_type in (expr_kind.UNKNOWN, expr_kind.CALL):
+            return True
+
+        if expr.expr_type == expr_kind.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_unknown_or_call(cond.expression):
+                    return True
+                if self._expression_contains_unknown_or_call(value):
+                    return True
+            return False
+
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unknown_or_call(operand):
+                return True
+
+        return False
     
     def get_block_by_hash(self, block) -> Optional[BasicBlockInfo]:
         """ブロックオブジェクトから情報を取得"""

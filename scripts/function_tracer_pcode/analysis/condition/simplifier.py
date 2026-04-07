@@ -547,6 +547,169 @@ class ConditionSimplifier:
         # それ以外はそのまま
         cls._debug_print(f"  -> No flattening", 2)
         return [Condition(expr, negated=negated)]
+
+    @classmethod
+    def _collect_implied_condition_norms(cls, conditions: List[Condition]) -> Set[Tuple[str, str, str, bool]]:
+        implied: Set[Tuple[str, str, str, bool]] = set()
+        stack = list(conditions or [])
+        while stack:
+            condition = stack.pop()
+            if condition is None:
+                continue
+            normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+            implied.add(normalized)
+
+            expr = condition.expression
+            if (
+                not condition.negated
+                and expr is not None
+                and expr.expr_type == ExpressionType.BINARY_OP
+                and expr.operator == "BOOL_AND"
+            ):
+                stack.append(Condition(expr.operands[0], False))
+                stack.append(Condition(expr.operands[1], False))
+
+        return implied
+
+    @classmethod
+    def _condition_is_implied(
+        cls,
+        condition: Condition,
+        implied_conditions: Set[Tuple[str, str, str, bool]],
+    ) -> bool:
+        normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+        if normalized in implied_conditions:
+            return True
+
+        expr = condition.expression
+        if (
+            not condition.negated
+            and expr is not None
+            and expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == "BOOL_AND"
+        ):
+            stack = [Condition(expr.operands[0], False), Condition(expr.operands[1], False)]
+            while stack:
+                current = stack.pop()
+                current_expr = current.expression
+                if (
+                    not current.negated
+                    and current_expr is not None
+                    and current_expr.expr_type == ExpressionType.BINARY_OP
+                    and current_expr.operator == "BOOL_AND"
+                ):
+                    stack.append(Condition(current_expr.operands[0], False))
+                    stack.append(Condition(current_expr.operands[1], False))
+                    continue
+                if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
+                    return False
+            return True
+
+        return False
+
+    @classmethod
+    def _condition_is_contradicted(
+        cls,
+        condition: Condition,
+        context_conditions: List[Condition],
+        implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
+    ) -> bool:
+        implied = implied_conditions if implied_conditions is not None else cls._collect_implied_condition_norms(context_conditions)
+        if cls._condition_is_implied(condition.negate(), implied):
+            return True
+        return any(
+            ConditionNormalizer.are_contradictory(condition, context)
+            for context in context_conditions
+        )
+
+    @classmethod
+    def _reduce_expression_under_conditions(
+        cls,
+        expr: Expression,
+        conditions: List[Condition],
+    ) -> Expression:
+        if expr is None:
+            return expr
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            implied = cls._collect_implied_condition_norms(conditions)
+
+            for cond, value in expr.value:
+                if cond is None:
+                    continue
+                if cls._condition_is_implied(cond, implied):
+                    return cls._reduce_expression_under_conditions(value, list(conditions) + [cond])
+
+            surviving = []
+            for cond, value in expr.value:
+                if cond is not None and cls._condition_is_contradicted(cond, conditions, implied):
+                    continue
+                combined = list(conditions)
+                if cond is not None:
+                    combined.append(cond)
+                reduced_value = cls._reduce_expression_under_conditions(value, combined)
+                surviving.append((cond, reduced_value))
+
+            if not surviving:
+                return expr
+            if len(surviving) == 1:
+                return surviving[0][1]
+
+            changed = len(surviving) != len(expr.value)
+            if not changed:
+                for (orig_cond, orig_value), (new_cond, new_value) in zip(expr.value, surviving):
+                    if orig_cond != new_cond or orig_value is not new_value:
+                        changed = True
+                        break
+            if not changed:
+                return expr
+
+            rebuilt = Expression.phi(surviving)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if expr.expr_type in (
+            ExpressionType.BINARY_OP,
+            ExpressionType.UNARY_OP,
+            ExpressionType.CALL,
+            ExpressionType.MEMORY,
+        ):
+            new_operands = [cls._reduce_expression_under_conditions(op, conditions) for op in expr.operands]
+            if all(new is old for new, old in zip(new_operands, expr.operands)):
+                return expr
+            rebuilt = Expression(
+                expr_type=expr.expr_type,
+                value=expr.value,
+                operator=expr.operator,
+                operands=new_operands,
+                size=expr.size,
+                name=expr.name,
+                data_type=expr.data_type,
+                storage_info=expr.storage_info,
+                read_order_key=expr.read_order_key,
+            )
+            return rebuilt
+
+        return expr
+
+    @classmethod
+    def _contextually_reduce_conditions(cls, conditions: List[Condition]) -> List[Condition]:
+        current = list(conditions)
+        for _ in range(4):
+            reduced: List[Condition] = []
+            changed = False
+            for index, cond in enumerate(current):
+                context = current[:index] + current[index + 1:]
+                reduced_expr = cls._reduce_expression_under_conditions(cond.expression, context)
+                rewritten = Condition(reduced_expr, cond.negated)
+                flattened = cls.flatten_condition(rewritten)
+                reduced.extend(flattened)
+                if len(flattened) != 1 or flattened[0].to_string() != cond.to_string():
+                    changed = True
+            if not changed:
+                return current
+            current = reduced
+        return current
     
     @classmethod
     def is_contradiction(cls, conditions: List[Condition]) -> bool:
@@ -586,6 +749,12 @@ class ConditionSimplifier:
         for i, cond in enumerate(flattened):
             cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
         
+        flattened = cls._contextually_reduce_conditions(flattened)
+
+        cls._debug_print(f"After contextual reduction ({len(flattened)} conditions):")
+        for i, cond in enumerate(flattened):
+            cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
+
         # Step 2: 矛盾判定専用の正規化を使用
         # key: (left, op, right), value: {True, False} (polarities)
         comparison_map: Dict[Tuple[str, str, str], Set[bool]] = {}
@@ -679,6 +848,8 @@ class ConditionSimplifier:
             if truth_value is True:
                 continue
             flattened.extend(cls.flatten_condition(cond))
+
+        flattened = cls._contextually_reduce_conditions(flattened)
 
         result = []
         seen: Set[Tuple[str, str, str, bool]] = set()

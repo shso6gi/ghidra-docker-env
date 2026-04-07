@@ -116,3 +116,45 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
     assert result.unknown_pairs == 0
     solver_runner.run_sequential.assert_not_called()
 
+
+def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solver():
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f1",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_const(1),
+                conditions=[
+                    Condition(
+                        _binary("INT_SLESS", _param("param_1"), Expression.unknown("call_out_of_scope:callee")),
+                        False,
+                    )
+                ],
+            )
+        ],
+        return_type="long",
+    )
+    analysis2 = _analysis([])
+
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+    }
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unknown_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.sat_pairs == 0
+    solver_runner.run_sequential.assert_not_called()

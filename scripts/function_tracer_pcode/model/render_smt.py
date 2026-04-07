@@ -26,6 +26,18 @@ _SIGNED_COMPARISON_OPERATORS = {
 }
 
 _MEMORY_ARRAY_WIDTHS = {8, 16, 32, 64}
+_ARITHMETIC_BINARY_OPERATORS = {
+    "INT_AND",
+    "INT_OR",
+    "INT_XOR",
+    "INT_ADD",
+    "INT_SUB",
+    "INT_MULT",
+    "INT_DIV",
+    "INT_SDIV",
+    "INT_REM",
+    "INT_SREM",
+}
 
 
 def expression_to_smt(expr) -> str:
@@ -98,6 +110,8 @@ def expression_smt_bit_width(expr) -> int:
             return left_bits
         if expr.operator in _BOOLEAN_BINARY_OPERATORS:
             return 1
+        if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
+            return _preferred_arithmetic_width(left, right, left_bits, right_bits)
         return max(left_bits, right_bits)
 
     if expr_type == expr_kind.PHI:
@@ -192,10 +206,90 @@ def _coerce_expr_to_bitvec_width(
     if expr_bits < target_bits:
         op = "sign_extend" if prefer_sign_extension else "zero_extend"
         return f"((_ {op} {target_bits - expr_bits}) {expr_smt})"
+    if expr is not None and getattr(expr, "expr_type", None) == expr.expr_type.__class__.CONSTANT:
+        value = getattr(expr, "value", 0)
+        if isinstance(value, int) and target_bits > 0:
+            value = value & ((1 << target_bits) - 1)
+            return f"(_ bv{value} {target_bits})"
     return f"((_ extract {target_bits - 1} 0) {expr_smt})"
 
 
-def _to_smt_internal(expr) -> str:
+def _constant_fits_width(expr, target_bits: int) -> bool:
+    if expr is None or getattr(expr, "expr_type", None) is None:
+        return False
+    if expr.expr_type != expr.expr_type.__class__.CONSTANT:
+        return False
+    if target_bits <= 0:
+        return False
+
+    value = getattr(expr, "value", None)
+    if not isinstance(value, int):
+        return False
+    mask = (1 << target_bits) - 1
+    return (value & ~mask) == 0 or value < 0
+
+
+def _preferred_arithmetic_width(left, right, left_bits: int, right_bits: int) -> int:
+    if left_bits == right_bits:
+        return left_bits
+    if (
+        left_bits > right_bits
+        and _constant_fits_width(left, right_bits)
+        and not expression_returns_bool(right)
+    ):
+        return right_bits
+    if (
+        right_bits > left_bits
+        and _constant_fits_width(right, left_bits)
+        and not expression_returns_bool(left)
+    ):
+        return left_bits
+    return max(left_bits, right_bits)
+
+
+def _expr_prefers_signed_extension(expr) -> bool:
+    """式を widening するとき sign-extend を優先すべきか判定する。"""
+    if expr is None:
+        return False
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
+        data_type = str(getattr(expr, "data_type", "") or "").lower()
+        if "unsigned" in data_type or data_type.startswith("u"):
+            return False
+        if any(token in data_type for token in ("int", "long", "short", "char")):
+            return True
+        return False
+
+    if expr_type == expr_kind.CONSTANT:
+        value = getattr(expr, "value", None)
+        return isinstance(value, int) and value < 0
+
+    if expr_type == expr_kind.UNARY_OP:
+        if expr.operator == "INT_SEXT":
+            return True
+        if expr.operator == "INT_ZEXT":
+            return False
+        operands = getattr(expr, "operands", None) or []
+        return any(_expr_prefers_signed_extension(operand) for operand in operands)
+
+    if expr_type == expr_kind.BINARY_OP:
+        if expr.operator in {"INT_SDIV", "INT_SREM", "INT_SRIGHT"}:
+            return True
+        operands = getattr(expr, "operands", None) or []
+        return any(_expr_prefers_signed_extension(operand) for operand in operands)
+
+    if expr_type == expr_kind.PHI:
+        branches = getattr(expr, "value", None) or []
+        return any(_expr_prefers_signed_extension(branch_value) for _, branch_value in branches)
+
+    operands = getattr(expr, "operands", None) or []
+    return any(_expr_prefers_signed_extension(operand) for operand in operands)
+
+
+def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
 
@@ -217,10 +311,14 @@ def _to_smt_internal(expr) -> str:
         right = expr.operands[1]
 
         if expr.operator == "PIECE":
-            return f"(concat {left._to_smt_internal()} {right._to_smt_internal()})"
+            return (
+                f"(concat "
+                f"{_to_smt_internal(left, prefer_signed_arithmetic)} "
+                f"{_to_smt_internal(right, prefer_signed_arithmetic)})"
+            )
 
         if expr.operator == "SUBPIECE":
-            source_smt = left._to_smt_internal()
+            source_smt = _to_smt_internal(left, prefer_signed_arithmetic)
             right_kind = right.expr_type.__class__
             if right.expr_type == right_kind.CONSTANT:
                 byte_offset = right.value
@@ -232,8 +330,8 @@ def _to_smt_internal(expr) -> str:
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)
-        left_smt = left._to_smt_internal()
-        right_smt = right._to_smt_internal()
+        left_smt = _to_smt_internal(left, prefer_signed_arithmetic)
+        right_smt = _to_smt_internal(right, prefer_signed_arithmetic)
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
@@ -247,26 +345,39 @@ def _to_smt_internal(expr) -> str:
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
 
-        if expr.operator in [
-            "INT_AND",
-            "INT_OR",
-            "INT_XOR",
-            "INT_ADD",
-            "INT_SUB",
-            "INT_MULT",
-            "INT_DIV",
-            "INT_SDIV",
-            "INT_REM",
-            "INT_SREM",
-        ]:
+        if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
             if left_bits != right_bits:
-                target_bits = max(left_bits, right_bits)
+                target_bits = _preferred_arithmetic_width(left, right, left_bits, right_bits)
                 if left_bits < target_bits:
-                    left_smt = f"((_ zero_extend {target_bits - left_bits}) {left_smt})"
+                    left_extend = (
+                        "sign_extend"
+                        if prefer_signed_arithmetic and _expr_prefers_signed_extension(left)
+                        else "zero_extend"
+                    )
+                    left_smt = f"((_ {left_extend} {target_bits - left_bits}) {left_smt})"
+                elif left_bits > target_bits:
+                    left_smt = _coerce_expr_to_bitvec_width(
+                        left,
+                        left_smt,
+                        target_bits,
+                        prefer_sign_extension=False,
+                    )
                 if right_bits < target_bits:
-                    right_smt = f"((_ zero_extend {target_bits - right_bits}) {right_smt})"
+                    right_extend = (
+                        "sign_extend"
+                        if prefer_signed_arithmetic and _expr_prefers_signed_extension(right)
+                        else "zero_extend"
+                    )
+                    right_smt = f"((_ {right_extend} {target_bits - right_bits}) {right_smt})"
+                elif right_bits > target_bits:
+                    right_smt = _coerce_expr_to_bitvec_width(
+                        right,
+                        right_smt,
+                        target_bits,
+                        prefer_sign_extension=False,
+                    )
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
 
@@ -278,12 +389,43 @@ def _to_smt_internal(expr) -> str:
             "INT_LESSEQUAL",
             "INT_SLESSEQUAL",
         ]:
-            if left_bits != right_bits:
+            prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
+            left_is_bool = expression_returns_bool(left)
+            right_is_bool = expression_returns_bool(right)
+            left_smt = _to_smt_internal(left, False)
+            right_smt = _to_smt_internal(right, False)
+
+            # Bool sort を含む比較は、そのまま zero/sign-extend すると
+            # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
+            # 0/1 へ変換してから幅を揃える。
+            if left_is_bool or right_is_bool:
+                should_compare_as_bool = (
+                    left_is_bool
+                    and right_is_bool
+                    and expr.operator in {"INT_EQUAL", "INT_NOTEQUAL"}
+                )
+                if not should_compare_as_bool:
+                    target_bits = max(left_bits, right_bits, 1)
+                    left_smt = _coerce_expr_to_bitvec_width(
+                        left,
+                        left_smt,
+                        target_bits,
+                        prefer_sign_extension=prefer_sign_extension,
+                    )
+                    right_smt = _coerce_expr_to_bitvec_width(
+                        right,
+                        right_smt,
+                        target_bits,
+                        prefer_sign_extension=prefer_sign_extension,
+                    )
+            elif left_bits != right_bits:
                 target_bits = max(left_bits, right_bits)
                 if left_bits < target_bits:
-                    left_smt = f"((_ zero_extend {target_bits - left_bits}) {left_smt})"
+                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
+                    left_smt = f"((_ {op} {target_bits - left_bits}) {left_smt})"
                 if right_bits < target_bits:
-                    right_smt = f"((_ zero_extend {target_bits - right_bits}) {right_smt})"
+                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
+                    right_smt = f"((_ {op} {target_bits - right_bits}) {right_smt})"
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
 
@@ -292,7 +434,7 @@ def _to_smt_internal(expr) -> str:
 
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0]
-        operand_smt = operand._to_smt_internal()
+        operand_smt = _to_smt_internal(operand, prefer_signed_arithmetic)
         operand_bits = expression_smt_bit_width(operand)
 
         if expr.operator == "INT_ZEXT":
@@ -330,7 +472,7 @@ def _to_smt_internal(expr) -> str:
         return f"({op} {operand_smt})"
 
     if expr_type == expr_kind.CALL:
-        args = " ".join(operand._to_smt_internal() for operand in expr.operands)
+        args = " ".join(_to_smt_internal(operand, prefer_signed_arithmetic) for operand in expr.operands)
         if args:
             return f"({expr.name} {args})"
         return f"{expr.name}"
@@ -340,7 +482,7 @@ def _to_smt_internal(expr) -> str:
         if mem_bits not in _MEMORY_ARRAY_WIDTHS:
             mem_bits = 32
         addr_expr = expr.operands[0]
-        addr_smt = addr_expr._to_smt_internal()
+        addr_smt = _to_smt_internal(addr_expr, prefer_signed_arithmetic)
         addr_smt = _coerce_expr_to_bitvec_width(
             addr_expr,
             addr_smt,
@@ -360,7 +502,7 @@ def _to_smt_internal(expr) -> str:
 
         def render_branch_value(branch_expr):
             if hasattr(branch_expr, "_to_smt_internal"):
-                branch_smt = branch_expr._to_smt_internal()
+                branch_smt = _to_smt_internal(branch_expr, prefer_sign_extension)
             else:
                 branch_smt = str(branch_expr)
 
@@ -380,7 +522,7 @@ def _to_smt_internal(expr) -> str:
         for index in range(len(branches) - 2, -1, -1):
             cond, val = branches[index]
             if cond is not None and hasattr(cond, "_to_smt_internal"):
-                cond_str = cond._to_smt_internal()
+                cond_str = _to_smt_internal(cond, prefer_sign_extension)
             elif cond is not None and hasattr(cond, "to_smt"):
                 cond_str = cond.to_smt()
             else:

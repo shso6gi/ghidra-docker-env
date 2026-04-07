@@ -220,6 +220,17 @@ class ReturnAnalyzer:
         parameters = self._collect_parameters(high_function)
         self._current_parameters = parameters
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
+        image_base = None
+        try:
+            image_base = self.program.getImageBase().getOffset()
+        except Exception:
+            image_base = None
+        condition_tracker.refine_branch_conditions(
+            call_resolver=self._make_call_resolver(active_functions, function),
+            parameters=parameters,
+            read_memory_value=self._read_memory_value,
+            image_base=image_base,
+        )
         effect_summary = self._build_effect_summary(
             function,
             high_function,
@@ -880,80 +891,17 @@ class ReturnAnalyzer:
         parameters: List[Dict],
         local_bindings: Optional[Dict[str, Expression]] = None,
     ) -> Optional[Expression]:
-        expr_text = self._strip_outer_parentheses(text.strip())
-        if not expr_text:
-            return None
-
-        for operator in ("||", "&&"):
-            parts = self._split_top_level_binary(expr_text, operator)
-            if parts is not None:
-                left_part, right_part = parts
-                left_expr = self._parse_wrapper_condition_expr(left_part, parameters, local_bindings)
-                right_expr = self._parse_wrapper_condition_expr(right_part, parameters, local_bindings)
-                if left_expr is None or right_expr is None:
-                    return None
-                return Expression.binary_op(
-                    "BOOL_OR" if operator == "||" else "BOOL_AND",
-                    left_expr,
-                    right_expr,
-                )
-
-        if expr_text.startswith("!"):
-            operand = self._parse_wrapper_condition_expr(expr_text[1:].strip(), parameters, local_bindings)
-            if operand is None:
-                return None
-            return Expression.unary_op("BOOL_NEGATE", operand)
-
-        for operator in ("==", "!=", "<=", ">=", "<", ">"):
-            parts = self._split_top_level_binary(expr_text, operator)
-            if parts is None:
-                continue
-            left_text, right_text = parts
-            left_expr = self._parse_wrapper_argument_expr(
-                left_text,
-                parameters,
-                fallback_index=0,
-                local_bindings=local_bindings,
-            )
-            right_expr = self._parse_wrapper_argument_expr(
-                right_text,
-                parameters,
-                fallback_index=0,
-                local_bindings=local_bindings,
-            )
-            if left_expr is None or right_expr is None:
-                return None
-
-            if left_expr.expr_type == ExpressionType.CONSTANT and right_expr.size:
-                left_expr = Expression.constant(left_expr.value, max(1, right_expr.size))
-            if right_expr.expr_type == ExpressionType.CONSTANT and left_expr.size:
-                right_expr = Expression.constant(right_expr.value, max(1, left_expr.size))
-
-            if operator == "==":
-                return Expression.binary_op("INT_EQUAL", left_expr, right_expr)
-            if operator == "!=":
-                return Expression.binary_op("INT_NOTEQUAL", left_expr, right_expr)
-
-            prefer_signed = self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
-            prefer_signed = prefer_signed or self._wrapper_expr_prefers_signed_compare(right_expr, parameters)
-            less_op = "INT_SLESS" if prefer_signed else "INT_LESS"
-            less_equal_op = "INT_SLESSEQUAL" if prefer_signed else "INT_LESSEQUAL"
-            if operator == "<":
-                return Expression.binary_op(less_op, left_expr, right_expr)
-            if operator == "<=":
-                return Expression.binary_op(less_equal_op, left_expr, right_expr)
-            if operator == ">":
-                return Expression.binary_op(less_op, right_expr, left_expr)
-            return Expression.binary_op(less_equal_op, right_expr, left_expr)
-
-        operand = self._parse_wrapper_argument_expr(
-            expr_text,
+        operand = self._parse_wrapper_expr(
+            text,
             parameters,
             fallback_index=0,
             local_bindings=local_bindings,
         )
         if operand is None:
             return None
+
+        if self._is_wrapper_boolean_expr(operand):
+            return operand
 
         return Expression.binary_op(
             "INT_NOTEQUAL",
@@ -987,6 +935,295 @@ class ReturnAnalyzer:
                     return None
                 return left, right
             index += 1
+        return None
+
+    def _split_top_level_binary_any(
+        self,
+        text: str,
+        operators: Tuple[str, ...],
+    ) -> Optional[Tuple[str, str, str]]:
+        depth = 0
+        candidates = sorted(operators, key=len, reverse=True)
+        for index in range(len(text) - 1, -1, -1):
+            char = text[index]
+            if char == ")":
+                depth += 1
+                continue
+            if char == "(":
+                depth -= 1
+                if depth < 0:
+                    return None
+                continue
+            if depth != 0:
+                continue
+
+            for operator in candidates:
+                op_start = index - len(operator) + 1
+                if op_start < 0 or text[op_start:index + 1] != operator:
+                    continue
+                if operator in {"+", "-"} and self._is_unary_operator_position(text, op_start):
+                    continue
+                left = text[:op_start].strip()
+                right = text[index + 1:].strip()
+                if not left or not right:
+                    return None
+                return left, operator, right
+        return None
+
+    def _is_unary_operator_position(self, text: str, index: int) -> bool:
+        if index <= 0:
+            return True
+        prev = text[index - 1]
+        return prev in "(,+-*/%<>=!&|^"
+
+    def _is_wrapper_boolean_expr(self, expr: Expression) -> bool:
+        if expr.expr_type == ExpressionType.UNARY_OP:
+            return expr.operator == "BOOL_NEGATE"
+        if expr.expr_type != ExpressionType.BINARY_OP:
+            return False
+        return expr.operator in {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        }
+
+    def _build_wrapper_compare_expr(
+        self,
+        operator: str,
+        left_expr: Expression,
+        right_expr: Expression,
+        parameters: List[Dict],
+    ) -> Expression:
+        if left_expr.expr_type == ExpressionType.CONSTANT and right_expr.size:
+            left_expr = Expression.constant(left_expr.value, max(1, right_expr.size))
+        if right_expr.expr_type == ExpressionType.CONSTANT and left_expr.size:
+            right_expr = Expression.constant(right_expr.value, max(1, left_expr.size))
+
+        if operator == "==":
+            return Expression.binary_op("INT_EQUAL", left_expr, right_expr)
+        if operator == "!=":
+            return Expression.binary_op("INT_NOTEQUAL", left_expr, right_expr)
+
+        prefer_signed = self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
+        prefer_signed = prefer_signed or self._wrapper_expr_prefers_signed_compare(right_expr, parameters)
+        less_op = "INT_SLESS" if prefer_signed else "INT_LESS"
+        less_equal_op = "INT_SLESSEQUAL" if prefer_signed else "INT_LESSEQUAL"
+        if operator == "<":
+            return Expression.binary_op(less_op, left_expr, right_expr)
+        if operator == "<=":
+            return Expression.binary_op(less_equal_op, left_expr, right_expr)
+        if operator == ">":
+            return Expression.binary_op(less_op, right_expr, left_expr)
+        return Expression.binary_op(less_equal_op, right_expr, left_expr)
+
+    def _infer_wrapper_constant_size(
+        self,
+        expr_text: str,
+        parameters: List[Dict],
+        fallback_index: int,
+    ) -> int:
+        literal = expr_text.strip()
+        negative = literal.startswith("-")
+        if negative:
+            literal = literal[1:].strip()
+        if literal.lower().startswith("0x"):
+            hex_digits = len(literal[2:])
+            if hex_digits <= 2:
+                return 1
+            if hex_digits <= 4:
+                return 2
+            if hex_digits <= 8:
+                return 4
+            return 8
+        if 0 <= fallback_index < len(parameters):
+            return max(1, parameters[fallback_index].get("size", 4))
+        try:
+            value = int(expr_text, 0)
+        except ValueError:
+            return 4
+        if -(1 << 31) <= value <= ((1 << 32) - 1):
+            return 4
+        return 8
+
+    def _parse_wrapper_expr(
+        self,
+        text: str,
+        parameters: List[Dict],
+        fallback_index: int,
+        local_bindings: Optional[Dict[str, Expression]] = None,
+    ) -> Optional[Expression]:
+        expr_text = self._strip_outer_parentheses(text.strip())
+        previous = None
+        while expr_text != previous:
+            previous = expr_text
+            cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", expr_text)
+            if cast_match:
+                expr_text = self._strip_outer_parentheses(cast_match.group(1).strip())
+
+        if not expr_text:
+            return None
+
+        if local_bindings and expr_text in local_bindings:
+            return self._clone_expression(local_bindings[expr_text])
+
+        split = self._split_top_level_binary_any(expr_text, ("||",))
+        if split is not None:
+            left_text, _operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("BOOL_OR", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("&&",))
+        if split is not None:
+            left_text, _operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("BOOL_AND", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("|",))
+        if split is not None:
+            left_text, _operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("INT_OR", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("^",))
+        if split is not None:
+            left_text, _operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("INT_XOR", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("&",))
+        if split is not None:
+            left_text, _operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("INT_AND", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("==", "!=", "<=", ">=", "<", ">"))
+        if split is not None:
+            left_text, operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return self._build_wrapper_compare_expr(operator, left_expr, right_expr, parameters)
+
+        split = self._split_top_level_binary_any(expr_text, ("<<", ">>"))
+        if split is not None:
+            left_text, operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            if operator == "<<":
+                return Expression.binary_op("INT_LEFT", left_expr, right_expr)
+            shift_op = (
+                "INT_SRIGHT"
+                if self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
+                else "INT_RIGHT"
+            )
+            return Expression.binary_op(shift_op, left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("+", "-"))
+        if split is not None:
+            left_text, operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            return Expression.binary_op("INT_ADD" if operator == "+" else "INT_SUB", left_expr, right_expr)
+
+        split = self._split_top_level_binary_any(expr_text, ("*", "/", "%"))
+        if split is not None:
+            left_text, operator, right_text = split
+            left_expr = self._parse_wrapper_expr(left_text, parameters, fallback_index, local_bindings)
+            right_expr = self._parse_wrapper_expr(right_text, parameters, fallback_index, local_bindings)
+            if left_expr is None or right_expr is None:
+                return None
+            if operator == "*":
+                return Expression.binary_op("INT_MULT", left_expr, right_expr)
+            if operator == "/":
+                division_op = (
+                    "INT_SDIV"
+                    if self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
+                    else "INT_DIV"
+                )
+                return Expression.binary_op(division_op, left_expr, right_expr)
+            remainder_op = (
+                "INT_SREM"
+                if self._wrapper_expr_prefers_signed_compare(left_expr, parameters)
+                else "INT_REM"
+            )
+            return Expression.binary_op(remainder_op, left_expr, right_expr)
+
+        if expr_text.startswith("!"):
+            operand = self._parse_wrapper_expr(
+                expr_text[1:].strip(),
+                parameters,
+                fallback_index,
+                local_bindings,
+            )
+            if operand is None:
+                return None
+            if self._is_wrapper_boolean_expr(operand):
+                return Expression.unary_op("BOOL_NEGATE", operand)
+            return Expression.binary_op(
+                "INT_EQUAL",
+                operand,
+                Expression.constant(0, max(1, operand.size or 4)),
+            )
+
+        if expr_text.startswith("+"):
+            return self._parse_wrapper_expr(expr_text[1:].strip(), parameters, fallback_index, local_bindings)
+
+        if expr_text.startswith("-") and not re.fullmatch(r"-?(?:0x[0-9a-fA-F]+|\d+)", expr_text):
+            operand = self._parse_wrapper_expr(
+                expr_text[1:].strip(),
+                parameters,
+                fallback_index,
+                local_bindings,
+            )
+            if operand is None:
+                return None
+            return Expression.binary_op(
+                "INT_SUB",
+                Expression.constant(0, max(1, operand.size or 4)),
+                operand,
+            )
+
+        for index, param in enumerate(parameters):
+            if expr_text == param.get("name"):
+                return Expression.parameter(
+                    expr_text,
+                    index=index,
+                    data_type=param.get("data_type"),
+                    size=param.get("size", 4),
+                )
+
+        const_match = re.fullmatch(r"(-?(?:0x[0-9a-fA-F]+|\d+))", expr_text)
+        if const_match:
+            value = int(const_match.group(1), 0)
+            size = self._infer_wrapper_constant_size(expr_text, parameters, fallback_index)
+            return Expression.constant(value, size=size)
+
         return None
 
     def _wrapper_expr_prefers_signed_compare(
@@ -1248,35 +1485,12 @@ class ReturnAnalyzer:
         fallback_index: int,
         local_bindings: Optional[Dict[str, Expression]] = None,
     ) -> Optional[Expression]:
-        expr_text = self._strip_outer_parentheses(text.strip())
-        previous = None
-        while expr_text != previous:
-            previous = expr_text
-            cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", expr_text)
-            if cast_match:
-                expr_text = self._strip_outer_parentheses(cast_match.group(1).strip())
-
-        if local_bindings and expr_text in local_bindings:
-            return self._clone_expression(local_bindings[expr_text])
-
-        for index, param in enumerate(parameters):
-            if expr_text == param.get("name"):
-                return Expression.parameter(
-                    expr_text,
-                    index=index,
-                    data_type=param.get("data_type"),
-                    size=param.get("size", 4),
-                )
-
-        const_match = re.fullmatch(r"(-?(?:0x[0-9a-fA-F]+|\d+))", expr_text)
-        if const_match:
-            value = int(const_match.group(1), 0)
-            size = 4
-            if 0 <= fallback_index < len(parameters):
-                size = parameters[fallback_index].get("size", 4)
-            return Expression.constant(value, size=size)
-
-        return None
+        return self._parse_wrapper_expr(
+            text,
+            parameters,
+            fallback_index=fallback_index,
+            local_bindings=local_bindings,
+        )
 
     def _get_decompiled_c_text(self, decompile_results) -> Optional[str]:
         """DecompileResults から C テキストを安全に取得する。"""
@@ -1758,6 +1972,17 @@ class ReturnAnalyzer:
             callee_tracker.build()
             callee_parameters = self._collect_parameters(callee_high)
             self._effect_summary_parameter_cache[callee_key] = list(callee_parameters)
+            image_base = None
+            try:
+                image_base = self.program.getImageBase().getOffset()
+            except Exception:
+                image_base = None
+            callee_tracker.refine_branch_conditions(
+                call_resolver=self._make_call_resolver(active_functions | {function_name}, callee),
+                parameters=callee_parameters,
+                read_memory_value=self._read_memory_value,
+                image_base=image_base,
+            )
             summary = self._build_effect_summary(
                 callee,
                 callee_high,
@@ -1824,7 +2049,14 @@ class ReturnAnalyzer:
             return None
 
         analysis = self._get_or_analyze_call_target(function_name, active_functions)
-        if analysis is None or not self._is_call_return_summary_allowed(analysis, args):
+        if analysis is None:
+            self._debug_print(f"Call expansion skipped for '{function_name}': analysis unavailable")
+            return None
+        if not self._is_call_return_summary_allowed(analysis, args):
+            self._debug_print(
+                f"Call expansion skipped for '{function_name}': "
+                "summary not safe enough for inlining"
+            )
             return None
 
         param_names = [param.get("name") for param in analysis.parameters if param.get("name")]
@@ -2416,6 +2648,11 @@ class ReturnAnalyzer:
         args: List[Expression],
     ) -> bool:
         if analysis is None or not analysis.returns:
+            return False
+        # 一時的な unknown event が残っていても、最終的な return summary が
+        # 完全に解決済みなら call 展開には利用できる。ここでは最終 summary の
+        # 安全性に直接効くシグナルだけを除外条件に使う。
+        if analysis.has_unknown_return() or analysis.has_overlapping_unconditional_returns():
             return False
 
         param_names = {param.get("name") for param in analysis.parameters if param.get("name")}

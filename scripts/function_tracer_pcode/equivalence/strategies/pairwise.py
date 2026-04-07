@@ -4,7 +4,7 @@
 from typing import Any, Dict, List, Optional
 import time
 
-from ...model import FunctionReturnAnalysis
+from ...model import Condition, Expression, FunctionReturnAnalysis, ExpressionType
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
@@ -81,6 +81,8 @@ class PairwiseStrategy(CheckStrategy):
             return self._create_empty_result()
 
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        self._rewrite_cases_with_parameter_fragments(cases1, base_ctx.get("extra_vars1", []))
+        self._rewrite_cases_with_parameter_fragments(cases2, base_ctx.get("extra_vars2", []))
         symbol_replace_fn1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
@@ -114,6 +116,12 @@ class PairwiseStrategy(CheckStrategy):
         for i, case1 in enumerate(cases1):
             for j, case2 in enumerate(cases2):
                 pair_id = f"({i},{j})"
+                if self._case_contains_unresolved_expression(case1) or self._case_contains_unresolved_expression(case2):
+                    unknown_count += 1
+                    self._debug_print(
+                        f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
+                    )
+                    continue
                 if self._cases_are_contradictory(case1, case2):
                     unsat_count += 1
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
@@ -404,6 +412,35 @@ class PairwiseStrategy(CheckStrategy):
             return False
         return ConditionSimplifier.is_contradiction(combined_conditions)
 
+    def _case_contains_unresolved_expression(self, case: ReturnCase) -> bool:
+        if self._expression_contains_unresolved(case.value_expr):
+            return True
+        return any(
+            self._expression_contains_unresolved(cond.expression)
+            for cond in case.conditions
+        )
+
+    def _expression_contains_unresolved(self, expr) -> bool:
+        if expr is None:
+            return False
+
+        if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+            return True
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_unresolved(cond.expression):
+                    return True
+                if self._expression_contains_unresolved(value):
+                    return True
+            return False
+
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unresolved(operand):
+                return True
+
+        return False
+
     def _create_empty_result(self) -> StrategyResult:
         return StrategyResult(
             is_equivalent=None,
@@ -427,3 +464,177 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print(f"    {param.original_name} -> {param.smt_name}")
         for var in base_ctx.get("extra_vars2", []):
             self._debug_print(f"    {var.original_name} -> {var.smt_name}")
+
+    def _rewrite_cases_with_parameter_fragments(
+        self,
+        cases: List[ReturnCase],
+        extra_vars: List[Any],
+    ) -> None:
+        fragment_map = {}
+        for extra in extra_vars or []:
+            analysis = getattr(extra, "analysis", None)
+            if analysis is None or not analysis.is_parameter_fragment() or analysis.fragment_info is None:
+                continue
+            fragment_map[extra.original_name] = analysis.fragment_info
+
+        if not fragment_map:
+            return
+
+        for case in cases:
+            changed = False
+
+            rewritten_conditions: List[Condition] = []
+            for cond in case.conditions:
+                rewritten_expr = self._rewrite_expr_with_parameter_fragments(
+                    cond.expression,
+                    fragment_map,
+                )
+                rewritten_conditions.append(Condition(rewritten_expr, cond.negated))
+                changed = changed or (rewritten_expr is not cond.expression)
+
+            rewritten_value = self._rewrite_expr_with_parameter_fragments(
+                case.value_expr,
+                fragment_map,
+            )
+            changed = changed or (rewritten_value is not case.value_expr)
+
+            if not changed:
+                continue
+
+            case.conditions = ConditionSimplifier.simplify_conditions(rewritten_conditions)
+            case.value_expr = normalize_expression(rewritten_value, NormalizationContext())
+            case.conditions_smt = None
+            case._value_smt_cache.clear()
+
+    def _rewrite_expr_with_parameter_fragments(
+        self,
+        expr: Expression,
+        fragment_map: Dict[str, Any],
+    ) -> Expression:
+        if expr is None:
+            return expr
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            changed = False
+            branches = []
+            for cond, value in expr.value:
+                rewritten_cond = None
+                if cond is not None:
+                    rewritten_cond_expr = self._rewrite_expr_with_parameter_fragments(
+                        cond.expression,
+                        fragment_map,
+                    )
+                    rewritten_cond = Condition(rewritten_cond_expr, cond.negated)
+                    changed = changed or (rewritten_cond_expr is not cond.expression)
+                rewritten_value = self._rewrite_expr_with_parameter_fragments(value, fragment_map)
+                changed = changed or (rewritten_value is not value)
+                branches.append((rewritten_cond, rewritten_value))
+
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        operands = getattr(expr, "operands", None) or []
+        rewritten_operands = [
+            self._rewrite_expr_with_parameter_fragments(operand, fragment_map)
+            for operand in operands
+        ]
+        operands_changed = any(new is not old for new, old in zip(rewritten_operands, operands))
+
+        candidate = expr
+        if operands_changed:
+            candidate = Expression(
+                expr_type=expr.expr_type,
+                value=expr.value,
+                operator=expr.operator,
+                operands=rewritten_operands,
+                size=expr.size,
+                name=expr.name,
+                data_type=expr.data_type,
+                storage_info=expr.storage_info,
+                read_order_key=expr.read_order_key,
+            )
+
+        collapsed = self._collapse_parameter_fragment_extension(candidate, fragment_map)
+        return collapsed
+
+    def _collapse_parameter_fragment_extension(
+        self,
+        expr: Expression,
+        fragment_map: Dict[str, Any],
+    ) -> Expression:
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP:
+            return expr
+
+        if expr.operator == "PIECE" and len(expr.operands) == 2:
+            high, low = expr.operands
+            collapsed = self._build_fragment_extension_expr(high, low, fragment_map)
+            if collapsed is not None:
+                return collapsed
+            return expr
+
+        if expr.operator != "INT_OR" or len(expr.operands) != 2:
+            return expr
+
+        left, right = expr.operands
+        collapsed = self._match_shift_or_fragment_expr(left, right, fragment_map)
+        if collapsed is not None:
+            return collapsed
+        collapsed = self._match_shift_or_fragment_expr(right, left, fragment_map)
+        if collapsed is not None:
+            return collapsed
+        return expr
+
+    def _match_shift_or_fragment_expr(
+        self,
+        shifted_expr: Expression,
+        low_expr: Expression,
+        fragment_map: Dict[str, Any],
+    ) -> Optional[Expression]:
+        if (
+            shifted_expr.expr_type != ExpressionType.BINARY_OP
+            or shifted_expr.operator != "INT_LEFT"
+            or len(shifted_expr.operands) != 2
+        ):
+            return None
+
+        shift_amount = shifted_expr.operands[1]
+        if shift_amount.expr_type != ExpressionType.CONSTANT:
+            return None
+
+        return self._build_fragment_extension_expr(
+            shifted_expr.operands[0],
+            low_expr,
+            fragment_map,
+            expected_shift_bits=int(shift_amount.value),
+        )
+
+    def _build_fragment_extension_expr(
+        self,
+        high_expr: Expression,
+        low_expr: Expression,
+        fragment_map: Dict[str, Any],
+        expected_shift_bits: Optional[int] = None,
+    ) -> Optional[Expression]:
+        if high_expr.expr_type != ExpressionType.VARIABLE or not high_expr.name:
+            return None
+
+        fragment_info = fragment_map.get(high_expr.name)
+        if fragment_info is None:
+            return None
+
+        if low_expr.expr_type not in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+            return None
+        if low_expr.name != fragment_info.parent_param_name:
+            return None
+
+        if expected_shift_bits is not None and expected_shift_bits != fragment_info.parent_param_bit_width:
+            return None
+
+        ext_op = "INT_SEXT" if fragment_info.extension_type.name == "SIGN_EXTEND" else "INT_ZEXT"
+        rebuilt = Expression.unary_op(ext_op, low_expr)
+        rebuilt.size = max(1, fragment_info.base_register_size_bits // 8)
+        rebuilt.data_type = getattr(low_expr, "data_type", None)
+        return rebuilt

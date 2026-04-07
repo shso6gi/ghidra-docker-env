@@ -233,3 +233,66 @@ def test_simplify_conditions_keeps_only_strongest_interval_bounds():
         "(0 < param_2)",
         "(param_2 < 8)",
     ]
+
+
+def test_simplify_conditions_reduces_phi_guard_under_selector_context():
+    selector = Expression.binary_op("INT_SLESS", _param("param_2"), _param("param_1"))
+    selector_is_zero = Expression.binary_op("INT_EQUAL", selector, _const(0))
+    bool_phi = Expression.phi(
+        [
+            (
+                Condition(selector_is_zero, True),
+                Expression.binary_op("INT_SLESS", _param("param_3"), Expression.binary_op("INT_ADD", _param("param_1"), _const(10))),
+            ),
+            (
+                Condition(selector_is_zero, False),
+                Expression.binary_op(
+                    "INT_SLESS",
+                    _param("param_3"),
+                    Expression.binary_op("INT_ADD", Expression.binary_op("INT_MULT", _param("param_2"), _const(3)), _const(1)),
+                ),
+            ),
+        ]
+    )
+
+    conditions = [
+        Condition(bool_phi, True),
+        Condition(selector_is_zero, False),
+    ]
+
+    simplified = ConditionSimplifier.simplify_conditions(conditions)
+    simplified_strings = [cond.to_string() for cond in simplified]
+
+    assert "(not PHI(" not in " ".join(simplified_strings)
+    assert "((param_2 < param_1) == 0)" in simplified_strings
+    assert "(not (param_3 < ((param_2 * 3) + 1)))" in simplified_strings
+
+
+def test_phi_guard_and_selected_branch_condition_become_contradiction():
+    selector = Expression.binary_op("INT_SLESS", _param("param_2"), _param("param_1"))
+    selector_is_zero = Expression.binary_op("INT_EQUAL", selector, _const(0))
+    selected_branch = Expression.binary_op(
+        "INT_SLESS",
+        _param("param_3"),
+        Expression.binary_op("INT_ADD", Expression.binary_op("INT_MULT", _param("param_2"), _const(3)), _const(1)),
+    )
+    bool_phi = Expression.phi(
+        [
+            (
+                Condition(selector_is_zero, True),
+                Expression.binary_op("INT_SLESS", _param("param_3"), Expression.binary_op("INT_ADD", _param("param_1"), _const(10))),
+            ),
+            (
+                Condition(selector_is_zero, False),
+                selected_branch,
+            ),
+        ]
+    )
+
+    conditions = [
+        Condition(bool_phi, True),
+        Condition(selector_is_zero, False),
+        Condition(selected_branch, False),
+    ]
+
+    assert ConditionSimplifier.is_contradiction(conditions) is True

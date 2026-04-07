@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+
+from unittest.mock import Mock
+
+from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo
+from scripts.function_tracer_pcode.equivalence.formula.variable import (
+    ExtensionType,
+    ExtraVariableAnalysis,
+    ParameterFragmentInfo,
+    VariableClassification,
+)
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.model import Condition, Expression, ReturnInfo
+
+
+def _param(name: str) -> Expression:
+    return Expression.parameter(name, size=4, data_type="int")
+
+
+def _const(value: int, size: int = 4) -> Expression:
+    return Expression.constant(value, size=size)
+
+
+def _binary(op: str, left: Expression, right: Expression) -> Expression:
+    return Expression.binary_op(op, left, right)
+
+
+def _fragment_var(name: str) -> Expression:
+    return Expression.variable(name, size=4)
+
+
+def _wide_param(fragment_name: str, param_name: str) -> Expression:
+    return _binary(
+        "INT_OR",
+        _binary("INT_LEFT", _fragment_var(fragment_name), _const(32, size=8)),
+        _param(param_name),
+    )
+
+
+def _fragment_info(fragment_name: str, parent_name: str, parent_index: int) -> ExtraVariableInfo:
+    fragment_info = ParameterFragmentInfo(
+        fragment_name=fragment_name,
+        fragment_bit_width=32,
+        parent_param_name=parent_name,
+        parent_param_index=parent_index,
+        parent_param_bit_width=32,
+        extension_type=ExtensionType.SIGN_EXTEND,
+        bit_offset_in_base=0,
+        bit_length=32,
+        base_register_name=f"a{parent_index}",
+        base_register_size_bits=64,
+    )
+    analysis = ExtraVariableAnalysis(
+        name=fragment_name,
+        bit_width=32,
+        classification=VariableClassification.PARAMETER_FRAGMENT,
+        fragment_info=fragment_info,
+        reason="test fragment",
+    )
+    return ExtraVariableInfo(
+        original_name=fragment_name,
+        smt_name=f"{fragment_name}_2",
+        bit_width=32,
+        analysis=analysis,
+    )
+
+
+def test_pairwise_rewrites_mips64_parameter_fragments_before_contradiction_check():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    selector_is_zero = _binary(
+        "INT_EQUAL",
+        _binary("INT_SLESS", _param("param_2"), _param("param_1")),
+        _const(0),
+    )
+    cutoff = _binary(
+        "INT_ADD",
+        _binary("INT_MULT", _param("param_2"), _const(3)),
+        _const(1),
+    )
+
+    case1 = ReturnCase(
+        index=1,
+        conditions=[
+            Condition(_binary("INT_SLESSEQUAL", cutoff, _param("param_3"))),
+            Condition(selector_is_zero),
+        ],
+        value_expr=_const(0),
+        return_info=ReturnInfo(address="0x1", value=_const(0), conditions=[], branch_index=1),
+        return_type="int",
+    )
+
+    wide_cutoff = Expression.unary_op("INT_SEXT", cutoff)
+    wide_cutoff.size = 8
+    case2 = ReturnCase(
+        index=2,
+        conditions=[
+            Condition(
+                _binary(
+                    "INT_SLESSEQUAL",
+                    _wide_param("in_a0_hi", "param_1"),
+                    _wide_param("in_a1_hi", "param_2"),
+                )
+            ),
+            Condition(
+                _binary(
+                    "INT_SLESS",
+                    _wide_param("in_a2_hi", "param_3"),
+                    wide_cutoff,
+                )
+            ),
+        ],
+        value_expr=_const(1),
+        return_info=ReturnInfo(address="0x2", value=_const(1), conditions=[], branch_index=2),
+        return_type="int",
+    )
+
+    strategy._rewrite_cases_with_parameter_fragments(
+        [case2],
+        [
+            _fragment_info("in_a0_hi", "param_1", 0),
+            _fragment_info("in_a1_hi", "param_2", 1),
+            _fragment_info("in_a2_hi", "param_3", 2),
+        ],
+    )
+
+    for cond in case2.conditions:
+        assert "in_a" not in cond.to_string()
+    assert case2.conditions[0].to_string() == "(int(param_1) <= int(param_2))"
+    assert case2.conditions[1].to_string() == "(int(param_3) < int(((param_2 * 3) + 1)))"

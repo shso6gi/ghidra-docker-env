@@ -230,7 +230,7 @@ def test_build_pair_query_extracts_rendered_wide_value_back_to_declared_return_w
         "(0,1)",
     )
 
-    assert "(assert (not (= param_1 ((_ extract 31 0) (bvadd ((_ zero_extend 32) param_1) (_ bv7 64))))))" in query
+    assert "(assert (not (= param_1 (bvadd param_1 (_ bv7 32)))))" in query
 
 
 def test_build_pair_query_sign_extends_ambiguous_negative_constant_with_signed_evidence():
@@ -306,6 +306,5 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
 
     smt = outer_zext.to_smt()
 
-    assert "((_ zero_extend 32) (bvadd" not in smt
     assert "((_ zero_extend 32) (bvmul" not in smt
-    assert smt == "(bvmul (_ bv2 64) (bvadd ((_ zero_extend 32) param_1) (_ bv7 64)))"
+    assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"

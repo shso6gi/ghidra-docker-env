@@ -66,6 +66,48 @@ def test_return_analyzer_resolves_call_summary_with_argument_substitution():
     assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 != 0)"]
 
 
+def test_return_analyzer_allows_safe_call_summary_despite_incomplete_control_flow():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x401000",
+        parameters=[{"name": "x", "size": 4, "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x401010",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("x", 0, size=4),
+                    Expression.constant(2, 4),
+                ),
+                conditions=[
+                    _cond_ne(
+                        Expression.parameter("x", 0, size=4),
+                        Expression.constant(0, 4),
+                    )
+                ],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+        unknown_event_count=4,
+        unknown_event_reasons=["OTHER"],
+        incomplete_control_flow=True,
+    )
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
+        expanded = analyzer._resolve_call_expansions(
+            "callee",
+            [_param_expr("arg0", 0, size=4)],
+            active_functions=set(),
+        )
+
+    assert expanded is not None
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "(arg0 + 2)"
+    assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 != 0)"]
+
+
 def test_expression_expander_inlines_direct_call_results():
     class _FakeVarnode:
         def __init__(self, name, size=4):
@@ -152,6 +194,94 @@ def test_expression_expander_inlines_direct_call_results():
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "(arg0 + 1)"
     assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 == 7)"]
+
+
+def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
+    class _FakeVarnode:
+        def __init__(self, name, size=4):
+            self.name = name
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class _FakeOutput:
+        def __init__(self, size):
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class _FakeCallOp:
+        def __init__(self, target, arg):
+            self._inputs = [target, arg]
+            self._output = _FakeOutput(4)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+    target_varnode = _FakeVarnode("callee_addr", size=8)
+    arg_varnode = _FakeVarnode("arg0", size=4)
+
+    class _FakeTracer:
+        debug = False
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            if varnode is target_varnode:
+                return Expression.constant(0x401000, 8)
+            if varnode is arg_varnode:
+                return _param_expr("arg0", 0, size=4)
+            raise AssertionError(f"unexpected varnode: {varnode}")
+
+        def emit_unknown_event(self, **kwargs):
+            raise AssertionError(f"call should have been resolved: {kwargs}")
+
+        def _trace_pcode_op(self, *_args, **_kwargs):
+            raise AssertionError("recursive tracing fallback should not run")
+
+    def _resolve_call(function_name, args):
+        assert function_name == "callee"
+        assert len(args) == 1
+        return [
+            ExpandedValue(
+                Expression.binary_op("INT_ADD", args[0], Expression.constant(1, 8)),
+                [],
+            )
+        ]
+
+    expander = ExpressionExpander(
+        _FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        call_resolver=_resolve_call,
+    )
+
+    expanded = expander._expand_call_operation(
+        _FakeCallOp(target_varnode, arg_varnode),
+        [],
+        depth=0,
+        output_size=4,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.operator == "SUBPIECE"
+    assert expanded[0].value.size == 4
+    assert expanded[0].value.operands[0].to_string() == "(arg0 + 1)"
 
 
 def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_table():
@@ -1311,6 +1441,88 @@ def test_return_analyzer_recovers_branching_call_wrapper_from_decompiler_text():
     assert recovered_by_condition.get("(param_3 != 0)") == "(param_1 + 10)" or recovered_by_condition.get(
         "(not (param_3 == 0))"
     ) == "(param_1 + 10)"
+
+
+def test_return_analyzer_recovers_nested_dispatch_wrapper_from_decompiler_text():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_nested_dispatch",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_3", "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    c_text = """void ptr_nested_dispatch(int param_1,int param_2,int param_3)
+{
+  int iVar1;
+  iVar1 = ptr_select_path(param_1,param_2,param_2 < param_1);
+  if (param_3 < iVar1) {
+    ptr_add_bias(iVar1 - param_3,5);
+  }
+  else {
+    ptr_scale_then_bias(param_3 - iVar1,2,0xffffffffffffffff);
+  }
+  return;
+}
+"""
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_select_path":
+            return [
+                ExpandedValue(
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op("INT_MULT", args[1], Expression.constant(3, 4)),
+                        Expression.constant(1, 4),
+                    ),
+                    [Condition(Expression.binary_op("INT_EQUAL", args[2], Expression.constant(0, 1)))],
+                ),
+                ExpandedValue(
+                    Expression.binary_op("INT_ADD", args[0], Expression.constant(10, 4)),
+                    [Condition(Expression.binary_op("INT_NOTEQUAL", args[2], Expression.constant(0, 1)))],
+                ),
+            ]
+        if function_name == "ptr_add_bias":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_scale_then_bias":
+            return [
+                ExpandedValue(
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op("INT_MULT", args[0], args[1]),
+                        args[2],
+                    ),
+                    [],
+                )
+            ]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                Mock(),
+                analysis,
+                Mock(),
+                set(),
+            )
+
+    assert recovered is not None
+    assert len(recovered) == 4
+    recovered_values = sorted(ret.value.to_string() for ret in recovered)
+    assert "(((param_3 - ((param_2 * 3) + 1)) * 2) + 18446744073709551615)" in recovered_values
+    assert "(((param_3 - (param_1 + 10)) * 2) + 18446744073709551615)" in recovered_values
+    assert "((((param_2 * 3) + 1) - param_3) + 5)" in recovered_values
+    assert "(((param_1 + 10) - param_3) + 5)" in recovered_values
+    condition_strings = [" && ".join(cond.to_string() for cond in ret.conditions) for ret in recovered]
+    assert any("(param_2 < param_1) == 0" in conds and "(param_3 < ((param_2 * 3) + 1))" in conds for conds in condition_strings)
+    assert any("(param_2 < param_1) != 0" in conds and "(param_3 < (param_1 + 10))" in conds for conds in condition_strings)
 
 
 def test_return_analyzer_straightline_wrapper_recovery_rejects_branching_body():
