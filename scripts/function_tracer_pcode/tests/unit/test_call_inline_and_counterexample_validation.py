@@ -1156,6 +1156,7 @@ def test_return_analyzer_recovers_implicit_return_from_same_block_output():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()
     condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = Mock(name="invalid_path_entries")
     condition_tracker.get_path_conditions_to_return.return_value = []
     condition_tracker.get_all_valid_paths_to_return.return_value = [[]]
 
@@ -1344,6 +1345,125 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     assert recovered == recovered_then + recovered_else
     assert mock_recover.call_args_list[0].args[0] is call_then
     assert mock_recover.call_args_list[1].args[0] is call_else
+
+
+def test_return_analyzer_detects_noreturn_stack_chk_fail_target_from_symbol_name():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
+    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+
+    symbol = Mock()
+    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var = Mock()
+    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var.getSymbol.return_value = symbol
+    target_varnode = Mock()
+    target_varnode.getHigh.return_value = high_var
+
+    call_op = Mock()
+    call_op.getMnemonic.return_value = "CALLIND"
+    call_op.getNumInputs.return_value = 1
+    call_op.getInput.return_value = target_varnode
+
+    assert analyzer._is_noreturn_call_op(call_op, tracer) is True
+
+
+def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
+    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+
+    symbol = Mock()
+    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var = Mock()
+    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var.getSymbol.return_value = symbol
+    target_varnode = Mock()
+    target_varnode.getHigh.return_value = high_var
+
+    fail_call = Mock()
+    fail_call.getMnemonic.return_value = "CALLIND"
+    fail_call.getNumInputs.return_value = 1
+    fail_call.getInput.return_value = target_varnode
+
+    normal_op = Mock()
+    normal_op.getMnemonic.return_value = "COPY"
+
+    return_varnode = Mock()
+    return_op = Mock()
+    return_op.getSeqnum.return_value = Mock(getTarget=Mock(return_value="0x1000"))
+    return_op.getNumInputs.return_value = 2
+    return_op.getInput.side_effect = lambda index: return_varnode if index == 1 else None
+
+    cond_ok = _cond_eq(_param_expr("param_1", 0), Expression.constant(0, 4))
+    cond_fail = _cond_ne(_param_expr("param_1", 0), Expression.constant(0, 4))
+    ok_block = Mock(index=1, pcode_ops=[normal_op, return_op])
+    fail_block = Mock(index=2, pcode_ops=[fail_call, return_op])
+
+    condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([ok_block], [cond_ok]),
+        ([fail_block], [cond_fail]),
+    ]
+
+    recovered = [ReturnInfo(address="0x1000", value=Expression.constant(7, 4), conditions=[cond_ok], branch_index=0)]
+    with patch.object(analyzer, "_analyze_return_value", return_value=recovered) as mock_analyze:
+        result = analyzer._analyze_return_op(
+            return_op,
+            tracer,
+            condition_tracker,
+            0,
+            current_function=Mock(),
+            active_functions=set(),
+        )
+
+    assert result == recovered
+    assert mock_analyze.call_args.kwargs["all_path_conditions"] == [[cond_ok]]
+
+
+def test_return_analyzer_skips_return_when_all_paths_are_pruned_as_noreturn():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
+    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+
+    symbol = Mock()
+    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var = Mock()
+    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
+    high_var.getSymbol.return_value = symbol
+    target_varnode = Mock()
+    target_varnode.getHigh.return_value = high_var
+
+    fail_call = Mock()
+    fail_call.getMnemonic.return_value = "CALLIND"
+    fail_call.getNumInputs.return_value = 1
+    fail_call.getInput.return_value = target_varnode
+
+    return_op = Mock()
+    return_op.getSeqnum.return_value = Mock(getTarget=Mock(return_value="0x1000"))
+    return_op.getNumInputs.return_value = 0
+
+    cond_fail = _cond_ne(_param_expr("param_1", 0), Expression.constant(0, 4))
+    fail_block = Mock(index=2, pcode_ops=[fail_call, return_op])
+
+    condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([fail_block], [cond_fail]),
+    ]
+
+    result = analyzer._analyze_return_op(
+        return_op,
+        tracer,
+        condition_tracker,
+        0,
+        current_function=Mock(),
+        active_functions=set(),
+    )
+
+    assert result == []
 
 
 def test_return_analyzer_prefers_pcode_wrapper_recovery_before_decompiler_fallback():

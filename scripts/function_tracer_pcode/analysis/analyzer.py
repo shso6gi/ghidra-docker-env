@@ -11,8 +11,12 @@ from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
+    _expressions_equivalent,
+    _resolve_call_target_name,
     _reduce_expression_under_conditions,
     canonicalize_post_state_subexpressions,
+    expression_contains_synthetic_location_reads,
+    rewrite_loads_from_effects,
     summarize_store_effects,
     substitute_condition,
     substitute_expression,
@@ -22,6 +26,20 @@ from .memory_resolver import concretize_readonly_loads
 
 class ReturnAnalyzer:
     """関数のReturn値を解析"""
+
+    _KNOWN_NORETURN_NAME_FRAGMENTS = (
+        "stack_chk_fail",
+        "fortify_fail",
+        "assert_fail",
+        "abort",
+        "panic",
+        "fatal",
+    )
+    _KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS = (
+        "stack_chk_guard",
+        "stack_chk_fail",
+        "fortify_fail",
+    )
     
     def __init__(self, program, debug: bool = False):
         self.program = program
@@ -324,6 +342,7 @@ class ReturnAnalyzer:
                 result.recovered_from_decompiler = True
                 result.analysis_notes.append("call_wrapper_return_recovery")
 
+        result.returns = self._strip_stack_protector_only_conditions(result.returns)
         self._mark_incomplete_control_flow(result)
 
         # デバッグダンプ（解析結果の可視化）
@@ -345,6 +364,56 @@ class ReturnAnalyzer:
             print(f"  Use --debug flag for detailed report")
         
         return result
+
+    def _strip_stack_protector_only_conditions(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> List[ReturnInfo]:
+        if len(return_infos) != 1:
+            return return_infos
+
+        only_return = return_infos[0]
+        if not only_return.conditions:
+            return return_infos
+        if not all(self._condition_looks_like_stack_protector_guard(cond) for cond in only_return.conditions):
+            return return_infos
+
+        if self.debug:
+            cond_dump = [
+                ConditionSimplifier.get_simplified_condition_string(cond)
+                for cond in only_return.conditions
+            ]
+            self._debug_print(
+                "Dropped stack-protector-only return conditions from the sole surviving return case: "
+                f"{cond_dump}"
+            )
+
+        return [
+            ReturnInfo(
+                address=only_return.address,
+                value=only_return.value,
+                conditions=[],
+                branch_index=only_return.branch_index,
+            )
+        ]
+
+    def _condition_looks_like_stack_protector_guard(self, condition: Condition) -> bool:
+        names = sorted(condition.get_all_variables())
+        if names:
+            return all(self._name_looks_stack_protector_artifact(name) for name in names)
+        text = condition.to_string().lower()
+        return any(fragment in text for fragment in self._KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS)
+
+    def _name_looks_stack_protector_artifact(self, name: Optional[str]) -> bool:
+        if not name:
+            return False
+        normalized = str(name).lower()
+        for prefix in ("ptr_", "thunk_", "__imp_"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+        normalized = re.sub(r"_[0-9a-f]+$", "", normalized)
+        normalized = normalized.lstrip("_")
+        return any(fragment in normalized for fragment in self._KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS)
 
     def _mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
         """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
@@ -3040,10 +3109,31 @@ class ReturnAnalyzer:
         
         num_inputs = return_op.getNumInputs()
         self._debug_print(f"RETURN at {address}, inputs: {num_inputs}")
-        
-        # RETURNへのパス条件を取得
-        path_conditions = condition_tracker.get_path_conditions_to_return(return_op)
-        all_valid_path_conditions = condition_tracker.get_all_valid_paths_to_return(return_op)
+
+        raw_path_entries = None
+        get_block_paths = getattr(condition_tracker, "get_all_valid_block_paths_to_return", None)
+        if callable(get_block_paths):
+            raw_path_entries = get_block_paths(return_op)
+
+        path_entries = self._coerce_block_path_entries(raw_path_entries)
+        if path_entries:
+            path_entries = self._filter_noreturn_return_path_entries(
+                path_entries,
+                tracer,
+                return_op,
+            )
+            if not path_entries:
+                if self.debug:
+                    self._debug_print(
+                        "All RETURN path variants were pruned as noreturn/unreachable; skipping RETURN"
+                    )
+                return []
+            all_valid_path_conditions = [list(conditions) for _blocks, conditions in path_entries]
+            path_conditions = list(all_valid_path_conditions[0]) if all_valid_path_conditions else []
+        else:
+            # Fall back to the pre-existing condition-only API if block paths are unavailable.
+            path_conditions = condition_tracker.get_path_conditions_to_return(return_op)
+            all_valid_path_conditions = condition_tracker.get_all_valid_paths_to_return(return_op)
 
         if self.debug and path_conditions:
             cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in path_conditions]
@@ -3088,6 +3178,146 @@ class ReturnAnalyzer:
                 conditions=simplified_conds,
                 branch_index=return_index
             )]
+
+    def _coerce_block_path_entries(self, path_entries) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
+        if not isinstance(path_entries, (list, tuple)):
+            return None
+
+        normalized: List[Tuple[List[Any], List[Condition]]] = []
+        for entry in path_entries:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                return None
+            block_path, conditions = entry
+            if not isinstance(block_path, (list, tuple)):
+                return None
+            if not isinstance(conditions, (list, tuple)):
+                return None
+            normalized.append((list(block_path), list(conditions)))
+        return normalized
+
+    def _filter_noreturn_return_path_entries(
+        self,
+        path_entries,
+        tracer: PcodeTracer,
+        return_op,
+    ):
+        if not path_entries:
+            return path_entries
+
+        filtered = []
+        for block_path, conditions in path_entries:
+            if self._block_path_contains_noreturn_call(block_path, tracer, return_op):
+                if self.debug:
+                    cond_strs = [
+                        ConditionSimplifier.get_simplified_condition_string(c)
+                        for c in conditions
+                    ]
+                    block_indexes = [getattr(block, "index", "?") for block in block_path]
+                    self._debug_print(
+                        "Pruned RETURN path that contains a noreturn call: "
+                        f"blocks={block_indexes}, conditions={cond_strs}"
+                    )
+                continue
+            filtered.append((block_path, conditions))
+
+        return filtered
+
+    def _block_path_contains_noreturn_call(
+        self,
+        block_path,
+        tracer: PcodeTracer,
+        return_op,
+    ) -> bool:
+        for block_info in block_path:
+            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
+                if pcode_op is return_op:
+                    return False
+                if self._is_noreturn_call_op(pcode_op, tracer):
+                    return True
+        return False
+
+    def _is_noreturn_call_op(self, pcode_op, tracer: PcodeTracer) -> bool:
+        if pcode_op is None or pcode_op.getMnemonic() not in {"CALL", "CALLIND"}:
+            return False
+
+        for candidate_name in self._collect_call_target_candidate_names(pcode_op, tracer):
+            if self._name_looks_noreturn(candidate_name):
+                return True
+
+        resolved_name = _resolve_call_target_name(tracer, pcode_op)
+        if not resolved_name:
+            return False
+
+        try:
+            function_manager = self.program.getFunctionManager() if self.program is not None else None
+            if function_manager is not None:
+                for func in function_manager.getFunctions(True):
+                    if func.getName() != resolved_name:
+                        continue
+                    for attr_name in ("hasNoReturn", "isNoReturn", "getNoReturn"):
+                        attr = getattr(func, attr_name, None)
+                        if callable(attr):
+                            try:
+                                if bool(attr()):
+                                    return True
+                            except Exception:
+                                continue
+        except Exception:
+            pass
+
+        return self._name_looks_noreturn(resolved_name)
+
+    def _collect_call_target_candidate_names(
+        self,
+        pcode_op,
+        tracer: PcodeTracer,
+    ) -> List[str]:
+        names: List[str] = []
+        if pcode_op is None or pcode_op.getNumInputs() < 1:
+            return names
+
+        def _append_name(candidate) -> None:
+            if not candidate:
+                return
+            candidate_str = str(candidate)
+            if candidate_str and candidate_str not in names:
+                names.append(candidate_str)
+
+        try:
+            target_varnode = pcode_op.getInput(0)
+        except Exception:
+            return names
+
+        _append_name(tracer._get_function_name(target_varnode))
+
+        try:
+            high_var = target_varnode.getHigh()
+            if high_var is not None:
+                _append_name(high_var.getName())
+                symbol = high_var.getSymbol()
+                if symbol is not None:
+                    _append_name(symbol.getName())
+        except Exception:
+            pass
+
+        try:
+            traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
+            _append_name(getattr(traced_target, "name", None))
+        except Exception:
+            pass
+
+        return names
+
+    def _name_looks_noreturn(self, name: Optional[str]) -> bool:
+        if not name:
+            return False
+        normalized = str(name).lower()
+        for prefix in ("ptr_", "thunk_", "__imp_"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+        normalized = re.sub(r"_[0-9a-f]+$", "", normalized)
+        normalized = normalized.lstrip("_")
+        return any(fragment in normalized for fragment in self._KNOWN_NORETURN_NAME_FRAGMENTS)
 
     def _analyze_implicit_return_value(
         self,
@@ -3452,7 +3682,126 @@ class ReturnAnalyzer:
                     branch_index=return_index * 100 + i,
                 )
             )
-        return results
+        return self._merge_equivalent_return_infos(results)
+
+    def _merge_equivalent_return_infos(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> List[ReturnInfo]:
+        if len(return_infos) < 2:
+            return return_infos
+
+        merged = list(return_infos)
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(merged)):
+                for j in range(i + 1, len(merged)):
+                    combined = self._merge_return_info_pair(merged[i], merged[j])
+                    if combined is None:
+                        continue
+                    merged[i] = combined
+                    del merged[j]
+                    changed = True
+                    break
+                if changed:
+                    break
+        return merged
+
+    def _merge_return_info_pair(
+        self,
+        left: ReturnInfo,
+        right: ReturnInfo,
+    ) -> Optional[ReturnInfo]:
+        if left.address != right.address:
+            return None
+        if not _expressions_equivalent(left.value, right.value):
+            return None
+
+        shared_conditions, left_residual, right_residual = self._partition_return_conditions(
+            left.conditions,
+            right.conditions,
+        )
+
+        if not left_residual and not right_residual:
+            return self._make_merged_return_info(left, right, shared_conditions, "deduplicated identical return case")
+
+        if len(left_residual) == 1 and len(right_residual) == 1:
+            if ConditionSimplifier.are_contradictory_conditions(left_residual[0], right_residual[0]):
+                return self._make_merged_return_info(
+                    left,
+                    right,
+                    shared_conditions,
+                    "collapsed complementary same-valued return cases",
+                )
+
+        return None
+
+    def _partition_return_conditions(
+        self,
+        left_conditions: List[Condition],
+        right_conditions: List[Condition],
+    ) -> Tuple[List[Condition], List[Condition], List[Condition]]:
+        shared: List[Condition] = []
+        right_used: Set[int] = set()
+        left_residual: List[Condition] = []
+
+        for left_cond in left_conditions:
+            match_index = None
+            for index, right_cond in enumerate(right_conditions):
+                if index in right_used:
+                    continue
+                if ConditionSimplifier.are_equivalent_conditions(left_cond, right_cond):
+                    match_index = index
+                    break
+            if match_index is None:
+                left_residual.append(left_cond)
+                continue
+            right_used.add(match_index)
+            shared.append(left_cond)
+
+        right_residual = [
+            cond for index, cond in enumerate(right_conditions) if index not in right_used
+        ]
+        return (
+            ConditionSimplifier.simplify_conditions(shared),
+            ConditionSimplifier.simplify_conditions(left_residual),
+            ConditionSimplifier.simplify_conditions(right_residual),
+        )
+
+    def _make_merged_return_info(
+        self,
+        primary: ReturnInfo,
+        secondary: ReturnInfo,
+        merged_conditions: List[Condition],
+        reason: str,
+    ) -> ReturnInfo:
+        normalized_conditions = ConditionSimplifier.simplify_conditions(list(merged_conditions))
+        if self.debug:
+            cond_dump = [
+                ConditionSimplifier.get_simplified_condition_string(cond)
+                for cond in normalized_conditions
+            ]
+            self._debug_print(
+                f"{reason}: value={primary.value.to_string()} conditions={cond_dump}"
+            )
+        return ReturnInfo(
+            address=primary.address,
+            value=primary.value,
+            conditions=normalized_conditions,
+            branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
+        )
+
+    def _min_branch_index(
+        self,
+        left: Optional[int],
+        right: Optional[int],
+    ) -> Optional[int]:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return min(left, right)
 
     def _normalize_expanded_return_value(
         self,
@@ -3461,6 +3810,8 @@ class ReturnAnalyzer:
     ) -> Expression:
         normalized_value = value
         started_with_phi = self._expression_contains_phi(value)
+        effect_summary = self._current_effect_summary
+        has_effects = effect_summary is not None and bool(effect_summary.effects)
 
         if started_with_phi:
             reduced_value = _reduce_expression_under_conditions(value, conditions)
@@ -3472,17 +3823,32 @@ class ReturnAnalyzer:
                     f"{value.to_string()} -> {normalized_value.to_string()}"
                 )
 
-        if (
-            not started_with_phi
-            and self._current_effect_summary is not None
-            and self._current_effect_summary.effects
-        ):
-            normalized_value = canonicalize_post_state_subexpressions(
+        if has_effects:
+            canonicalized = canonicalize_post_state_subexpressions(
                 normalized_value,
                 conditions,
-                self._current_effect_summary.effects,
+                effect_summary.effects,
                 self._current_parameters,
             )
+            if canonicalized is not None:
+                normalized_value = canonicalized
+
+            if expression_contains_synthetic_location_reads(normalized_value):
+                rewritten_post_state = rewrite_loads_from_effects(
+                    normalized_value,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                )
+                if rewritten_post_state is not None:
+                    normalized_value = rewritten_post_state
+
+            reduced_post_state = _reduce_expression_under_conditions(
+                normalized_value,
+                conditions,
+            )
+            if reduced_post_state is not None:
+                normalized_value = reduced_post_state
 
         return normalized_value
 

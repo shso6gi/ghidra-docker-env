@@ -2,19 +2,22 @@
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any
-from ..model import Expression, Condition, ExpressionType
+from ..model import Expression, Condition, ExpressionType, StorageInfo
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_name,
     resolve_call_targets,
     _expressions_equivalent,
+    canonicalize_location,
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    expression_contains_synthetic_location_reads,
     memory_expression_for_location,
     rewrite_loads_from_effects,
+    rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
 )
 
@@ -854,8 +857,19 @@ class ExpressionExpander:
             self.effect_summary.effects,
             self.parameters,
         )
+        rewrite_target = canonicalized if canonicalized is not None else expr
+        rewritten_post_state = (
+            rewrite_loads_from_effects(
+                rewrite_target,
+                conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            if expression_contains_synthetic_location_reads(rewrite_target)
+            else rewrite_target
+        )
         reduced = _reduce_expression_under_conditions(
-            canonicalized if canonicalized is not None else expr,
+            rewritten_post_state if rewritten_post_state is not None else (canonicalized if canonicalized is not None else expr),
             conditions,
         )
         return reduced if reduced is not None else expr
@@ -1080,6 +1094,7 @@ class ExpressionExpander:
             conditions,
             depth,
             output_size=output_size,
+            output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
         )
     
@@ -1092,7 +1107,7 @@ class ExpressionExpander:
             return False
         
         mnemonic = pcode_op.getMnemonic()
-        if mnemonic in {"MULTIEQUAL", "CALL", "CALLIND"}:
+        if mnemonic in {"MULTIEQUAL", "CALL", "CALLIND", "INDIRECT"}:
             return True
         
         for i in range(pcode_op.getNumInputs()):
@@ -1205,6 +1220,134 @@ class ExpressionExpander:
             context="expander",
         )
         return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{fallback_name}"), base_conditions)]
+
+    def _infer_indirect_output_location(
+        self,
+        output_varnode,
+        output_size: int,
+    ):
+        if output_varnode is None or output_size <= 0:
+            return None
+
+        storage_info = None
+        try:
+            storage_info = self.tracer._get_storage_info_from_varnode(output_varnode)
+        except Exception:
+            storage_info = None
+        if storage_info is None:
+            storage_info = self._fallback_storage_info_from_varnode(output_varnode, output_size)
+
+        high_name = None
+        try:
+            high_var = output_varnode.getHigh()
+            if high_var is not None:
+                high_name = high_var.getName()
+        except Exception:
+            high_name = None
+
+        probe_name = high_name or f"indirect_out_{id(output_varnode):x}"
+        probe = Expression.variable(
+            probe_name,
+            size=output_size,
+            storage_info=storage_info,
+        )
+        location = canonicalize_location(probe, self.parameters, size=output_size)
+        if self.debug and location is None:
+            self._debug_print(
+                "Failed to infer INDIRECT output location: "
+                f"name={probe_name} storage={storage_info}",
+                0,
+            )
+        return location
+
+    def _fallback_storage_info_from_varnode(
+        self,
+        varnode,
+        output_size: int,
+    ) -> Optional[StorageInfo]:
+        if varnode is None:
+            return None
+        try:
+            addr = varnode.getAddress()
+            if addr is None:
+                return None
+            space = addr.getAddressSpace()
+            if space is None:
+                return None
+            space_name = space.getName()
+            size = max(1, int(output_size or varnode.getSize() or 0))
+            if space_name == "stack":
+                return StorageInfo(
+                    is_register=False,
+                    space_name="stack",
+                    offset=int(varnode.getOffset()),
+                    size=size,
+                    size_bits=size * 8,
+                )
+            if space_name == "register":
+                reg_name = None
+                try:
+                    reg = self.tracer.program.getRegister(addr, size)
+                    reg_name = reg.getName() if reg is not None else None
+                except Exception:
+                    reg_name = None
+                return StorageInfo(
+                    is_register=True,
+                    space_name="register",
+                    offset=int(varnode.getOffset()),
+                    size=size,
+                    size_bits=size * 8,
+                    register_name=reg_name,
+                    base_register_name=reg_name,
+                    base_register_offset=int(varnode.getOffset()),
+                    base_register_size=size,
+                    base_register_size_bits=size * 8,
+                    bit_offset_in_base=0,
+                )
+        except Exception:
+            return None
+        return None
+
+    def _resolve_indirect_post_state_read(
+        self,
+        output_varnode,
+        fallback_expr: Expression,
+        conditions: List[Condition],
+        depth: int,
+        output_size: int = 0,
+    ) -> Expression:
+        if self.effect_summary is None or not getattr(self.effect_summary, "effects", None):
+            return fallback_expr
+        if not self.parameters:
+            return fallback_expr
+
+        location = self._infer_indirect_output_location(output_varnode, output_size)
+        if location is None:
+            if self.debug:
+                self._debug_print(
+                    f"INDIRECT post-state read fell back to pre-state value: {fallback_expr.to_string()}",
+                    depth,
+                )
+            return fallback_expr
+
+        resolved = rewrite_location_read_from_effects(
+            location,
+            fallback_expr,
+            conditions,
+            self.effect_summary.effects,
+            self.parameters,
+        )
+        reduced = _reduce_expression_under_conditions(resolved, conditions)
+        resolved = reduced if reduced is not None else resolved
+        if self._expression_contains_unknown_or_call(resolved):
+            return fallback_expr
+
+        if self.debug and not _expressions_equivalent(resolved, fallback_expr):
+            self._debug_print(
+                f"Resolved INDIRECT post-state read via effect summary: {fallback_expr.to_string()} -> {resolved.to_string()}",
+                depth,
+            )
+        return resolved
     
     def _expand_operation(
         self,
@@ -1278,6 +1421,7 @@ class ExpressionExpander:
             base_conditions,
             depth,
             output_size=output_size,
+            output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
         )
     
@@ -1288,6 +1432,7 @@ class ExpressionExpander:
         base_conditions: List[Condition],
         depth: int,
         output_size: int = 0,
+        output_varnode=None,
         read_order_key: Optional[int] = None,
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
@@ -1323,6 +1468,14 @@ class ExpressionExpander:
                             right_ev.value,
                             output_size if output_size > 0 else 4,
                             read_order_key=read_order_key,
+                        )
+                    elif mnemonic == "INDIRECT":
+                        new_value = self._resolve_indirect_post_state_read(
+                            output_varnode,
+                            left_ev.value,
+                            combined_conds,
+                            depth,
+                            output_size=output_size if output_size > 0 else left_ev.value.size,
                         )
                     else:
                         new_value = Expression.binary_op(mnemonic, left_ev.value, right_ev.value)

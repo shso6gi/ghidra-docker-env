@@ -39,6 +39,19 @@ _ARITHMETIC_BINARY_OPERATORS = {
     "INT_SREM",
 }
 
+_SUPPORTED_BINARY_OPERATORS = (
+    _ARITHMETIC_BINARY_OPERATORS
+    | _BOOLEAN_BINARY_OPERATORS
+    | {"PIECE", "SUBPIECE", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}
+)
+_SUPPORTED_UNARY_OPERATORS = {
+    "INT_ZEXT",
+    "INT_SEXT",
+    "INT_NEGATE",
+    "INT_2COMP",
+    "BOOL_NEGATE",
+}
+
 
 def expression_to_smt(expr) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
@@ -150,6 +163,35 @@ def expression_contains_signed_comparison(expr) -> bool:
                 if hasattr(cond, "operands") and expression_contains_signed_comparison(cond):
                     return True
             if expression_contains_signed_comparison(branch_value):
+                return True
+
+    return False
+
+
+def expression_contains_unsupported_smt_ops(expr) -> bool:
+    """SMT renderer が直接扱えない演算子を含むか判定する。"""
+    if expr is None:
+        return False
+
+    expr_type = expr.expr_type
+    expr_kind = expr_type.__class__
+
+    if expr_type == expr_kind.BINARY_OP and expr.operator not in _SUPPORTED_BINARY_OPERATORS:
+        return True
+
+    if expr_type == expr_kind.UNARY_OP and expr.operator not in _SUPPORTED_UNARY_OPERATORS:
+        return True
+
+    if getattr(expr, "operands", None):
+        for operand in expr.operands:
+            if expression_contains_unsupported_smt_ops(operand):
+                return True
+
+    if expr_type == expr_kind.PHI and expr.value:
+        for cond, branch_value in expr.value:
+            if cond is not None and expression_contains_unsupported_smt_ops(cond.expression):
+                return True
+            if expression_contains_unsupported_smt_ops(branch_value):
                 return True
 
     return False

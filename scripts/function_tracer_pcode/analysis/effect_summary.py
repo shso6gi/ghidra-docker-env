@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import binascii
 from dataclasses import dataclass
 import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
@@ -34,6 +35,89 @@ class EffectSummary:
     effects: List[StoreEffect]
     synthetic_expr: Optional[Expression] = None
     has_unsupported_call: bool = False
+
+
+_SYNTHETIC_LOCATION_BASE_PREFIX = "__locbase__"
+_SYNTHETIC_LOCATION_READ_PREFIX = "__locread__"
+_STACK_FRAME_LOCATION_BASE = f"{_SYNTHETIC_LOCATION_BASE_PREFIX}stackframe"
+
+
+def _encode_signed_token(value: int) -> str:
+    try:
+        numeric = int(value)
+    except Exception:
+        numeric = 0
+    if numeric < 0:
+        return f"n{abs(numeric)}"
+    return f"p{numeric}"
+
+
+def _decode_signed_token(token: str) -> Optional[int]:
+    if not token:
+        return None
+    prefix = token[0]
+    digits = token[1:]
+    if prefix not in {"n", "p"} or not digits.isdigit():
+        return None
+    value = int(digits)
+    return -value if prefix == "n" else value
+
+
+def _synthetic_storage_base_name(storage: Optional[StorageInfo]) -> Optional[str]:
+    storage = _coerce_storage_info(storage)
+    if storage is None or storage.is_register:
+        return None
+    space_name = re.sub(r"[^0-9A-Za-z_]", "_", str(storage.space_name or "mem"))
+    return (
+        f"{_SYNTHETIC_LOCATION_BASE_PREFIX}"
+        f"{space_name}_{_encode_signed_token(storage.offset)}_{max(1, int(storage.size or 0))}"
+    )
+
+
+def _synthetic_location_read_name(location: CanonicalLocation) -> str:
+    encoded_base = binascii.hexlify(location.base_param.encode("utf-8")).decode("ascii")
+    return (
+        f"{_SYNTHETIC_LOCATION_READ_PREFIX}"
+        f"{encoded_base}_{_encode_signed_token(location.offset)}_{max(1, int(location.size or 0))}"
+    )
+
+
+def _parse_synthetic_location_read_name(name: Optional[str]) -> Optional[CanonicalLocation]:
+    if not name or not name.startswith(_SYNTHETIC_LOCATION_READ_PREFIX):
+        return None
+    payload = name[len(_SYNTHETIC_LOCATION_READ_PREFIX):]
+    parts = payload.rsplit("_", 2)
+    if len(parts) != 3:
+        return None
+
+    encoded_base, offset_token, size_token = parts
+    try:
+        base_name = binascii.unhexlify(encoded_base.encode("ascii")).decode("utf-8")
+        offset = _decode_signed_token(offset_token)
+        size = int(size_token)
+    except Exception:
+        return None
+    if offset is None:
+        return None
+    return CanonicalLocation(base_param=base_name, offset=offset, size=max(1, size))
+
+
+def expression_contains_synthetic_location_reads(expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return False
+    if _parse_synthetic_location_read_name(getattr(expr, "name", None)) is not None:
+        return True
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and expression_contains_synthetic_location_reads(cond.expression):
+                return True
+            if expression_contains_synthetic_location_reads(value):
+                return True
+        return False
+    for operand in getattr(expr, "operands", []) or []:
+        if expression_contains_synthetic_location_reads(operand):
+            return True
+    return False
 
 
 def summarize_store_effects(
@@ -98,6 +182,13 @@ def summarize_store_effects(
                 callee_parameters,
                 explicit_args,
             )
+            if debug:
+                explicit_dump = ", ".join(arg.to_string() for arg in explicit_args)
+                recovered_dump = ", ".join(arg.to_string() for arg in args)
+                print(
+                    "[EffectSummary] call arguments: "
+                    f"target={target_name} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
+                )
             callee_summary = direct_call_summary(target_name, args)
             if callee_summary is None or not is_call_effect_summary_allowed(callee_summary):
                 has_unsupported_call = True
@@ -117,13 +208,26 @@ def summarize_store_effects(
                     parameters,
                 )
                 if substituted_location is None:
+                    if debug:
+                        arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
+                        print(
+                            "[EffectSummary] skip substituted effect: "
+                            f"callee_loc={effect.location} args=[{arg_dump}]"
+                        )
                     continue
                 substitutions = dict(zip(callee_summary.parameter_names, substitution_args))
-                substituted_value = substitute_expression(effect.value, substitutions)
+                substituted_value = substitute_expression(effect.value, substitutions, parameters)
                 substituted_conditions = [
-                    substitute_condition(cond, substitutions)
+                    substitute_condition(cond, substitutions, parameters)
                     for cond in effect.conditions
                 ]
+                if debug:
+                    cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
+                    print(
+                        "[EffectSummary] substituted effect: "
+                        f"callee_loc={effect.location} caller_loc={substituted_location} "
+                        f"value={substituted_value.to_string()} conditions=[{cond_dump}]"
+                    )
                 for path_conditions in path_sets:
                     merged_conditions = ConditionSimplifier.simplify_conditions(
                         list(path_conditions) + substituted_conditions
@@ -167,6 +271,18 @@ def _recover_call_argument_expressions(
         if _expression_maps_to_parameter(explicit, caller_parameters):
             recovered_args.append(explicit)
             continue
+        explicit_size = (
+            explicit.size
+            if explicit is not None and getattr(explicit, "size", 0)
+            else callee_param.get("size")
+        )
+        if _should_prefer_explicit_call_argument(
+            explicit,
+            caller_parameters,
+            size=explicit_size,
+        ):
+            recovered_args.append(explicit)
+            continue
 
         recovered = _recover_call_argument_from_storage(
             call_op,
@@ -196,6 +312,78 @@ def _recover_call_argument_expressions(
     for index in range(len(recovered_args), len(explicit_args)):
         recovered_args.append(explicit_args[index])
     return recovered_args
+
+
+def _should_prefer_explicit_call_argument(
+    expr: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    size: Optional[int] = None,
+) -> bool:
+    if expr is None:
+        return False
+    if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.MEMORY, ExpressionType.CALL}:
+        return True
+    if expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
+        return True
+
+    try:
+        effective_size = int(size or expr.size or 0)
+    except Exception:
+        effective_size = 0
+    if effective_size <= 0:
+        effective_size = 8
+    return canonicalize_location(expr, caller_parameters, size=effective_size) is not None
+
+
+def _parameter_descriptor_looks_pointer(param: Optional[Dict]) -> bool:
+    if not param:
+        return False
+    data_type = str(param.get("data_type") or param.get("type") or "")
+    normalized = data_type.replace(" ", "").lower()
+    return "*" in normalized or normalized.endswith("ptr")
+
+
+def _call_argument_semantic_rank(
+    expr: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    callee_param: Optional[Dict],
+) -> int:
+    if expr is None:
+        return -1
+
+    callee_expects_pointer = _parameter_descriptor_looks_pointer(callee_param)
+    try:
+        effective_size = int((callee_param or {}).get("size") or expr.size or 0)
+    except Exception:
+        effective_size = 0
+    if effective_size <= 0:
+        effective_size = max(1, int(expr.size or 8))
+
+    caller_param_name = _resolve_parameter_name(expr, caller_parameters)
+    caller_param = next(
+        (param for param in caller_parameters if param.get("name") == caller_param_name),
+        None,
+    )
+    caller_param_is_pointer = _parameter_descriptor_looks_pointer(caller_param)
+
+    if expr.expr_type == ExpressionType.CONSTANT and int(getattr(expr, "value", 1)) == 0:
+        return 3 if callee_expects_pointer else 1
+
+    location = canonicalize_location(expr, caller_parameters, size=effective_size)
+    if callee_expects_pointer:
+        if location is not None:
+            if location.base_param == _STACK_FRAME_LOCATION_BASE:
+                return 8
+            if location.base_param.startswith(_SYNTHETIC_LOCATION_BASE_PREFIX):
+                return 7
+            if caller_param_name is not None:
+                return 6 if caller_param_is_pointer else 1
+            return 5
+        if caller_param_name is not None:
+            return 6 if caller_param_is_pointer else 1
+        return 0
+
+    return 0
 
 
 def _resolve_call_target_name(tracer, op) -> Optional[str]:
@@ -544,6 +732,8 @@ def _recover_call_argument_from_storage(
     call_order = _get_order_key(call_op)
     best_candidate = None
     best_order = None
+    best_rank = -1
+    best_semantic_rank = -1
 
     for op in tracer.get_all_pcode_ops():
         op_order = _get_order_key(op)
@@ -551,22 +741,53 @@ def _recover_call_argument_from_storage(
             continue
 
         output = op.getOutput()
-        if output is not None and _varnode_matches_storage(output, target_storage, tracer):
-            if best_order is None or op_order > best_order:
-                best_candidate = ("output", output)
+        output_rank = _varnode_storage_match_rank(output, target_storage, tracer)
+        if output is not None and output_rank > 0:
+            candidate_expr = _resolve_call_argument_expression(output, tracer, caller_parameters)
+            semantic_rank = _call_argument_semantic_rank(
+                candidate_expr,
+                caller_parameters,
+                callee_param,
+            )
+            if (
+                semantic_rank > best_semantic_rank
+                or (
+                    semantic_rank == best_semantic_rank
+                    and (
+                        output_rank > best_rank
+                        or (output_rank == best_rank and (best_order is None or op_order > best_order))
+                    )
+                )
+            ):
+                best_candidate = candidate_expr
                 best_order = op_order
+                best_rank = output_rank
+                best_semantic_rank = semantic_rank
 
         if not target_storage.is_register and op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
             if _stack_varnode_matches_storage(op.getInput(1), target_storage):
-                if best_order is None or op_order > best_order:
-                    best_candidate = ("store", op.getInput(2))
+                candidate_expr = _resolve_call_argument_expression(op.getInput(2), tracer, caller_parameters)
+                semantic_rank = _call_argument_semantic_rank(
+                    candidate_expr,
+                    caller_parameters,
+                    callee_param,
+                )
+                if (
+                    semantic_rank > best_semantic_rank
+                    or (
+                        semantic_rank == best_semantic_rank
+                        and (3 > best_rank or (3 == best_rank and (best_order is None or op_order > best_order)))
+                    )
+                ):
+                    best_candidate = candidate_expr
                     best_order = op_order
+                    best_rank = 3
+                    best_semantic_rank = semantic_rank
 
     if best_candidate is None:
         return None
 
-    _, source_varnode = best_candidate
-    return _resolve_call_argument_expression(source_varnode, tracer, caller_parameters)
+    return best_candidate
 
 
 def _parameter_expression_from_matching_storage(
@@ -592,12 +813,16 @@ def _parameter_expression_from_matching_storage(
 
 
 def _varnode_matches_storage(varnode, target_storage: StorageInfo, tracer) -> bool:
+    return _varnode_storage_match_rank(varnode, target_storage, tracer) > 0
+
+
+def _varnode_storage_match_rank(varnode, target_storage: StorageInfo, tracer) -> int:
     varnode_storage = tracer._get_storage_info_from_varnode(varnode)
     if varnode_storage is not None:
-        return _storage_infos_match(varnode_storage, target_storage)
+        return _storage_match_rank(varnode_storage, target_storage)
     if target_storage.is_register:
-        return False
-    return _stack_varnode_matches_storage(varnode, target_storage)
+        return 0
+    return 3 if _stack_varnode_matches_storage(varnode, target_storage) else 0
 
 
 def _stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool:
@@ -618,13 +843,39 @@ def _stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool
 
 
 def _storage_infos_match(left: StorageInfo, right: StorageInfo) -> bool:
+    return _storage_match_rank(left, right) > 0
+
+
+def _storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
     if left.is_register or right.is_register:
-        return _storage_matches_parameter(left, right)
-    return (
+        if not (left.is_register and right.is_register):
+            return 0
+        if left.shares_base_register_with(right):
+            if (
+                left.bit_offset_in_base == right.bit_offset_in_base
+                and left.size_bits == right.size_bits
+                and left.size == right.size
+            ):
+                return 3
+            if (
+                StorageInfo._normalize_reg_name(left.register_name or "")
+                == StorageInfo._normalize_reg_name(right.register_name or "")
+            ):
+                return 2
+            if left.bit_range_overlaps_with(right):
+                return 1
+            return 0
+        return (
+            2
+            if StorageInfo._normalize_reg_name(left.register_name or "")
+            == StorageInfo._normalize_reg_name(right.register_name or "")
+            else 0
+        )
+    return 3 if (
         left.space_name == right.space_name
         and left.offset == right.offset
         and left.size == right.size
-    )
+    ) else 0
 
 
 def _normalize_call_argument_expression(
@@ -1009,6 +1260,17 @@ def canonicalize_param_location(
     return CanonicalLocation(base_param=base_name, offset=const_total, size=size)
 
 
+def canonicalize_location(
+    addr_expr: Expression,
+    parameters: Sequence[Dict],
+    size: int = 4,
+) -> Optional[CanonicalLocation]:
+    const_total, bases = _flatten_location_addition(addr_expr, parameters)
+    if const_total is None or len(bases) != 1:
+        return None
+    return CanonicalLocation(base_param=bases[0], offset=const_total, size=size)
+
+
 def substitute_location(
     location: CanonicalLocation,
     callee_params: Sequence[str],
@@ -1019,7 +1281,7 @@ def substitute_location(
     actual_addr = arg_map.get(location.base_param)
     if actual_addr is None:
         return None
-    caller_location = canonicalize_param_location(actual_addr, caller_params, size=location.size)
+    caller_location = canonicalize_location(actual_addr, caller_params, size=location.size)
     if caller_location is None:
         return None
     return CanonicalLocation(
@@ -1046,6 +1308,20 @@ def rewrite_loads_from_effects(
     if active_cycle_components is None:
         active_cycle_components = _compute_effect_cycle_components(effects, parameters)
 
+    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    if expr.expr_type == ExpressionType.VARIABLE and synthetic_location is not None:
+        return _rewrite_canonical_location_read(
+            expr,
+            expr,
+            synthetic_location,
+            return_conditions,
+            effects,
+            parameters,
+            max_order_key=max_order_key,
+            blocked_locations=active_blocked_locations,
+            cycle_components=active_cycle_components,
+        )
+
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = rewrite_loads_from_effects(
             expr.operands[0],
@@ -1056,83 +1332,21 @@ def rewrite_loads_from_effects(
             blocked_locations=active_blocked_locations,
             cycle_components=active_cycle_components,
         )
-        location = canonicalize_param_location(rewritten_addr, parameters, size=expr.size)
+        location = canonicalize_location(rewritten_addr, parameters, size=expr.size)
         candidate = Expression.memory(rewritten_addr, expr.size)
         if location is None:
             return candidate
-        if _matches_existing_effect_value(
+        return _rewrite_canonical_location_read(
+            candidate,
             candidate,
             location,
             return_conditions,
             effects,
             parameters,
             max_order_key=max_order_key,
-        ):
-            return candidate
-
-        for blocked_location in active_blocked_locations:
-            if blocked_location.size != expr.size:
-                continue
-            if locations_match(location, blocked_location, return_conditions):
-                return candidate
-
-        matched = []
-        for effect in effects:
-            if max_order_key is not None and effect.order_key >= max_order_key:
-                continue
-            if effect.location.size != expr.size:
-                continue
-            if ConditionSimplifier.is_contradiction(list(return_conditions) + list(effect.conditions)):
-                continue
-            if not locations_match(location, effect.location, list(return_conditions) + effect.conditions):
-                continue
-            residual = subtract_implied_conditions(effect.conditions, return_conditions)
-            matched.append((effect.order_key, residual, effect.value))
-
-        if not matched:
-            return candidate
-
-        if _has_overlapping_guards(matched):
-            return candidate
-
-        matched.sort(key=lambda item: item[0], reverse=True)
-        branches = []
-        for effect_order, residual, value in matched:
-            preserved_locations = list(active_cycle_components.get(location, frozenset()))
-            if location not in preserved_locations:
-                preserved_locations.append(location)
-            next_blocked_locations = active_blocked_locations + preserved_locations
-            if residual:
-                cond = Condition.combine_and(residual)
-                branches.append(
-                    (
-                        cond,
-                        rewrite_loads_from_effects(
-                            value,
-                            return_conditions,
-                            effects,
-                            parameters,
-                            max_order_key=effect_order,
-                            blocked_locations=next_blocked_locations,
-                            cycle_components=active_cycle_components,
-                        ),
-                    )
-                )
-            else:
-                return rewrite_loads_from_effects(
-                    value,
-                    return_conditions,
-                    effects,
-                    parameters,
-                    max_order_key=effect_order,
-                    blocked_locations=next_blocked_locations,
-                    cycle_components=active_cycle_components,
-                )
-
-        branches.append((None, candidate))
-        resolved = Expression.phi(branches)
-        resolved.size = expr.size
-        return resolved
+            blocked_locations=active_blocked_locations,
+            cycle_components=active_cycle_components,
+        )
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
         expr_location = canonicalize_expr_read_location(expr, parameters)
@@ -1196,6 +1410,112 @@ def rewrite_loads_from_effects(
         return rebuilt
 
     return expr
+
+
+def rewrite_location_read_from_effects(
+    location: CanonicalLocation,
+    fallback_expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    max_order_key: Optional[int] = None,
+    blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
+    cycle_components: Optional[Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]] = None,
+) -> Expression:
+    candidate = memory_expression_for_location(location, parameters)
+    if candidate is None:
+        return fallback_expr
+    return _rewrite_canonical_location_read(
+        candidate,
+        fallback_expr,
+        location,
+        return_conditions,
+        effects,
+        parameters,
+        max_order_key=max_order_key,
+        blocked_locations=blocked_locations,
+        cycle_components=cycle_components,
+    )
+
+
+def _rewrite_canonical_location_read(
+    candidate_expr: Expression,
+    fallback_expr: Expression,
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    max_order_key: Optional[int] = None,
+    blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
+    cycle_components: Optional[Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]] = None,
+) -> Expression:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    active_blocked_locations = list(blocked_locations or [])
+    active_cycle_components = cycle_components
+    if active_cycle_components is None:
+        active_cycle_components = _compute_effect_cycle_components(effects, parameters)
+
+    if _matches_existing_effect_value(
+        candidate_expr,
+        location,
+        normalized_return_conditions,
+        effects,
+        parameters,
+        max_order_key=max_order_key,
+    ):
+        return candidate_expr
+
+    for blocked_location in active_blocked_locations:
+        if blocked_location.size != location.size:
+            continue
+        if locations_match(location, blocked_location, normalized_return_conditions):
+            return fallback_expr
+
+    matched = []
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if max_order_key is not None and effect.order_key >= max_order_key:
+            continue
+        if effect.location.size != location.size:
+            continue
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        if not locations_match(location, effect.location, normalized_return_conditions + normalized_effect_conditions):
+            continue
+        residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
+        matched.append((effect.order_key, residual, effect.value))
+
+    if not matched:
+        return fallback_expr
+
+    if _has_overlapping_guards(matched):
+        return fallback_expr
+
+    matched.sort(key=lambda item: item[0], reverse=True)
+    branches = []
+    for effect_order, residual, value in matched:
+        preserved_locations = list(active_cycle_components.get(location, frozenset()))
+        if location not in preserved_locations:
+            preserved_locations.append(location)
+        next_blocked_locations = active_blocked_locations + preserved_locations
+        rewritten_value = rewrite_loads_from_effects(
+            value,
+            normalized_return_conditions,
+            effects,
+            parameters,
+            max_order_key=effect_order,
+            blocked_locations=next_blocked_locations,
+            cycle_components=active_cycle_components,
+        )
+        if residual:
+            branches.append((Condition.combine_and(residual), rewritten_value))
+        else:
+            return rewritten_value
+
+    branches.append((None, fallback_expr))
+    resolved = Expression.phi(branches)
+    resolved.size = max(candidate_expr.size or 0, fallback_expr.size or 0, location.size)
+    return resolved
 
 
 def rewrite_observed_loads_from_effects(
@@ -1303,19 +1623,21 @@ def _matches_existing_effect_value(
     parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
 ) -> bool:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
         if max_order_key is not None and effect.order_key >= max_order_key:
             continue
-        if ConditionSimplifier.is_contradiction(list(return_conditions) + list(effect.conditions)):
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
             continue
-        if not locations_match(location, effect.location, return_conditions):
+        if not locations_match(location, effect.location, normalized_return_conditions):
             continue
-        if not _expression_reads_location(expr, location, return_conditions, parameters):
+        if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
             continue
         if _expression_matches_value_under_conditions(
             expr,
             effect.value,
-            list(return_conditions) + list(effect.conditions),
+            normalized_return_conditions + normalized_effect_conditions,
         ):
             return True
     return False
@@ -1346,8 +1668,11 @@ def _expression_matches_value_under_conditions(
 def canonicalize_expr_read_location(expr: Expression, parameters: Sequence[Dict]) -> Optional[CanonicalLocation]:
     if expr is None:
         return None
+    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    if synthetic_location is not None:
+        return synthetic_location
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
-        return canonicalize_param_location(expr.operands[0], parameters, size=expr.size)
+        return canonicalize_location(expr.operands[0], parameters, size=expr.size)
     if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
         left = canonicalize_expr_read_location(expr.operands[0], parameters)
         right = canonicalize_expr_read_location(expr.operands[1], parameters)
@@ -1371,8 +1696,11 @@ def _expression_reads_location(
 ) -> bool:
     if expr is None:
         return False
+    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    if synthetic_location is not None:
+        return locations_match(synthetic_location, location, conditions)
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
-        read_location = canonicalize_param_location(expr.operands[0], parameters, size=expr.size)
+        read_location = canonicalize_location(expr.operands[0], parameters, size=expr.size)
         if read_location is None:
             return False
         return locations_match(read_location, location, conditions)
@@ -1708,7 +2036,10 @@ def memory_expression_for_location(
 ) -> Optional[Expression]:
     param = next((item for item in parameters if item.get("name") == location.base_param), None)
     if param is None:
-        return None
+        return Expression.variable(
+            _synthetic_location_read_name(location),
+            size=max(1, location.size),
+        )
 
     try:
         param_index = int(param.get("index", -1))
@@ -1881,18 +2212,29 @@ def _condition_is_implied(
     return False
 
 
-def substitute_condition(condition: Condition, replacements: Dict[str, Expression]) -> Condition:
-    return Condition(substitute_expression(condition.expression, replacements), condition.negated)
+def substitute_condition(
+    condition: Condition,
+    replacements: Dict[str, Expression],
+    parameters: Optional[Sequence[Dict]] = None,
+) -> Condition:
+    return Condition(
+        substitute_expression(condition.expression, replacements, parameters),
+        condition.negated,
+    )
 
 
-def substitute_expression(expr: Expression, replacements: Dict[str, Expression]) -> Expression:
+def substitute_expression(
+    expr: Expression,
+    replacements: Dict[str, Expression],
+    parameters: Optional[Sequence[Dict]] = None,
+) -> Expression:
     if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE) and expr.name in replacements:
-        return replacements[expr.name]
+        return _simplify_substituted_expression(replacements[expr.name], parameters)
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
-        new_operands = [substitute_expression(op, replacements) for op in expr.operands]
+        new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
         if all(new is old for new, old in zip(new_operands, expr.operands)):
-            return expr
+            return _simplify_substituted_expression(expr, parameters)
         rebuilt = Expression(
             expr_type=expr.expr_type,
             value=expr.value,
@@ -1903,23 +2245,173 @@ def substitute_expression(expr: Expression, replacements: Dict[str, Expression])
             data_type=expr.data_type,
             storage_info=expr.storage_info,
         )
-        return rebuilt
+        return _simplify_substituted_expression(rebuilt, parameters)
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         branches = []
         changed = False
         for cond, value in expr.value:
-            new_cond = substitute_condition(cond, replacements) if cond is not None else None
-            new_value = substitute_expression(value, replacements)
+            new_cond = substitute_condition(cond, replacements, parameters) if cond is not None else None
+            new_value = substitute_expression(value, replacements, parameters)
             branches.append((new_cond, new_value))
             changed = changed or (new_cond is not cond or new_value is not value)
         if not changed:
-            return expr
+            return _simplify_substituted_expression(expr, parameters)
         rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return _simplify_substituted_expression(rebuilt, parameters)
+
+    return expr
+
+
+def _simplify_substituted_expression(
+    expr: Expression,
+    parameters: Optional[Sequence[Dict]] = None,
+) -> Expression:
+    if expr is None:
+        return expr
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE" and expr.operands:
+        truth_value = _expression_truth_value(expr.operands[0])
+        if truth_value is not None:
+            return Expression.constant(0 if truth_value else 1, size=1)
+        return expr
+
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left = expr.operands[0]
+        right = expr.operands[1]
+
+        if expr.operator in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            known_truth = _known_nonnull_address_comparison_truth(
+                expr.operator,
+                left,
+                right,
+                parameters,
+            )
+            if known_truth is not None:
+                return Expression.constant(1 if known_truth else 0, size=1)
+
+        if expr.operator in {"BOOL_AND", "BOOL_OR", "BOOL_XOR"}:
+            simplified_bool = _simplify_boolean_binary_expression(expr.operator, left, right)
+            if simplified_bool is not None:
+                return simplified_bool
+        return expr
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        simplified_branches = []
+        changed = False
+        for cond, value in expr.value:
+            if cond is None:
+                simplified_branches.append((None, value))
+                continue
+            truth_value = ConditionSimplifier.evaluate_condition_truth(cond)
+            if truth_value is False:
+                changed = True
+                continue
+            if truth_value is True:
+                return value
+            simplified_branches.append((cond, value))
+
+        if not simplified_branches:
+            return expr
+        if len(simplified_branches) == 1:
+            only_cond, only_value = simplified_branches[0]
+            if only_cond is None or changed:
+                return only_value
+        if not changed and len(simplified_branches) == len(expr.value):
+            return expr
+        rebuilt = Expression.phi(simplified_branches)
         rebuilt.size = expr.size
         return rebuilt
 
     return expr
+
+
+def _expression_truth_value(expr: Optional[Expression]) -> Optional[bool]:
+    if expr is None:
+        return None
+    return ConditionSimplifier.evaluate_condition_truth(Condition(expr, False))
+
+
+def _simplify_boolean_binary_expression(
+    operator: str,
+    left: Expression,
+    right: Expression,
+) -> Optional[Expression]:
+    left_truth = _expression_truth_value(left)
+    right_truth = _expression_truth_value(right)
+
+    if operator == "BOOL_AND":
+        if left_truth is False or right_truth is False:
+            return Expression.constant(0, size=1)
+        if left_truth is True:
+            return right
+        if right_truth is True:
+            return left
+        return None
+
+    if operator == "BOOL_OR":
+        if left_truth is True or right_truth is True:
+            return Expression.constant(1, size=1)
+        if left_truth is False:
+            return right
+        if right_truth is False:
+            return left
+        return None
+
+    if operator == "BOOL_XOR":
+        if left_truth is not None and right_truth is not None:
+            return Expression.constant(1 if left_truth ^ right_truth else 0, size=1)
+        if left_truth is False:
+            return right
+        if right_truth is False:
+            return left
+        if left_truth is True:
+            return Expression.unary_op("BOOL_NEGATE", right)
+        if right_truth is True:
+            return Expression.unary_op("BOOL_NEGATE", left)
+
+    return None
+
+
+def _known_nonnull_address_comparison_truth(
+    operator: str,
+    left: Expression,
+    right: Expression,
+    parameters: Optional[Sequence[Dict]],
+) -> Optional[bool]:
+    if operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+        return None
+    if not parameters:
+        parameters = []
+
+    if _is_zero_constant(left) and _is_known_nonnull_stack_address(right, parameters):
+        return operator == "INT_NOTEQUAL"
+    if _is_zero_constant(right) and _is_known_nonnull_stack_address(left, parameters):
+        return operator == "INT_NOTEQUAL"
+    return None
+
+
+def _is_zero_constant(expr: Optional[Expression]) -> bool:
+    return (
+        expr is not None
+        and expr.expr_type == ExpressionType.CONSTANT
+        and isinstance(expr.value, int)
+        and int(expr.value) == 0
+    )
+
+
+def _is_known_nonnull_stack_address(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+    size = max(1, int(getattr(expr, "size", 0) or 0), 1)
+    location = canonicalize_location(expr, parameters, size=size)
+    if location is None:
+        return False
+    return location.base_param == _STACK_FRAME_LOCATION_BASE
 
 
 def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]:
@@ -1935,13 +2427,26 @@ def _flatten_param_addition(
     expr: Expression,
     parameters: Sequence[Dict],
 ) -> Tuple[Optional[int], List[str]]:
+    const_total, bases = _flatten_location_addition(expr, parameters)
+    if const_total is None:
+        return None, []
+    if not all(any(param.get("name") == base for param in parameters) for base in bases):
+        return None, []
+    return const_total, bases
+
+
+def _flatten_location_addition(
+    expr: Expression,
+    parameters: Sequence[Dict],
+) -> Tuple[Optional[int], List[str]]:
     if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
-        base_name = _resolve_parameter_name(expr, parameters)
-        if base_name is not None:
-            return 0, [base_name]
+        resolved_base = _resolve_location_base_with_offset(expr, parameters)
+        if resolved_base is not None:
+            base_name, base_offset = resolved_base
+            return base_offset, [base_name]
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and expr.operands:
-        return _flatten_param_addition(expr.operands[0], parameters)
+        return _flatten_location_addition(expr.operands[0], parameters)
 
     if (
         expr.expr_type == ExpressionType.BINARY_OP
@@ -1950,15 +2455,15 @@ def _flatten_param_addition(
     ):
         source, offset = expr.operands
         if offset.expr_type == ExpressionType.CONSTANT and offset.value == 0:
-            return _flatten_param_addition(source, parameters)
+            return _flatten_location_addition(source, parameters)
 
     if (
         expr.expr_type == ExpressionType.BINARY_OP
         and expr.operator == "INT_ADD"
         and len(expr.operands) == 2
     ):
-        left_const, left_bases = _flatten_param_addition(expr.operands[0], parameters)
-        right_const, right_bases = _flatten_param_addition(expr.operands[1], parameters)
+        left_const, left_bases = _flatten_location_addition(expr.operands[0], parameters)
+        right_const, right_bases = _flatten_location_addition(expr.operands[1], parameters)
         if left_const is None or right_const is None:
             return None, []
         return left_const + right_const, left_bases + right_bases
@@ -1971,14 +2476,76 @@ def _flatten_param_addition(
         left_const = _constant_factor(expr.operands[0])
         right_const = _constant_factor(expr.operands[1])
         if left_const == 1:
-            return _flatten_param_addition(expr.operands[1], parameters)
+            return _flatten_location_addition(expr.operands[1], parameters)
         if right_const == 1:
-            return _flatten_param_addition(expr.operands[0], parameters)
+            return _flatten_location_addition(expr.operands[0], parameters)
 
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return expr.value, []
 
     return None, []
+
+
+def _resolve_location_base_with_offset(
+    expr: Expression,
+    parameters: Sequence[Dict],
+) -> Optional[Tuple[str, int]]:
+    param_name = _resolve_parameter_name(expr, parameters)
+    if param_name is not None:
+        return param_name, 0
+
+    if _is_stack_frame_base_expression(expr):
+        return _STACK_FRAME_LOCATION_BASE, 0
+
+    expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
+    if expr_storage is None:
+        return None
+    if not expr_storage.is_register and expr_storage.space_name == "stack":
+        return _STACK_FRAME_LOCATION_BASE, int(expr_storage.offset)
+    base_name = _synthetic_storage_base_name(expr_storage)
+    if base_name is None:
+        return None
+    return base_name, 0
+
+
+def _is_stack_frame_base_expression(expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return False
+
+    expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
+    register_candidates = []
+    if expr_storage is not None and expr_storage.is_register:
+        register_candidates.extend(
+            [
+                expr_storage.register_name,
+                expr_storage.base_register_name,
+            ]
+        )
+
+    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
+        register_candidates.append(expr.name)
+
+    normalized = {
+        StorageInfo._normalize_reg_name(candidate or "")
+        for candidate in register_candidates
+        if candidate
+    }
+    return bool(
+        normalized.intersection(
+            {
+                "sp",
+                "wsp",
+                "rsp",
+                "esp",
+                "rbp",
+                "ebp",
+                "bp",
+                "fp",
+                "s8",
+                "x29",
+            }
+        )
+    )
 
 
 def _resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Optional[str]:
@@ -2036,7 +2603,20 @@ def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
 def _storage_matches_parameter(expr_storage: StorageInfo, param_storage: StorageInfo) -> bool:
     if expr_storage.is_register and param_storage.is_register:
         if expr_storage.shares_base_register_with(param_storage):
-            return expr_storage.bit_range_overlaps_with(param_storage)
+            expr_low = expr_storage.bit_offset_in_base
+            expr_high = expr_low + max(0, int(expr_storage.size_bits or 0))
+            param_low = param_storage.bit_offset_in_base
+            param_high = param_low + max(0, int(param_storage.size_bits or 0))
+            if expr_high <= expr_low or param_high <= param_low:
+                return (
+                    StorageInfo._normalize_reg_name(expr_storage.register_name or "")
+                    == StorageInfo._normalize_reg_name(param_storage.register_name or "")
+                )
+            # Only treat a register-backed value as "the same parameter" when all
+            # of the value's bits are contained within the parameter fragment.
+            # Mere overlap is too permissive on architectures like MIPS64 where
+            # `a0` and `a0_lo` share a base register but mean different things.
+            return param_low <= expr_low and expr_high <= param_high
         return (
             StorageInfo._normalize_reg_name(expr_storage.register_name or "")
             == StorageInfo._normalize_reg_name(param_storage.register_name or "")

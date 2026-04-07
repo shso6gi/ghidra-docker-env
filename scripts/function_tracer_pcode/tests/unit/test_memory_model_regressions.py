@@ -8,18 +8,26 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     StoreEffect,
     _resolve_call_target_name,
+    _resolve_parameter_name,
+    _storage_matches_parameter,
     subtract_implied_conditions,
     is_call_effect_summary_allowed,
     build_void_effect_summary_expr,
+    canonicalize_location,
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    memory_expression_for_location,
     rewrite_loads_from_effects,
+    rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
+    substitute_condition,
     substitute_location,
     _choose_effect_substitution_args,
+    _recover_call_argument_expressions,
+    _recover_call_argument_from_storage,
     _resolve_call_argument_expression,
     _normalize_call_argument_expression,
     EffectSummary,
@@ -62,6 +70,16 @@ def _reg_storage(base_name: str, size_bytes: int = 8, register_name: str = None)
         "base_register_size": size_bytes,
         "base_register_size_bits": size_bytes * 8,
         "bit_offset_in_base": 0,
+    }
+
+
+def _stack_storage(offset: int, size_bytes: int = 4):
+    return {
+        "is_register": False,
+        "space_name": "stack",
+        "offset": offset,
+        "size": size_bytes,
+        "size_bits": size_bytes * 8,
     }
 
 
@@ -738,6 +756,755 @@ def test_substitute_location_accepts_register_alias_call_arguments():
     assert substituted == CanonicalLocation("param_1", 0, 4)
 
 
+def test_substitute_location_accepts_stack_local_call_arguments():
+    caller_params = [_param("param_1", size=8, is_signed=False)]
+    local_out = Expression.variable(
+        "local_out",
+        size=8,
+        storage_info=StorageInfo(**_stack_storage(24, size_bytes=4)),
+    )
+
+    substituted = substitute_location(
+        CanonicalLocation("out", 0, 4),
+        ["in", "out"],
+        [Expression.parameter("param_1", 0, size=8), local_out],
+        caller_params,
+    )
+
+    assert substituted == canonicalize_location(local_out, caller_params, size=4)
+
+
+def test_canonicalize_location_accepts_stack_pointer_relative_address_expression():
+    params = [_param("param_1", size=8, is_signed=False)]
+    sp = Expression.variable(
+        "sp",
+        size=8,
+        storage_info=StorageInfo(
+            is_register=True,
+            space_name="register",
+            register_name="sp",
+            base_register_name="sp",
+            size=8,
+            size_bits=64,
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=0,
+        ),
+    )
+    addr_expr = Expression.binary_op("INT_ADD", sp, Expression.constant(-0x1C, 8))
+
+    location = canonicalize_location(addr_expr, params, size=4)
+
+    assert location == CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+
+
+def test_substitute_condition_simplifies_stack_local_nonnull_guard():
+    params = [_param("param_1", size=8, is_signed=False)]
+    sp = Expression.variable(
+        "sp",
+        size=8,
+        storage_info=StorageInfo(
+            is_register=True,
+            space_name="register",
+            register_name="sp",
+            base_register_name="sp",
+            size=8,
+            size_bits=64,
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=0,
+        ),
+    )
+    local_addr = Expression.binary_op("INT_ADD", sp, Expression.constant(-0x1C, 8))
+    guard = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.parameter("out", 1, size=8),
+            Expression.constant(0, 8),
+        ),
+        False,
+    )
+
+    substituted = substitute_condition(
+        guard,
+        {"out": local_addr},
+        params,
+    )
+
+    assert substituted.expression.expr_type.name == "CONSTANT"
+    assert substituted.expression.value == 1
+
+
+def test_effect_summary_rewrites_stack_local_post_state_reads_in_arithmetic_expression():
+    a = Expression.parameter("a", 0, size=4)
+    b = Expression.parameter("b", 1, size=4)
+    sum_slot = Expression.variable(
+        "sum_slot",
+        size=4,
+        storage_info=StorageInfo(**_stack_storage(24, size_bytes=4)),
+    )
+    diff_slot = Expression.variable(
+        "diff_slot",
+        size=4,
+        storage_info=StorageInfo(**_stack_storage(28, size_bytes=4)),
+    )
+    sum_location = canonicalize_location(sum_slot, [_param("a", size=4), _param("b", size=4, index=1)], size=4)
+    diff_location = canonicalize_location(diff_slot, [_param("a", size=4), _param("b", size=4, index=1)], size=4)
+
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_MULT", memory_expression_for_location(sum_location, []), Expression.constant(4, 4)),
+        memory_expression_for_location(diff_location, []),
+    )
+
+    rewritten = rewrite_loads_from_effects(
+        expr,
+        [],
+        [
+            StoreEffect(
+                location=sum_location,
+                value=Expression.binary_op("INT_ADD", a, b),
+                conditions=[],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=diff_location,
+                value=Expression.binary_op("INT_SUB", a, b),
+                conditions=[],
+                order_key=2,
+            ),
+        ],
+        [_param("a", size=4), _param("b", size=4, index=1)],
+    )
+
+    assert rewritten.to_string() == "(((a + b) * 4) + (a - b))"
+
+
+def test_rewrite_location_read_from_effects_drops_stack_local_nonnull_phi_guard():
+    params = [_param("a", size=4), _param("b", size=4, index=1)]
+    location = CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+    raw_guard = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.parameter("out", 2, size=8),
+            Expression.constant(0, 8),
+        ),
+        False,
+    )
+    cond = substitute_condition(
+        raw_guard,
+        {
+            "out": Expression.binary_op(
+                "INT_ADD",
+                Expression.variable(
+                    "sp",
+                    size=8,
+                    storage_info=StorageInfo(
+                        is_register=True,
+                        space_name="register",
+                        register_name="sp",
+                        base_register_name="sp",
+                        size=8,
+                        size_bits=64,
+                        base_register_size=8,
+                        base_register_size_bits=64,
+                        bit_offset_in_base=0,
+                    ),
+                ),
+                Expression.constant(-0x1C, 8),
+            ),
+        },
+        params,
+    )
+
+    rewritten = rewrite_location_read_from_effects(
+        location,
+        Expression.constant(0, 4),
+        [],
+        [
+            StoreEffect(
+                location=location,
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("a", 0, size=4),
+                    Expression.parameter("b", 1, size=4),
+                ),
+                conditions=[cond],
+                order_key=1,
+            ),
+        ],
+        params,
+    )
+
+    assert rewritten.to_string() == "(a + b)"
+
+
+def test_return_analyzer_normalizes_synthetic_post_state_reads_via_effect_summary():
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("param_1", size=4, is_signed=False, index=0),
+        _param("param_2", size=4, is_signed=False, index=1),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("__locbase__stackframe", -32, 4),
+                value=Expression.binary_op(
+                    "INT_SUB",
+                    Expression.parameter("param_1", 0, size=4),
+                    Expression.parameter("param_2", 1, size=4),
+                ),
+                conditions=[],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("__locbase__stackframe", -28, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("param_1", 0, size=4),
+                    Expression.parameter("param_2", 1, size=4),
+                ),
+                conditions=[],
+                order_key=2,
+            ),
+        ],
+    )
+
+    expr = Expression.binary_op(
+        "INT_ADD",
+        memory_expression_for_location(CanonicalLocation("__locbase__stackframe", -32, 4), []),
+        Expression.binary_op(
+            "INT_MULT",
+            memory_expression_for_location(CanonicalLocation("__locbase__stackframe", -28, 4), []),
+            Expression.constant(4, 4),
+        ),
+    )
+
+    normalized = analyzer._normalize_expanded_return_value(expr, [])
+
+    assert "__locread__" not in normalized.to_string()
+    assert normalized.to_string() == "((param_1 - param_2) + ((param_1 + param_2) * 4))"
+
+
+def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_read():
+    params = [_param("guard", size=8, is_signed=False)]
+    slot_expr = Expression.variable(
+        "local_guard",
+        size=8,
+        storage_info=StorageInfo(**_stack_storage(8, size_bytes=8)),
+    )
+    location = canonicalize_location(slot_expr, params, size=8)
+    fallback = Expression.variable("guard_before_call", size=8)
+
+    rewritten = rewrite_location_read_from_effects(
+        location,
+        fallback,
+        [],
+        [
+            StoreEffect(
+                location=CanonicalLocation("guard", 0, 8),
+                value=Expression.constant(1, 8),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+        params,
+    )
+
+    assert rewritten.to_string() == "guard_before_call"
+
+
+def test_recover_call_argument_from_storage_prefers_exact_register_match_for_pointer_arg():
+    class FakeAddress:
+        def __init__(self, offset, space_name="register"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset, "ram")
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, storage, size=8):
+            self.storage = storage
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getAddress(self):
+            return FakeAddress(self.storage.offset, self.storage.space_name)
+
+        def getOffset(self):
+            return self.storage.offset
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeOp:
+        def __init__(self, output, offset, order):
+            self._output = output
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getOutput(self):
+            return self._output
+
+        def getMnemonic(self):
+            return "COPY"
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeTracer:
+        def __init__(self, traced_values, ops):
+            self._traced_values = traced_values
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return self._traced_values[varnode]
+
+    partial_output = FakeVarnode(
+        StorageInfo(
+            is_register=True,
+            space_name="register",
+            offset=0,
+            size=4,
+            size_bits=32,
+            register_name="a2_lo",
+            base_register_name="a2",
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=0,
+        ),
+        size=4,
+    )
+    exact_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
+    tracer = FakeTracer(
+        {
+            partial_output: Expression.parameter("param_1", 0, size=4),
+            exact_output: Expression.binary_op(
+                "INT_ADD",
+                Expression.variable(
+                    "sp",
+                    size=8,
+                    storage_info=StorageInfo(
+                        is_register=True,
+                        space_name="register",
+                        register_name="sp",
+                        base_register_name="sp",
+                        size=8,
+                        size_bits=64,
+                        base_register_size=8,
+                        base_register_size_bits=64,
+                        bit_offset_in_base=0,
+                    ),
+                ),
+                Expression.constant(-0x30, 8),
+            ),
+        },
+        [
+            FakeOp(partial_output, 0x1000, 1),
+            FakeOp(exact_output, 0x1000, 2),
+        ],
+    )
+    call_op = FakeOp(None, 0x1000, 3)
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        tracer,
+        [_param("param_1", size=4, is_signed=False, index=0)],
+        {"storage": _reg_storage("a2"), "size": 8},
+    )
+
+    assert recovered is not None
+    assert recovered.to_string() == "(sp + (-48))"
+
+
+def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate_over_later_scalar_copy():
+    class FakeAddress:
+        def __init__(self, offset, space_name="register"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset, "ram")
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, storage, size=8):
+            self.storage = storage
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getAddress(self):
+            return FakeAddress(self.storage.offset, self.storage.space_name)
+
+        def getOffset(self):
+            return self.storage.offset
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeOp:
+        def __init__(self, output, offset, order):
+            self._output = output
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getOutput(self):
+            return self._output
+
+        def getMnemonic(self):
+            return "COPY"
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeTracer:
+        def __init__(self, traced_values, ops):
+            self._traced_values = traced_values
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return self._traced_values[varnode]
+
+    pointer_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
+    scalar_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
+    local_addr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable(
+            "sp",
+            size=8,
+            storage_info=StorageInfo(
+                is_register=True,
+                space_name="register",
+                register_name="sp",
+                base_register_name="sp",
+                size=8,
+                size_bits=64,
+                base_register_size=8,
+                base_register_size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        ),
+        Expression.constant(-0x30, 8),
+    )
+    tracer = FakeTracer(
+        {
+            pointer_output: local_addr,
+            scalar_output: Expression.parameter("param_1", 0, size=4),
+        },
+        [
+            FakeOp(pointer_output, 0x1000, 1),
+            FakeOp(scalar_output, 0x1000, 2),
+        ],
+    )
+    call_op = FakeOp(None, 0x1000, 3)
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        tracer,
+        [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0_lo", size_bytes=4, register_name="a0_lo"))],
+        {"storage": _reg_storage("a2"), "size": 8, "data_type": "int *"},
+    )
+
+    assert recovered is not None
+    assert recovered.to_string() == "(sp + (-48))"
+
+
+def test_storage_matches_parameter_rejects_superset_register_alias():
+    expr_storage = StorageInfo(**_reg_storage("a0", size_bytes=8, register_name="a0"))
+    param_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        offset=36,
+        size=4,
+        size_bits=32,
+        register_name="a0_lo",
+        base_register_name="a0",
+        base_register_offset=0,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=32,
+    )
+
+    assert _storage_matches_parameter(expr_storage, param_storage) is False
+    assert _storage_matches_parameter(param_storage, param_storage) is True
+
+
+def test_resolve_parameter_name_rejects_full_register_when_only_fragment_param_exists():
+    params = [
+        _param(
+            "param_1",
+            size=4,
+            is_signed=False,
+            index=0,
+            storage={
+                **_reg_storage("a0", size_bytes=4, register_name="a0_lo"),
+                "offset": 36,
+                "bit_offset_in_base": 32,
+                "base_register_size": 8,
+                "base_register_size_bits": 64,
+            },
+        )
+    ]
+
+    full_reg_expr = Expression.variable(
+        "a0",
+        size=8,
+        storage_info=StorageInfo(**_reg_storage("a0", size_bytes=8, register_name="a0")),
+    )
+    fragment_expr = Expression.variable(
+        "a0_lo",
+        size=4,
+        storage_info=StorageInfo(
+            is_register=True,
+            space_name="register",
+            offset=36,
+            size=4,
+            size_bits=32,
+            register_name="a0_lo",
+            base_register_name="a0",
+            base_register_offset=0,
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=32,
+        ),
+    )
+
+    assert _resolve_parameter_name(full_reg_expr, params) is None
+    assert _resolve_parameter_name(fragment_expr, params) == "param_1"
+
+
+def test_expression_expander_infers_stack_location_for_indirect_output_without_tracer_storage():
+    class FakeAddress:
+        def __init__(self, offset, space_name="stack"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeVarnode:
+        def getAddress(self):
+            return FakeAddress(-0x30, "stack")
+
+        def getOffset(self):
+            return -0x30
+
+        def getSize(self):
+            return 4
+
+        def getHigh(self):
+            return None
+
+    class FakeTracer:
+        def __init__(self):
+            self.program = object()
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    expander = ExpressionExpander(
+        tracer=FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=EffectSummary(parameter_names=["param_1"], effects=[]),
+        parameters=[_param("param_1", size=4, is_signed=False, index=0)],
+    )
+
+    location = expander._infer_indirect_output_location(FakeVarnode(), 4)
+
+    assert location == CanonicalLocation("__locbase__stackframe", -0x30, 4)
+
+
+def test_recover_call_argument_expressions_prefers_explicit_stack_local_address_over_storage_guess():
+    class FakeAddress:
+        def __init__(self, offset, space_name="register"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset, "ram")
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, storage=None, size=8):
+            self.storage = storage
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getAddress(self):
+            if self.storage is None:
+                return None
+            return FakeAddress(self.storage.offset, self.storage.space_name)
+
+        def getOffset(self):
+            return 0 if self.storage is None else self.storage.offset
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeOp:
+        def __init__(self, output):
+            self._output = output
+            self._seqnum = FakeSeqnum(0x1000, 3)
+
+        def getSeqnum(self):
+            return self._seqnum
+
+        def getOutput(self):
+            return self._output
+
+        def getMnemonic(self):
+            return "COPY"
+
+        def getNumInputs(self):
+            return 0
+
+    class FakeTracer:
+        def __init__(self, ops):
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, _varnode, use_cache=False, depth=0):
+            return Expression.variable("opaque", size=8)
+
+    misleading_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
+    tracer = FakeTracer([FakeOp(misleading_output)])
+    call_op = FakeOp(None)
+    local_addr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable(
+            "sp",
+            size=8,
+            storage_info=StorageInfo(
+                is_register=True,
+                space_name="register",
+                register_name="sp",
+                base_register_name="sp",
+                size=8,
+                size_bits=64,
+                base_register_size=8,
+                base_register_size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        ),
+        Expression.constant(-0x30, 8),
+    )
+
+    recovered = _recover_call_argument_expressions(
+        call_op,
+        tracer,
+        [
+            _param("param_1", size=4, is_signed=False, index=0),
+            _param("param_2", size=4, is_signed=False, index=1),
+        ],
+        [
+            {"name": "param_1", "size": 4, "storage": _reg_storage("a0_lo", size_bytes=4, register_name="a0_lo")},
+            {"name": "param_2", "size": 4, "storage": _reg_storage("a1_lo", size_bytes=4, register_name="a1_lo")},
+            {"name": "param_3", "size": 8, "storage": _reg_storage("a2")},
+        ],
+        [
+            Expression.parameter("param_1", 0, size=4),
+            Expression.parameter("param_2", 1, size=4),
+            local_addr,
+        ],
+    )
+
+    assert recovered[2].to_string() == "(sp + (-48))"
+
+
 def test_resolve_call_argument_expression_recovers_parameter_from_storage_alias():
     class FakeVarnode:
         def getSize(self):
@@ -919,6 +1686,136 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
     assert summary.effects[0].value.to_string() == "MEM[param_2]"
     assert summary.effects[1].location == CanonicalLocation("param_2", 0, 4)
     assert summary.effects[1].value.to_string() == "MEM[param_1]"
+
+
+def test_summarize_store_effects_substitutes_stack_pointer_relative_out_parameter_locations():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key):
+            self.key = key
+
+        def getSize(self):
+            return 8
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target"),
+                FakeVarnode("arg0"),
+                FakeVarnode("out0"),
+            ]
+            self._seqnum = FakeSeqnum(0x401100, 3)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    sp = Expression.variable(
+        "sp",
+        size=8,
+        storage_info=StorageInfo(
+            is_register=True,
+            space_name="register",
+            register_name="sp",
+            base_register_name="sp",
+            size=8,
+            size_bits=64,
+            base_register_size=8,
+            base_register_size_bits=64,
+            bit_offset_in_base=0,
+        ),
+    )
+
+    class FakeTracer:
+        def __init__(self, op):
+            self._op = op
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def get_all_pcode_ops(self):
+            return [self._op]
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "arg0":
+                return Expression.parameter("param_1", 0, size=8)
+            if varnode.key == "out0":
+                return Expression.binary_op("INT_ADD", sp, Expression.constant(-0x1C, 8))
+            return Expression.constant(0x401100, 8)
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(call_op),
+        FakeConditionTracker(),
+        [_param("param_1", size=8, is_signed=False, index=0)],
+        direct_call_summary=lambda _name, _args: EffectSummary(
+            parameter_names=["value", "out"],
+            effects=[
+                StoreEffect(
+                    location=CanonicalLocation("out", 0, 4),
+                    value=Expression.parameter("value", 0, size=4),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        ),
+        resolve_callee_parameters=lambda _name: [
+            _param("value", size=8, is_signed=False, index=0),
+            _param("out", size=8, is_signed=False, index=1),
+        ],
+        debug=False,
+    )
+
+    assert len(summary.effects) == 1
+    assert summary.effects[0].location == CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+    assert summary.effects[0].value.expr_type.name == "PARAMETER"
+    assert summary.effects[0].value.name == "param_1"
 
 
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
@@ -2904,6 +3801,58 @@ def test_expander_combines_load_inputs_into_memory_expression():
     assert len(result) == 1
     assert result[0].value.expr_type.name == "MEMORY"
     assert result[0].value.to_string() == "MEM[ptr]"
+
+
+def test_expander_resolves_indirect_stack_slot_read_via_effect_summary():
+    class FakeOutputVarnode:
+        def getHigh(self):
+            return None
+
+    class FakeTracer:
+        debug = False
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return StorageInfo(**_stack_storage(-0x1C, size_bytes=4))
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[
+                StoreEffect(
+                    location=CanonicalLocation("__locbase__stackframe", -0x1C, 4),
+                    value=Expression.binary_op(
+                        "INT_ADD",
+                        Expression.parameter("a", 0, size=4),
+                        Expression.parameter("b", 1, size=4),
+                    ),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        ),
+        parameters=[
+            _param("a", size=4, is_signed=False, index=0),
+            _param("b", size=4, is_signed=False, index=1),
+        ],
+    )
+
+    result = expander._combine_input_expansions_with_conditions(
+        "INDIRECT",
+        [
+            [ExpandedValue(Expression.constant(0, 4), [])],
+            [ExpandedValue(Expression.constant(0x28, 4), [])],
+        ],
+        [],
+        0,
+        output_size=4,
+        output_varnode=FakeOutputVarnode(),
+    )
+
+    assert len(result) == 1
+    assert result[0].value.to_string() == "(a + b)"
 
 
 def test_type_fixer_does_not_pattern_fix_pointer_types():

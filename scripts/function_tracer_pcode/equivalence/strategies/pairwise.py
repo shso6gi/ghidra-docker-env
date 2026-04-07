@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import time
 
 from ...model import Condition, Expression, FunctionReturnAnalysis, ExpressionType
+from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
@@ -425,6 +426,8 @@ class PairwiseStrategy(CheckStrategy):
             return False
 
         if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+            return True
+        if expression_contains_unsupported_smt_ops(expr):
             return True
 
         if expr.expr_type == ExpressionType.PHI and expr.value:

@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue
 
 
@@ -173,3 +173,101 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
         [cond.to_string() for cond in path_b],
     ]
     tracer.clear_cache.assert_called_once()
+
+
+def test_return_analyzer_collapses_same_value_under_complementary_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selector = _param("param_1")
+    zero = Expression.constant(0, 4)
+    cond_true = _cond("INT_NOTEQUAL", selector, zero)
+    cond_false = _cond("INT_NOTEQUAL", selector, zero, negated=True)
+    same_value = Expression.constant(7, 4)
+
+    expanded_values = [
+        ExpandedValue(same_value, [cond_true]),
+        ExpandedValue(same_value, [cond_false]),
+    ]
+
+    results = analyzer._build_return_infos_from_expansions(
+        address="0x1000",
+        expanded_values=expanded_values,
+        return_index=3,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "7"
+    assert results[0].conditions == []
+
+
+def test_return_analyzer_collapses_same_value_under_stack_guard_like_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    guard_ptr = Expression.variable("PTR___stack_chk_guard_120013160", size=8)
+    left = Expression.memory(
+        Expression.binary_op(
+            "INDIRECT",
+            Expression.memory(guard_ptr, size=8),
+            Expression.constant(74, 4),
+        ),
+        size=8,
+    )
+    right = Expression.memory(
+        Expression.binary_op("INDIRECT", guard_ptr, Expression.constant(74, 4)),
+        size=8,
+    )
+    guard_expr = Expression.binary_op("INT_NOTEQUAL", left, right)
+    value = Expression.constant(0, 4)
+
+    expanded_values = [
+        ExpandedValue(value, [Condition(guard_expr, True)]),
+        ExpandedValue(value, [Condition(guard_expr, False)]),
+    ]
+
+    results = analyzer._build_return_infos_from_expansions(
+        address="0x2000",
+        expanded_values=expanded_values,
+        return_index=4,
+    )
+
+    assert len(results) == 1
+    assert results[0].conditions == []
+
+
+def test_return_analyzer_drops_stack_protector_condition_from_sole_return_case():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    guard_ptr = Expression.variable("PTR___stack_chk_guard_00111fe8", size=8)
+    guard_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op(
+            "INT_SUB",
+            Expression.memory(
+                Expression.binary_op(
+                    "INDIRECT",
+                    Expression.memory(guard_ptr, size=8),
+                    Expression.constant(48, 4),
+                ),
+                size=8,
+            ),
+            Expression.memory(
+                Expression.binary_op("INDIRECT", guard_ptr, Expression.constant(48, 4)),
+                size=8,
+            ),
+        ),
+        Expression.constant(0, 8),
+    )
+
+    stripped = analyzer._strip_stack_protector_only_conditions(
+        [
+            ReturnInfo(
+                address="0x4000",
+                value=Expression.constant(7, 4),
+                conditions=[Condition(guard_expr, True)],
+                branch_index=0,
+            )
+        ]
+    )
+
+    assert len(stripped) == 1
+    assert stripped[0].conditions == []
