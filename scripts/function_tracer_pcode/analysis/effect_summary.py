@@ -2030,6 +2030,50 @@ def canonicalize_post_state_subexpressions(
     return expr
 
 
+def normalize_post_state_expression(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    """
+    Normalize equivalent post-state expressions to a stable canonical form.
+
+    The pipeline may derive semantically equivalent results in two shapes:
+    1. canonical post-state memory (e.g. MEM[param])
+    2. pre-state expressions reconstructed from guarded store effects
+
+    Converting both shapes through the same canonicalization step keeps
+    equivalent branches comparable across architectures and optimization levels.
+    """
+    if expr is None:
+        return None
+
+    normalized = expr
+
+    canonicalized = canonicalize_post_state_subexpressions(
+        normalized,
+        return_conditions,
+        effects,
+        parameters,
+    )
+    if canonicalized is not None:
+        normalized = canonicalized
+
+    if expression_contains_synthetic_location_reads(normalized):
+        rewritten_post_state = rewrite_loads_from_effects(
+            normalized,
+            return_conditions,
+            effects,
+            parameters,
+        )
+        if rewritten_post_state is not None:
+            normalized = rewritten_post_state
+
+    reduced = _reduce_expression_under_conditions(normalized, return_conditions)
+    return reduced if reduced is not None else normalized
+
+
 def memory_expression_for_location(
     location: CanonicalLocation,
     parameters: Sequence[Dict],

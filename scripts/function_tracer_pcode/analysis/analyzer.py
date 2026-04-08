@@ -14,9 +14,7 @@ from .effect_summary import (
     _expressions_equivalent,
     _resolve_call_target_name,
     _reduce_expression_under_conditions,
-    canonicalize_post_state_subexpressions,
-    expression_contains_synthetic_location_reads,
-    rewrite_loads_from_effects,
+    normalize_post_state_expression,
     summarize_store_effects,
     substitute_condition,
     substitute_expression,
@@ -3824,7 +3822,7 @@ class ReturnAnalyzer:
                 )
 
         if has_effects:
-            canonicalized = canonicalize_post_state_subexpressions(
+            canonicalized = normalize_post_state_expression(
                 normalized_value,
                 conditions,
                 effect_summary.effects,
@@ -3832,23 +3830,6 @@ class ReturnAnalyzer:
             )
             if canonicalized is not None:
                 normalized_value = canonicalized
-
-            if expression_contains_synthetic_location_reads(normalized_value):
-                rewritten_post_state = rewrite_loads_from_effects(
-                    normalized_value,
-                    conditions,
-                    effect_summary.effects,
-                    self._current_parameters,
-                )
-                if rewritten_post_state is not None:
-                    normalized_value = rewritten_post_state
-
-            reduced_post_state = _reduce_expression_under_conditions(
-                normalized_value,
-                conditions,
-            )
-            if reduced_post_state is not None:
-                normalized_value = reduced_post_state
 
         return normalized_value
 

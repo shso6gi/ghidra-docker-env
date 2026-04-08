@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
     memory_expression_for_location,
+    normalize_post_state_expression,
     rewrite_loads_from_effects,
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
@@ -2606,6 +2607,138 @@ def test_expression_expander_collapses_nested_multiequal_with_grouped_active_con
     assert expanded[0].value.to_string() == "MEM[b]"
 
 
+def test_normalize_post_state_expression_collapses_effect_rewritten_branch_value():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=8)
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 8)),
+        False,
+    )
+    negate_nonzero = negate_zero.negate()
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("value", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+            conditions=[negate_zero],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("value", 0, 4),
+            value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+            conditions=[negate_nonzero],
+            order_key=5,
+        ),
+    ]
+
+    rewritten = rewrite_observed_loads_from_effects(
+        Expression.memory(value, size=4, read_order_key=9),
+        [negate_zero],
+        effects,
+        [
+            _param("value", size=8, is_signed=False),
+            _param("delta", size=4, index=1),
+            _param("negate", size=8, index=2),
+        ],
+    )
+    normalized = normalize_post_state_expression(
+        rewritten,
+        [negate_zero],
+        effects,
+        [
+            _param("value", size=8, is_signed=False),
+            _param("delta", size=4, index=1),
+            _param("negate", size=8, index=2),
+        ],
+    )
+
+    assert rewritten.to_string() == "(MEM[value] + delta)"
+    assert normalized.to_string() == "MEM[value]"
+
+
+def test_normalize_post_state_expression_stays_conservative_when_guards_do_not_match():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=8)
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 8)),
+        False,
+    )
+    other_guard = Condition(
+        Expression.binary_op("INT_NOTEQUAL", negate, Expression.constant(1, 8)),
+        False,
+    )
+    expr = Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta)
+
+    normalized = normalize_post_state_expression(
+        expr,
+        [negate_zero],
+        [
+            StoreEffect(
+                location=CanonicalLocation("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[other_guard],
+                order_key=5,
+            ),
+        ],
+        [
+            _param("value", size=8, is_signed=False),
+            _param("delta", size=4, index=1),
+            _param("negate", size=8, index=2),
+        ],
+    )
+
+    assert normalized.to_string() == "(MEM[value] + delta)"
+
+
+def test_expression_expander_prefers_canonical_post_state_memory_after_observed_load_rewrite():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=8)
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 8)),
+        False,
+    )
+    negate_nonzero = negate_zero.negate()
+
+    effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[negate_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[negate_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    expander = ExpressionExpander(
+        tracer=None,
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("value", size=8, is_signed=False),
+            _param("delta", size=4, index=1),
+            _param("negate", size=8, index=2),
+        ],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        Expression.memory(value, size=4, read_order_key=9),
+        [negate_zero],
+    )
+
+    assert canonicalized.to_string() == "MEM[value]"
+
+
 def test_expression_expander_collapses_nested_multiequal_after_phi_handler_prunes_to_memory_leaf():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -2952,7 +3085,7 @@ def test_expression_expander_reduces_full_operation_trace_under_active_condition
     assert direct.to_string() == "(MEM[a] - MEM[b])"
 
 
-def test_expression_expander_rewrites_observed_loads_before_post_state_canonicalization():
+def test_expression_expander_rewrites_observed_loads_before_post_state_canonicalization_duplicate_path():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
     nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
@@ -3003,7 +3136,7 @@ def test_expression_expander_rewrites_observed_loads_before_post_state_canonical
         [nonnull_a, nonnull_b],
     )
 
-    assert canonicalized.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
+    assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
 
 
 def test_phi_handler_merge_preserves_same_value_with_distinct_conditions():
@@ -3255,7 +3388,7 @@ def test_expression_expander_rewrites_observed_loads_before_post_state_canonical
         [nonnull_a, nonnull_b],
     )
 
-    assert canonicalized.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
+    assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
 
 
 def test_expression_expander_keeps_canonical_memory_without_read_order_key_unchanged():
@@ -3382,10 +3515,11 @@ def test_expression_expander_expands_observed_load_phi_difference_into_cases():
         depth=0,
     )
 
-    assert len(expanded) == 2
-    values = sorted(ev.value.to_string() for ev in expanded)
-    assert values == ["(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"]
-    assert any("(MEM[b] < MEM[a])" in " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded)
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "(MEM[a] - MEM[b])"
+    cond_text = " ".join(cond.to_string() for cond in expanded[0].conditions)
+    assert "(a != 0)" in cond_text
+    assert "(b != 0)" in cond_text
 
 
 def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_location():

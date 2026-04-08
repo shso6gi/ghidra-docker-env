@@ -16,6 +16,7 @@ from ..analysis.effect_summary import (
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
     expression_contains_synthetic_location_reads,
     memory_expression_for_location,
+    normalize_post_state_expression,
     rewrite_loads_from_effects,
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
@@ -846,11 +847,13 @@ class ExpressionExpander:
                     f"{expr.to_string()} -> {rewritten_observed.to_string()}",
                     0,
                 )
-            reduced = _reduce_expression_under_conditions(
+            normalized = normalize_post_state_expression(
                 rewritten_observed if rewritten_observed is not None else expr,
                 conditions,
+                self.effect_summary.effects,
+                self.parameters,
             )
-            return reduced if reduced is not None else rewritten_observed
+            return normalized if normalized is not None else rewritten_observed
         canonicalized = canonicalize_post_state_subexpressions(
             expr,
             conditions,
