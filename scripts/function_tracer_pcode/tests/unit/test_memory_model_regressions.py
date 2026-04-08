@@ -2656,6 +2656,129 @@ def test_normalize_post_state_expression_collapses_effect_rewritten_branch_value
     assert normalized.to_string() == "MEM[value]"
 
 
+def test_normalize_post_state_expression_collapses_ordered_alias_updates_to_post_state_memory():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", dst, src),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("dst", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+            conditions=[dst_nonnull, src_nonnull],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("src", 0, 4),
+            value=Expression.binary_op(
+                "INT_ADD",
+                Expression.memory(src, size=4),
+                Expression.constant(4294967295, 4),
+            ),
+            conditions=[dst_nonnull, src_nonnull],
+            order_key=20,
+        ),
+    ]
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+        Expression.constant(4294967295, 4),
+    )
+    params = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("delta", size=4, index=2),
+    ]
+    conditions = [dst_nonnull, src_nonnull, alias_cond]
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        expr,
+        effects,
+        params,
+        return_conditions=conditions,
+    )
+    normalized = normalize_post_state_expression(
+        expr,
+        conditions,
+        effects,
+        params,
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[dst]"
+    assert normalized.to_string() == "MEM[dst]"
+
+
+def test_normalize_post_state_expression_keeps_ordered_alias_update_when_alias_not_implied():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("dst", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+            conditions=[dst_nonnull, src_nonnull],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("src", 0, 4),
+            value=Expression.binary_op(
+                "INT_ADD",
+                Expression.memory(src, size=4),
+                Expression.constant(4294967295, 4),
+            ),
+            conditions=[dst_nonnull, src_nonnull],
+            order_key=20,
+        ),
+    ]
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+        Expression.constant(4294967295, 4),
+    )
+    params = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("delta", size=4, index=2),
+    ]
+    conditions = [dst_nonnull, src_nonnull]
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        expr,
+        effects,
+        params,
+        return_conditions=conditions,
+    )
+    normalized = normalize_post_state_expression(
+        expr,
+        conditions,
+        effects,
+        params,
+    )
+
+    assert collapsed is None
+    assert normalized.to_string() == "(MEM[dst] + 4294967295)"
+
+
 def test_normalize_post_state_expression_stays_conservative_when_guards_do_not_match():
     value = Expression.parameter("value", 0, size=8)
     delta = Expression.parameter("delta", 1, size=4)

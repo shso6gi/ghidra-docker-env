@@ -1923,6 +1923,17 @@ def collapse_post_state_expr_to_canonical_memory(
         normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
         if _expressions_equivalent(normalized_expr, normalized_rewritten):
             return candidate
+        replayed = _replay_definite_active_effects_for_location(
+            location,
+            active_conditions,
+            effects,
+            parameters,
+        )
+        if replayed is None:
+            continue
+        normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
+        if _expressions_equivalent(normalized_expr, normalized_replayed):
+            return candidate
 
     return None
 
@@ -1963,6 +1974,17 @@ def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
         )
         normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
         if _expressions_equivalent(normalized_expr, normalized_rewritten):
+            return candidate
+        replayed = _replay_definite_active_effects_for_location(
+            location,
+            active_conditions,
+            effects,
+            parameters,
+        )
+        if replayed is None:
+            continue
+        normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
+        if _expressions_equivalent(normalized_expr, normalized_replayed):
             return candidate
 
     return None
@@ -2072,6 +2094,225 @@ def normalize_post_state_expression(
 
     reduced = _reduce_expression_under_conditions(normalized, return_conditions)
     return reduced if reduced is not None else normalized
+
+
+def _replay_definite_active_effects_for_location(
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    tracked_locations = sorted(
+        {location, *[effect.location for effect in effects]},
+        key=_location_sort_key,
+    )
+    alias_representatives = _build_alias_representative_map(
+        tracked_locations,
+        normalized_return_conditions,
+    )
+    if not alias_representatives:
+        return None
+
+    state: Dict[CanonicalLocation, Expression] = {}
+    for representative in sorted(set(alias_representatives.values()), key=_location_sort_key):
+        base_expr = memory_expression_for_location(representative, parameters)
+        if base_expr is None:
+            return None
+        state[representative] = base_expr
+
+    active_effects: List[StoreEffect] = []
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
+        if residual:
+            continue
+        active_effects.append(
+            StoreEffect(
+                location=effect.location,
+                value=effect.value,
+                conditions=normalized_effect_conditions,
+                order_key=effect.order_key,
+            )
+        )
+
+    active_effects.sort(key=lambda effect: effect.order_key)
+    for effect in active_effects:
+        target_rep = _resolve_alias_representative(
+            effect.location,
+            alias_representatives,
+            normalized_return_conditions,
+        )
+        if target_rep is None:
+            continue
+        replayed_value = _rewrite_expression_with_replayed_state(
+            effect.value,
+            normalized_return_conditions,
+            state,
+            alias_representatives,
+            parameters,
+        )
+        reduced_value = _reduce_expression_under_conditions(replayed_value, normalized_return_conditions)
+        state[target_rep] = reduced_value if reduced_value is not None else replayed_value
+
+    target_rep = _resolve_alias_representative(
+        location,
+        alias_representatives,
+        normalized_return_conditions,
+    )
+    if target_rep is None:
+        return None
+    return state.get(target_rep)
+
+
+def _rewrite_expression_with_replayed_state(
+    expr: Optional[Expression],
+    conditions: Sequence[Condition],
+    state: Dict[CanonicalLocation, Expression],
+    alias_representatives: Dict[CanonicalLocation, CanonicalLocation],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    if expr.expr_type == ExpressionType.VARIABLE and synthetic_location is not None:
+        representative = _resolve_alias_representative(
+            synthetic_location,
+            alias_representatives,
+            conditions,
+        )
+        if representative is not None and representative in state:
+            return state[representative]
+        fallback = memory_expression_for_location(synthetic_location, parameters)
+        return fallback if fallback is not None else expr
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = _rewrite_expression_with_replayed_state(
+            expr.operands[0],
+            conditions,
+            state,
+            alias_representatives,
+            parameters,
+        )
+        current = Expression.memory(
+            rewritten_addr if rewritten_addr is not None else expr.operands[0],
+            expr.size,
+            read_order_key=expr.read_order_key,
+        )
+        location = canonicalize_location(current.operands[0], parameters, size=expr.size)
+        if location is None:
+            return current
+        representative = _resolve_alias_representative(
+            location,
+            alias_representatives,
+            conditions,
+        )
+        if representative is not None and representative in state:
+            return state[representative]
+        fallback = memory_expression_for_location(location, parameters)
+        return fallback if fallback is not None else current
+
+    if expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        new_operands = [
+            _rewrite_expression_with_replayed_state(
+                operand,
+                conditions,
+                state,
+                alias_representatives,
+                parameters,
+            )
+            for operand in expr.operands
+        ]
+        if all(new is old for new, old in zip(new_operands, expr.operands)):
+            return expr
+        return Expression(
+            expr_type=expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=new_operands,
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = _rewrite_expression_with_replayed_state(
+                value,
+                combined_conditions,
+                state,
+                alias_representatives,
+                parameters,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
+
+
+def _build_alias_representative_map(
+    locations: Sequence[CanonicalLocation],
+    conditions: Sequence[Condition],
+) -> Dict[CanonicalLocation, CanonicalLocation]:
+    groups: List[List[CanonicalLocation]] = []
+    for location in sorted(set(locations), key=_location_sort_key):
+        placed = False
+        for group in groups:
+            head = group[0]
+            if head.size != location.size:
+                continue
+            if locations_match(location, head, conditions):
+                group.append(location)
+                placed = True
+                break
+        if not placed:
+            groups.append([location])
+
+    representatives: Dict[CanonicalLocation, CanonicalLocation] = {}
+    for group in groups:
+        representative = min(group, key=_location_sort_key)
+        for member in group:
+            representatives[member] = representative
+    return representatives
+
+
+def _resolve_alias_representative(
+    location: CanonicalLocation,
+    alias_representatives: Dict[CanonicalLocation, CanonicalLocation],
+    conditions: Sequence[Condition],
+) -> Optional[CanonicalLocation]:
+    representative = alias_representatives.get(location)
+    if representative is not None:
+        return representative
+    for candidate, candidate_rep in alias_representatives.items():
+        if candidate.size != location.size:
+            continue
+        if locations_match(location, candidate, conditions):
+            return candidate_rep
+    return None
+
+
+def _location_sort_key(location: CanonicalLocation) -> Tuple[str, int, int]:
+    return (location.base_param, location.offset, location.size)
 
 
 def memory_expression_for_location(
