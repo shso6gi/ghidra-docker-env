@@ -5,6 +5,7 @@ from typing import Dict, List, Set, Optional
 from dataclasses import dataclass
 
 from ...model import Condition, Expression, ExpressionType
+from ...analysis.condition.simplifier import ConditionSimplifier
 
 
 @dataclass
@@ -108,47 +109,111 @@ def extract_sign_facts(
     """
     facts = SignFacts()
     
-    # 第1パス：基本的な比較から facts を収集
-    for cond in conditions:
-        # 否定されている場合はスキップ（保守的）
-        if cond.negated:
-            continue
-        
+    simplified_conditions = ConditionSimplifier.simplify_conditions(conditions)
+
+    # 第1パス：簡約済みの比較から facts を収集
+    for cond in simplified_conditions:
         expr = cond.expression
-        
-        # 二項演算のみ対象
         if expr.expr_type != ExpressionType.BINARY_OP:
             continue
-        
         if len(expr.operands) < 2:
             continue
-        
+
+        scalar_fact = ConditionSimplifier.extract_scalar_constraint(cond)
+        if scalar_fact is not None:
+            _record_scalar_fact(facts, scalar_fact, debug)
+
         left = _normalize_fact_expr(expr.operands[0])
         right = _normalize_fact_expr(expr.operands[1])
-        
-        # 基本的な比較パターン
-        _extract_from_comparison(expr.operator, left, right, facts, debug)
-    
-    # 第2パス：AND演算を含む複雑なパターンから推論
-    for cond in conditions:
-        if cond.negated:
-            continue
-        
-        expr = cond.expression
-        
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            continue
-        
-        if len(expr.operands) < 2:
-            continue
-        
-        left = _normalize_fact_expr(expr.operands[0])
-        right = _normalize_fact_expr(expr.operands[1])
-        
-        # AND演算を含む比較パターン
+
+        # 第2パス：AND演算を含む複雑なパターンから推論
         _extract_from_and_comparison(expr.operator, left, right, facts, debug)
     
     return facts
+
+
+def _record_scalar_fact(
+    facts: SignFacts,
+    scalar_fact: Dict[str, object],
+    debug: bool,
+) -> None:
+    """ConditionSimplifier の区間制約を sign/range facts に落とす"""
+    kind = scalar_fact.get("kind")
+    expr = scalar_fact.get("expr")
+    if not isinstance(expr, Expression):
+        return
+
+    normalized_expr = _normalize_fact_expr(expr)
+    var_name = _get_var_name(normalized_expr)
+    if kind == "ne":
+        raw_value = scalar_fact.get("raw_value")
+        if raw_value == 0:
+            if var_name:
+                facts.nonzero_vars.add(var_name)
+                if debug:
+                    print(f"[Facts] {var_name} is nonzero ({var_name} != 0)")
+            _record_expr_fact(facts.nonzero_exprs, normalized_expr, debug, "expr is nonzero (expr != 0)")
+        return
+
+    signed = bool(scalar_fact.get("signed"))
+    if kind == "lower" and signed:
+        value = int(scalar_fact.get("value", 0))
+        inclusive = bool(scalar_fact.get("inclusive"))
+        if value > 0 or (value == 0 and not inclusive):
+            if var_name:
+                facts.pos_vars.add(var_name)
+                facts.nonneg_vars.add(var_name)
+                facts.nonzero_vars.add(var_name)
+                if debug:
+                    print(f"[Facts] {var_name} is pos ({var_name} > 0)")
+            _record_expr_fact(facts.pos_exprs, normalized_expr, debug, "expr is pos (expr > 0)")
+            _record_expr_fact(facts.nonneg_exprs, normalized_expr, debug, "expr is nonneg (expr > 0)")
+            _record_expr_fact(facts.nonzero_exprs, normalized_expr, debug, "expr is nonzero (expr > 0)")
+            return
+
+        if value == 0 and inclusive:
+            if var_name:
+                facts.nonneg_vars.add(var_name)
+                if debug:
+                    print(f"[Facts] {var_name} is nonneg ({var_name} >= 0)")
+            _record_expr_fact(facts.nonneg_exprs, normalized_expr, debug, "expr is nonneg (expr >= 0)")
+            return
+
+        if value == -1 and not inclusive and _is_integral_expression(normalized_expr):
+            if var_name:
+                facts.nonneg_vars.add(var_name)
+                if debug:
+                    print(f"[Facts] {var_name} is nonneg (-1 < {var_name}, integral)")
+            _record_integral_expr_fact(
+                facts.nonneg_exprs,
+                normalized_expr,
+                debug,
+                "expr is nonneg (-1 < expr, integral)",
+            )
+            return
+
+    if kind == "upper":
+        value = int(scalar_fact.get("value", 0))
+        inclusive = bool(scalar_fact.get("inclusive"))
+
+        if signed:
+            if value < 0 or (value == 0 and not inclusive):
+                if var_name:
+                    facts.neg_vars.add(var_name)
+                    facts.nonzero_vars.add(var_name)
+                    if debug:
+                        op_text = "<= -1" if inclusive else "< 0"
+                        print(f"[Facts] {var_name} is neg ({var_name} {op_text})")
+                _record_expr_fact(facts.neg_exprs, normalized_expr, debug, "expr is neg (expr < 0)")
+                _record_expr_fact(facts.nonzero_exprs, normalized_expr, debug, "expr is nonzero (expr < 0)")
+                if value != 0 or inclusive:
+                    return
+
+        exclusive_bound = value + 1 if inclusive else value
+        if exclusive_bound >= 0:
+            integral_name = _get_integral_var_name(normalized_expr)
+            if integral_name:
+                _record_upper_bound(facts, integral_name, exclusive_bound, debug, "<=" if inclusive else "<")
 
 
 def _extract_from_comparison(

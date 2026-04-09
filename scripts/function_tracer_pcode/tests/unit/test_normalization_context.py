@@ -17,8 +17,13 @@ from scripts.function_tracer_pcode.equivalence.normalize.core import (
     normalize_expression,
 )
 from scripts.function_tracer_pcode.equivalence.normalize.policy import (
+    extract_min_excluded_params,
     extract_upper_bound_facts,
 )
+from scripts.function_tracer_pcode.equivalence.normalize.facts import (
+    extract_sign_facts,
+)
+from scripts.function_tracer_pcode.model import Condition
 from scripts.function_tracer_pcode.equivalence.normalize.division import (
     normalize_division_signs,
 )
@@ -144,6 +149,54 @@ def test_extract_upper_bound_facts_parses_shift_ub_constraints():
         "param_2_2": 64,
         "param_2_3": 8,
     }
+
+
+def test_extract_min_excluded_params_parses_32bit_and_64bit_constraints():
+    lines = [
+        "(assert (not (= param_1_1 (_ bv9223372036854775808 64))))",
+        "(assert (distinct tmp_1 (_ bv2147483648 32)))",
+        "(assert (not (= ignored (_ bv7 4))))",
+    ]
+
+    excluded = extract_min_excluded_params(lines)
+
+    assert excluded == {"param_1_1", "tmp_1"}
+
+
+def test_extract_sign_facts_recovers_nonneg_from_negated_less_condition():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_param("param_1"), Expression.constant(0, size=8)],
+                size=1,
+            ),
+            negated=True,
+        )
+    ]
+
+    facts = extract_sign_facts(conditions)
+
+    assert facts.is_nonneg("param_1") is True
+
+
+def test_extract_sign_facts_recovers_nonzero_from_negated_equality():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_EQUAL",
+                operands=[_param("param_2"), Expression.constant(0, size=8)],
+                size=1,
+            ),
+            negated=True,
+        )
+    ]
+
+    facts = extract_sign_facts(conditions)
+
+    assert facts.is_nonzero("param_2") is True
 
 
 def test_normalize_expression_removes_shift_mask_when_range_proven():

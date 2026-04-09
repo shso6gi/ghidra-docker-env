@@ -212,6 +212,7 @@ class ConditionSimplifier:
                 "key": (variable_key, bits),
                 "kind": fact_kind,
                 "raw_value": constant_raw,
+                "expr": variable_expr,
             }
 
         if expr.operator == "INT_NOTEQUAL":
@@ -220,6 +221,7 @@ class ConditionSimplifier:
                 "key": (variable_key, bits),
                 "kind": fact_kind,
                 "raw_value": constant_raw,
+                "expr": variable_expr,
             }
 
         if expr.operator not in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
@@ -247,7 +249,16 @@ class ConditionSimplifier:
             "value": constant_value,
             "inclusive": inclusive,
             "signed": signed,
+            "expr": variable_expr,
         }
+
+    @classmethod
+    def extract_scalar_constraint(
+        cls,
+        condition: Condition,
+    ) -> Optional[Dict[str, Any]]:
+        """条件を単一のスカラ制約として解釈する公開ラッパー"""
+        return cls._extract_scalar_constraint(condition)
 
     @classmethod
     def _effective_lower_bound(

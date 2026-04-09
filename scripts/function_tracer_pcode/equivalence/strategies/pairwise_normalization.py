@@ -42,6 +42,10 @@ def try_normalization_equivalence(
         smt_to_original[param_info.smt_name] = param_info.original_name
     for param_info in base_ctx.get("params2", []):
         smt_to_original[param_info.smt_name] = param_info.original_name
+    for extra_var in base_ctx.get("extra_vars1", []):
+        smt_to_original[extra_var.smt_name] = extra_var.original_name
+    for extra_var in base_ctx.get("extra_vars2", []):
+        smt_to_original[extra_var.smt_name] = extra_var.original_name
 
     min_excluded_original = set()
     for smt_name in min_excluded_smt:

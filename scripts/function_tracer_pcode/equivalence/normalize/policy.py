@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """正規化ポリシー（UB由来factsの解析など）"""
 
-from typing import Dict, Set, List
+from typing import Dict, Optional, Set, List
 import re
 
 
 def extract_min_excluded_params(
     smt_lines: List[str],
-    bit_width: int = 64,
+    bit_width: Optional[int] = None,
     debug: bool = False
 ) -> Set[str]:
     """
@@ -27,41 +27,47 @@ def extract_min_excluded_params(
     """
     excluded = set()
     
-    # MIN値を計算
-    if bit_width == 64:
-        min_value = 2**63  # INT64_MIN (符号なし表現)
-    elif bit_width == 32:
-        min_value = 2**31  # INT32_MIN
-    else:
-        # 他のビット幅は未対応
-        return excluded
-    
     # パターン: (assert (not (= PARAM (_ bvMIN WIDTH))))
     # または: (assert (distinct PARAM (_ bvMIN WIDTH)))
     pattern1 = re.compile(
-        r'\(assert\s+\(not\s+\(=\s+(\w+)\s+\(_\s+bv' + str(min_value) + r'\s+' + str(bit_width) + r'\)\)\)\)'
+        r'\(assert\s+\(not\s+\(=\s+(\w+)\s+\(_\s+bv(\d+)\s+(\d+)\)\)\)\)'
     )
     pattern2 = re.compile(
-        r'\(assert\s+\(distinct\s+(\w+)\s+\(_\s+bv' + str(min_value) + r'\s+' + str(bit_width) + r'\)\)\)'
+        r'\(assert\s+\(distinct\s+(\w+)\s+\(_\s+bv(\d+)\s+(\d+)\)\)\)'
     )
     
     for line in smt_lines:
         match1 = pattern1.search(line)
         if match1:
             param_name = match1.group(1)
-            excluded.add(param_name)
-            if debug:
-                print(f"[Policy] MIN excluded: {param_name} (pattern: not =)")
+            min_value = int(match1.group(2))
+            width = int(match1.group(3))
+            if _is_min_value_exclusion(min_value, width, bit_width):
+                excluded.add(param_name)
+                if debug:
+                    print(f"[Policy] MIN excluded: {param_name} (pattern: not =, width={width})")
             continue
         
         match2 = pattern2.search(line)
         if match2:
             param_name = match2.group(1)
-            excluded.add(param_name)
-            if debug:
-                print(f"[Policy] MIN excluded: {param_name} (pattern: distinct)")
+            min_value = int(match2.group(2))
+            width = int(match2.group(3))
+            if _is_min_value_exclusion(min_value, width, bit_width):
+                excluded.add(param_name)
+                if debug:
+                    print(f"[Policy] MIN excluded: {param_name} (pattern: distinct, width={width})")
     
     return excluded
+
+
+def _is_min_value_exclusion(value: int, width: int, requested_width: Optional[int]) -> bool:
+    """指定された値が該当ビット幅の signed MIN を表すか判定"""
+    if width <= 0:
+        return False
+    if requested_width is not None and width != requested_width:
+        return False
+    return value == (1 << (width - 1))
 
 
 def extract_upper_bound_facts(
