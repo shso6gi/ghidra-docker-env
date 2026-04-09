@@ -14,6 +14,7 @@ from ..analysis.effect_summary import (
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    expression_contains_complex_location_reads,
     expression_contains_synthetic_location_reads,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -712,7 +713,7 @@ class ExpressionExpander:
 
         candidate_locations = sorted(
             {effect.location for effect in self.effect_summary.effects},
-            key=lambda loc: (loc.base_param, loc.offset, loc.size),
+            key=lambda loc: (loc.base_param, getattr(loc, "steps", ()), loc.offset, loc.size),
         )
 
         for location in candidate_locations:
@@ -765,7 +766,7 @@ class ExpressionExpander:
             if self.debug:
                 self._debug_print(
                     "Inferred MULTIEQUAL canonical location by identical observed load "
-                    f"location: {first.base_param}+{first.offset}",
+                    f"location: {first.base_param} steps={getattr(first, 'steps', ())} offset={first.offset}",
                     depth,
                 )
             return first
@@ -868,7 +869,10 @@ class ExpressionExpander:
                 self.effect_summary.effects,
                 self.parameters,
             )
-            if expression_contains_synthetic_location_reads(rewrite_target)
+            if (
+                expression_contains_synthetic_location_reads(rewrite_target)
+                or expression_contains_complex_location_reads(rewrite_target, self.parameters)
+            )
             else rewrite_target
         )
         reduced = _reduce_expression_under_conditions(

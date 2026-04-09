@@ -6,6 +6,7 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
 )
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
+    LocationStep,
     StoreEffect,
     _resolve_call_target_name,
     _resolve_parameter_name,
@@ -708,6 +709,41 @@ def test_effect_summary_accepts_register_alias_parameter_addresses():
     )
 
     assert location == CanonicalLocation("param_1", 0, 4)
+
+
+def test_effect_summary_accepts_double_indirect_parameter_addresses():
+    addr_expr = Expression.memory(
+        Expression.parameter("slot", 0, size=8),
+        size=8,
+    )
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("slot", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation(
+        "slot",
+        0,
+        4,
+        steps=(LocationStep("deref", 8),),
+    )
+
+
+def test_memory_expression_for_location_reconstructs_double_indirect_location():
+    expr = memory_expression_for_location(
+        CanonicalLocation(
+            "slot",
+            0,
+            4,
+            steps=(LocationStep("deref", 8),),
+        ),
+        [_param("slot", size=8, is_signed=False)],
+    )
+
+    assert expr is not None
+    assert expr.to_string() == "MEM[MEM[slot]]"
 
 
 def test_substitute_location_accepts_register_alias_call_arguments():
@@ -1819,6 +1855,94 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
     assert summary.effects[0].value.name == "param_1"
 
 
+def test_summarize_store_effects_captures_double_indirect_parameter_store():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeStoreOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                FakeVarnode("value", 4),
+            ]
+            self._seqnum = FakeSeqnum(0x401200, 7)
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    class FakeTracer:
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "addr":
+                return Expression.memory(Expression.parameter("slot", 0, size=8), size=8)
+            if varnode.key == "value":
+                return Expression.parameter("value", 1, size=4)
+            return Expression.constant(0, 4)
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeStoreOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("slot", size=8, is_signed=False, index=0),
+            _param("value", size=4, index=1),
+        ],
+        debug=False,
+    )
+
+    assert len(summary.effects) == 1
+    assert summary.effects[0].location == CanonicalLocation(
+        "slot",
+        0,
+        4,
+        steps=(LocationStep("deref", 8),),
+    )
+    assert summary.effects[0].value.to_string() == "value"
+
+
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
     addr_expr = Expression.binary_op(
         "INT_MULT",
@@ -2654,6 +2778,52 @@ def test_normalize_post_state_expression_collapses_effect_rewritten_branch_value
 
     assert rewritten.to_string() == "(MEM[value] + delta)"
     assert normalized.to_string() == "MEM[value]"
+
+
+def test_normalize_post_state_expression_rewrites_double_indirect_post_state_load():
+    slot = Expression.parameter("slot", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    slot_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", slot, Expression.constant(0, 8)),
+        False,
+    )
+    inner_nonnull = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.memory(slot, size=8),
+            Expression.constant(0, 8),
+        ),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(Expression.memory(slot, size=8), size=4),
+        Expression.constant(1, 4),
+    )
+
+    normalized = normalize_post_state_expression(
+        expr,
+        [slot_nonnull, inner_nonnull],
+        [
+            StoreEffect(
+                location=CanonicalLocation(
+                    "slot",
+                    0,
+                    4,
+                    steps=(LocationStep("deref", 8),),
+                ),
+                value=value,
+                conditions=[slot_nonnull, inner_nonnull],
+                order_key=5,
+            ),
+        ],
+        [
+            _param("slot", size=8, is_signed=False),
+            _param("value", size=4, index=1),
+        ],
+    )
+
+    assert normalized.to_string() == "(value + 1)"
 
 
 def test_normalize_post_state_expression_collapses_ordered_alias_updates_to_post_state_memory():
