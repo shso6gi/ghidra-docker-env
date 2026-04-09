@@ -3,7 +3,9 @@
 
 from typing import Any, List, Dict, Set, Optional, Tuple
 from ...model import Expression, Condition, ExpressionType
+from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 from .normalizer import ConditionNormalizer
+from .scalar import ScalarConstraint, extract_scalar_constraint
 
 
 class ConditionSimplifier:
@@ -31,115 +33,15 @@ class ConditionSimplifier:
 
     @classmethod
     def _normalize_raw_value(cls, value: int, bits: int) -> int:
-        if bits <= 0:
-            return value
-        return value % (1 << bits)
+        return normalize_raw_value(value, bits)
 
     @classmethod
     def _to_signed_value(cls, value: int, bits: int) -> int:
-        if bits <= 0:
-            return value
-        sign_bit = 1 << (bits - 1)
-        if value & sign_bit:
-            return value - (1 << bits)
-        return value
+        return to_signed_value(value, bits)
 
     @classmethod
     def _eval_constant_raw(cls, expr: Expression) -> Optional[Tuple[int, int]]:
-        if expr is None:
-            return None
-
-        bits = expr.get_bit_width()
-
-        if expr.expr_type == ExpressionType.CONSTANT:
-            return (cls._normalize_raw_value(int(expr.value), bits), bits)
-
-        if expr.expr_type == ExpressionType.LITERAL:
-            try:
-                return (cls._normalize_raw_value(int(expr.value, 0), bits), bits)
-            except (TypeError, ValueError):
-                return None
-
-        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
-            operand_eval = cls._eval_constant_raw(expr.operands[0])
-            if operand_eval is None:
-                return None
-            operand_raw, operand_bits = operand_eval
-            operand_signed = cls._to_signed_value(operand_raw, operand_bits)
-
-            if expr.operator in ("COPY", "CAST", "INT_ZEXT"):
-                return (cls._normalize_raw_value(operand_raw, bits), bits)
-            if expr.operator == "INT_SEXT":
-                return (cls._normalize_raw_value(operand_signed, bits), bits)
-            if expr.operator == "INT_NEGATE":
-                return (cls._normalize_raw_value(~operand_raw, bits), bits)
-            if expr.operator == "INT_2COMP":
-                return (cls._normalize_raw_value(-operand_signed, bits), bits)
-            if expr.operator == "BOOL_NEGATE":
-                return (0 if operand_raw else 1, 1)
-            return None
-
-        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
-            left_eval = cls._eval_constant_raw(expr.operands[0])
-            right_eval = cls._eval_constant_raw(expr.operands[1])
-            if left_eval is None or right_eval is None:
-                return None
-
-            left_raw, left_bits = left_eval
-            right_raw, right_bits = right_eval
-            left_signed = cls._to_signed_value(left_raw, left_bits)
-            right_signed = cls._to_signed_value(right_raw, right_bits)
-
-            if expr.operator == "INT_ADD":
-                return (cls._normalize_raw_value(left_raw + right_raw, bits), bits)
-            if expr.operator == "INT_SUB":
-                return (cls._normalize_raw_value(left_raw - right_raw, bits), bits)
-            if expr.operator == "INT_MULT":
-                return (cls._normalize_raw_value(left_raw * right_raw, bits), bits)
-            if expr.operator == "INT_AND":
-                return (cls._normalize_raw_value(left_raw & right_raw, bits), bits)
-            if expr.operator == "INT_OR":
-                return (cls._normalize_raw_value(left_raw | right_raw, bits), bits)
-            if expr.operator in ("INT_XOR", "BOOL_XOR"):
-                return (cls._normalize_raw_value(left_raw ^ right_raw, bits), bits)
-            if expr.operator == "INT_LEFT":
-                return (cls._normalize_raw_value(left_raw << right_raw, bits), bits)
-            if expr.operator == "INT_RIGHT":
-                return (cls._normalize_raw_value(left_raw >> right_raw, bits), bits)
-            if expr.operator == "INT_SRIGHT":
-                return (cls._normalize_raw_value(left_signed >> right_raw, bits), bits)
-            if expr.operator in ("INT_DIV", "DIV"):
-                if right_raw == 0:
-                    return None
-                return (cls._normalize_raw_value(left_raw // right_raw, bits), bits)
-            if expr.operator in ("INT_SDIV", "SDIV"):
-                if right_signed == 0:
-                    return None
-                quotient = abs(left_signed) // abs(right_signed)
-                if (left_signed < 0) ^ (right_signed < 0):
-                    quotient = -quotient
-                return (
-                    cls._normalize_raw_value(quotient, bits),
-                    bits,
-                )
-            if expr.operator == "INT_EQUAL":
-                return (1 if left_raw == right_raw else 0, 1)
-            if expr.operator == "INT_NOTEQUAL":
-                return (1 if left_raw != right_raw else 0, 1)
-            if expr.operator == "INT_LESS":
-                return (1 if left_raw < right_raw else 0, 1)
-            if expr.operator == "INT_LESSEQUAL":
-                return (1 if left_raw <= right_raw else 0, 1)
-            if expr.operator == "INT_SLESS":
-                return (1 if left_signed < right_signed else 0, 1)
-            if expr.operator == "INT_SLESSEQUAL":
-                return (1 if left_signed <= right_signed else 0, 1)
-            if expr.operator == "BOOL_AND":
-                return (1 if left_raw and right_raw else 0, 1)
-            if expr.operator == "BOOL_OR":
-                return (1 if left_raw or right_raw else 0, 1)
-
-        return None
+        return eval_constant_raw(expr)
 
     @classmethod
     def evaluate_condition_truth(cls, condition: Condition) -> Optional[bool]:
@@ -165,98 +67,14 @@ class ConditionSimplifier:
     def _extract_scalar_constraint(
         cls,
         condition: Condition,
-    ) -> Optional[Dict[str, Any]]:
-        expr = condition.expression
-        negated = condition.negated
-
-        while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
-            negated = not negated
-            if expr.operands:
-                expr = expr.operands[0]
-            else:
-                break
-
-        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
-            return None
-
-        left = expr.operands[0]
-        right = expr.operands[1]
-        left_eval = cls._eval_constant_raw(left)
-        right_eval = cls._eval_constant_raw(right)
-
-        if (left_eval is None) == (right_eval is None):
-            return None
-
-        if right_eval is not None:
-            variable_expr = left
-            const_raw, const_bits = right_eval
-            const_on_left = False
-        else:
-            variable_expr = right
-            const_raw, const_bits = left_eval
-            const_on_left = True
-
-        variable_key = variable_expr.to_string()
-        bits = max(variable_expr.get_bit_width(), const_bits)
-        signed = expr.operator in ("INT_SLESS", "INT_SLESSEQUAL")
-        constant_raw = cls._normalize_raw_value(const_raw, bits)
-        constant_value = (
-            cls._to_signed_value(constant_raw, bits)
-            if signed
-            else constant_raw
-        )
-
-        if expr.operator == "INT_EQUAL":
-            fact_kind = "ne" if negated else "eq"
-            return {
-                "key": (variable_key, bits),
-                "kind": fact_kind,
-                "raw_value": constant_raw,
-                "expr": variable_expr,
-            }
-
-        if expr.operator == "INT_NOTEQUAL":
-            fact_kind = "eq" if negated else "ne"
-            return {
-                "key": (variable_key, bits),
-                "kind": fact_kind,
-                "raw_value": constant_raw,
-                "expr": variable_expr,
-            }
-
-        if expr.operator not in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
-            return None
-
-        is_lessequal = expr.operator in ("INT_SLESSEQUAL", "INT_LESSEQUAL")
-        if const_on_left:
-            if negated:
-                fact_kind = "upper"
-                inclusive = not is_lessequal
-            else:
-                fact_kind = "lower"
-                inclusive = is_lessequal
-        else:
-            if negated:
-                fact_kind = "lower"
-                inclusive = not is_lessequal
-            else:
-                fact_kind = "upper"
-                inclusive = is_lessequal
-
-        return {
-            "key": (variable_key, bits),
-            "kind": fact_kind,
-            "value": constant_value,
-            "inclusive": inclusive,
-            "signed": signed,
-            "expr": variable_expr,
-        }
+    ) -> Optional[ScalarConstraint]:
+        return extract_scalar_constraint(condition)
 
     @classmethod
     def extract_scalar_constraint(
         cls,
         condition: Condition,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ScalarConstraint]:
         """条件を単一のスカラ制約として解釈する公開ラッパー"""
         return cls._extract_scalar_constraint(condition)
 
@@ -362,7 +180,7 @@ class ConditionSimplifier:
                 continue
 
             group = grouped.setdefault(
-                fact["key"],
+                fact.key,
                 {
                     "eq_raw_values": set(),
                     "ne_raw_values": set(),
@@ -371,14 +189,14 @@ class ConditionSimplifier:
                 },
             )
 
-            if fact["kind"] == "eq":
-                group["eq_raw_values"].add(fact["raw_value"])
-            elif fact["kind"] == "ne":
-                group["ne_raw_values"].add(fact["raw_value"])
-            elif fact["kind"] == "lower":
-                signed = fact["signed"]
+            if fact.kind == "eq":
+                group["eq_raw_values"].add(fact.raw_value)
+            elif fact.kind == "ne":
+                group["ne_raw_values"].add(fact.raw_value)
+            elif fact.kind == "lower":
+                signed = fact.signed
                 current = group["lower"][signed]
-                candidate = (fact["value"], fact["inclusive"], index)
+                candidate = (fact.value, fact.inclusive, index)
                 if current is None:
                     group["lower"][signed] = candidate
                 else:
@@ -386,13 +204,13 @@ class ConditionSimplifier:
                         current[0],
                         current[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     candidate_effective = cls._effective_lower_bound(
                         candidate[0],
                         candidate[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     if (
                         candidate_effective > current_effective
@@ -402,10 +220,10 @@ class ConditionSimplifier:
                         )
                     ):
                         group["lower"][signed] = candidate
-            elif fact["kind"] == "upper":
-                signed = fact["signed"]
+            elif fact.kind == "upper":
+                signed = fact.signed
                 current = group["upper"][signed]
-                candidate = (fact["value"], fact["inclusive"], index)
+                candidate = (fact.value, fact.inclusive, index)
                 if current is None:
                     group["upper"][signed] = candidate
                 else:
@@ -413,13 +231,13 @@ class ConditionSimplifier:
                         current[0],
                         current[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     candidate_effective = cls._effective_upper_bound(
                         candidate[0],
                         candidate[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     if (
                         candidate_effective < current_effective
@@ -886,7 +704,7 @@ class ConditionSimplifier:
                 continue
 
             group = scalar_groups.setdefault(
-                fact["key"],
+                fact.key,
                 {
                     "eq": {},
                     "ne": {},
@@ -896,13 +714,13 @@ class ConditionSimplifier:
             )
             current_index = len(result) - 1
 
-            if fact["kind"] == "eq":
-                group["eq"].setdefault(fact["raw_value"], current_index)
-            elif fact["kind"] == "ne":
-                group["ne"].setdefault(fact["raw_value"], current_index)
-            elif fact["kind"] == "lower":
-                signed = fact["signed"]
-                candidate = (fact["value"], fact["inclusive"], current_index)
+            if fact.kind == "eq":
+                group["eq"].setdefault(fact.raw_value, current_index)
+            elif fact.kind == "ne":
+                group["ne"].setdefault(fact.raw_value, current_index)
+            elif fact.kind == "lower":
+                signed = fact.signed
+                candidate = (fact.value, fact.inclusive, current_index)
                 current = group["lower"][signed]
                 if current is None:
                     group["lower"][signed] = candidate
@@ -911,13 +729,13 @@ class ConditionSimplifier:
                         current[0],
                         current[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     candidate_effective = cls._effective_lower_bound(
                         candidate[0],
                         candidate[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     if (
                         candidate_effective > current_effective
@@ -927,9 +745,9 @@ class ConditionSimplifier:
                         )
                     ):
                         group["lower"][signed] = candidate
-            elif fact["kind"] == "upper":
-                signed = fact["signed"]
-                candidate = (fact["value"], fact["inclusive"], current_index)
+            elif fact.kind == "upper":
+                signed = fact.signed
+                candidate = (fact.value, fact.inclusive, current_index)
                 current = group["upper"][signed]
                 if current is None:
                     group["upper"][signed] = candidate
@@ -938,13 +756,13 @@ class ConditionSimplifier:
                         current[0],
                         current[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     candidate_effective = cls._effective_upper_bound(
                         candidate[0],
                         candidate[1],
                         signed=signed,
-                        bits=fact["key"][1],
+                        bits=fact.key[1],
                     )
                     if (
                         candidate_effective < current_effective

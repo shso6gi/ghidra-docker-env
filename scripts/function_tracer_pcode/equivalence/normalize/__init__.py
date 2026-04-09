@@ -4,7 +4,8 @@
 from .core import normalize_expression
 from .context import NormalizationContext, RuleApplication
 from .policy import extract_min_excluded_params, extract_upper_bound_facts
-from .facts import extract_sign_facts, SignFacts
+from .facts import extract_sign_facts
+from .fact_types import SignFacts
 from .division_signedness_guarded import normalize_udiv_with_guard, contains_udiv
 from .structural import are_structurally_equivalent, get_structural_summary
 
