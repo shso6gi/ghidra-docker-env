@@ -2984,6 +2984,39 @@ def test_normalize_post_state_expression_stays_conservative_when_guards_do_not_m
     assert normalized.to_string() == "(MEM[value] + delta)"
 
 
+def test_normalize_post_state_expression_replays_definite_simple_store_then_read():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(ptr, size=4),
+        Expression.constant(4294967295, 4),
+    )
+
+    normalized = normalize_post_state_expression(
+        expr,
+        [ptr_nonnull],
+        [
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.binary_op("INT_ADD", value, Expression.constant(3, 4)),
+                conditions=[ptr_nonnull],
+                order_key=5,
+            ),
+        ],
+        [
+            _param("ptr", size=8, is_signed=False),
+            _param("value", size=4, is_signed=True, index=1),
+        ],
+    )
+
+    assert normalized.to_string() == "((value + 3) + 4294967295)"
+
+
 def test_expression_expander_prefers_canonical_post_state_memory_after_observed_load_rewrite():
     value = Expression.parameter("value", 0, size=8)
     delta = Expression.parameter("delta", 1, size=4)

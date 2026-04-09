@@ -2176,6 +2176,7 @@ def normalize_post_state_expression(
 
     normalized = expr
 
+    canonicalized_changed = False
     canonicalized = canonicalize_post_state_subexpressions(
         normalized,
         return_conditions,
@@ -2183,7 +2184,16 @@ def normalize_post_state_expression(
         parameters,
     )
     if canonicalized is not None:
+        canonicalized_changed = not _expressions_equivalent(normalized, canonicalized)
         normalized = canonicalized
+
+    if not canonicalized_changed:
+        normalized = _rewrite_definite_post_state_subexpressions(
+            normalized,
+            return_conditions,
+            effects,
+            parameters,
+        )
 
     if expression_contains_complex_location_reads(normalized, parameters):
         rewritten_post_state = rewrite_loads_from_effects(
@@ -2197,6 +2207,123 @@ def normalize_post_state_expression(
 
     reduced = _reduce_expression_under_conditions(normalized, return_conditions)
     return reduced if reduced is not None else normalized
+
+
+def _rewrite_definite_post_state_subexpressions(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    rewrite_memory_leaf: bool = False,
+) -> Optional[Expression]:
+    """
+    Replay definite active effects into post-state subexpressions.
+
+    This is intentionally conservative: a MEMORY leaf is rewritten only when
+    the current path conditions imply the relevant store effects. That keeps
+    raw pre-state loads intact while still normalizing pruned post-state loads
+    that lost their original read-order metadata during PHI simplification.
+    """
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = _rewrite_definite_post_state_subexpressions(
+            expr.operands[0],
+            return_conditions,
+            effects,
+            parameters,
+            rewrite_memory_leaf=True,
+        )
+        current = expr
+        if rewritten_addr is not expr.operands[0]:
+            current = Expression.memory(
+                rewritten_addr if rewritten_addr is not None else expr.operands[0],
+                expr.size,
+                read_order_key=expr.read_order_key,
+            )
+
+        if not rewrite_memory_leaf:
+            return current
+
+        location = canonicalize_location(current.operands[0], parameters, size=current.size)
+        if location is None:
+            return current
+
+        active_effects = _collect_definite_active_effects(return_conditions, effects)
+        if len(active_effects) > 1 and _summary_has_interdependent_writes(
+            EffectSummary(
+                parameter_names=[param.get("name") for param in parameters if param.get("name")],
+                effects=list(active_effects),
+            )
+        ):
+            return current
+
+        replayed = _replay_definite_active_effects_for_location(
+            location,
+            return_conditions,
+            active_effects,
+            parameters,
+        )
+        if replayed is None:
+            return current
+
+        reduced_replayed = _reduce_expression_under_conditions(replayed, return_conditions)
+        resolved = reduced_replayed if reduced_replayed is not None else replayed
+        return current if _expressions_equivalent(current, resolved) else resolved
+
+    if expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        new_operands = [
+            _rewrite_definite_post_state_subexpressions(
+                operand,
+                return_conditions,
+                effects,
+                parameters,
+                rewrite_memory_leaf=True,
+            )
+            for operand in expr.operands
+        ]
+        if all(new is old for new, old in zip(new_operands, expr.operands)):
+            return expr
+        return Expression(
+            expr_type=expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=new_operands,
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = _rewrite_definite_post_state_subexpressions(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+                rewrite_memory_leaf=True,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
 
 
 def _replay_definite_active_effects_for_location(
@@ -2224,23 +2351,7 @@ def _replay_definite_active_effects_for_location(
             return None
         state[representative] = base_expr
 
-    active_effects: List[StoreEffect] = []
-    for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
-            continue
-        residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
-        if residual:
-            continue
-        active_effects.append(
-            StoreEffect(
-                location=effect.location,
-                value=effect.value,
-                conditions=normalized_effect_conditions,
-                order_key=effect.order_key,
-            )
-        )
-
+    active_effects = _collect_definite_active_effects(normalized_return_conditions, effects)
     active_effects.sort(key=lambda effect: effect.order_key)
     for effect in active_effects:
         target_rep = _resolve_alias_representative(
@@ -2268,6 +2379,30 @@ def _replay_definite_active_effects_for_location(
     if target_rep is None:
         return None
     return state.get(target_rep)
+
+
+def _collect_definite_active_effects(
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+) -> List[StoreEffect]:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    active_effects: List[StoreEffect] = []
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
+        if residual:
+            continue
+        active_effects.append(
+            StoreEffect(
+                location=effect.location,
+                value=effect.value,
+                conditions=normalized_effect_conditions,
+                order_key=effect.order_key,
+            )
+        )
+    return active_effects
 
 
 def _rewrite_expression_with_replayed_state(
