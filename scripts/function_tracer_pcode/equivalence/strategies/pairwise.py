@@ -13,6 +13,7 @@ from .pairwise_models import QueryResult, ReturnCase
 from .pairwise_normalization import try_normalization_equivalence
 from .pairwise_query_builder import (
     build_condition_only_query,
+    build_single_case_condition_query,
     build_normalized_inequality_query,
     build_pair_query,
     extract_return_cases,
@@ -66,20 +67,6 @@ class PairwiseStrategy(CheckStrategy):
 
         cases1 = self._extract_return_cases(analysis1)
         cases2 = self._extract_return_cases(analysis2)
-        total_pairs = len(cases1) * len(cases2)
-
-        self._debug_print("=" * 60)
-        self._debug_print("Pairwise strategy (two-stage check):")
-        self._debug_print(f"  Function 1: {len(cases1)} return cases")
-        self._debug_print(f"  Function 2: {len(cases2)} return cases")
-        self._debug_print(f"  Total pairs to check: {total_pairs}")
-        self._debug_print(f"  Per-query timeout (stage1): {self.per_query_timeout}s")
-        self._debug_print(f"  Per-query timeout (stage2 hard): {self.per_query_timeout_hard}s")
-        self._debug_print("=" * 60)
-
-        if total_pairs == 0:
-            self._debug_print("No return cases to check")
-            return self._create_empty_result()
 
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
         self._rewrite_cases_with_parameter_fragments(cases1, base_ctx.get("extra_vars1", []))
@@ -95,6 +82,49 @@ class PairwiseStrategy(CheckStrategy):
 
         if self.debug:
             self._debug_symbol_mapping(base_ctx)
+
+        original_case_count1 = len(cases1)
+        original_case_count2 = len(cases2)
+        cases1 = self._prune_unreachable_cases(
+            cases1,
+            base_ctx,
+            symbol_replace_fn1,
+            label="Case1",
+        )
+        cases2 = self._prune_unreachable_cases(
+            cases2,
+            base_ctx,
+            symbol_replace_fn2,
+            label="Case2",
+        )
+        total_pairs = len(cases1) * len(cases2)
+
+        self._debug_print("=" * 60)
+        self._debug_print("Pairwise strategy (two-stage check):")
+        self._debug_print(
+            f"  Function 1: {len(cases1)} return cases"
+            + (
+                f" (pruned {original_case_count1 - len(cases1)} unreachable)"
+                if len(cases1) != original_case_count1
+                else ""
+            )
+        )
+        self._debug_print(
+            f"  Function 2: {len(cases2)} return cases"
+            + (
+                f" (pruned {original_case_count2 - len(cases2)} unreachable)"
+                if len(cases2) != original_case_count2
+                else ""
+            )
+        )
+        self._debug_print(f"  Total pairs to check: {total_pairs}")
+        self._debug_print(f"  Per-query timeout (stage1): {self.per_query_timeout}s")
+        self._debug_print(f"  Per-query timeout (stage2 hard): {self.per_query_timeout_hard}s")
+        self._debug_print("=" * 60)
+
+        if total_pairs == 0:
+            self._debug_print("No return cases to check")
+            return self._create_empty_result()
 
         unsat_count = 0
         sat_count = 0
@@ -117,18 +147,18 @@ class PairwiseStrategy(CheckStrategy):
         for i, case1 in enumerate(cases1):
             for j, case2 in enumerate(cases2):
                 pair_id = f"({i},{j})"
-                if self._case_contains_unresolved_expression(case1) or self._case_contains_unresolved_expression(case2):
-                    unknown_count += 1
-                    self._debug_print(
-                        f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
-                    )
-                    continue
                 if self._cases_are_contradictory(case1, case2):
                     unsat_count += 1
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                         )
+                    continue
+                if self._case_contains_unresolved_expression(case1) or self._case_contains_unresolved_expression(case2):
+                    unknown_count += 1
+                    self._debug_print(
+                        f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
+                    )
                     continue
 
                 result = self._solve_query_twostage(
@@ -338,6 +368,87 @@ class PairwiseStrategy(CheckStrategy):
         analysis: FunctionReturnAnalysis
     ) -> List[ReturnCase]:
         return extract_return_cases(analysis)
+
+    def _build_single_case_condition_query(
+        self,
+        base_ctx: Dict[str, Any],
+        case: ReturnCase,
+        param_replace_fn,
+        label: str,
+    ) -> str:
+        return build_single_case_condition_query(
+            base_ctx,
+            case,
+            param_replace_fn,
+            label,
+        )
+
+    def _prune_unreachable_cases(
+        self,
+        cases: List[ReturnCase],
+        base_ctx: Dict[str, Any],
+        param_replace_fn,
+        label: str,
+    ) -> List[ReturnCase]:
+        if not cases:
+            return cases
+
+        reachable_cases: List[ReturnCase] = []
+        pruned_count = 0
+
+        for case in cases:
+            if ConditionSimplifier.is_contradiction(case.conditions):
+                pruned_count += 1
+                self._debug_print(
+                    f"  {label}[{case.index}]: pruned by contradiction precheck"
+                )
+                continue
+
+            if not self._case_contains_unresolved_expression(case):
+                reachable_cases.append(case)
+                continue
+
+            if not case.conditions:
+                reachable_cases.append(case)
+                continue
+
+            if any(
+                self._expression_contains_unresolved(cond.expression)
+                for cond in case.conditions
+            ):
+                reachable_cases.append(case)
+                continue
+
+            query = self._build_single_case_condition_query(
+                base_ctx,
+                case,
+                param_replace_fn,
+                label,
+            )
+            result = self._solve_query_internal(
+                query,
+                f"{label}[{case.index}]",
+                stage="case-feasible",
+                use_hard_timeout=False,
+            )
+
+            if result.is_equivalent is True:
+                pruned_count += 1
+                self._debug_print(
+                    f"  {label}[{case.index}]: pruned as unreachable by SMT"
+                )
+                continue
+
+            reachable_cases.append(case)
+
+        if reachable_cases:
+            return reachable_cases
+
+        if pruned_count > 0:
+            self._debug_print(
+                f"  {label}: pruning removed every case; keeping originals conservatively"
+            )
+        return cases
 
     def _build_pair_query(
         self,

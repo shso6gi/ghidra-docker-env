@@ -163,7 +163,7 @@ class ExpressionExpander:
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular MULTIEQUAL detected: {op_key}", depth)
-            return [ExpandedValue(Expression.unknown("phi_circular"), [])]
+            return [ExpandedValue(Expression.unknown("phi_circular"), list(base_conditions))]
         
         self._expanding_ops.add(op_key)
         
@@ -188,7 +188,7 @@ class ExpressionExpander:
         """
         phi_parent = multiequal_op.getParent()
         if not phi_parent:
-            return [ExpandedValue(Expression.unknown("phi_no_parent"), [])]
+            return [ExpandedValue(Expression.unknown("phi_no_parent"), list(base_conditions))]
         
         num_inputs = multiequal_op.getNumInputs()
         in_size = phi_parent.getInSize()
@@ -353,7 +353,7 @@ class ExpressionExpander:
         self._debug_print("=" * 50, depth)
         self._debug_print(f"MULTIEQUAL -> 0 branches (no valid branches)", depth)
         self._debug_print("=" * 50, depth)
-        return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), [])]
+        return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
     
     def _deduplicate_expanded_values(
         self, 

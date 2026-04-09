@@ -2157,6 +2157,7 @@ def test_expand_multiequal_carries_base_conditions_into_predicate_filtering():
     )
 
     assert expanded[0].value.to_string() == "phi_no_valid_branch"
+    assert expanded[0].conditions == [base_condition]
     expander._expand_input_varnode.assert_not_called()
 
 

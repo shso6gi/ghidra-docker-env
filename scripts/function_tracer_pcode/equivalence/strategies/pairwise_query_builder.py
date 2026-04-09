@@ -84,6 +84,23 @@ def build_condition_only_query(
     return "\n".join(lines)
 
 
+def build_single_case_condition_query(
+    base_ctx: Dict[str, Any],
+    case: ReturnCase,
+    param_replace_fn,
+    label: str,
+) -> str:
+    """単一ケースの到達可能性チェック用 SMT クエリを構築する。"""
+    lines = _build_query_header(
+        f"; Single Case Reachability: {label}[{case.index}]",
+        f"; {label}[{case.index}]: {case.get_condition_summary()}",
+    )
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(_build_case_conditions(case, param_replace_fn, label))
+    lines.append("(check-sat)")
+    return "\n".join(lines)
+
+
 def build_pair_query(
     base_ctx: Dict[str, Any],
     case1: ReturnCase,
