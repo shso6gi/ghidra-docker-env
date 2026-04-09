@@ -2201,6 +2201,8 @@ def normalize_post_state_expression(
     return_conditions: Sequence[Condition],
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
+    *,
+    prefer_canonical_post_state: bool = True,
 ) -> Optional[Expression]:
     """
     Normalize equivalent post-state expressions to a stable canonical form.
@@ -2218,15 +2220,16 @@ def normalize_post_state_expression(
     normalized = expr
 
     canonicalized_changed = False
-    canonicalized = canonicalize_post_state_subexpressions(
-        normalized,
-        return_conditions,
-        effects,
-        parameters,
-    )
-    if canonicalized is not None:
-        canonicalized_changed = not _expressions_equivalent(normalized, canonicalized)
-        normalized = canonicalized
+    if prefer_canonical_post_state:
+        canonicalized = canonicalize_post_state_subexpressions(
+            normalized,
+            return_conditions,
+            effects,
+            parameters,
+        )
+        if canonicalized is not None:
+            canonicalized_changed = not _expressions_equivalent(normalized, canonicalized)
+            normalized = canonicalized
 
     if not canonicalized_changed:
         rewritten_definite = _rewrite_definite_post_state_subexpressions(

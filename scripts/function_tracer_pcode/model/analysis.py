@@ -148,6 +148,45 @@ class FunctionReturnAnalysis:
             for ret in self.returns
         )
 
+    def _expression_contains_unresolved_value(self, expr) -> bool:
+        """式木に solver へ流せない未解決値が残っているかを判定する。"""
+        if expr is None:
+            return True
+
+        expr_type = getattr(expr, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is None or expr_kind is None:
+            return True
+
+        if expr_type in {expr_kind.UNKNOWN, expr_kind.CALL}:
+            return True
+
+        if expr_type == expr_kind.PHI and expr.value:
+            for cond, value in expr.value:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None and self._expression_contains_unresolved_value(cond_expr):
+                    return True
+                if self._expression_contains_unresolved_value(value):
+                    return True
+            return False
+
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unresolved_value(operand):
+                return True
+
+        return False
+
+    def has_unresolved_return_value(self) -> bool:
+        """ネストした UNKNOWN/CALL を含む戻り値・ガードがあるか。"""
+        for ret in self.returns:
+            if self._expression_contains_unresolved_value(ret.value):
+                return True
+            for cond in ret.conditions:
+                cond_expr = getattr(cond, "expression", None)
+                if cond_expr is not None and self._expression_contains_unresolved_value(cond_expr):
+                    return True
+        return False
+
     def count_unconditional_returns(self) -> int:
         """条件なしの return 候補数を返す。"""
         return sum(1 for ret in self.returns if not ret.conditions)
@@ -162,4 +201,4 @@ class FunctionReturnAnalysis:
             return False
         if not self.incomplete_control_flow:
             return False
-        return self.has_unknown_return() or self.has_overlapping_unconditional_returns()
+        return self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns()

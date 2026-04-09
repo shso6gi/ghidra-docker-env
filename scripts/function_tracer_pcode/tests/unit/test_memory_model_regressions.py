@@ -3144,6 +3144,105 @@ def test_normalize_post_state_expression_replays_definite_simple_store_then_read
     assert normalized.to_string() == "((value + 3) + 4294967295)"
 
 
+def test_normalize_post_state_expression_rewrites_wide_param_store_then_read_per_branch():
+    param_1 = Expression.parameter("param_1", 0, size=8)
+    param_2 = Expression.parameter("param_2", 1, size=8)
+    param_3 = Expression.parameter("param_3", 2, size=4)
+    param_4 = Expression.parameter("param_4", 3, size=8)
+    param_4_zero = Condition(
+        Expression.binary_op("INT_EQUAL", param_4, Expression.constant(0, 8)),
+        False,
+    )
+    param_4_nonzero = param_4_zero.negate()
+    param_2_lo = Expression.binary_op("SUBPIECE", param_2, Expression.constant(0, 4))
+    param_2_lo.size = 4
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(param_1, size=4),
+        param_2_lo,
+    )
+
+    normalized_zero = normalize_post_state_expression(
+        expr,
+        [param_4_zero],
+        [
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op(
+                            "INT_MULT",
+                            param_2_lo,
+                            Expression.constant(2, 4),
+                        ),
+                        Expression.constant(11, 4),
+                    ),
+                    param_3,
+                ),
+                conditions=[param_4_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
+                conditions=[param_4_nonzero],
+                order_key=5,
+            ),
+        ],
+        [
+            _param("param_1", size=8, is_signed=False),
+            _param("param_2", size=8, is_signed=False, index=1),
+            _param("param_3", size=4, index=2),
+            _param("param_4", size=8, is_signed=False, index=3),
+        ],
+    )
+    normalized_nonzero = normalize_post_state_expression(
+        expr,
+        [param_4_nonzero],
+        [
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op(
+                            "INT_MULT",
+                            param_2_lo,
+                            Expression.constant(2, 4),
+                        ),
+                        Expression.constant(11, 4),
+                    ),
+                    param_3,
+                ),
+                conditions=[param_4_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
+                conditions=[param_4_nonzero],
+                order_key=5,
+            ),
+        ],
+        [
+            _param("param_1", size=8, is_signed=False),
+            _param("param_2", size=8, is_signed=False, index=1),
+            _param("param_3", size=4, index=2),
+            _param("param_4", size=8, is_signed=False, index=3),
+        ],
+    )
+
+    assert normalized_zero.to_string() == (
+        "(((((param_2 & 4294967295) * 2) + 11) + param_3) - (param_2 & 4294967295))"
+    )
+    assert normalized_nonzero.to_string() == (
+        "(((param_2 & 4294967295) ^ param_3) - (param_2 & 4294967295))"
+    )
+
+
 def test_expression_expander_prefers_canonical_post_state_memory_after_observed_load_rewrite():
     value = Expression.parameter("value", 0, size=8)
     delta = Expression.parameter("delta", 1, size=4)
@@ -3462,6 +3561,78 @@ def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonical
 
     assert normalized_less.to_string() == "(MEM[param_2] - MEM[param_1])"
     assert normalized_not_less.to_string() == "(MEM[param_1] - MEM[param_2])"
+
+
+def test_return_analyzer_prefers_definite_branch_store_value_over_canonical_post_state_memory():
+    param_1 = Expression.parameter("param_1", 0, size=8)
+    param_2 = Expression.parameter("param_2", 1, size=8)
+    param_3 = Expression.parameter("param_3", 2, size=4)
+    param_4 = Expression.parameter("param_4", 3, size=8)
+    param_4_zero = Condition(
+        Expression.binary_op("INT_EQUAL", param_4, Expression.constant(0, 8)),
+        False,
+    )
+    param_4_nonzero = param_4_zero.negate()
+    param_2_lo = Expression.binary_op("SUBPIECE", param_2, Expression.constant(0, 4))
+    param_2_lo.size = 4
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(param_1, size=4),
+        param_2_lo,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3", "param_4"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.binary_op(
+                            "INT_MULT",
+                            param_2_lo,
+                            Expression.constant(2, 4),
+                        ),
+                        Expression.constant(11, 4),
+                    ),
+                    param_3,
+                ),
+                conditions=[param_4_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
+                conditions=[param_4_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+        _param("param_3", size=4, index=2),
+        _param("param_4", size=8, is_signed=False, index=3),
+    ]
+
+    normalized_zero = analyzer._normalize_expanded_return_value(
+        expr,
+        [param_4_zero],
+    )
+    normalized_nonzero = analyzer._normalize_expanded_return_value(
+        expr,
+        [param_4_nonzero],
+    )
+
+    assert normalized_zero.to_string() == (
+        "(((((param_2 & 4294967295) * 2) + 11) + param_3) - (param_2 & 4294967295))"
+    )
+    assert normalized_nonzero.to_string() == (
+        "(((param_2 & 4294967295) ^ param_3) - (param_2 & 4294967295))"
+    )
 
 
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions():

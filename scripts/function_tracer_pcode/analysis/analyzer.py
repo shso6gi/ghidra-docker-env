@@ -668,6 +668,9 @@ class ReturnAnalyzer:
         active_functions: Optional[Set[str]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """wrapper らしい unknown return を P-code 優先で復元し、必要なら decompiler へフォールバックする。"""
+        if not self._analysis_needs_wrapper_recovery(analysis):
+            return None
+
         recovered_from_pcode = self._recover_call_wrapper_returns_from_pcode(
             analysis,
             tracer,
@@ -701,15 +704,7 @@ class ReturnAnalyzer:
         active_functions: Set[str],
     ) -> Optional[List[ReturnInfo]]:
         """entry -> RETURN の block path 上の terminal CALL を callee summary から復元する。"""
-        if not analysis.has_unknown_return():
-            return None
-
-        if any(ret.value.expr_type != ExpressionType.UNKNOWN for ret in analysis.returns):
-            if self.debug:
-                self._debug_print(
-                    "P-code call-wrapper recovery skipped: analysis already contains "
-                    "non-unknown returns"
-                )
+        if not self._analysis_needs_wrapper_recovery(analysis):
             return None
 
         recovered: List[ReturnInfo] = []
@@ -772,7 +767,7 @@ class ReturnAnalyzer:
         active_functions: Optional[Set[str]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """decompiler の `callee(args); return;` 形式を戻り値 wrapper として補助復元する。"""
-        if not analysis.has_unknown_return():
+        if not self._analysis_needs_wrapper_recovery(analysis):
             return None
 
         c_text = self._get_decompiled_c_text(decompile_results)
@@ -782,6 +777,11 @@ class ReturnAnalyzer:
             analysis.parameters,
             c_text,
         )
+        if self.debug:
+            self._debug_print(
+                "Attempting call-wrapper recovery from decompiler text "
+                f"(returns={len(analysis.returns)}, unknown_reasons={analysis.unknown_event_reasons})"
+            )
         recovered_structured = self._recover_structured_call_wrapper_from_c_text(
             c_text,
             wrapper_parameters,
@@ -796,6 +796,8 @@ class ReturnAnalyzer:
                     "from structured wrapper body"
                 )
             return recovered_structured
+        if self.debug:
+            self._debug_print("Call-wrapper structured recovery did not match decompiler text")
 
         recovered_chain = self._recover_straightline_call_chain_from_c_text(
             c_text,
@@ -811,6 +813,8 @@ class ReturnAnalyzer:
                     "from straight-line call chain"
                 )
             return recovered_chain
+        if self.debug:
+            self._debug_print("Call-wrapper straight-line recovery did not match decompiler text")
 
         recovered = self._parse_call_wrapper_from_c_text(
             c_text,
@@ -969,6 +973,8 @@ class ReturnAnalyzer:
                 statement,
                 parameters,
                 states,
+                active_functions=active_functions,
+                current_function=current_function,
             )
             if return_expr is not None:
                 if index != len(statements) - 1:
@@ -1014,6 +1020,30 @@ class ReturnAnalyzer:
                     new_bindings = dict(bindings)
                     new_bindings[target_name] = self._clone_expression(parsed_expr)
                     next_states.append((new_bindings, list(conditions), None))
+                states = next_states
+                continue
+
+            parsed_store = self._parse_wrapper_store_statement(statement)
+            if parsed_store is not None:
+                lhs_text, rhs_text = parsed_store
+                next_states = []
+                for bindings, conditions, last_call in states:
+                    parsed_expr = self._parse_wrapper_argument_expr(
+                        rhs_text,
+                        parameters,
+                        fallback_index=0,
+                        local_bindings=bindings,
+                    )
+                    if parsed_expr is None:
+                        return None
+                    new_bindings = dict(bindings)
+                    self._record_wrapper_store_binding(
+                        new_bindings,
+                        lhs_text,
+                        parsed_expr,
+                        parameters,
+                    )
+                    next_states.append((new_bindings, list(conditions), last_call))
                 states = next_states
                 continue
 
@@ -1092,6 +1122,8 @@ class ReturnAnalyzer:
                 line,
                 parameters,
                 live_states,
+                active_functions=active_functions,
+                current_function=current_function,
             )
             if return_expr is not None:
                 terminated_states.extend(return_expr)
@@ -1157,6 +1189,31 @@ class ReturnAnalyzer:
                 index += 1
                 continue
 
+            parsed_store = self._parse_wrapper_store_statement(line)
+            if parsed_store is not None:
+                lhs_text, rhs_text = parsed_store
+                next_states = []
+                for bindings, conditions, last_call in live_states:
+                    parsed_expr = self._parse_wrapper_argument_expr(
+                        rhs_text,
+                        parameters,
+                        fallback_index=0,
+                        local_bindings=bindings,
+                    )
+                    if parsed_expr is None:
+                        return index, [], terminated_states, False
+                    new_bindings = dict(bindings)
+                    self._record_wrapper_store_binding(
+                        new_bindings,
+                        lhs_text,
+                        parsed_expr,
+                        parameters,
+                    )
+                    next_states.append((new_bindings, list(conditions), last_call))
+                live_states = next_states
+                index += 1
+                continue
+
             return index, live_states, terminated_states, False
 
         return index, live_states, terminated_states, True
@@ -1185,6 +1242,8 @@ class ReturnAnalyzer:
         statement: str,
         parameters: List[Dict],
         states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        active_functions: Optional[Set[str]] = None,
+        current_function=None,
     ) -> Optional[List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]]]:
         line = statement.strip()
         if line == "return;":
@@ -1199,6 +1258,18 @@ class ReturnAnalyzer:
             return None
 
         expr_text = return_match.group(1).strip()
+        parsed_call = self._parse_wrapper_call_expr(expr_text)
+        if parsed_call is not None:
+            callee_spec, arg_blob = parsed_call
+            return self._expand_wrapper_return_call_states(
+                states,
+                callee_spec,
+                arg_blob,
+                parameters,
+                active_functions or set(),
+                current_function,
+            )
+
         terminated_states = []
         for bindings, conditions, _last_call in states:
             parsed_expr = self._parse_wrapper_argument_expr(
@@ -1763,6 +1834,10 @@ class ReturnAnalyzer:
             )
             if operand is None:
                 return None
+            if local_bindings:
+                binding_key = self._wrapper_memory_binding_key(operand)
+                if binding_key in local_bindings:
+                    return self._clone_expression(local_bindings[binding_key])
             pointer_size = max(1, operand.size or 8)
             return Expression.memory(operand, size=pointer_size)
 
@@ -1949,6 +2024,12 @@ class ReturnAnalyzer:
                 current_function,
             )
             if not expanded:
+                if self.debug:
+                    arg_preview = [arg.to_string() for arg in parsed_args]
+                    self._debug_print(
+                        "Call-wrapper nested expansion failed: "
+                        f"callee='{callee_spec}', args={arg_preview}"
+                    )
                 return None
 
             for ev in expanded:
@@ -1967,6 +2048,67 @@ class ReturnAnalyzer:
                 next_states.append((new_bindings, merged_conditions, last_call_value))
 
         return next_states or None
+
+    def _expand_wrapper_return_call_states(
+        self,
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        callee_spec: str,
+        arg_blob: str,
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+    ) -> Optional[List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]]]:
+        arg_texts = self._split_call_arguments(arg_blob) if arg_blob else []
+        if arg_texts is None:
+            return None
+
+        terminated_states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]] = []
+        for bindings, conditions, _last_call in states:
+            parsed_args: List[Expression] = []
+            for arg_index, arg_text in enumerate(arg_texts):
+                parsed_arg = self._parse_wrapper_argument_expr(
+                    arg_text,
+                    parameters,
+                    fallback_index=arg_index,
+                    local_bindings=bindings,
+                )
+                if parsed_arg is None:
+                    return None
+                parsed_args.append(parsed_arg)
+
+            expanded = self._resolve_wrapper_call_target(
+                callee_spec,
+                parsed_args,
+                conditions,
+                parameters,
+                bindings,
+                active_functions,
+                current_function,
+            )
+            if not expanded:
+                if self.debug:
+                    arg_preview = [arg.to_string() for arg in parsed_args]
+                    self._debug_print(
+                        "Return-call wrapper expansion failed: "
+                        f"callee='{callee_spec}', args={arg_preview}"
+                    )
+                return None
+
+            for ev in expanded:
+                merged_conditions = ConditionSimplifier.simplify_conditions(
+                    list(conditions) + list(ev.conditions)
+                )
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                terminated_states.append(
+                    (
+                        dict(bindings),
+                        merged_conditions,
+                        self._clone_expression(ev.value),
+                    )
+                )
+
+        return terminated_states or None
 
     def _resolve_wrapper_call_target(
         self,
@@ -2139,6 +2281,21 @@ class ReturnAnalyzer:
             candidates.append(param)
 
         if not candidates:
+            overlap_candidates = []
+            for param in current_parameters or []:
+                name = param.get("name")
+                if not name or name in used_param_names:
+                    continue
+                if not self._parameter_storages_overlap_for_passthrough(
+                    param.get("storage"),
+                    callee_storage,
+                ):
+                    continue
+                overlap_candidates.append(param)
+            if overlap_candidates:
+                overlap_candidates.sort(key=lambda param: int(param.get("index", 1 << 20)))
+                return overlap_candidates[0]
+
             named = self._find_implicit_passthrough_parameter_by_name_or_index(
                 callee_param,
                 current_parameters,
@@ -2206,6 +2363,25 @@ class ReturnAnalyzer:
         caller_bits = int(caller.get("size_bits") or (caller.get("size", 0) * 8))
         callee_bits = int(callee.get("size_bits") or (callee.get("size", 0) * 8))
         return caller_bits == callee_bits and caller_bits > 0
+
+    def _parameter_storages_overlap_for_passthrough(
+        self,
+        caller_storage: Optional[Dict],
+        callee_storage: Optional[Dict],
+    ) -> bool:
+        caller = self._coerce_wrapper_storage_info(caller_storage)
+        callee = self._coerce_wrapper_storage_info(callee_storage)
+        if caller is None or callee is None:
+            return False
+        if not caller.is_register or not callee.is_register:
+            return False
+        try:
+            return (
+                caller.shares_base_register_with(callee)
+                and caller.bit_range_overlaps_with(callee)
+            )
+        except Exception:
+            return False
 
     def _coerce_wrapper_storage_info(self, storage: Optional[object]) -> Optional[StorageInfo]:
         if storage is None:
@@ -2310,7 +2486,7 @@ class ReturnAnalyzer:
                 if callee_storage is None or not callee_storage.is_register:
                     continue
                 if any(
-                    self._parameter_storages_match_for_passthrough(
+                    self._parameter_storages_overlap_for_passthrough(
                         existing.get("storage"),
                         callee_param.get("storage"),
                     )
@@ -2755,6 +2931,43 @@ class ReturnAnalyzer:
             return None
         return target_name, callee_spec, arg_blob
 
+    def _parse_wrapper_call_expr(
+        self,
+        expr_text: str,
+    ) -> Optional[Tuple[str, str]]:
+        stripped = self._strip_outer_parentheses(expr_text.strip())
+        if not stripped or not stripped.endswith(")"):
+            return None
+        open_index = self._find_outer_call_open_paren(stripped)
+        if open_index is None:
+            return None
+        callee_spec = stripped[:open_index].strip()
+        arg_blob = stripped[open_index + 1:-1].strip()
+        if not callee_spec:
+            return None
+        return callee_spec, arg_blob
+
+    def _parse_wrapper_store_statement(
+        self,
+        statement: str,
+    ) -> Optional[Tuple[str, str]]:
+        stripped = statement.strip()
+        if not stripped.endswith(";"):
+            return None
+        stripped = stripped[:-1].strip()
+        if not stripped:
+            return None
+
+        assign_match = re.fullmatch(r"(\*.+?)\s*=\s*(.+)", stripped)
+        if assign_match is None:
+            return None
+
+        lhs_text = assign_match.group(1).strip()
+        rhs_text = assign_match.group(2).strip()
+        if not lhs_text.startswith("*") or not rhs_text:
+            return None
+        return lhs_text, rhs_text
+
     def _find_outer_call_open_paren(self, text: str) -> Optional[int]:
         depth = 0
         for index in range(len(text) - 1, -1, -1):
@@ -2783,6 +2996,49 @@ class ReturnAnalyzer:
             fallback_index=fallback_index,
             local_bindings=local_bindings,
         )
+
+    def _analysis_needs_wrapper_recovery(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> bool:
+        if analysis is None:
+            return False
+        if analysis.has_unknown_return():
+            return True
+        if analysis.has_unresolved_return_value():
+            return True
+        return any(
+            reason in {"call_out_of_scope", "callind_out_of_scope"}
+            for reason in getattr(analysis, "unknown_event_reasons", [])
+        )
+
+    def _wrapper_memory_binding_key(self, operand: Expression) -> str:
+        return f"*{operand.to_string()}"
+
+    def _record_wrapper_store_binding(
+        self,
+        bindings: Dict[str, Expression],
+        lhs_text: str,
+        value_expr: Expression,
+        parameters: List[Dict],
+    ) -> None:
+        normalized_lhs = self._strip_outer_parentheses(lhs_text.strip())
+        bindings[normalized_lhs] = self._clone_expression(value_expr)
+
+        lhs_expr = self._parse_wrapper_argument_expr(
+            normalized_lhs,
+            parameters,
+            fallback_index=0,
+            local_bindings=None,
+        )
+        if (
+            lhs_expr is None
+            or lhs_expr.expr_type != ExpressionType.MEMORY
+            or not lhs_expr.operands
+        ):
+            return
+
+        bindings[self._wrapper_memory_binding_key(lhs_expr.operands[0])] = self._clone_expression(value_expr)
 
     def _get_decompiled_c_text(self, decompile_results) -> Optional[str]:
         """DecompileResults から C テキストを安全に取得する。"""
@@ -5130,8 +5386,14 @@ class ReturnAnalyzer:
                 conditions,
                 effect_summary.effects,
                 self._current_parameters,
+                prefer_canonical_post_state=False,
             )
             if canonicalized is not None:
+                if self.debug and canonicalized is not normalized_value:
+                    self._debug_print(
+                        "Normalized expanded return with definite post-state replay: "
+                        f"{normalized_value.to_string()} -> {canonicalized.to_string()}"
+                    )
                 normalized_value = canonicalized
 
         return normalized_value
