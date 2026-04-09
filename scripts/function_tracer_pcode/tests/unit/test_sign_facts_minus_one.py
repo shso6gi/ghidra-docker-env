@@ -12,19 +12,11 @@ if str(workspace_root) not in sys.path:
 
 from scripts.function_tracer_pcode.equivalence.normalize.facts import extract_sign_facts
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
-
-
-def _const(value: int) -> Expression:
-    return Expression(ExpressionType.CONSTANT, value=value, size=8)
-
-
-def _param(name: str, data_type: Optional[str] = None) -> Expression:
-    return Expression(
-        ExpressionType.PARAMETER,
-        name=name,
-        size=8,
-        data_type=data_type,
-    )
+from normalization_helpers import (
+    make_const as _const,
+    make_modulo_expansion,
+    make_param as _param,
+)
 
 
 def test_minus_one_less_than_integer_param_implies_nonneg():
@@ -116,26 +108,7 @@ def test_less_equal_constant_implies_exclusive_upper_bound_plus_one():
 
 
 def test_minus_one_less_than_modulo_expansion_records_nonnegative_expr_fact():
-    dividend = _param("param_1", data_type="long")
-    divisor = _param("param_2", data_type="long")
-    div_expr = Expression(
-        ExpressionType.BINARY_OP,
-        operator="INT_SDIV",
-        operands=[dividend, divisor],
-        size=8,
-    )
-    mult_expr = Expression(
-        ExpressionType.BINARY_OP,
-        operator="INT_MULT",
-        operands=[div_expr, divisor],
-        size=8,
-    )
-    modulo_expansion = Expression(
-        ExpressionType.BINARY_OP,
-        operator="INT_SUB",
-        operands=[dividend, mult_expr],
-        size=8,
-    )
+    dividend, divisor, modulo_expansion = make_modulo_expansion()
     canonical_mod = Expression(
         ExpressionType.BINARY_OP,
         operator="INT_SREM",
