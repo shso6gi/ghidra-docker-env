@@ -301,6 +301,23 @@ def _try_resolve_readonly_load(
     if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
         return None
 
+    load_size = expr.size if expr.size else 4
+    direct_addr = _resolve_direct_readonly_address(
+        expr.operands[0],
+        load_size,
+        read_memory_value,
+        image_base,
+    )
+    if direct_addr is not None:
+        mem_value = read_memory_value(direct_addr, load_size)
+        if mem_value is not None:
+            if debug:
+                print(
+                    "[MemoryResolver] concretized direct readonly load "
+                    f"addr=0x{direct_addr:x} size={load_size} -> 0x{mem_value:x}"
+                )
+            return Expression.constant(mem_value, load_size)
+
     pattern = _extract_indexed_pattern(expr.operands[0])
     if pattern is None:
         return None
@@ -321,7 +338,6 @@ def _try_resolve_readonly_load(
 
     branches = []
     index_size_bytes = max(1, pattern.index_bits // 8)
-    load_size = expr.size if expr.size else 4
     fallback = expr
     resolved_base = _resolve_readonly_base_address(
         pattern,
@@ -364,6 +380,43 @@ def _try_resolve_readonly_load(
     resolved = Expression.phi(branches)
     resolved.size = expr.size
     return resolved
+
+
+def _resolve_direct_readonly_address(
+    addr_expr: Expression,
+    load_size: int,
+    read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int],
+) -> Optional[int]:
+    flattened = _flatten_additive_terms(addr_expr)
+    if flattened is None:
+        return None
+
+    const_total, symbolic_bases, scaled_terms = flattened
+    if scaled_terms or len(symbolic_bases) > 1:
+        return None
+
+    candidates: List[int] = []
+
+    def _append(value: Optional[int]) -> None:
+        if value is None:
+            return
+        if value < 0:
+            return
+        if value not in candidates:
+            candidates.append(value)
+
+    if symbolic_bases:
+        _append(symbolic_bases[0] + const_total)
+        if image_base is not None:
+            _append(image_base + const_total)
+    else:
+        _append(const_total)
+
+    for candidate in candidates:
+        if read_memory_value(candidate, load_size) is not None:
+            return candidate
+    return None
 
 
 def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPattern]:

@@ -11,7 +11,7 @@ from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence
 from ..model import Condition, Expression, ExpressionType, StorageInfo
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
-from .memory_resolver import concretize_readonly_loads
+from .memory_resolver import concretize_readonly_loads, _extract_address_suffix
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,26 @@ def _decode_signed_token(token: str) -> Optional[int]:
         return None
     value = int(digits)
     return -value if prefix == "n" else value
+
+
+def _collect_named_parameter_names(parameters: Sequence[Dict]) -> List[str]:
+    return [
+        str(name)
+        for param in parameters
+        for name in [param.get("name")]
+        if isinstance(name, str) and name
+    ]
+
+
+def _all_non_none_expressions(
+    operands: Sequence[Optional[Expression]],
+) -> Optional[List[Expression]]:
+    normalized: List[Expression] = []
+    for operand in operands:
+        if operand is None:
+            return None
+        normalized.append(operand)
+    return normalized
 
 
 def _synthetic_storage_base_name(storage: Optional[StorageInfo]) -> Optional[str]:
@@ -234,7 +254,7 @@ def summarize_store_effects(
     resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
     debug: bool = False,
 ) -> EffectSummary:
-    parameter_names = [param.get("name") for param in parameters if param.get("name")]
+    parameter_names = _collect_named_parameter_names(parameters)
     effects: List[StoreEffect] = []
     has_unsupported_call = False
 
@@ -373,7 +393,10 @@ def _recover_call_argument_expressions(
     recovered_args: List[Expression] = []
     for index, callee_param in enumerate(callee_parameters):
         explicit = explicit_args[index] if index < len(explicit_args) else None
-        if _expression_maps_to_parameter(explicit, caller_parameters):
+        if explicit is not None and _should_preserve_explicit_indirect_target_argument(explicit, callee_param):
+            recovered_args.append(explicit)
+            continue
+        if explicit is not None and _expression_maps_to_parameter(explicit, caller_parameters):
             recovered_args.append(explicit)
             continue
         explicit_size = (
@@ -381,7 +404,7 @@ def _recover_call_argument_expressions(
             if explicit is not None and getattr(explicit, "size", 0)
             else callee_param.get("size")
         )
-        if _should_prefer_explicit_call_argument(
+        if explicit is not None and _should_prefer_explicit_call_argument(
             explicit,
             caller_parameters,
             size=explicit_size,
@@ -419,6 +442,17 @@ def _recover_call_argument_expressions(
     return recovered_args
 
 
+def _should_preserve_explicit_indirect_target_argument(
+    expr: Optional[Expression],
+    callee_param: Optional[Dict],
+) -> bool:
+    if expr is None or not _parameter_descriptor_looks_pointer(callee_param):
+        return False
+    if expr.expr_type == ExpressionType.PHI:
+        return True
+    return bool(_enumerate_constant_expression_branches(expr))
+
+
 def _should_prefer_explicit_call_argument(
     expr: Optional[Expression],
     caller_parameters: Sequence[Dict],
@@ -426,6 +460,8 @@ def _should_prefer_explicit_call_argument(
 ) -> bool:
     if expr is None:
         return False
+    if expr.expr_type == ExpressionType.PHI:
+        return True
     if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.MEMORY, ExpressionType.CALL}:
         return True
     if expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
@@ -1053,7 +1089,7 @@ def _build_positional_parameter_args(
     return positional_args
 
 
-def _expression_maps_to_parameter(expr: Expression, parameters: Sequence[Dict]) -> bool:
+def _expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequence[Dict]) -> bool:
     if expr is None:
         return False
     if _resolve_parameter_name(expr, parameters) is not None:
@@ -1648,7 +1684,7 @@ def rewrite_observed_loads_from_effects(
         current = expr
         if rewritten_addr is not expr.operands[0]:
             current = Expression.memory(
-                rewritten_addr,
+                rewritten_addr if rewritten_addr is not None else expr.operands[0],
                 expr.size,
                 read_order_key=expr.read_order_key,
             )
@@ -1670,7 +1706,7 @@ def rewrite_observed_loads_from_effects(
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
     ):
-        new_operands = [
+        rewritten_operands = [
             rewrite_observed_loads_from_effects(
                 op,
                 return_conditions,
@@ -1679,7 +1715,10 @@ def rewrite_observed_loads_from_effects(
             )
             for op in expr.operands
         ]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        new_operands = _all_non_none_expressions(rewritten_operands)
+        if new_operands is None:
             return expr
         rebuilt = Expression(
             expr_type=expr.expr_type,
@@ -2112,11 +2151,14 @@ def canonicalize_post_state_subexpressions(
         return collapsed
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
-        new_operands = [
+        rewritten_operands = [
             canonicalize_post_state_subexpressions(op, return_conditions, effects, parameters)
             for op in expr.operands
         ]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        new_operands = _all_non_none_expressions(rewritten_operands)
+        if new_operands is None:
             return expr
         rebuilt = Expression(
             expr_type=expr.expr_type,
@@ -2188,12 +2230,14 @@ def normalize_post_state_expression(
         normalized = canonicalized
 
     if not canonicalized_changed:
-        normalized = _rewrite_definite_post_state_subexpressions(
+        rewritten_definite = _rewrite_definite_post_state_subexpressions(
             normalized,
             return_conditions,
             effects,
             parameters,
         )
+        if rewritten_definite is not None:
+            normalized = rewritten_definite
 
     if expression_contains_complex_location_reads(normalized, parameters):
         rewritten_post_state = rewrite_loads_from_effects(
@@ -2253,7 +2297,7 @@ def _rewrite_definite_post_state_subexpressions(
         active_effects = _collect_definite_active_effects(return_conditions, effects)
         if len(active_effects) > 1 and _summary_has_interdependent_writes(
             EffectSummary(
-                parameter_names=[param.get("name") for param in parameters if param.get("name")],
+                parameter_names=_collect_named_parameter_names(parameters),
                 effects=list(active_effects),
             )
         ):
@@ -2277,7 +2321,7 @@ def _rewrite_definite_post_state_subexpressions(
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
     ):
-        new_operands = [
+        rewritten_operands = [
             _rewrite_definite_post_state_subexpressions(
                 operand,
                 return_conditions,
@@ -2287,7 +2331,10 @@ def _rewrite_definite_post_state_subexpressions(
             )
             for operand in expr.operands
         ]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        new_operands = _all_non_none_expressions(rewritten_operands)
+        if new_operands is None:
             return expr
         return Expression(
             expr_type=expr.expr_type,
@@ -2368,6 +2415,8 @@ def _replay_definite_active_effects_for_location(
             alias_representatives,
             parameters,
         )
+        if replayed_value is None:
+            continue
         reduced_value = _reduce_expression_under_conditions(replayed_value, normalized_return_conditions)
         state[target_rep] = reduced_value if reduced_value is not None else replayed_value
 
@@ -2458,7 +2507,7 @@ def _rewrite_expression_with_replayed_state(
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
     ):
-        new_operands = [
+        rewritten_operands = [
             _rewrite_expression_with_replayed_state(
                 operand,
                 conditions,
@@ -2468,7 +2517,10 @@ def _rewrite_expression_with_replayed_state(
             )
             for operand in expr.operands
         ]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        new_operands = _all_non_none_expressions(rewritten_operands)
+        if new_operands is None:
             return expr
         return Expression(
             expr_type=expr.expr_type,
@@ -2979,7 +3031,7 @@ def _normalize_location_steps(steps: Sequence[LocationStep]) -> Tuple[LocationSt
 
 
 def _location_step_sequence(location: CanonicalLocation) -> List[LocationStep]:
-    steps = list(getattr(location, "steps", ()) or ())
+    steps: List[LocationStep] = list(getattr(location, "steps", ()) or ())
     if int(getattr(location, "offset", 0) or 0) != 0:
         steps.append(LocationStep("offset", int(location.offset)))
     return list(_normalize_location_steps(steps))

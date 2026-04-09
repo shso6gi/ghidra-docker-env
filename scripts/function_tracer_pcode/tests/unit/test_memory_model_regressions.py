@@ -193,6 +193,28 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
     assert values == [1, 1, 2, 2]
 
 
+def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
+    load_expr = Expression.memory(
+        Expression.variable("PTR_ptr_op_add_00113090", size=8),
+        size=8,
+    )
+
+    table = {
+        0x00113090: 0x401120,
+    }
+
+    resolved = concretize_readonly_loads(
+        load_expr,
+        [],
+        [],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "CONSTANT"
+    assert resolved.value == 0x401120
+
+
 def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_by_mul_one():
     param = Expression.parameter("param_1", 0, size=8)
     subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
@@ -1540,6 +1562,111 @@ def test_recover_call_argument_expressions_prefers_explicit_stack_local_address_
     )
 
     assert recovered[2].to_string() == "(sp + (-48))"
+
+
+def test_recover_call_argument_expressions_preserves_explicit_phi_function_pointer():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeOp:
+        def __init__(self):
+            self._seqnum = FakeSeqnum(0x1000, 3)
+
+        def getSeqnum(self):
+            return self._seqnum
+
+        def getOutput(self):
+            return None
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 0
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, _varnode, use_cache=False, depth=0):
+            return Expression.variable("opaque", size=8)
+
+    call_op = FakeOp()
+    explicit_target = Expression.phi(
+        [
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression.parameter("selector", 0, size=4),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                ),
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.constant(0, 8),
+                    Expression.constant(0x100814, 8),
+                ),
+            ),
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("selector", 0, size=4),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                ),
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.constant(0, 8),
+                    Expression.constant(0x10081C, 8),
+                ),
+            ),
+        ]
+    )
+
+    recovered = _recover_call_argument_expressions(
+        call_op,
+        FakeTracer(),
+        [
+            _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("x0")),
+        ],
+        [
+            {"name": "param_1", "size": 8, "data_type": "code *", "storage": _reg_storage("x0")},
+        ],
+        [explicit_target],
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].expr_type.name == "PHI"
+    assert recovered[0].to_string() == explicit_target.to_string()
 
 
 def test_resolve_call_argument_expression_recovers_parameter_from_storage_alias():

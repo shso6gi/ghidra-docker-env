@@ -27,6 +27,56 @@ def _cond_ne(left: Expression, right: Expression) -> Condition:
     return Condition(Expression.binary_op("INT_NOTEQUAL", left, right), False)
 
 
+class _FakeFunction:
+    def __init__(self, name: str, entry: int):
+        self._name = name
+        self._entry = entry
+
+    def getName(self):
+        return self._name
+
+    def getEntryPoint(self):
+        return self._entry
+
+
+class _FakeFunctionManager:
+    def __init__(self, by_addr, by_name):
+        self._by_addr = dict(by_addr)
+        self._by_name = dict(by_name)
+
+    def getFunctionAt(self, addr):
+        return self._by_addr.get(addr)
+
+    def getFunctionContaining(self, addr):
+        return self._by_addr.get(addr)
+
+    def getFunctions(self, _forward):
+        return list(self._by_name.values())
+
+
+class _FakeAddressSpace:
+    def getAddress(self, value):
+        return value
+
+
+class _FakeAddressFactory:
+    def getDefaultAddressSpace(self):
+        return _FakeAddressSpace()
+
+
+class _FakeProgram:
+    def __init__(self, functions):
+        by_name = {func.getName(): func for func in functions}
+        by_addr = {func.getEntryPoint(): func for func in functions}
+        self._function_manager = _FakeFunctionManager(by_addr, by_name)
+
+    def getFunctionManager(self):
+        return self._function_manager
+
+    def getAddressFactory(self):
+        return _FakeAddressFactory()
+
+
 def test_return_analyzer_resolves_call_summary_with_argument_substitution():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     callee_analysis = FunctionReturnAnalysis(
@@ -1519,6 +1569,49 @@ def test_return_analyzer_parses_simple_decompiler_call_wrapper():
     assert [arg.to_string() for arg in args] == ["param_1", "7"]
 
 
+def test_return_analyzer_normalizes_pointer_symbol_call_wrapper_to_underlying_function():
+    analyzer = ReturnAnalyzer(
+        program=_FakeProgram([_FakeFunction("ptr_op_xor", 0x401200)]),
+        debug=False,
+    )
+    parsed = analyzer._parse_call_wrapper_from_c_text(
+        """undefined8 ptr_dispatch_callback(undefined4 param_2,undefined4 param_3)
+{
+  (*(code *)PTR_ptr_op_xor_120013098)(param_2,param_3);
+  return;
+}
+""",
+        [
+            {"name": "param_2", "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "size": 4, "data_type": "undefined4"},
+        ],
+    )
+
+    assert parsed is not None
+    callee_name, args = parsed
+    assert callee_name == "ptr_op_xor"
+    assert [arg.to_string() for arg in args] == ["param_2", "param_3"]
+
+
+def test_return_analyzer_does_not_treat_parameter_name_as_direct_wrapper_callee():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    parsed = analyzer._parse_call_wrapper_from_c_text(
+        """void ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  (*param_1)(param_2,param_3);
+  return;
+}
+""",
+        [
+            {"name": "param_1", "size": 8, "data_type": "code *"},
+            {"name": "param_2", "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "size": 4, "data_type": "undefined4"},
+        ],
+    )
+
+    assert parsed is None
+
+
 def test_return_analyzer_recovers_call_wrapper_from_decompiler_text():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     analysis = FunctionReturnAnalysis(
@@ -1760,6 +1853,1572 @@ def test_return_analyzer_recovers_nested_dispatch_wrapper_from_decompiler_text()
     condition_strings = [" && ".join(cond.to_string() for cond in ret.conditions) for ret in recovered]
     assert any("(param_2 < param_1) == 0" in conds and "(param_3 < ((param_2 * 3) + 1))" in conds for conds in condition_strings)
     assert any("(param_2 < param_1) != 0" in conds and "(param_3 < (param_1 + 10))" in conds for conds in condition_strings)
+
+
+def test_return_analyzer_falls_back_to_decompiler_for_higher_order_call_summary():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    ptr_apply_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
+            {"name": "param_2", "size": 4, "data_type": "int", "index": 1},
+            {"name": "param_3", "size": 4, "data_type": "int", "index": 2},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x402010",
+                value=Expression.unknown("call_out_of_scope:UNKNOWN_FUNC"),
+                conditions=[_cond_ne(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=0,
+            ),
+            ReturnInfo(
+                address="0x402020",
+                value=Expression.constant(0xFFFFFDA8, 4),
+                conditions=[_cond_eq(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=1,
+            ),
+        ],
+        return_type="int",
+        unknown_event_reasons=["call_out_of_scope", "callind_out_of_scope"],
+        unknown_event_count=2,
+    )
+    add_analysis = FunctionReturnAnalysis(
+        function_name="ptr_op_add",
+        entry_point="0x401100",
+        parameters=[
+            {"name": "a", "size": 4, "index": 0},
+            {"name": "b", "size": 4, "index": 1},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401110",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("a", 0, size=4),
+                    Expression.parameter("b", 1, size=4),
+                ),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+    )
+    xor_analysis = FunctionReturnAnalysis(
+        function_name="ptr_op_xor",
+        entry_point="0x401200",
+        parameters=[
+            {"name": "a", "size": 4, "index": 0},
+            {"name": "b", "size": 4, "index": 1},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401210",
+                value=Expression.binary_op(
+                    "INT_XOR",
+                    Expression.parameter("a", 0, size=4),
+                    Expression.parameter("b", 1, size=4),
+                ),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+    )
+
+    c_text = """undefined4 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined4 local_14;
+  if (param_1 == (code *)0x0) {
+    local_14 = 0xfffffda8;
+  }
+  else {
+    local_14 = (*param_1)(param_2,param_3);
+  }
+  return local_14;
+}
+"""
+
+    def _analysis_side_effect(function_name, _active_functions):
+        return {
+            "ptr_apply_callback": ptr_apply_analysis,
+            "ptr_op_add": add_analysis,
+            "ptr_op_xor": xor_analysis,
+        }.get(function_name)
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", side_effect=_analysis_side_effect):
+        with patch.object(analyzer, "_decompile_function", return_value=object()):
+            with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+                expanded = analyzer._resolve_call_expansions(
+                    "ptr_apply_callback",
+                    [
+                        Expression.constant(0x401100, 8),
+                        _param_expr("lhs", 0, size=4),
+                        _param_expr("rhs", 1, size=4),
+                    ],
+                    active_functions=set(),
+                )
+
+    assert expanded is not None
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "(lhs + rhs)"
+    assert expanded[0].conditions == []
+
+
+def test_return_analyzer_decompiler_fallback_handles_early_return_higher_order_wrapper():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    ptr_apply_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
+            {"name": "param_2", "size": 4, "data_type": "undefined4", "index": 1},
+            {"name": "param_3", "size": 4, "data_type": "undefined4", "index": 2},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x402010",
+                value=Expression.unknown("call_out_of_scope:UNKNOWN_FUNC"),
+                conditions=[_cond_ne(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=0,
+            ),
+            ReturnInfo(
+                address="0x402020",
+                value=Expression.constant(0xFFFFFDA8, 8),
+                conditions=[_cond_eq(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=1,
+            ),
+        ],
+        return_type="undefined8",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    c_text = """undefined8 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined8 uVar1;
+  if (param_1 != (code *)0x0) {
+    uVar1 = (*param_1)(param_2,param_3);
+    return uVar1;
+  }
+  return 0xfffffda8;
+}
+"""
+
+    selector = Expression.parameter("param_1", 0, size=4)
+    phi_target = Expression.phi(
+        [
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression.binary_op("INT_AND", selector, Expression.constant(1, 4)),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                ),
+                Expression.binary_op("INT_ADD", Expression.constant(0, 8), Expression.constant(0x401100, 8)),
+            ),
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_NOTEQUAL",
+                        Expression.binary_op("INT_AND", selector, Expression.constant(1, 4)),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                ),
+                Expression.binary_op("INT_ADD", Expression.constant(0, 8), Expression.constant(0x401200, 8)),
+            ),
+        ]
+    )
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_op_xor":
+            return [ExpandedValue(Expression.binary_op("INT_XOR", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_decompile_function", return_value=object()):
+        with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+            with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+                recovered = analyzer._resolve_call_expansions_from_decompiler(
+                    "ptr_apply_callback",
+                    [
+                        phi_target,
+                        Expression.parameter("param_2", 1, size=4),
+                        Expression.parameter("param_3", 2, size=4),
+                    ],
+                    set(),
+                    analysis=ptr_apply_analysis,
+                )
+
+    assert recovered is not None
+    assert sorted(ev.value.to_string() for ev in recovered) == [
+        "(param_2 + param_3)",
+        "(param_2 ^ param_3)",
+        "4294966696",
+    ]
+    condition_strings = [" && ".join(cond.to_string() for cond in ev.conditions) for ev in recovered]
+    assert any("((param_1 & 1) == 0)" in conds for conds in condition_strings)
+    assert any("((param_1 & 1) != 0)" in conds for conds in condition_strings)
+
+
+def test_return_analyzer_structured_wrapper_ignores_unreachable_tail_after_constant_true_branch():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    c_text = """undefined8 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined8 uVar1;
+  if (param_1 != (code *)0x0) {
+    uVar1 = (*param_1)(param_2,param_3);
+    return uVar1;
+  }
+  return 0xfffffda8;
+}
+"""
+    parameters = [
+        {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
+        {"name": "param_2", "size": 4, "data_type": "undefined4", "index": 1},
+        {"name": "param_3", "size": 4, "data_type": "undefined4", "index": 2},
+    ]
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+        recovered = analyzer._recover_structured_call_wrapper_from_c_text(
+            c_text,
+            parameters,
+            "0x1000",
+            Mock(),
+            set(),
+            initial_bindings={
+                "param_1": Expression.variable("ptr_op_add", size=8),
+                "param_2": Expression.parameter("param_2", 1, size=4),
+                "param_3": Expression.parameter("param_3", 2, size=4),
+            },
+        )
+
+    assert recovered is not None
+    assert len(recovered) == 1
+    assert recovered[0].value.to_string() == "(param_2 + param_3)"
+    assert recovered[0].conditions == []
+
+
+def test_return_analyzer_structured_wrapper_ignores_decompiler_warning_comments_before_indirect_call():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    c_text = """void ptr_dispatch_callback(ulong param_1,undefined8 param_2,undefined8 param_3)
+{
+  code *UNRECOVERED_JUMPTABLE;
+  UNRECOVERED_JUMPTABLE = (code *)PTR_ptr_op_add_120012068;
+  if ((param_1 & 1) != 0) {
+    UNRECOVERED_JUMPTABLE = (code *)PTR_ptr_op_xor_120012070;
+  }
+                    /* WARNING: Could not recover jumptable at 0x000120000e7c. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (*UNRECOVERED_JUMPTABLE)(param_2,param_3);
+  return;
+}
+"""
+    parameters = [
+        {"name": "param_1", "size": 8, "data_type": "ulong", "index": 0},
+        {"name": "param_2", "size": 8, "data_type": "undefined8", "index": 1},
+        {"name": "param_3", "size": 8, "data_type": "undefined8", "index": 2},
+    ]
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_op_xor":
+            return [ExpandedValue(Expression.binary_op("INT_XOR", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+        recovered = analyzer._recover_structured_call_wrapper_from_c_text(
+            c_text,
+            parameters,
+            "0x1000",
+            Mock(),
+            set(),
+        )
+
+    assert recovered is not None
+    assert len(recovered) == 2
+    recovered_by_condition = {
+        tuple(cond.to_string() for cond in ret.conditions): ret.value.to_string()
+        for ret in recovered
+    }
+    assert recovered_by_condition.get(("((param_1 & 1) == 0)",)) == "(param_2 + param_3)" or recovered_by_condition.get(
+        ("(not ((param_1 & 1) != 0))",)
+    ) == "(param_2 + param_3)"
+    assert recovered_by_condition.get(("((param_1 & 1) != 0)",)) == "(param_2 ^ param_3)" or recovered_by_condition.get(
+        ("(not ((param_1 & 1) == 0))",)
+    ) == "(param_2 ^ param_3)"
+
+
+def test_return_analyzer_recovers_indirect_dispatch_wrapper_from_pointer_slots():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_dispatch_callback",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 8, "data_type": "ulong", "index": 0}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    c_text = """undefined4 ptr_dispatch_callback(ulong param_1,undefined8 param_2,undefined8 param_3)
+{
+  undefined4 uVar1;
+  undefined **ppuVar2;
+  ppuVar2 = &PTR_ptr_op_xor_00112070;
+  if ((param_1 & 1) == 0) {
+    ppuVar2 = &PTR_ptr_op_add_00112078;
+  }
+  uVar1 = (*(code *)*ppuVar2)(param_2,param_3);
+  return uVar1;
+}
+"""
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_op_xor":
+            return [ExpandedValue(Expression.binary_op("INT_XOR", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    slot_table = {
+        0x00112070: 0x401200,
+        0x00112078: 0x401100,
+    }
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: slot_table.get(addr)):
+                recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                    Mock(),
+                    analysis,
+                    Mock(),
+                    set(),
+                )
+
+    assert recovered is not None
+    assert len(recovered) == 2
+    recovered_by_condition = {
+        ret.conditions[0].to_string() if ret.conditions else "(unconditional)": ret.value.to_string()
+        for ret in recovered
+    }
+    assert recovered_by_condition["((param_1 & 1) == 0)"] == "(param_2 + param_3)"
+    assert recovered_by_condition.get("((param_1 & 1) != 0)") == "(param_2 ^ param_3)" or recovered_by_condition.get(
+        "(not ((param_1 & 1) == 0))"
+    ) == "(param_2 ^ param_3)"
+
+
+def test_return_analyzer_prunes_impossible_null_branch_for_known_function_pointer_binding():
+    functions = [
+        _FakeFunction("ptr_dispatch_callback", 0x403000),
+        _FakeFunction("ptr_apply_callback", 0x402000),
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    dispatch_analysis = FunctionReturnAnalysis(
+        function_name="ptr_dispatch_callback",
+        entry_point="0x403000",
+        parameters=[
+            {"name": "param_1", "size": 4, "index": 0},
+            {"name": "param_2", "size": 4, "index": 1},
+            {"name": "param_3", "size": 4, "index": 2},
+        ],
+        returns=[ReturnInfo(address="0x403000", value=Expression.unknown("void"), conditions=[], branch_index=0)],
+        return_type="void",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+    apply_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
+            {"name": "param_2", "size": 4, "data_type": "undefined4", "index": 1},
+            {"name": "param_3", "size": 4, "data_type": "undefined4", "index": 2},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x402010",
+                value=Expression.unknown("call_out_of_scope:UNKNOWN_FUNC"),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="undefined8",
+        unknown_event_reasons=["call_out_of_scope", "callind_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    dispatch_text = """undefined8 ptr_dispatch_callback(uint param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined *local_28;
+  undefined8 uVar1;
+  local_28 = PTR_ptr_op_xor_120013098;
+  if ((param_1 & 1) == 0) {
+    local_28 = PTR_ptr_op_add_120013090;
+  }
+  uVar1 = ptr_apply_callback((code *)local_28,param_2,param_3);
+  return uVar1;
+}
+"""
+    apply_text = """undefined8 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined8 uVar1;
+  if (param_1 == (code *)0x0) {
+    uVar1 = 0xfffffffffffffda8;
+  }
+  else {
+    uVar1 = (*param_1)(param_2,param_3);
+  }
+  return uVar1;
+}
+"""
+
+    class _FakeDecompileResult:
+        def __init__(self, name):
+            self.name = name
+
+    def _analysis_side_effect(function_name, _active_functions):
+        return {
+            "ptr_dispatch_callback": dispatch_analysis,
+            "ptr_apply_callback": apply_analysis,
+            "ptr_op_add": FunctionReturnAnalysis(
+                function_name="ptr_op_add",
+                entry_point="0x401100",
+                parameters=[{"name": "a", "size": 4, "index": 0}, {"name": "b", "size": 4, "index": 1}],
+                returns=[
+                    ReturnInfo(
+                        address="0x401110",
+                        value=Expression.binary_op(
+                            "INT_ADD",
+                            Expression.parameter("a", 0, size=4),
+                            Expression.parameter("b", 1, size=4),
+                        ),
+                        conditions=[],
+                        branch_index=0,
+                    )
+                ],
+                return_type="int",
+            ),
+            "ptr_op_xor": FunctionReturnAnalysis(
+                function_name="ptr_op_xor",
+                entry_point="0x401200",
+                parameters=[{"name": "a", "size": 4, "index": 0}, {"name": "b", "size": 4, "index": 1}],
+                returns=[
+                    ReturnInfo(
+                        address="0x401210",
+                        value=Expression.binary_op(
+                            "INT_XOR",
+                            Expression.parameter("a", 0, size=4),
+                            Expression.parameter("b", 1, size=4),
+                        ),
+                        conditions=[],
+                        branch_index=0,
+                    )
+                ],
+                return_type="int",
+            ),
+        }.get(function_name)
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", side_effect=_analysis_side_effect):
+        with patch.object(
+            analyzer,
+            "_decompile_function",
+            side_effect=lambda function, timeout=60: _FakeDecompileResult(function.getName()),
+        ):
+            with patch.object(
+                analyzer,
+                "_get_decompiled_c_text",
+                side_effect=lambda results: {
+                    "ptr_dispatch_callback": dispatch_text,
+                    "ptr_apply_callback": apply_text,
+                }[results.name],
+            ):
+                recovered = analyzer._resolve_call_expansions_from_decompiler(
+                    "ptr_dispatch_callback",
+                    [
+                        Expression.parameter("param_1", 0, size=4),
+                        Expression.parameter("param_2", 1, size=4),
+                        Expression.parameter("param_3", 2, size=4),
+                    ],
+                    active_functions=set(),
+                    analysis=dispatch_analysis,
+                )
+
+    assert recovered is not None
+    assert len(recovered) == 2
+    recovered_by_condition = {
+        tuple(cond.to_string() for cond in ret.conditions): ret.value.to_string()
+        for ret in recovered
+    }
+    assert recovered_by_condition[( "((param_1 & 1) == 0)",)] == "(param_2 + param_3)"
+    assert recovered_by_condition.get(("((param_1 & 1) != 0)",)) == "(param_2 ^ param_3)" or recovered_by_condition.get(
+        ("(not ((param_1 & 1) == 0))",)
+    ) == "(param_2 ^ param_3)"
+    assert all("600" not in value for value in recovered_by_condition.values())
+
+
+def test_return_analyzer_augments_wrapper_call_with_implicit_passthrough_register_args():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    current_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+        {
+            "name": "param_2",
+            "index": 1,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a1",
+                "base_register_name": "a1",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+        {
+            "name": "param_3",
+            "index": 2,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a2",
+                "base_register_name": "a2",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+    ]
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {
+                "name": "param_1",
+                "index": 0,
+                "size": 8,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a0",
+                    "base_register_name": "a0",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 64,
+                },
+            },
+            {
+                "name": "param_2",
+                "index": 1,
+                "size": 8,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a1",
+                    "base_register_name": "a1",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 64,
+                },
+            },
+            {
+                "name": "param_3",
+                "index": 2,
+                "size": 8,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a2",
+                    "base_register_name": "a2",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 64,
+                },
+            },
+        ],
+        returns=[],
+        return_type="undefined8",
+    )
+
+    captured = {}
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        captured["function_name"] = function_name
+        captured["args"] = [arg.to_string() for arg in args]
+        return [ExpandedValue(Expression.constant(0, 8), [])]
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            expanded = analyzer._resolve_wrapper_call_target(
+                "ptr_apply_callback",
+                [Expression.variable("PTR_ptr_op_add_120012068", size=8)],
+                [],
+                current_parameters,
+                {},
+                set(),
+                None,
+            )
+
+    assert expanded is not None
+    assert captured["function_name"] == "ptr_apply_callback"
+    assert captured["args"] == [
+        "PTR_ptr_op_add_120012068",
+        "param_2",
+        "param_3",
+    ]
+    assert expanded[0].value.to_string() == "0"
+
+
+def test_return_analyzer_augments_current_parameters_with_implicit_passthrough_registers():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    class _FakeCallOp:
+        def __init__(self):
+            self._target = object()
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            if index == 0:
+                return self._target
+            return object()
+
+        def getOutput(self):
+            return None
+
+    call_op = _FakeCallOp()
+
+    class _FakeTracer:
+        def get_all_pcode_ops(self):
+            return [call_op]
+
+        def _get_function_name(self, target_varnode):
+            if target_varnode is call_op.getInput(0):
+                return "ptr_apply_callback"
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, *_args, **_kwargs):
+            raise AssertionError("direct target resolution should be enough")
+
+        def _get_op_order_key(self, _op):
+            return 10
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    current_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 4,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0_lo",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 32,
+                "size_bits": 32,
+                "base_register_size_bits": 64,
+            },
+        }
+    ]
+    callee_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+                "base_register_size_bits": 64,
+            },
+        },
+        {
+            "name": "param_2",
+            "index": 1,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a1",
+                "base_register_name": "a1",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+                "base_register_size_bits": 64,
+            },
+        },
+        {
+            "name": "param_3",
+            "index": 2,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a2",
+                "base_register_name": "a2",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+                "base_register_size_bits": 64,
+            },
+        },
+    ]
+
+    with patch.object(analyzer, "_get_freshest_callee_parameters", return_value=callee_parameters):
+        augmented = analyzer._augment_parameters_with_implicit_passthrough(
+            current_parameters,
+            _FakeTracer(),
+            set(),
+        )
+
+    assert [param["name"] for param in augmented] == ["param_1", "param_2", "param_3"]
+    assert augmented[1]["storage"]["base_register_name"] == "a1"
+    assert augmented[2]["storage"]["base_register_name"] == "a2"
+
+
+def test_return_analyzer_augments_hidden_passthrough_even_when_live_in_check_is_too_conservative():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    class _FakeOutput:
+        def __init__(self, storage):
+            self.storage = analyzer._coerce_wrapper_storage_info(storage)
+
+    class _FakeCallOp:
+        def __init__(self):
+            self._target = object()
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            if index == 0:
+                return self._target
+            return object()
+
+        def getOutput(self):
+            return None
+
+    class _FakeWriteOp:
+        def __init__(self, storage):
+            self._output = _FakeOutput(storage)
+
+        def getMnemonic(self):
+            return "COPY"
+
+        def getNumInputs(self):
+            return 0
+
+        def getInput(self, _index):
+            raise IndexError
+
+        def getOutput(self):
+            return self._output
+
+    class _FakeLocalMap:
+        def getSymbols(self):
+            return []
+
+    class _FakeHighFunction:
+        def getLocalSymbolMap(self):
+            return _FakeLocalMap()
+
+    call_op = _FakeCallOp()
+    prior_write = _FakeWriteOp(
+        {
+            "is_register": True,
+            "register_name": "a1",
+            "base_register_name": "a1",
+            "bit_offset_in_base": 0,
+            "size_bits": 64,
+            "size": 8,
+        }
+    )
+
+    class _FakeTracer:
+        high_function = _FakeHighFunction()
+
+        def get_all_pcode_ops(self):
+            return [prior_write, call_op]
+
+        def _get_function_name(self, target_varnode):
+            if target_varnode is call_op.getInput(0):
+                return "ptr_apply_callback"
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, *_args, **_kwargs):
+            raise AssertionError("direct target resolution should be enough")
+
+        def _get_op_order_key(self, op):
+            return 1 if op is prior_write else 10
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+    current_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        }
+    ]
+    callee_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+        {
+            "name": "param_2",
+            "index": 1,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a1",
+                "base_register_name": "a1",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+                "size": 8,
+            },
+        },
+    ]
+
+    with patch.object(analyzer, "_get_freshest_callee_parameters", return_value=callee_parameters):
+        augmented = analyzer._augment_parameters_with_implicit_passthrough(
+            current_parameters,
+            _FakeTracer(),
+            set(),
+        )
+
+    assert [param["name"] for param in augmented] == ["param_1", "param_2"]
+
+
+def test_return_analyzer_does_not_synthesize_hidden_param_when_register_has_local_symbol():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    class _FakeCallOp:
+        def __init__(self):
+            self._target = object()
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            if index == 0:
+                return self._target
+            return object()
+
+        def getOutput(self):
+            return None
+
+    class _FakeSymbol:
+        def __init__(self, storage):
+            self._storage = storage
+
+        def isParameter(self):
+            return False
+
+        def getStorage(self):
+            class _Storage:
+                def __init__(self, storage):
+                    self._storage = storage
+
+                def getVarnodes(self):
+                    class _Addr:
+                        def __init__(self, storage):
+                            self._storage = storage
+
+                        def getAddressSpace(self):
+                            class _Space:
+                                def __init__(self, storage):
+                                    self._storage = storage
+
+                                def isRegisterSpace(self):
+                                    return self._storage.get("is_register", False)
+
+                                def getName(self):
+                                    return self._storage.get("space_name", "register")
+
+                            return _Space(self._storage)
+
+                    class _Varnode:
+                        def __init__(self, storage):
+                            self._storage = storage
+
+                        def getAddress(self):
+                            return _Addr(self._storage)
+
+                        def getOffset(self):
+                            return self._storage.get("offset", 0)
+
+                        def getSize(self):
+                            return self._storage.get("size", 8)
+
+                    return [_Varnode(self._storage)]
+
+            return _Storage(self._storage)
+
+    class _FakeLocalMap:
+        def __init__(self, symbols):
+            self._symbols = symbols
+
+        def getSymbols(self):
+            return list(self._symbols)
+
+    class _FakeHighFunction:
+        def __init__(self, symbols):
+            self._symbols = symbols
+
+        def getLocalSymbolMap(self):
+            return _FakeLocalMap(self._symbols)
+
+    call_op = _FakeCallOp()
+    claimed_storage = {
+        "is_register": True,
+        "space_name": "register",
+        "offset": 8,
+        "size": 8,
+        "size_bits": 64,
+        "register_name": "a1",
+        "base_register_name": "a1",
+        "base_register_size": 8,
+        "base_register_size_bits": 64,
+        "bit_offset_in_base": 0,
+    }
+
+    class _FakeTracer:
+        high_function = _FakeHighFunction([_FakeSymbol(claimed_storage)])
+
+        def get_all_pcode_ops(self):
+            return [call_op]
+
+        def _get_function_name(self, target_varnode):
+            if target_varnode is call_op.getInput(0):
+                return "ptr_apply_callback"
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, *_args, **_kwargs):
+            raise AssertionError("direct target resolution should be enough")
+
+        def _get_op_order_key(self, _op):
+            return 10
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    current_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        }
+    ]
+    callee_parameters = [
+        {
+            "name": "param_1",
+            "index": 0,
+            "size": 8,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+        {
+            "name": "param_2",
+            "index": 1,
+            "size": 8,
+            "storage": claimed_storage,
+        },
+    ]
+
+    with patch.object(analyzer, "_get_freshest_callee_parameters", return_value=callee_parameters):
+        with patch.object(analyzer, "_get_storage_info", side_effect=lambda sym: sym._storage):
+            augmented = analyzer._augment_parameters_with_implicit_passthrough(
+                current_parameters,
+                _FakeTracer(),
+                set(),
+            )
+
+    assert [param["name"] for param in augmented] == ["param_1"]
+
+
+def test_return_analyzer_promotes_referenced_hidden_parameters_into_formal_signature():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_dispatch_callback",
+        entry_point="0x401000",
+        parameters=[
+            {
+                "name": "param_1",
+                "index": 0,
+                "size": 8,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "x0",
+                    "base_register_name": "x0",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 64,
+                    "base_register_size_bits": 64,
+                },
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401020",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter(
+                        "param_2",
+                        1,
+                        size=4,
+                        storage_info=analyzer._coerce_wrapper_storage_info(
+                            {
+                                "is_register": True,
+                                "register_name": "w1",
+                                "base_register_name": "x1",
+                                "bit_offset_in_base": 32,
+                                "size_bits": 32,
+                                "base_register_size_bits": 64,
+                            }
+                        ),
+                    ),
+                    Expression.parameter(
+                        "param_3",
+                        2,
+                        size=4,
+                        storage_info=analyzer._coerce_wrapper_storage_info(
+                            {
+                                "is_register": True,
+                                "register_name": "w2",
+                                "base_register_name": "x2",
+                                "bit_offset_in_base": 32,
+                                "size_bits": 32,
+                                "base_register_size_bits": 64,
+                            }
+                        ),
+                    ),
+                ),
+                conditions=[
+                    Condition(
+                        Expression.binary_op(
+                            "INT_NOTEQUAL",
+                            Expression.parameter(
+                                "param_1",
+                                0,
+                                size=8,
+                                storage_info=analyzer._coerce_wrapper_storage_info(
+                                    {
+                                        "is_register": True,
+                                        "register_name": "x0",
+                                        "base_register_name": "x0",
+                                        "bit_offset_in_base": 0,
+                                        "size_bits": 64,
+                                        "base_register_size_bits": 64,
+                                    }
+                                ),
+                            ),
+                            Expression.constant(0, 8),
+                        ),
+                        False,
+                    )
+                ],
+                branch_index=0,
+            )
+        ],
+        return_type="undefined8",
+    )
+
+    analyzer._synchronize_parameters_with_referenced_parameter_expressions(analysis)
+
+    assert [param["name"] for param in analysis.parameters] == ["param_1", "param_2", "param_3"]
+    assert analysis.parameters[1]["storage"]["base_register_name"] == "x1"
+    assert analysis.parameters[2]["storage"]["base_register_name"] == "x2"
+    assert analysis.parameters[1]["implicit_passthrough"] is True
+    assert analysis.parameters[2]["implicit_passthrough"] is True
+
+
+def test_return_analyzer_augments_hidden_passthrough_by_name_when_storage_is_missing():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    augmented = analyzer._augment_wrapper_call_args_with_implicit_passthrough(
+        "ptr_apply_callback",
+        [Expression.variable("pcVar1", size=8)],
+        [
+            {"name": "param_1", "index": 0, "size": 8},
+            {"name": "param_2", "index": 1, "size": 4},
+            {"name": "param_3", "index": 2, "size": 4},
+        ],
+        set(),
+    )
+
+    assert [arg.to_string() for arg in augmented] == ["pcVar1"]
+
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "index": 0, "size": 8},
+            {"name": "param_2", "index": 1, "size": 4},
+            {"name": "param_3", "index": 2, "size": 4},
+        ],
+        returns=[],
+        return_type="undefined8",
+    )
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
+        augmented = analyzer._augment_wrapper_call_args_with_implicit_passthrough(
+            "ptr_apply_callback",
+            [Expression.variable("pcVar1", size=8)],
+            [
+                {"name": "param_1", "index": 0, "size": 8},
+                {"name": "param_2", "index": 1, "size": 4},
+                {"name": "param_3", "index": 2, "size": 4},
+            ],
+            set(),
+        )
+
+    assert [arg.to_string() for arg in augmented] == ["pcVar1", "param_2", "param_3"]
+
+
+def test_return_analyzer_outer_wrapper_recovers_void_call_with_name_based_passthrough():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_dispatch_callback",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "size": 8, "data_type": "ulong"},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "index": 2, "size": 4, "data_type": "undefined4"},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("call_out_of_scope:ptr_apply_callback"), conditions=[], branch_index=0)],
+        return_type="void",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+    ptr_apply_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "index": 0, "size": 8, "data_type": "code *"},
+            {"name": "param_2", "index": 1, "size": 4, "data_type": "undefined4"},
+            {"name": "param_3", "index": 2, "size": 4, "data_type": "undefined4"},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1",
+                value=Expression.unknown("call_out_of_scope:UNKNOWN_FUNC"),
+                conditions=[_cond_ne(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=0,
+            ),
+            ReturnInfo(
+                address="0x2",
+                value=Expression.constant(0xFFFFFDA8, 8),
+                conditions=[_cond_eq(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
+                branch_index=1,
+            ),
+        ],
+        return_type="undefined8",
+        unknown_event_reasons=["call_out_of_scope"],
+        unknown_event_count=1,
+    )
+    c_text = """/* WARNING: Unknown calling convention -- yet parameter storage is locked */
+void ptr_dispatch_callback(ulong param_1)
+{
+  code *pcVar1;
+  pcVar1 = ptr_op_add;
+  if ((param_1 & 1) != 0) {
+    pcVar1 = ptr_op_xor;
+  }
+  ptr_apply_callback(pcVar1);
+  return;
+}
+"""
+
+    captured = []
+
+    def _get_or_analyze(function_name, active_functions, minimum_param_count=0):
+        if function_name == "ptr_apply_callback":
+            return ptr_apply_analysis
+        return None
+
+    def _decompiler_fallback(function_name, args, active_functions, current_function=None, analysis=None):
+        if function_name != "ptr_apply_callback":
+            return None
+        captured.append([arg.to_string() for arg in args])
+        return [ExpandedValue(Expression.binary_op("INT_ADD", args[1], args[2]), [])]
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_get_or_analyze_call_target", side_effect=_get_or_analyze):
+            with patch.object(analyzer, "_resolve_call_expansions_from_decompiler", side_effect=_decompiler_fallback):
+                recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                    object(),
+                    analysis,
+                    Mock(),
+                    set(),
+                )
+
+    assert recovered is not None
+    assert captured == [["ptr_op_xor", "param_2", "param_3"], ["ptr_op_add", "param_2", "param_3"]]
+    assert len(recovered) == 1
+    assert recovered[0].value.to_string() == "(param_2 + param_3)"
+
+
+def test_return_analyzer_refreshes_callee_parameter_cache_when_decompilation_is_richer():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    cache_key = str(functions[0].getEntryPoint())
+    analyzer._effect_summary_parameter_cache[cache_key] = [
+        {"name": "param_1", "index": 0, "size": 8}
+    ]
+
+    fresh_parameters = [
+        {"name": "param_1", "index": 0, "size": 8},
+        {"name": "param_2", "index": 1, "size": 8},
+        {"name": "param_3", "index": 2, "size": 8},
+    ]
+    fake_results = Mock()
+    fake_results.getHighFunction.return_value = Mock()
+
+    with patch.object(analyzer, "_decompile_function", return_value=fake_results):
+        with patch.object(analyzer, "_collect_parameters", return_value=fresh_parameters):
+            refreshed = analyzer._get_freshest_callee_parameters("ptr_apply_callback")
+
+    assert [param["name"] for param in refreshed] == ["param_1", "param_2", "param_3"]
+    assert len(analyzer._effect_summary_parameter_cache[cache_key]) == 3
+
+
+def test_return_analyzer_reanalyzes_call_target_when_cached_signature_is_too_small():
+    functions = [
+        _FakeFunction("ptr_apply_callback", 0x402000),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+
+    cache_key = str(functions[0].getEntryPoint())
+    stale_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[{"name": "param_1", "index": 0, "size": 8}],
+        returns=[],
+        return_type="undefined8",
+    )
+    fresh_analysis = FunctionReturnAnalysis(
+        function_name="ptr_apply_callback",
+        entry_point="0x402000",
+        parameters=[
+            {"name": "param_1", "index": 0, "size": 8},
+            {"name": "param_2", "index": 1, "size": 8},
+            {"name": "param_3", "index": 2, "size": 8},
+        ],
+        returns=[],
+        return_type="undefined8",
+    )
+    analyzer._call_analysis_cache[cache_key] = stale_analysis
+
+    with patch.object(analyzer, "analyze_function", return_value=fresh_analysis) as patched_analyze:
+        refreshed = analyzer._get_or_analyze_call_target(
+            "ptr_apply_callback",
+            set(),
+            minimum_param_count=3,
+        )
+
+    assert refreshed is fresh_analysis
+    patched_analyze.assert_called_once()
+    assert analyzer._call_analysis_cache[cache_key] is fresh_analysis
+
+
+def test_return_analyzer_parsed_wrapper_parameters_keep_storage_info():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    params = [
+        {
+            "name": "param_1",
+            "size": 8,
+            "index": 0,
+            "storage": {
+                "is_register": True,
+                "register_name": "a0",
+                "base_register_name": "a0",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+        {
+            "name": "param_2",
+            "size": 8,
+            "index": 1,
+            "storage": {
+                "is_register": True,
+                "register_name": "a1",
+                "base_register_name": "a1",
+                "bit_offset_in_base": 0,
+                "size_bits": 64,
+            },
+        },
+    ]
+
+    parsed = analyzer._parse_wrapper_argument_expr(
+        "param_2",
+        params,
+        fallback_index=1,
+        local_bindings={},
+    )
+
+    assert parsed is not None
+    assert parsed.storage_info is not None
+    assert parsed.storage_info.base_register_name == "a1"
+
+
+def test_return_analyzer_does_not_collapse_complementary_cases_across_conflicting_value():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    xor_value = Expression.binary_op(
+        "INT_XOR",
+        Expression.parameter("param_2", 1, size=4),
+        Expression.parameter("param_3", 2, size=4),
+    )
+    add_value = Expression.binary_op(
+        "INT_ADD",
+        Expression.parameter("param_2", 1, size=4),
+        Expression.parameter("param_3", 2, size=4),
+    )
+    even_cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op(
+                "INT_AND",
+                Expression.parameter("param_1", 0, size=4),
+                Expression.constant(1, 4),
+            ),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    odd_cond = Condition(even_cond.expression, True)
+
+    merged = analyzer._merge_equivalent_return_infos(
+        [
+            ReturnInfo(address="0x1000", value=xor_value, conditions=[odd_cond], branch_index=0),
+            ReturnInfo(address="0x1000", value=xor_value, conditions=[even_cond], branch_index=1),
+            ReturnInfo(address="0x1000", value=add_value, conditions=[even_cond], branch_index=2),
+        ]
+    )
+
+    assert all(
+        not (ret.value.to_string() == "(param_2 ^ param_3)" and ret.conditions == [])
+        for ret in merged
+    )
+    assert any(ret.value.to_string() == "(param_2 + param_3)" for ret in merged)
+
+
+def test_return_analyzer_resolves_wrapper_parameter_bound_to_pointer_symbol_target():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    parameters = [
+        {"name": "param_1", "size": 8, "index": 0},
+        {"name": "param_2", "size": 4, "index": 1},
+        {"name": "param_3", "size": 4, "index": 2},
+    ]
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_op_xor":
+            return [ExpandedValue(Expression.binary_op("INT_XOR", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+        expanded = analyzer._resolve_wrapper_call_target(
+            "param_1",
+            [
+                Expression.parameter("param_2", 1, size=4),
+                Expression.parameter("param_3", 2, size=4),
+            ],
+            [],
+            parameters,
+            {"param_1": Expression.variable("PTR_ptr_op_add_00112078", size=8)},
+            set(),
+            None,
+        )
+
+    assert expanded is not None
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "(param_2 + param_3)"
+
+
+def test_return_analyzer_recovers_mips64_gcc_apply_wrapper_from_pointer_symbol_binding():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    c_text = """undefined8 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
+{
+  undefined8 uVar1;
+  if (param_1 == (code *)0x0) {
+    uVar1 = 0xfffffffffffffda8;
+  }
+  else {
+    uVar1 = (*param_1)(param_2,param_3);
+  }
+  return uVar1;
+}
+"""
+    params = [
+        {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
+        {"name": "param_2", "size": 4, "data_type": "undefined4", "index": 1},
+        {"name": "param_3", "size": 4, "data_type": "undefined4", "index": 2},
+    ]
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "ptr_op_add":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "ptr_op_xor":
+            return [ExpandedValue(Expression.binary_op("INT_XOR", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+        recovered = analyzer._recover_structured_call_wrapper_from_c_text(
+            c_text,
+            params,
+            "0x1000",
+            Mock(),
+            set(),
+            initial_bindings={
+                "param_1": Expression.variable("PTR_ptr_op_add_120013090", size=8),
+                "param_2": Expression.parameter("param_2", 1, size=4),
+                "param_3": Expression.parameter("param_3", 2, size=4),
+            },
+        )
+
+    assert recovered is not None
+    assert len(recovered) == 1
+    assert recovered[0].conditions == []
+    assert recovered[0].value.to_string() == "(param_2 + param_3)"
+
+
+def test_return_analyzer_preserves_phi_branch_conditions_for_pointer_symbol_targets():
+    functions = [
+        _FakeFunction("ptr_op_add", 0x401100),
+        _FakeFunction("ptr_op_xor", 0x401200),
+    ]
+    analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    cond_even = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op(
+                "INT_AND",
+                Expression.parameter("selector", 0, size=4),
+                Expression.constant(1, 4),
+            ),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    cond_odd = Condition(cond_even.expression, True)
+    phi_target = Expression.phi(
+        [
+            (cond_even, Expression.variable("PTR_ptr_op_add_120013090", size=8)),
+            (cond_odd, Expression.variable("PTR_ptr_op_xor_120013098", size=8)),
+        ]
+    )
+
+    targets = analyzer._resolve_wrapper_indirect_call_targets(phi_target, [], [])
+
+    target_map = {
+        name: [cond.to_string() for cond in conditions]
+        for name, conditions in targets
+    }
+    assert target_map["ptr_op_add"] == ["((selector & 1) == 0)"]
+    assert target_map["ptr_op_xor"] in (
+        ["((selector & 1) != 0)"],
+        ["(not ((selector & 1) == 0))"],
+    )
 
 
 def test_return_analyzer_straightline_wrapper_recovery_rejects_branching_body():

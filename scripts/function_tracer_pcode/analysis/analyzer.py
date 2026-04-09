@@ -6,12 +6,14 @@ from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Set, Tuple
 
 from ..model.expression import Expression, ExpressionType, Condition
+from ..model.storage import StorageInfo
 from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
     _expressions_equivalent,
+    _enumerate_constant_expression_branches,
     _resolve_call_target_name,
     _reduce_expression_under_conditions,
     normalize_post_state_expression,
@@ -234,6 +236,11 @@ class ReturnAnalyzer:
         condition_tracker.build()
         
         parameters = self._collect_parameters(high_function)
+        parameters = self._augment_parameters_with_implicit_passthrough(
+            parameters,
+            tracer,
+            active_functions,
+        )
         self._current_parameters = parameters
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
         image_base = None
@@ -340,6 +347,7 @@ class ReturnAnalyzer:
                 result.recovered_from_decompiler = True
                 result.analysis_notes.append("call_wrapper_return_recovery")
 
+        self._synchronize_parameters_with_referenced_parameter_expressions(result)
         result.returns = self._strip_stack_protector_only_conditions(result.returns)
         self._mark_incomplete_control_flow(result)
 
@@ -394,6 +402,172 @@ class ReturnAnalyzer:
                 branch_index=only_return.branch_index,
             )
         ]
+
+    def _synchronize_parameters_with_referenced_parameter_expressions(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> None:
+        parameters = [dict(param) for param in (analysis.parameters or [])]
+        referenced = self._collect_referenced_parameter_descriptors(analysis.returns)
+        changed = False
+
+        for candidate in referenced:
+            match_index = self._find_matching_parameter_descriptor_index(parameters, candidate)
+            if match_index is None:
+                parameters.append(candidate)
+                changed = True
+                continue
+
+            merged = self._merge_parameter_descriptors(parameters[match_index], candidate)
+            if merged != parameters[match_index]:
+                parameters[match_index] = merged
+                changed = True
+
+        if not changed:
+            return
+
+        parameters.sort(key=lambda param: int(param.get("index", 1 << 20)))
+        analysis.parameters = parameters
+        self._current_parameters = parameters
+
+    def _collect_referenced_parameter_descriptors(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> List[Dict]:
+        discovered: Dict[str, Dict] = {}
+
+        for return_info in return_infos or []:
+            self._collect_parameter_descriptors_from_expression(return_info.value, discovered)
+            for condition in return_info.conditions or []:
+                self._collect_parameter_descriptors_from_expression(
+                    getattr(condition, "expression", None),
+                    discovered,
+                )
+
+        descriptors = list(discovered.values())
+        descriptors.sort(key=lambda param: int(param.get("index", 1 << 20)))
+        return descriptors
+
+    def _collect_parameter_descriptors_from_expression(
+        self,
+        expr: Optional[Expression],
+        discovered: Dict[str, Dict],
+    ) -> None:
+        if expr is None:
+            return
+
+        if expr.expr_type == ExpressionType.PARAMETER:
+            descriptor = self._parameter_descriptor_from_expression(expr)
+            key = self._parameter_descriptor_key(descriptor)
+            existing = discovered.get(key)
+            discovered[key] = self._merge_parameter_descriptors(existing, descriptor)
+            return
+
+        if expr.expr_type in {
+            ExpressionType.BINARY_OP,
+            ExpressionType.UNARY_OP,
+            ExpressionType.CALL,
+            ExpressionType.MEMORY,
+        }:
+            for operand in expr.operands or []:
+                self._collect_parameter_descriptors_from_expression(operand, discovered)
+            return
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for branch_condition, branch_value in expr.value:
+                if branch_condition is not None:
+                    self._collect_parameter_descriptors_from_expression(
+                        getattr(branch_condition, "expression", None),
+                        discovered,
+                    )
+                self._collect_parameter_descriptors_from_expression(branch_value, discovered)
+
+    def _parameter_descriptor_from_expression(self, expr: Expression) -> Dict:
+        index_value = expr.value if isinstance(expr.value, int) else -1
+        if index_value < 0 and expr.name:
+            match = re.fullmatch(r"param_(\d+)", expr.name)
+            if match:
+                index_value = int(match.group(1)) - 1
+
+        descriptor = {
+            "name": expr.name or (f"param_{index_value + 1}" if index_value >= 0 else None),
+            "index": index_value,
+            "size": expr.size or 0,
+            "data_type": expr.data_type,
+            "is_signed": True,
+            "implicit_passthrough": True,
+        }
+        if expr.storage_info is not None:
+            descriptor["storage"] = expr.storage_info.to_dict()
+        return descriptor
+
+    def _parameter_descriptor_key(self, descriptor: Dict) -> str:
+        name = descriptor.get("name")
+        if name:
+            return f"name:{name}"
+        index = descriptor.get("index")
+        if isinstance(index, int) and index >= 0:
+            return f"index:{index}"
+
+        storage = descriptor.get("storage")
+        if storage:
+            base_name = storage.get("base_register_name") or storage.get("register_name") or storage.get("space_name")
+            offset = int(storage.get("bit_offset_in_base", storage.get("offset", 0)) or 0)
+            size_bits = int(storage.get("size_bits") or (storage.get("size", 0) * 8) or 0)
+            return f"storage:{base_name}:{offset}:{size_bits}"
+        return f"anonymous:{id(descriptor)}"
+
+    def _find_matching_parameter_descriptor_index(
+        self,
+        parameters: List[Dict],
+        candidate: Dict,
+    ) -> Optional[int]:
+        candidate_name = candidate.get("name")
+        if candidate_name:
+            for index, param in enumerate(parameters):
+                if param.get("name") == candidate_name:
+                    return index
+
+        candidate_index = candidate.get("index")
+        if isinstance(candidate_index, int) and candidate_index >= 0:
+            for index, param in enumerate(parameters):
+                if int(param.get("index", -1)) == candidate_index:
+                    return index
+
+        candidate_storage = candidate.get("storage")
+        if candidate_storage:
+            for index, param in enumerate(parameters):
+                if self._parameter_storages_match_for_passthrough(
+                    param.get("storage"),
+                    candidate_storage,
+                ):
+                    return index
+        return None
+
+    def _merge_parameter_descriptors(
+        self,
+        existing: Optional[Dict],
+        candidate: Dict,
+    ) -> Dict:
+        if existing is None:
+            return dict(candidate)
+
+        merged = dict(existing)
+        if not merged.get("name") and candidate.get("name"):
+            merged["name"] = candidate.get("name")
+        if int(merged.get("index", -1)) < 0 and int(candidate.get("index", -1)) >= 0:
+            merged["index"] = candidate.get("index")
+        if int(merged.get("size", 0) or 0) <= 0 and int(candidate.get("size", 0) or 0) > 0:
+            merged["size"] = candidate.get("size")
+        if not merged.get("data_type") and candidate.get("data_type"):
+            merged["data_type"] = candidate.get("data_type")
+        if not merged.get("storage") and candidate.get("storage"):
+            merged["storage"] = candidate.get("storage")
+        if candidate.get("implicit_passthrough"):
+            merged["implicit_passthrough"] = True
+        if "is_signed" not in merged and "is_signed" in candidate:
+            merged["is_signed"] = candidate.get("is_signed")
+        return merged
 
     def _condition_looks_like_stack_protector_guard(self, condition: Condition) -> bool:
         names = sorted(condition.get_all_variables())
@@ -604,9 +778,13 @@ class ReturnAnalyzer:
         c_text = self._get_decompiled_c_text(decompile_results)
         if not c_text:
             return None
+        wrapper_parameters = self._merge_wrapper_parameters_from_c_text(
+            analysis.parameters,
+            c_text,
+        )
         recovered_structured = self._recover_structured_call_wrapper_from_c_text(
             c_text,
-            analysis.parameters,
+            wrapper_parameters,
             analysis.entry_point,
             current_function,
             active_functions or set(),
@@ -621,7 +799,7 @@ class ReturnAnalyzer:
 
         recovered_chain = self._recover_straightline_call_chain_from_c_text(
             c_text,
-            analysis.parameters,
+            wrapper_parameters,
             analysis.entry_point,
             current_function,
             active_functions or set(),
@@ -636,7 +814,7 @@ class ReturnAnalyzer:
 
         recovered = self._parse_call_wrapper_from_c_text(
             c_text,
-            analysis.parameters,
+            wrapper_parameters,
         )
         if recovered is None:
             if self.debug:
@@ -718,6 +896,7 @@ class ReturnAnalyzer:
         address: str,
         current_function,
         active_functions: Set[str],
+        initial_bindings: Optional[Dict[str, Expression]] = None,
     ) -> Optional[List[ReturnInfo]]:
         from ..transform.expander import ExpandedValue
 
@@ -725,10 +904,15 @@ class ReturnAnalyzer:
         if not body_lines:
             return None
 
+        seeded_bindings = {
+            name: self._clone_expression(expr)
+            for name, expr in (initial_bindings or {}).items()
+        }
+
         next_index, live_states, terminated_states, ok = self._execute_structured_wrapper_block(
             body_lines,
             0,
-            [({}, [], None)],
+            [(seeded_bindings, [], None)],
             parameters,
             active_functions,
             current_function,
@@ -757,6 +941,7 @@ class ReturnAnalyzer:
         address: str,
         current_function,
         active_functions: Set[str],
+        initial_bindings: Optional[Dict[str, Expression]] = None,
     ) -> Optional[List[ReturnInfo]]:
         from ..transform.expander import ExpandedValue
 
@@ -765,58 +950,47 @@ class ReturnAnalyzer:
             return None
 
         statements = self._extract_wrapper_body_statements(c_text)
-        if not statements or statements[-1] != "return;":
+        if not statements:
             return None
 
         states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]] = [
-            ({}, [], None)
+            (
+                {
+                    name: self._clone_expression(expr)
+                    for name, expr in (initial_bindings or {}).items()
+                },
+                [],
+                None,
+            )
         ]
 
         for index, statement in enumerate(statements):
-            if statement == "return;":
+            return_expr = self._parse_wrapper_return_statement(
+                statement,
+                parameters,
+                states,
+            )
+            if return_expr is not None:
                 if index != len(statements) - 1:
                     return None
+                states = return_expr
                 break
 
             if self._is_wrapper_declaration_line(statement):
                 continue
 
-            assign_call = re.fullmatch(
-                r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;",
-                statement,
-            )
-            if assign_call:
-                target_name = assign_call.group(1)
-                callee_name = assign_call.group(2)
-                arg_blob = assign_call.group(3).strip()
+            parsed_call = self._parse_wrapper_call_statement(statement)
+            if parsed_call is not None:
+                target_name, callee_spec, arg_blob = parsed_call
                 next_states = self._expand_wrapper_call_states(
                     states,
                     target_name,
-                    callee_name,
+                    callee_spec,
                     arg_blob,
                     parameters,
                     active_functions,
                     current_function,
-                    assign_to_last_call=False,
-                )
-                if next_states is None:
-                    return None
-                states = next_states
-                continue
-
-            bare_call = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", statement)
-            if bare_call:
-                callee_name = bare_call.group(1)
-                arg_blob = bare_call.group(2).strip()
-                next_states = self._expand_wrapper_call_states(
-                    states,
-                    None,
-                    callee_name,
-                    arg_blob,
-                    parameters,
-                    active_functions,
-                    current_function,
-                    assign_to_last_call=True,
+                    assign_to_last_call=target_name is None,
                 )
                 if next_states is None:
                     return None
@@ -892,8 +1066,11 @@ class ReturnAnalyzer:
             if line == "{":
                 return index, live_states, terminated_states, False
 
-            if not live_states and terminated_states:
-                return index, live_states, terminated_states, False
+            if not live_states:
+                next_index = len(body_lines)
+                if stop_on_closing_brace:
+                    next_index = self._advance_to_structured_block_exit(body_lines, index)
+                return next_index, [], terminated_states, True
 
             if self._is_wrapper_declaration_line(line):
                 index += 1
@@ -906,7 +1083,22 @@ class ReturnAnalyzer:
                     (dict(bindings), list(conditions), self._clone_expression(last_call))
                     for bindings, conditions, last_call in live_states
                 )
-                return index + 1, [], terminated_states, True
+                next_index = index + 1
+                if stop_on_closing_brace:
+                    next_index = self._advance_to_structured_block_exit(body_lines, next_index)
+                return next_index, [], terminated_states, True
+
+            return_expr = self._parse_wrapper_return_statement(
+                line,
+                parameters,
+                live_states,
+            )
+            if return_expr is not None:
+                terminated_states.extend(return_expr)
+                next_index = index + 1
+                if stop_on_closing_brace:
+                    next_index = self._advance_to_structured_block_exit(body_lines, next_index)
+                return next_index, [], terminated_states, True
 
             if_match = re.fullmatch(r"if\s*\((.+)\)\s*(\{)?", line)
             if if_match:
@@ -926,37 +1118,18 @@ class ReturnAnalyzer:
                 index = next_index
                 continue
 
-            assign_call = re.fullmatch(
-                r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;",
-                line,
-            )
-            if assign_call:
+            parsed_call = self._parse_wrapper_call_statement(line)
+            if parsed_call is not None:
+                target_name, callee_spec, arg_blob = parsed_call
                 live_states = self._expand_wrapper_call_states(
                     live_states,
-                    assign_call.group(1),
-                    assign_call.group(2),
-                    assign_call.group(3).strip(),
+                    target_name,
+                    callee_spec,
+                    arg_blob,
                     parameters,
                     active_functions,
                     current_function,
-                    assign_to_last_call=False,
-                )
-                if live_states is None:
-                    return index, [], terminated_states, False
-                index += 1
-                continue
-
-            bare_call = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", line)
-            if bare_call:
-                live_states = self._expand_wrapper_call_states(
-                    live_states,
-                    None,
-                    bare_call.group(1),
-                    bare_call.group(2).strip(),
-                    parameters,
-                    active_functions,
-                    current_function,
-                    assign_to_last_call=True,
+                    assign_to_last_call=target_name is None,
                 )
                 if live_states is None:
                     return index, [], terminated_states, False
@@ -987,6 +1160,59 @@ class ReturnAnalyzer:
             return index, live_states, terminated_states, False
 
         return index, live_states, terminated_states, True
+
+    def _advance_to_structured_block_exit(
+        self,
+        body_lines: List[str],
+        start_index: int,
+    ) -> int:
+        depth = 0
+        index = start_index
+        while index < len(body_lines):
+            line = body_lines[index]
+            for char in line:
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    if depth == 0:
+                        return index + 1
+                    depth -= 1
+            index += 1
+        return start_index
+
+    def _parse_wrapper_return_statement(
+        self,
+        statement: str,
+        parameters: List[Dict],
+        states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+    ) -> Optional[List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]]]:
+        line = statement.strip()
+        if line == "return;":
+            return [
+                (dict(bindings), list(conditions), self._clone_expression(last_call))
+                for bindings, conditions, last_call in states
+                if last_call is not None
+            ] or None
+
+        return_match = re.fullmatch(r"return\s+(.+)\s*;", line)
+        if return_match is None:
+            return None
+
+        expr_text = return_match.group(1).strip()
+        terminated_states = []
+        for bindings, conditions, _last_call in states:
+            parsed_expr = self._parse_wrapper_argument_expr(
+                expr_text,
+                parameters,
+                fallback_index=0,
+                local_bindings=bindings,
+            )
+            if parsed_expr is None:
+                return None
+            terminated_states.append(
+                (dict(bindings), list(conditions), self._clone_expression(parsed_expr))
+            )
+        return terminated_states or None
 
     def _execute_structured_wrapper_if(
         self,
@@ -1097,12 +1323,116 @@ class ReturnAnalyzer:
         if condition_expr is None:
             return False, None
 
+        constant_truth = self._evaluate_wrapper_boolean_constant(condition_expr)
+        if constant_truth is not None:
+            branch_taken = not constant_truth if negated else constant_truth
+            return True, list(existing_conditions) if branch_taken else None
+
         simplified = ConditionSimplifier.simplify_conditions(
             list(existing_conditions) + [Condition(condition_expr, negated=negated)]
         )
         if ConditionSimplifier.is_contradiction(simplified):
             return True, None
         return True, simplified
+
+    def _evaluate_wrapper_boolean_constant(self, expr: Optional[Expression]) -> Optional[bool]:
+        if expr is None:
+            return None
+
+        if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+            return bool(int(expr.value))
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE" and expr.operands:
+            operand = self._evaluate_wrapper_boolean_constant(expr.operands[0])
+            return None if operand is None else (not operand)
+
+        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+
+        left_value = self._evaluate_wrapper_constant(expr.operands[0])
+        right_value = self._evaluate_wrapper_constant(expr.operands[1])
+        if left_value is None or right_value is None:
+            return None
+
+        operator = expr.operator
+        if operator == "INT_EQUAL":
+            return left_value == right_value
+        if operator == "INT_NOTEQUAL":
+            return left_value != right_value
+        if operator == "INT_LESS":
+            return left_value < right_value
+        if operator == "INT_LESSEQUAL":
+            return left_value <= right_value
+        if operator == "INT_SLESS":
+            return self._to_signed_wrapper_value(left_value, expr.operands[0].get_bit_width()) < self._to_signed_wrapper_value(
+                right_value,
+                expr.operands[1].get_bit_width(),
+            )
+        if operator == "INT_SLESSEQUAL":
+            return self._to_signed_wrapper_value(left_value, expr.operands[0].get_bit_width()) <= self._to_signed_wrapper_value(
+                right_value,
+                expr.operands[1].get_bit_width(),
+            )
+        if operator == "BOOL_AND":
+            return bool(left_value) and bool(right_value)
+        if operator == "BOOL_OR":
+            return bool(left_value) or bool(right_value)
+        if operator == "BOOL_XOR":
+            return bool(left_value) ^ bool(right_value)
+        return None
+
+    def _evaluate_wrapper_constant(self, expr: Optional[Expression]) -> Optional[int]:
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+            return int(expr.value)
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands or []) == 2:
+            left_value = self._evaluate_wrapper_constant(expr.operands[0])
+            right_value = self._evaluate_wrapper_constant(expr.operands[1])
+            if left_value is None or right_value is None:
+                return None
+            operator = expr.operator
+            if operator == "INT_ADD":
+                return left_value + right_value
+            if operator == "INT_SUB":
+                return left_value - right_value
+            if operator == "INT_MULT":
+                return left_value * right_value
+            if operator == "INT_AND":
+                return left_value & right_value
+            if operator == "INT_OR":
+                return left_value | right_value
+            if operator == "INT_XOR":
+                return left_value ^ right_value
+        if expr.expr_type == ExpressionType.VARIABLE and expr.name:
+            match = re.fullmatch(r"ADDR_([0-9a-fA-F]+)", expr.name)
+            if match:
+                return int(match.group(1), 16)
+            pointer_target = self._resolve_pointer_symbol_wrapper_target(expr.name)
+            if pointer_target is not None:
+                try:
+                    resolved = self._find_function_by_name(pointer_target)
+                except Exception:
+                    resolved = None
+                if resolved is not None:
+                    try:
+                        return int(resolved.getEntryPoint().getOffset())
+                    except Exception:
+                        return 1
+                return 1
+            resolved_name = self._resolve_named_wrapper_target(expr.name)
+            if resolved_name is not None:
+                return 1
+        return None
+
+    def _to_signed_wrapper_value(self, value: int, bit_width: int) -> int:
+        width = max(1, int(bit_width or 1))
+        mask = (1 << width) - 1
+        value &= mask
+        sign_bit = 1 << (width - 1)
+        if value & sign_bit:
+            return value - (1 << width)
+        return value
 
     def _parse_wrapper_condition_expr(
         self,
@@ -1413,6 +1743,29 @@ class ReturnAnalyzer:
         if expr_text.startswith("+"):
             return self._parse_wrapper_expr(expr_text[1:].strip(), parameters, fallback_index, local_bindings)
 
+        if expr_text.startswith("&"):
+            operand = self._parse_wrapper_expr(
+                expr_text[1:].strip(),
+                parameters,
+                fallback_index,
+                local_bindings,
+            )
+            if operand is None:
+                return None
+            return operand
+
+        if expr_text.startswith("*"):
+            operand = self._parse_wrapper_expr(
+                expr_text[1:].strip(),
+                parameters,
+                fallback_index,
+                local_bindings,
+            )
+            if operand is None:
+                return None
+            pointer_size = max(1, operand.size or 8)
+            return Expression.memory(operand, size=pointer_size)
+
         if expr_text.startswith("-") and not re.fullmatch(r"-?(?:0x[0-9a-fA-F]+|\d+)", expr_text):
             operand = self._parse_wrapper_expr(
                 expr_text[1:].strip(),
@@ -1435,6 +1788,7 @@ class ReturnAnalyzer:
                     index=index,
                     data_type=param.get("data_type"),
                     size=param.get("size", 4),
+                    storage_info=self._coerce_wrapper_storage_info(param.get("storage")),
                 )
 
         const_match = re.fullmatch(r"(-?(?:0x[0-9a-fA-F]+|\d+))", expr_text)
@@ -1442,6 +1796,11 @@ class ReturnAnalyzer:
             value = int(const_match.group(1), 0)
             size = self._infer_wrapper_constant_size(expr_text, parameters, fallback_index)
             return Expression.constant(value, size=size)
+
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", expr_text):
+            resolved_name = self._resolve_named_wrapper_target(expr_text)
+            if resolved_name is not None or expr_text.startswith(("PTR_", "DAT_", "LAB_", "ADDR_")):
+                return Expression.variable(expr_text, size=8)
 
         return None
 
@@ -1476,22 +1835,16 @@ class ReturnAnalyzer:
         return False
 
     def _extract_wrapper_body_statements(self, c_text: str) -> Optional[List[str]]:
-        lines = []
-        for raw_line in c_text.splitlines():
-            line = raw_line.split("//", 1)[0].strip()
-            if line:
-                lines.append(line)
-        if not lines:
+        body_lines = self._extract_structured_wrapper_body_lines(c_text)
+        if body_lines is None:
             return None
 
-        body_lines = [
+        statements = [
             line
-            for line in lines
+            for line in body_lines
             if line not in {"{", "}"} and not line.endswith("{")
         ]
-        if len(body_lines) < 2:
-            return None
-        return body_lines[1:]
+        return statements or None
 
     def _extract_structured_wrapper_body_lines(self, c_text: str) -> Optional[List[str]]:
         lines = self._normalize_wrapper_c_lines(c_text)
@@ -1501,13 +1854,13 @@ class ReturnAnalyzer:
         body_lines: List[str] = []
         body_started = False
         body_depth = 0
-        for index, line in enumerate(lines):
+        for line in lines:
             if not body_started:
                 if line == "{":
                     body_started = True
                     body_depth = 1
                     continue
-                if index == 0 and line.endswith("{"):
+                if self._looks_like_wrapper_header_line(line) and line.endswith("{"):
                     body_started = True
                     body_depth = 1
                 continue
@@ -1525,7 +1878,8 @@ class ReturnAnalyzer:
     def _normalize_wrapper_c_lines(self, c_text: str) -> List[str]:
         normalized: List[str] = []
         for raw_line in c_text.splitlines():
-            line = raw_line.split("//", 1)[0].strip()
+            line = re.sub(r"/\*.*?\*/", "", raw_line)
+            line = line.split("//", 1)[0].strip()
             if not line:
                 continue
             if re.fullmatch(r"\}\s*else\s*\{", line):
@@ -1533,6 +1887,14 @@ class ReturnAnalyzer:
                 continue
             normalized.append(line)
         return normalized
+
+    def _looks_like_wrapper_header_line(self, line: str) -> bool:
+        return bool(
+            re.match(
+                r"^[A-Za-z_][A-Za-z0-9_\s\*]*\s+[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)\s*\{?$",
+                line.strip(),
+            )
+        )
 
     def _has_structured_control_flow_markers(self, body_lines: List[str]) -> bool:
         markers = ("if ", "if(", "else", "switch", "while", "for", "do ")
@@ -1544,13 +1906,15 @@ class ReturnAnalyzer:
         if "=" in line or "(" in line or ")" in line:
             return False
         tokens = line[:-1].split()
+        if tokens and tokens[0] in {"return", "break", "continue", "goto", "case", "default"}:
+            return False
         return len(tokens) >= 2
 
     def _expand_wrapper_call_states(
         self,
         states: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
         target_name: Optional[str],
-        callee_name: str,
+        callee_spec: str,
         arg_blob: str,
         parameters: List[Dict],
         active_functions: Set[str],
@@ -1575,11 +1939,14 @@ class ReturnAnalyzer:
                     return None
                 parsed_args.append(parsed_arg)
 
-            expanded = self._resolve_call_expansions(
-                callee_name,
+            expanded = self._resolve_wrapper_call_target(
+                callee_spec,
                 parsed_args,
+                conditions,
+                parameters,
+                bindings,
                 active_functions,
-                current_function=current_function,
+                current_function,
             )
             if not expanded:
                 return None
@@ -1600,6 +1967,662 @@ class ReturnAnalyzer:
                 next_states.append((new_bindings, merged_conditions, last_call_value))
 
         return next_states or None
+
+    def _resolve_wrapper_call_target(
+        self,
+        callee_spec: str,
+        args: List[Expression],
+        conditions: List[Condition],
+        parameters: List[Dict],
+        local_bindings: Dict[str, Expression],
+        active_functions: Set[str],
+        current_function,
+    ):
+        normalized_spec = self._normalize_wrapper_callee_spec(callee_spec)
+        direct_name = None
+        if self._should_attempt_direct_wrapper_name_resolution(
+            normalized_spec,
+            parameters,
+            local_bindings,
+        ):
+            direct_name = self._resolve_named_wrapper_target(normalized_spec)
+        if direct_name is not None:
+            augmented_args = self._augment_wrapper_call_args_with_implicit_passthrough(
+                direct_name,
+                args,
+                parameters,
+                active_functions,
+            )
+            return self._resolve_call_expansions(
+                direct_name,
+                augmented_args,
+                active_functions,
+                current_function=current_function,
+            )
+
+        callee_expr = self._parse_wrapper_argument_expr(
+            normalized_spec,
+            parameters,
+            fallback_index=0,
+            local_bindings=local_bindings,
+        )
+        if callee_expr is None:
+            return None
+        return self._resolve_indirect_wrapper_call_expansions(
+            callee_expr,
+            args,
+            conditions,
+            parameters,
+            active_functions,
+            current_function,
+        )
+
+    def _resolve_indirect_wrapper_call_expansions(
+        self,
+        callee_expr: Expression,
+        args: List[Expression],
+        conditions: List[Condition],
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+    ):
+        from ..transform.expander import ExpandedValue
+
+        resolved_targets = self._resolve_wrapper_indirect_call_targets(
+            callee_expr,
+            conditions,
+            parameters,
+        )
+        if not resolved_targets:
+            return None
+
+        expanded = []
+        for target_name, target_conditions in resolved_targets:
+            augmented_args = self._augment_wrapper_call_args_with_implicit_passthrough(
+                target_name,
+                args,
+                parameters,
+                active_functions,
+            )
+            resolved = self._resolve_call_expansions(
+                target_name,
+                augmented_args,
+                active_functions,
+                current_function=current_function,
+            )
+            if not resolved:
+                return None
+            for ev in resolved:
+                merged_conditions = ConditionSimplifier.simplify_conditions(
+                    list(target_conditions) + list(ev.conditions)
+                )
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                expanded.append(
+                    ExpandedValue(
+                        value=self._clone_expression(ev.value),
+                        conditions=merged_conditions,
+                    )
+                )
+        return expanded or None
+
+    def _augment_wrapper_call_args_with_implicit_passthrough(
+        self,
+        function_name: str,
+        args: List[Expression],
+        current_parameters: List[Dict],
+        active_functions: Set[str],
+    ) -> List[Expression]:
+        try:
+            callee_analysis = self._get_or_analyze_call_target(
+                function_name,
+                active_functions,
+                minimum_param_count=len(args) + 1,
+            )
+        except Exception:
+            return list(args)
+        if callee_analysis is None:
+            return list(args)
+
+        callee_parameters = list(getattr(callee_analysis, "parameters", None) or [])
+        if len(args) >= len(callee_parameters):
+            return list(args)
+
+        explicit_param_names = {
+            arg.name
+            for arg in args
+            if getattr(arg, "expr_type", None) == ExpressionType.PARAMETER and arg.name
+        }
+
+        augmented_args = list(args)
+        for callee_param in callee_parameters[len(args):]:
+            matched_param = self._find_implicit_passthrough_parameter(
+                callee_param,
+                current_parameters,
+                explicit_param_names,
+            )
+            if matched_param is None:
+                return list(args)
+            param_name = matched_param.get("name")
+            if not param_name:
+                return list(args)
+            explicit_param_names.add(param_name)
+            augmented_args.append(
+                Expression.parameter(
+                    param_name,
+                    index=int(matched_param.get("index", len(augmented_args))),
+                    data_type=matched_param.get("data_type"),
+                    size=matched_param.get("size", callee_param.get("size", 4)),
+                    storage_info=self._coerce_wrapper_storage_info(matched_param.get("storage")),
+                )
+            )
+
+        return augmented_args
+
+    def _find_implicit_passthrough_parameter(
+        self,
+        callee_param: Dict,
+        current_parameters: List[Dict],
+        used_param_names: Set[str],
+    ) -> Optional[Dict]:
+        callee_storage = callee_param.get("storage") or {}
+        candidates = []
+        for param in current_parameters or []:
+            name = param.get("name")
+            if not name or name in used_param_names:
+                continue
+            if not self._parameter_storages_match_for_passthrough(
+                param.get("storage"),
+                callee_storage,
+            ):
+                continue
+            candidates.append(param)
+
+        if not candidates:
+            named = self._find_implicit_passthrough_parameter_by_name_or_index(
+                callee_param,
+                current_parameters,
+                used_param_names,
+            )
+            if named is not None:
+                return named
+            return None
+
+        candidates.sort(key=lambda param: int(param.get("index", 1 << 20)))
+        return candidates[0]
+
+    def _find_implicit_passthrough_parameter_by_name_or_index(
+        self,
+        callee_param: Dict,
+        current_parameters: List[Dict],
+        used_param_names: Set[str],
+    ) -> Optional[Dict]:
+        callee_name = callee_param.get("name")
+        callee_index = int(callee_param.get("index", -1))
+
+        if callee_name:
+            for param in current_parameters or []:
+                name = param.get("name")
+                if not name or name in used_param_names:
+                    continue
+                if name != callee_name:
+                    continue
+                param_index = int(param.get("index", -1))
+                if callee_index >= 0 and param_index >= 0 and param_index != callee_index:
+                    continue
+                return param
+
+        if callee_index >= 0:
+            for param in current_parameters or []:
+                name = param.get("name")
+                if not name or name in used_param_names:
+                    continue
+                if int(param.get("index", -1)) != callee_index:
+                    continue
+                return param
+
+        return None
+
+    def _parameter_storages_match_for_passthrough(
+        self,
+        caller_storage: Optional[Dict],
+        callee_storage: Optional[Dict],
+    ) -> bool:
+        caller = caller_storage or {}
+        callee = callee_storage or {}
+        if not caller.get("is_register") or not callee.get("is_register"):
+            return False
+
+        caller_base = (caller.get("base_register_name") or caller.get("register_name") or "").lower()
+        callee_base = (callee.get("base_register_name") or callee.get("register_name") or "").lower()
+        if not caller_base or caller_base != callee_base:
+            return False
+
+        caller_offset = int(caller.get("bit_offset_in_base", 0))
+        callee_offset = int(callee.get("bit_offset_in_base", 0))
+        if caller_offset != callee_offset:
+            return False
+
+        caller_bits = int(caller.get("size_bits") or (caller.get("size", 0) * 8))
+        callee_bits = int(callee.get("size_bits") or (callee.get("size", 0) * 8))
+        return caller_bits == callee_bits and caller_bits > 0
+
+    def _coerce_wrapper_storage_info(self, storage: Optional[object]) -> Optional[StorageInfo]:
+        if storage is None:
+            return None
+        if isinstance(storage, StorageInfo):
+            return storage
+        if isinstance(storage, dict):
+            try:
+                return StorageInfo(
+                    is_register=bool(storage.get("is_register", False)),
+                    space_name=str(storage.get("space_name", "")),
+                    offset=int(storage.get("offset", 0)),
+                    size=int(storage.get("size", 0)),
+                    size_bits=int(storage.get("size_bits", 0)),
+                    register_name=storage.get("register_name"),
+                    base_register_name=storage.get("base_register_name"),
+                    base_register_offset=int(storage.get("base_register_offset", 0)),
+                    base_register_size=int(storage.get("base_register_size", 0)),
+                    base_register_size_bits=int(storage.get("base_register_size_bits", 0)),
+                    bit_offset_in_base=int(storage.get("bit_offset_in_base", 0)),
+                )
+            except Exception:
+                return None
+        return None
+
+    def _parameter_descriptor_quality(self, parameters: Optional[List[Dict]]) -> Tuple[int, int, int, int]:
+        params = list(parameters or [])
+        return (
+            len(params),
+            sum(1 for param in params if param.get("storage")),
+            sum(1 for param in params if param.get("data_type")),
+            sum(1 for param in params if int(param.get("size", 0) or 0) > 0),
+        )
+
+    def _choose_richer_parameter_descriptors(
+        self,
+        cached_parameters: Optional[List[Dict]],
+        fresh_parameters: Optional[List[Dict]],
+    ) -> List[Dict]:
+        cached = list(cached_parameters or [])
+        fresh = list(fresh_parameters or [])
+        if self._parameter_descriptor_quality(fresh) > self._parameter_descriptor_quality(cached):
+            return fresh
+        return cached
+
+    def _get_freshest_callee_parameters(self, function_name: str) -> List[Dict]:
+        callee = self._find_function_by_name(function_name)
+        if callee is None:
+            return []
+
+        callee_key = str(callee.getEntryPoint())
+        cached_parameters = self._effect_summary_parameter_cache.get(callee_key)
+
+        results = self._decompile_function(callee, timeout=60)
+        if results is None:
+            return list(cached_parameters or [])
+
+        callee_high = results.getHighFunction()
+        if callee_high is None:
+            return list(cached_parameters or [])
+
+        fresh_parameters = self._collect_parameters(callee_high)
+        merged_parameters = self._choose_richer_parameter_descriptors(
+            cached_parameters,
+            fresh_parameters,
+        )
+        self._effect_summary_parameter_cache[callee_key] = list(merged_parameters)
+        return list(merged_parameters)
+
+    def _augment_parameters_with_implicit_passthrough(
+        self,
+        parameters: List[Dict],
+        tracer: PcodeTracer,
+        active_functions: Set[str],
+    ) -> List[Dict]:
+        augmented = [dict(param) for param in (parameters or [])]
+        changed = False
+
+        try:
+            pcode_ops = list(tracer.get_all_pcode_ops())
+        except Exception:
+            return augmented
+
+        for op in pcode_ops:
+            try:
+                if op.getMnemonic() not in {"CALL", "CALLIND"} or op.getNumInputs() < 1:
+                    continue
+            except Exception:
+                continue
+
+            target_name = _resolve_call_target_name(tracer, op)
+            if not target_name or target_name == "UNKNOWN_FUNC" or target_name in active_functions:
+                continue
+
+            explicit_count = max(0, int(op.getNumInputs()) - 1)
+            callee_parameters = self._get_freshest_callee_parameters(target_name)
+            if len(callee_parameters) <= explicit_count:
+                continue
+
+            for callee_param in callee_parameters[explicit_count:]:
+                callee_storage = self._coerce_wrapper_storage_info(callee_param.get("storage"))
+                if callee_storage is None or not callee_storage.is_register:
+                    continue
+                if any(
+                    self._parameter_storages_match_for_passthrough(
+                        existing.get("storage"),
+                        callee_param.get("storage"),
+                    )
+                    for existing in augmented
+                ):
+                    continue
+                if not self._should_synthesize_implicit_passthrough_for_call(
+                    tracer,
+                    op,
+                    callee_storage,
+                ):
+                    continue
+                augmented.append(
+                    self._synthesize_implicit_passthrough_parameter(
+                        augmented,
+                        callee_param,
+                        callee_storage,
+                    )
+                )
+                changed = True
+
+        if changed:
+            augmented.sort(key=lambda param: int(param.get("index", 1 << 20)))
+        return augmented
+
+    def _should_synthesize_implicit_passthrough_for_call(
+        self,
+        tracer: PcodeTracer,
+        call_op,
+        target_storage: StorageInfo,
+    ) -> bool:
+        if self._has_non_parameter_symbol_for_storage(tracer, target_storage):
+            return False
+        if self._is_passthrough_storage_live_in_for_call(tracer, call_op, target_storage):
+            return True
+        return True
+
+    def _is_passthrough_storage_live_in_for_call(
+        self,
+        tracer: PcodeTracer,
+        call_op,
+        target_storage: StorageInfo,
+    ) -> bool:
+        get_order_key = getattr(tracer, "_get_op_order_key", None)
+        if not callable(get_order_key):
+            return True
+
+        call_order = get_order_key(call_op)
+        if call_order is None:
+            return True
+
+        for op in tracer.get_all_pcode_ops():
+            op_order = get_order_key(op)
+            if op_order is None or op_order >= call_order:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            output_storage = tracer._get_storage_info_from_varnode(output)
+            if output_storage is None or not getattr(output_storage, "is_register", False):
+                continue
+            try:
+                same_base = output_storage.shares_base_register_with(target_storage)
+                overlaps = output_storage.bit_range_overlaps_with(target_storage)
+            except Exception:
+                same_base = False
+                overlaps = False
+            if same_base and overlaps:
+                return False
+        return True
+
+    def _has_non_parameter_symbol_for_storage(
+        self,
+        tracer: PcodeTracer,
+        target_storage: StorageInfo,
+    ) -> bool:
+        high_function = getattr(tracer, "high_function", None)
+        if high_function is None:
+            return False
+        try:
+            local_map = high_function.getLocalSymbolMap()
+        except Exception:
+            return False
+        if local_map is None:
+            return False
+
+        for sym in local_map.getSymbols() or []:
+            try:
+                if sym.isParameter():
+                    continue
+            except Exception:
+                continue
+            candidate_storage = self._coerce_wrapper_storage_info(self._get_storage_info(sym))
+            if candidate_storage is None or not candidate_storage.is_register:
+                continue
+            try:
+                same_base = candidate_storage.shares_base_register_with(target_storage)
+                overlaps = candidate_storage.bit_range_overlaps_with(target_storage)
+            except Exception:
+                same_base = False
+                overlaps = False
+            if same_base and overlaps:
+                return True
+        return False
+
+    def _synthesize_implicit_passthrough_parameter(
+        self,
+        current_parameters: List[Dict],
+        callee_param: Dict,
+        callee_storage: StorageInfo,
+    ) -> Dict:
+        used_names = {param.get("name") for param in current_parameters if param.get("name")}
+        next_index = max((int(param.get("index", -1)) for param in current_parameters), default=-1) + 1
+        suggested_name = callee_param.get("name") or f"param_{next_index + 1}"
+        if suggested_name in used_names:
+            suggested_name = f"param_{next_index + 1}"
+
+        return {
+            "name": suggested_name,
+            "index": next_index,
+            "size": callee_param.get("size") or callee_storage.size or 0,
+            "data_type": callee_param.get("data_type"),
+            "data_type_obj": callee_param.get("data_type_obj"),
+            "is_signed": callee_param.get("is_signed", True),
+            "storage": callee_storage.to_dict(),
+            "implicit_passthrough": True,
+        }
+
+    def _resolve_wrapper_indirect_call_targets(
+        self,
+        callee_expr: Optional[Expression],
+        conditions: List[Condition],
+        parameters: List[Dict],
+    ) -> List[Tuple[str, List[Condition]]]:
+        if callee_expr is None:
+            return []
+
+        direct_name = self._resolve_expression_to_named_wrapper_target(callee_expr)
+        if direct_name is not None:
+            simplified = ConditionSimplifier.simplify_conditions(list(conditions))
+            if ConditionSimplifier.is_contradiction(simplified):
+                return []
+            return [(direct_name, simplified)]
+
+        rewritten = callee_expr
+        try:
+            image_base = self.program.getImageBase().getOffset()
+        except Exception:
+            image_base = None
+
+        try:
+            rewritten = concretize_readonly_loads(
+                callee_expr,
+                list(conditions or []),
+                list(parameters or []),
+                self._read_memory_value,
+                image_base=image_base,
+                debug=self.debug,
+            )
+        except Exception:
+            rewritten = callee_expr
+
+        if rewritten.expr_type == ExpressionType.PHI and rewritten.value:
+            resolved: List[Tuple[str, List[Condition]]] = []
+            for branch_cond, branch_value in rewritten.value:
+                branch_conditions = list(conditions)
+                if branch_cond is not None:
+                    branch_conditions.append(branch_cond)
+                resolved.extend(
+                    self._resolve_wrapper_indirect_call_targets(
+                        branch_value,
+                        branch_conditions,
+                        parameters,
+                    )
+                )
+            return self._deduplicate_wrapper_targets(resolved)
+
+        resolved: List[Tuple[str, List[Condition]]] = []
+        for branch_conditions, address_value in _enumerate_constant_expression_branches(rewritten):
+            target_name = self._lookup_program_function_name_by_value(address_value)
+            if target_name is None:
+                target_name = f"ADDR_{address_value:x}"
+            merged_conditions = ConditionSimplifier.simplify_conditions(
+                list(conditions) + list(branch_conditions)
+            )
+            if ConditionSimplifier.is_contradiction(merged_conditions):
+                continue
+            resolved.append((target_name, merged_conditions))
+        return self._deduplicate_wrapper_targets(resolved)
+
+    def _should_attempt_direct_wrapper_name_resolution(
+        self,
+        name: str,
+        parameters: List[Dict],
+        local_bindings: Dict[str, Expression],
+    ) -> bool:
+        if not name or name in local_bindings:
+            return False
+        if any(name == param.get("name") for param in (parameters or []) if param.get("name")):
+            return False
+        if name.startswith(("PTR_", "DAT_", "LAB_")):
+            return False
+        return True
+
+    def _normalize_wrapper_callee_spec(self, callee_spec: str) -> str:
+        spec = self._strip_wrapper_callee_casts(callee_spec)
+        if spec.startswith("*"):
+            spec = self._strip_wrapper_callee_casts(spec[1:].strip())
+        return spec
+
+    def _strip_wrapper_callee_casts(self, text: str) -> str:
+        expr_text = self._strip_outer_parentheses(text.strip())
+        previous = None
+        while expr_text != previous:
+            previous = expr_text
+            expr_text = self._strip_outer_parentheses(expr_text)
+            cast_match = re.match(r"^\(\s*[A-Za-z_][A-Za-z0-9_\s\*]*\s*\)\s*(.+)$", expr_text)
+            if cast_match:
+                expr_text = cast_match.group(1).strip()
+        return self._strip_outer_parentheses(expr_text)
+
+    def _deduplicate_wrapper_targets(
+        self,
+        targets: List[Tuple[str, List[Condition]]],
+    ) -> List[Tuple[str, List[Condition]]]:
+        deduped: List[Tuple[str, List[Condition]]] = []
+        seen = set()
+        for target_name, conditions in targets:
+            key = (target_name, tuple(cond.to_string() for cond in conditions))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((target_name, conditions))
+        return deduped
+
+    def _resolve_expression_to_named_wrapper_target(
+        self,
+        expr: Expression,
+    ) -> Optional[str]:
+        if expr.expr_type == ExpressionType.PARAMETER:
+            return None
+        if expr.expr_type == ExpressionType.VARIABLE and expr.name:
+            if expr.name.startswith(("PTR_", "DAT_", "LAB_")):
+                return self._resolve_pointer_symbol_wrapper_target(expr.name)
+            return self._resolve_named_wrapper_target(expr.name)
+        return None
+
+    def _resolve_named_wrapper_target(self, name: Optional[str]) -> Optional[str]:
+        if not name:
+            return None
+        if self._looks_like_decompiler_parameter_name(name):
+            return None
+        if name.startswith("ADDR_"):
+            return name
+        pointer_target = self._resolve_pointer_symbol_wrapper_target(name)
+        if pointer_target is not None:
+            return pointer_target
+        try:
+            resolved = self._find_function_by_name(name)
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            return name
+        if re.fullmatch(r"(?:thunk_)?FUN_[0-9a-fA-F]+", name):
+            return name
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and not self._looks_like_decompiler_temp_name(name):
+            return name
+        return None
+
+    def _looks_like_decompiler_parameter_name(self, name: Optional[str]) -> bool:
+        return bool(re.fullmatch(r"(?:param|arg)_?\d+", name or ""))
+
+    def _resolve_pointer_symbol_wrapper_target(self, name: Optional[str]) -> Optional[str]:
+        if not name or not name.startswith(("PTR_", "DAT_", "LAB_")):
+            return None
+
+        match = re.fullmatch(r"(?:PTR|DAT|LAB)_([A-Za-z_][A-Za-z0-9_]*)_[0-9A-Fa-f]+", name)
+        if match is None:
+            return None
+
+        candidate = match.group(1)
+        try:
+            resolved = self._find_function_by_name(candidate)
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            return candidate
+        if re.fullmatch(r"(?:thunk_)?FUN_[0-9a-fA-F]+", candidate):
+            return candidate
+        return None
+
+    def _looks_like_decompiler_temp_name(self, name: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:[A-Za-z]{1,4}Var\d+|local_[0-9A-Fa-f]+|UNRECOVERED_JUMPTABLE)",
+                name or "",
+            )
+        )
+
+    def _lookup_program_function_name_by_value(self, address_value: int) -> Optional[str]:
+        try:
+            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
+            addr = default_space.getAddress(address_value)
+            manager = self.program.getFunctionManager()
+            func = manager.getFunctionAt(addr)
+            if func is None:
+                func = manager.getFunctionContaining(addr)
+            if func is not None:
+                return func.getName()
+        except Exception:
+            return None
+        return None
 
     def _should_attempt_switch_recovery(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis.recovered_from_decompiler:
@@ -1650,14 +2673,17 @@ class ReturnAnalyzer:
         if call_line is None or not return_seen:
             return None
 
-        call_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*;", call_line)
-        if not call_match:
+        parsed_call = self._parse_wrapper_call_statement(call_line)
+        if parsed_call is None:
             return None
-
-        callee_name = call_match.group(1)
-        arg_blob = call_match.group(2).strip()
+        target_name, callee_name, arg_blob = parsed_call
+        resolved_callee_name = self._resolve_named_wrapper_target(
+            self._normalize_wrapper_callee_spec(callee_name)
+        )
+        if target_name is not None or resolved_callee_name is None:
+            return None
         if not arg_blob:
-            return callee_name, []
+            return resolved_callee_name, []
 
         arg_texts = self._split_call_arguments(arg_blob)
         if arg_texts is None:
@@ -1669,7 +2695,7 @@ class ReturnAnalyzer:
             if parsed is None:
                 return None
             parsed_args.append(parsed)
-        return callee_name, parsed_args
+        return resolved_callee_name, parsed_args
 
     def _split_call_arguments(self, arg_blob: str) -> Optional[List[str]]:
         parts: List[str] = []
@@ -1696,6 +2722,50 @@ class ReturnAnalyzer:
         if tail:
             parts.append(tail)
         return parts or None
+
+    def _parse_wrapper_call_statement(
+        self,
+        statement: str,
+    ) -> Optional[Tuple[Optional[str], str, str]]:
+        stripped = statement.strip()
+        if not stripped.endswith(";"):
+            return None
+        stripped = stripped[:-1].strip()
+        if not stripped:
+            return None
+
+        target_name = None
+        assign_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", stripped)
+        if assign_match:
+            target_name = assign_match.group(1)
+            stripped = assign_match.group(2).strip()
+
+        if not stripped.endswith(")"):
+            return None
+        open_index = self._find_outer_call_open_paren(stripped)
+        if open_index is None:
+            return None
+
+        callee_spec = stripped[:open_index].strip()
+        arg_blob = stripped[open_index + 1:-1].strip()
+        if not callee_spec:
+            return None
+        return target_name, callee_spec, arg_blob
+
+    def _find_outer_call_open_paren(self, text: str) -> Optional[int]:
+        depth = 0
+        for index in range(len(text) - 1, -1, -1):
+            char = text[index]
+            if char == ")":
+                depth += 1
+                continue
+            if char == "(":
+                depth -= 1
+                if depth == 0:
+                    return index
+                if depth < 0:
+                    return None
+        return None
 
     def _parse_wrapper_argument_expr(
         self,
@@ -2213,24 +3283,7 @@ class ReturnAnalyzer:
             return summary
 
         def resolve_callee_parameters(function_name: str):
-            callee = self._find_function_by_name(function_name)
-            if callee is None:
-                return []
-            callee_key = str(callee.getEntryPoint())
-            cached_parameters = self._effect_summary_parameter_cache.get(callee_key)
-            if cached_parameters is not None:
-                return cached_parameters
-
-            decompiler = self._get_decompiler()
-            results = decompiler.decompileFunction(callee, 60, None)
-            if not results.decompileCompleted():
-                return []
-            callee_high = results.getHighFunction()
-            if callee_high is None:
-                return []
-            callee_parameters = self._collect_parameters(callee_high)
-            self._effect_summary_parameter_cache[callee_key] = list(callee_parameters)
-            return callee_parameters
+            return self._get_freshest_callee_parameters(function_name)
 
         summary = summarize_store_effects(
             condition_tracker.block_by_index.values(),
@@ -2269,9 +3322,27 @@ class ReturnAnalyzer:
 
         analysis = self._get_or_analyze_call_target(function_name, active_functions)
         if analysis is None:
+            expanded = self._resolve_call_expansions_from_decompiler(
+                function_name,
+                args,
+                active_functions,
+                current_function=current_function,
+                analysis=None,
+            )
+            if expanded is not None:
+                return expanded
             self._debug_print(f"Call expansion skipped for '{function_name}': analysis unavailable")
             return None
         if not self._is_call_return_summary_allowed(analysis, args):
+            expanded = self._resolve_call_expansions_from_decompiler(
+                function_name,
+                args,
+                active_functions,
+                current_function=current_function,
+                analysis=analysis,
+            )
+            if expanded is not None:
+                return expanded
             self._debug_print(
                 f"Call expansion skipped for '{function_name}': "
                 "summary not safe enough for inlining"
@@ -2314,6 +3385,168 @@ class ReturnAnalyzer:
             )
 
         return expanded
+
+    def _resolve_call_expansions_from_decompiler(
+        self,
+        function_name: str,
+        args: List[Expression],
+        active_functions: Set[str],
+        current_function=None,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+    ):
+        from ..transform.expander import ExpandedValue
+
+        callee = self._find_function_by_name(function_name)
+        if callee is None:
+            return None
+
+        decompile_results = self._decompile_function(callee, timeout=60)
+        if decompile_results is None:
+            return None
+        c_text = self._get_decompiled_c_text(decompile_results)
+        if not c_text:
+            return None
+
+        callee_analysis = analysis
+        if callee_analysis is None:
+            callee_analysis = self._get_or_analyze_call_target(function_name, active_functions)
+
+        parameters = self._merge_wrapper_parameters_from_c_text(
+            list(getattr(callee_analysis, "parameters", None) or []),
+            c_text,
+        )
+        initial_bindings = self._build_wrapper_initial_bindings(parameters, args)
+        nested_active = set(active_functions)
+        nested_active.add(function_name)
+        address = (
+            getattr(callee_analysis, "entry_point", None)
+            or str(callee.getEntryPoint())
+        )
+
+        recovered = self._recover_structured_call_wrapper_from_c_text(
+            c_text,
+            parameters,
+            address,
+            callee,
+            nested_active,
+            initial_bindings=initial_bindings,
+        )
+        if recovered is None:
+            recovered = self._recover_straightline_call_chain_from_c_text(
+                c_text,
+                parameters,
+                address,
+                callee,
+                nested_active,
+                initial_bindings=initial_bindings,
+            )
+        if recovered is None:
+            return None
+
+        return [
+            ExpandedValue(
+                value=self._clone_expression(ret.value),
+                conditions=ConditionSimplifier.simplify_conditions(list(ret.conditions)),
+            )
+            for ret in recovered
+        ]
+
+    def _decompile_function(self, function, timeout: int = 60):
+        try:
+            decompiler = self._get_decompiler()
+            results = decompiler.decompileFunction(function, timeout, None)
+            if not results.decompileCompleted():
+                return None
+            return results
+        except Exception:
+            return None
+
+    def _build_wrapper_initial_bindings(
+        self,
+        parameters: List[Dict],
+        args: List[Expression],
+    ) -> Dict[str, Expression]:
+        bindings: Dict[str, Expression] = {}
+        for param, arg in zip(parameters, args):
+            name = param.get("name")
+            if not name:
+                continue
+            bindings[name] = self._clone_expression(arg)
+        return bindings
+
+    def _merge_wrapper_parameters_from_c_text(
+        self,
+        parameters: List[Dict],
+        c_text: str,
+    ) -> List[Dict]:
+        merged = [dict(param) for param in (parameters or [])]
+        by_name = {
+            param.get("name"): param
+            for param in merged
+            if param.get("name")
+        }
+
+        header_line = next(
+            (
+                line
+                for line in self._normalize_wrapper_c_lines(c_text)
+                if self._looks_like_wrapper_header_line(line)
+            ),
+            "",
+        )
+        header_match = re.match(
+            r"^[A-Za-z_][A-Za-z0-9_\s\*]*\s+[A-Za-z_][A-Za-z0-9_]*\s*\((.*)\)\s*\{?$",
+            header_line,
+        )
+        if not header_match:
+            return merged
+
+        param_blob = header_match.group(1).strip()
+        if not param_blob or param_blob == "void":
+            return merged
+
+        param_texts = self._split_call_arguments(param_blob)
+        if param_texts is None:
+            return merged
+
+        for index, raw_param in enumerate(param_texts):
+            param_text = self._strip_outer_parentheses(raw_param.strip())
+            if not param_text:
+                continue
+            name_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", param_text)
+            if not name_match:
+                continue
+            name = name_match.group(1)
+            data_type = param_text[:name_match.start()].strip() or None
+            target = by_name.get(name)
+            inferred_size = self._infer_c_text_param_size(data_type)
+            if target is None:
+                target = {
+                    "name": name,
+                    "index": index,
+                    "size": inferred_size,
+                }
+                if data_type:
+                    target["data_type"] = data_type
+                merged.append(target)
+                by_name[name] = target
+                continue
+            target.setdefault("index", index)
+            if data_type and not target.get("data_type"):
+                target["data_type"] = data_type
+            if not target.get("size"):
+                target["size"] = inferred_size
+
+        merged.sort(key=lambda param: int(param.get("index", 1 << 20)))
+        return merged
+
+    def _infer_c_text_param_size(self, data_type: Optional[str]) -> int:
+        type_lower = str(data_type or "").lower()
+        if "*" in type_lower:
+            return 8
+        if any(token in type_lower for token in ("undefined8", "ulong", "uint64", "long long", "int64")):
+            return 8
+        return 4
 
     def _parse_local_target_address(self, function_name: str) -> Optional[int]:
         match = re.fullmatch(r"ADDR_([0-9a-fA-F]+)", function_name or "")
@@ -2844,22 +4077,31 @@ class ReturnAnalyzer:
         self,
         function_name: str,
         active_functions: Set[str],
+        minimum_param_count: int = 0,
     ) -> Optional[FunctionReturnAnalysis]:
         callee = self._find_function_by_name(function_name)
         if callee is None:
             return None
 
         cache_key = str(callee.getEntryPoint())
-        if cache_key in self._call_analysis_cache:
-            return self._call_analysis_cache[cache_key]
+        cached = self._call_analysis_cache.get(cache_key)
+        if cached is not None and len(getattr(cached, "parameters", []) or []) >= minimum_param_count:
+            return cached
 
         analysis = self.analyze_function(
             callee,
             timeout=60,
             active_functions=active_functions | {function_name},
         )
-        self._call_analysis_cache[cache_key] = analysis
-        return analysis
+        if cached is None:
+            self._call_analysis_cache[cache_key] = analysis
+            return analysis
+        if analysis is None:
+            return cached
+        if len(getattr(analysis, "parameters", []) or []) >= len(getattr(cached, "parameters", []) or []):
+            self._call_analysis_cache[cache_key] = analysis
+            return analysis
+        return cached
 
     def _is_call_return_summary_allowed(
         self,
@@ -3695,7 +4937,13 @@ class ReturnAnalyzer:
             changed = False
             for i in range(len(merged)):
                 for j in range(i + 1, len(merged)):
-                    combined = self._merge_return_info_pair(merged[i], merged[j])
+                    combined = self._merge_return_info_pair(
+                        merged[i],
+                        merged[j],
+                        merged,
+                        i,
+                        j,
+                    )
                     if combined is None:
                         continue
                     merged[i] = combined
@@ -3710,6 +4958,9 @@ class ReturnAnalyzer:
         self,
         left: ReturnInfo,
         right: ReturnInfo,
+        all_infos: Optional[List[ReturnInfo]] = None,
+        left_index: Optional[int] = None,
+        right_index: Optional[int] = None,
     ) -> Optional[ReturnInfo]:
         if left.address != right.address:
             return None
@@ -3726,6 +4977,15 @@ class ReturnAnalyzer:
 
         if len(left_residual) == 1 and len(right_residual) == 1:
             if ConditionSimplifier.are_contradictory_conditions(left_residual[0], right_residual[0]):
+                if not self._can_safely_collapse_complementary_return_pair(
+                    left,
+                    right,
+                    shared_conditions,
+                    all_infos or [],
+                    left_index,
+                    right_index,
+                ):
+                    return None
                 return self._make_merged_return_info(
                     left,
                     right,
@@ -3734,6 +4994,46 @@ class ReturnAnalyzer:
                 )
 
         return None
+
+    def _can_safely_collapse_complementary_return_pair(
+        self,
+        left: ReturnInfo,
+        right: ReturnInfo,
+        merged_conditions: List[Condition],
+        all_infos: List[ReturnInfo],
+        left_index: Optional[int],
+        right_index: Optional[int],
+    ) -> bool:
+        if not all_infos:
+            return True
+
+        merged_scope = ConditionSimplifier.simplify_conditions(list(merged_conditions))
+        for index, other in enumerate(all_infos):
+            if index == left_index or index == right_index:
+                continue
+            if other.address != left.address:
+                continue
+            if _expressions_equivalent(other.value, left.value):
+                continue
+
+            overlap_conditions = ConditionSimplifier.simplify_conditions(
+                list(merged_scope) + list(other.conditions)
+            )
+            if ConditionSimplifier.is_contradiction(overlap_conditions):
+                continue
+
+            if self.debug:
+                cond_dump = [
+                    ConditionSimplifier.get_simplified_condition_string(cond)
+                    for cond in overlap_conditions
+                ]
+                self._debug_print(
+                    "skipping complementary return-case collapse due to overlapping "
+                    f"different-valued case: value={other.value.to_string()} conditions={cond_dump}"
+                )
+            return False
+
+        return True
 
     def _partition_return_conditions(
         self,
