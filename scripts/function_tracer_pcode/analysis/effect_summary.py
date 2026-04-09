@@ -94,6 +94,37 @@ def _all_non_none_expressions(
     return normalized
 
 
+def _clone_expression_with_operands(
+    expr: Expression,
+    operands: Sequence[Expression],
+) -> Expression:
+    return Expression(
+        expr_type=expr.expr_type,
+        value=expr.value,
+        operator=expr.operator,
+        operands=list(operands),
+        size=expr.size,
+        name=expr.name,
+        data_type=expr.data_type,
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+    )
+
+
+def _rebuild_expression_from_optional_operands(
+    expr: Expression,
+    rewritten_operands: Sequence[Optional[Expression]],
+    *,
+    fallback: Optional[Expression] = None,
+) -> Optional[Expression]:
+    if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+        return expr
+    new_operands = _all_non_none_expressions(rewritten_operands)
+    if new_operands is None:
+        return fallback
+    return _clone_expression_with_operands(expr, new_operands)
+
+
 def _synthetic_storage_base_name(storage: Optional[StorageInfo]) -> Optional[str]:
     storage = _coerce_storage_info(storage)
     if storage is None or storage.is_register:
@@ -1510,19 +1541,9 @@ def rewrite_loads_from_effects(
             )
             for op in expr.operands
         ]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
-            return expr
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-        )
-        return rebuilt
+        return _clone_expression_with_operands(expr, new_operands) if not all(
+            new is old for new, old in zip(new_operands, expr.operands)
+        ) else expr
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         branches = []
@@ -1715,23 +1736,12 @@ def rewrite_observed_loads_from_effects(
             )
             for op in expr.operands
         ]
-        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
-            return expr
-        new_operands = _all_non_none_expressions(rewritten_operands)
-        if new_operands is None:
-            return expr
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
         )
-        return rebuilt
+        return rebuilt if rebuilt is not None else expr
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         changed = False
@@ -2155,23 +2165,12 @@ def canonicalize_post_state_subexpressions(
             canonicalize_post_state_subexpressions(op, return_conditions, effects, parameters)
             for op in expr.operands
         ]
-        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
-            return expr
-        new_operands = _all_non_none_expressions(rewritten_operands)
-        if new_operands is None:
-            return expr
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
         )
-        return rebuilt
+        return rebuilt if rebuilt is not None else expr
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         changed = False
@@ -2331,22 +2330,12 @@ def _rewrite_definite_post_state_subexpressions(
             )
             for operand in expr.operands
         ]
-        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
-            return expr
-        new_operands = _all_non_none_expressions(rewritten_operands)
-        if new_operands is None:
-            return expr
-        return Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
         )
+        return rebuilt if rebuilt is not None else expr
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         changed = False
@@ -2517,22 +2506,12 @@ def _rewrite_expression_with_replayed_state(
             )
             for operand in expr.operands
         ]
-        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
-            return expr
-        new_operands = _all_non_none_expressions(rewritten_operands)
-        if new_operands is None:
-            return expr
-        return Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
         )
+        return rebuilt if rebuilt is not None else expr
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         changed = False
@@ -2697,20 +2676,9 @@ def _reduce_expression_under_conditions(
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
         new_operands = [_reduce_expression_under_conditions(op, conditions) for op in expr.operands]
-        if all(new is old for new, old in zip(new_operands, expr.operands)):
-            return expr
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
-        )
-        return rebuilt
+        return _clone_expression_with_operands(expr, new_operands) if not all(
+            new is old for new, old in zip(new_operands, expr.operands)
+        ) else expr
 
     return expr
 
@@ -2827,16 +2795,7 @@ def substitute_expression(
         new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
         if all(new is old for new, old in zip(new_operands, expr.operands)):
             return _simplify_substituted_expression(expr, parameters)
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=new_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            storage_info=expr.storage_info,
-        )
+        rebuilt = _clone_expression_with_operands(expr, new_operands)
         return _simplify_substituted_expression(rebuilt, parameters)
 
     if expr.expr_type == ExpressionType.PHI and expr.value:

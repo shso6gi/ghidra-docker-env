@@ -2603,10 +2603,13 @@ class ReturnAnalyzer:
         return None
 
     def _looks_like_decompiler_temp_name(self, name: str) -> bool:
+        candidate = name or ""
+        if re.fullmatch(r"(?:[A-Za-z]{1,4}Var\d+|local_[0-9A-Fa-f]+)", candidate):
+            return True
         return bool(
             re.fullmatch(
-                r"(?:[A-Za-z]{1,4}Var\d+|local_[0-9A-Fa-f]+|UNRECOVERED_JUMPTABLE)",
-                name or "",
+                r"(?:UNRECOVERED|extraout|unaff|in)_[A-Za-z0-9_]+",
+                candidate,
             )
         )
 

@@ -3331,6 +3331,18 @@ def test_return_analyzer_resolves_wrapper_parameter_bound_to_pointer_symbol_targ
     assert expanded[0].value.to_string() == "(param_2 + param_3)"
 
 
+def test_return_analyzer_treats_generic_decompiler_generated_names_as_non_callees():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    assert analyzer._looks_like_decompiler_temp_name("UNRECOVERED_JUMPTABLE")
+    assert analyzer._looks_like_decompiler_temp_name("extraout_a0")
+    assert analyzer._looks_like_decompiler_temp_name("unaff_gp")
+    assert analyzer._looks_like_decompiler_temp_name("in_a1_hi")
+    assert analyzer._resolve_named_wrapper_target("UNRECOVERED_JUMPTABLE") is None
+    assert analyzer._resolve_named_wrapper_target("extraout_a0") is None
+    assert analyzer._resolve_named_wrapper_target("ptr_op_add") == "ptr_op_add"
+
+
 def test_return_analyzer_recovers_mips64_gcc_apply_wrapper_from_pointer_symbol_binding():
     functions = [
         _FakeFunction("ptr_op_add", 0x401100),
