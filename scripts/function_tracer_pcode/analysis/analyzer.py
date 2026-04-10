@@ -1369,56 +1369,71 @@ class ReturnAnalyzer:
         merged_live = list(then_live)
 
         if next_index < len(body_lines):
-            else_match = re.fullmatch(r"else\s*(\{)?", body_lines[next_index])
-            handled_else_branch = False
-            if else_match:
-                handled_else_branch = True
-                else_start = next_index + 1
-                if not else_match.group(1):
-                    if else_start >= len(body_lines) or body_lines[else_start] != "{":
-                        return if_index, states, [], False
-                    else_start += 1
-
-                next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_block(
-                    body_lines,
-                    else_start,
-                    else_inputs,
-                    parameters,
-                    active_functions,
-                    current_function,
-                    stop_on_closing_brace=True,
-                )
-                if not ok:
-                    return if_index, states, [], False
-                merged_live.extend(else_live)
-                all_terminated.extend(else_terminated)
-            else:
-                else_if_match = re.fullmatch(r"else\s+if\s*\((.+)\)\s*(\{)?", body_lines[next_index])
-                if else_if_match:
-                    handled_else_branch = True
-                    next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_if(
-                        body_lines,
-                        next_index,
-                        else_inputs,
-                        else_if_match.group(1).strip(),
-                        bool(else_if_match.group(2)),
-                        parameters,
-                        active_functions,
-                        current_function,
-                    )
-                    if not ok:
-                        return if_index, states, [], False
-                    merged_live.extend(else_live)
-                    all_terminated.extend(else_terminated)
-                elif else_inputs:
-                    handled_else_branch = True
-                    merged_live.extend(else_inputs)
-            if not handled_else_branch and else_inputs:
-                merged_live.extend(else_inputs)
+            next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_else_clause(
+                body_lines,
+                next_index,
+                else_inputs,
+                parameters,
+                active_functions,
+                current_function,
+            )
+            if not ok:
+                return if_index, states, [], False
+            merged_live.extend(else_live)
+            all_terminated.extend(else_terminated)
         elif else_inputs:
             merged_live.extend(else_inputs)
 
         return next_index, merged_live, all_terminated, True
+
+    def _execute_structured_wrapper_else_clause(
+        self,
+        body_lines: List[str],
+        next_index: int,
+        else_inputs: List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        parameters: List[Dict],
+        active_functions: Set[str],
+        current_function,
+    ) -> Tuple[
+        int,
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        List[Tuple[Dict[str, Expression], List[Condition], Optional[Expression]]],
+        bool,
+    ]:
+        line = body_lines[next_index]
+        else_match = re.fullmatch(r"else\s*(\{)?", line)
+        if else_match:
+            else_start = next_index + 1
+            if not else_match.group(1):
+                if else_start >= len(body_lines) or body_lines[else_start] != "{":
+                    return next_index, [], [], False
+                else_start += 1
+
+            next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_block(
+                body_lines,
+                else_start,
+                else_inputs,
+                parameters,
+                active_functions,
+                current_function,
+                stop_on_closing_brace=True,
+            )
+            return next_index, else_live, else_terminated, ok
+
+        else_if_match = re.fullmatch(r"else\s+if\s*\((.+)\)\s*(\{)?", line)
+        if else_if_match:
+            return self._execute_structured_wrapper_if(
+                body_lines,
+                next_index,
+                else_inputs,
+                else_if_match.group(1).strip(),
+                bool(else_if_match.group(2)),
+                parameters,
+                active_functions,
+                current_function,
+            )
+
+        return next_index, list(else_inputs), [], True
 
     def _refine_wrapper_state_conditions(
         self,
@@ -1937,12 +1952,9 @@ class ReturnAnalyzer:
         if expr is None:
             return None
 
-        if expr.data_type:
-            type_lower = expr.data_type.lower()
-            if "unsigned" in type_lower or type_lower.startswith("u"):
-                return False
-            if any(token in type_lower for token in ("int", "long", "short", "char")):
-                return True
+        expr_type_signedness = self._signedness_from_wrapper_type_name(expr.data_type)
+        if expr_type_signedness is not None:
+            return expr_type_signedness
 
         if expr.expr_type == ExpressionType.PARAMETER and expr.name:
             for param in parameters:
@@ -1950,11 +1962,9 @@ class ReturnAnalyzer:
                     continue
                 if "is_signed" in param:
                     return bool(param.get("is_signed"))
-                data_type = str(param.get("data_type") or "").lower()
-                if "unsigned" in data_type or data_type.startswith("u"):
-                    return False
-                if any(token in data_type for token in ("int", "long", "short", "char")):
-                    return True
+                param_type_signedness = self._signedness_from_wrapper_type_name(param.get("data_type"))
+                if param_type_signedness is not None:
+                    return param_type_signedness
                 return None
 
         if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
@@ -1988,6 +1998,16 @@ class ReturnAnalyzer:
             if len(operand_signedness) == 1:
                 return operand_signedness.pop()
 
+        return None
+
+    def _signedness_from_wrapper_type_name(self, data_type: Optional[str]) -> Optional[bool]:
+        type_lower = str(data_type or "").lower()
+        if not type_lower:
+            return None
+        if "unsigned" in type_lower or type_lower.startswith("u"):
+            return False
+        if any(token in type_lower for token in ("int", "long", "short", "char")):
+            return True
         return None
 
     def _extract_wrapper_body_statements(self, c_text: str) -> Optional[List[str]]:
@@ -2038,15 +2058,20 @@ class ReturnAnalyzer:
             line = line.split("//", 1)[0].strip()
             if not line:
                 continue
-            else_if_match = re.fullmatch(r"\}\s*else\s+if\s*\((.+)\)\s*\{", line)
-            if else_if_match:
-                normalized.extend(["}", f"else if ({else_if_match.group(1).strip()}) {{"])
-                continue
-            if re.fullmatch(r"\}\s*else\s*\{", line):
-                normalized.extend(["}", "else {"])
+            split_transition = self._split_wrapper_control_transition_line(line)
+            if split_transition is not None:
+                normalized.extend(split_transition)
                 continue
             normalized.append(line)
         return normalized
+
+    def _split_wrapper_control_transition_line(self, line: str) -> Optional[List[str]]:
+        else_if_match = re.fullmatch(r"\}\s*else\s+if\s*\((.+)\)\s*\{", line)
+        if else_if_match:
+            return ["}", f"else if ({else_if_match.group(1).strip()}) {{"]
+        if re.fullmatch(r"\}\s*else\s*\{", line):
+            return ["}", "else {"]
+        return None
 
     def _looks_like_wrapper_header_line(self, line: str) -> bool:
         return bool(
