@@ -7,6 +7,9 @@ from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_name,
+    _recover_call_argument_expressions,
+    _resolve_call_argument_expression,
+    _expression_maps_to_parameter,
     resolve_call_targets,
     _expressions_equivalent,
     canonicalize_location,
@@ -73,6 +76,7 @@ class ExpressionExpander:
         call_resolver: Optional[Callable[[str, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
         effect_summary=None,
         parameters: Optional[List[Dict[str, Any]]] = None,
+        resolve_callee_parameters: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
     ):
@@ -82,6 +86,7 @@ class ExpressionExpander:
         self.call_resolver = call_resolver
         self.effect_summary = effect_summary
         self.parameters = list(parameters or [])
+        self.resolve_callee_parameters = resolve_callee_parameters
         self.read_memory_value = read_memory_value
         self.image_base = image_base
         self._expanding_ops: Set[str] = set()
@@ -1164,6 +1169,24 @@ class ExpressionExpander:
             return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{target_name or 'UNKNOWN_FUNC'}"), base_conditions)]
 
         arg_expansions: List[List[ExpandedValue]] = []
+        explicit_input_varnodes = [
+            pcode_op.getInput(index)
+            for index in range(1, pcode_op.getNumInputs())
+        ]
+        canonical_explicit_args: List[Optional[Expression]] = []
+        if self.parameters:
+            for input_varnode in explicit_input_varnodes:
+                try:
+                    canonical_explicit_args.append(
+                        _resolve_call_argument_expression(
+                            input_varnode,
+                            self.tracer,
+                            self.parameters,
+                        )
+                    )
+                except Exception:
+                    canonical_explicit_args.append(None)
+
         for index in range(1, pcode_op.getNumInputs()):
             arg_expansions.append(
                 self._expand_input_varnode(pcode_op.getInput(index), [], depth + 1)
@@ -1184,7 +1207,56 @@ class ExpressionExpander:
                     if ConditionSimplifier.is_contradiction(merged_target_conditions):
                         continue
 
-                    resolved = self.call_resolver(target_name, current_args)
+                    effective_args = list(current_args)
+                    if self.parameters and canonical_explicit_args:
+                        stabilized_args: List[Expression] = []
+                        for index, arg in enumerate(effective_args):
+                            input_varnode = (
+                                explicit_input_varnodes[index]
+                                if index < len(explicit_input_varnodes)
+                                else None
+                            )
+                            canonical_arg = (
+                                canonical_explicit_args[index]
+                                if index < len(canonical_explicit_args)
+                                else None
+                            )
+                            should_replace = (
+                                input_varnode is not None
+                                and getattr(input_varnode, "getDef", lambda: None)() is not None
+                                and canonical_arg is not None
+                                and canonical_arg.expr_type not in {ExpressionType.UNKNOWN, ExpressionType.CALL}
+                                and not self._expression_contains_unknown_or_call(canonical_arg)
+                                and (
+                                    canonical_arg.expr_type != ExpressionType.VARIABLE
+                                    or _expression_maps_to_parameter(canonical_arg, self.parameters)
+                                )
+                                and _expression_maps_to_parameter(arg, self.parameters)
+                                and not _expressions_equivalent(arg, canonical_arg)
+                            )
+                            if should_replace:
+                                if self.debug:
+                                    self._debug_print(
+                                        "Stabilized explicit CALL arg from original input: "
+                                        f"{arg.to_string()} -> {canonical_arg.to_string()}",
+                                        depth,
+                                    )
+                                stabilized_args.append(canonical_arg)
+                            else:
+                                stabilized_args.append(arg)
+                        effective_args = stabilized_args
+                    if self.resolve_callee_parameters is not None:
+                        callee_parameters = list(self.resolve_callee_parameters(target_name) or [])
+                        if callee_parameters:
+                            effective_args = _recover_call_argument_expressions(
+                                pcode_op,
+                                self.tracer,
+                                self.parameters,
+                                callee_parameters,
+                                effective_args,
+                            )
+
+                    resolved = self.call_resolver(target_name, effective_args)
                     if not resolved:
                         if self.debug:
                             self._debug_print(

@@ -56,6 +56,19 @@ class ReturnAnalyzer:
         if self.debug:
             prefix = "  " * indent
             print(f"{prefix}[ReturnAnalyzer] {msg}")
+
+    @contextmanager
+    def _analysis_context(self, parameters: List[Dict], effect_summary):
+        """Temporarily bind per-analysis state and restore the parent context on exit."""
+        previous_parameters = self._current_parameters
+        previous_effect_summary = self._current_effect_summary
+        self._current_parameters = parameters
+        self._current_effect_summary = effect_summary
+        try:
+            yield
+        finally:
+            self._current_parameters = previous_parameters
+            self._current_effect_summary = previous_effect_summary
     
     def _get_decompiler(self):
         if self._decompiler is None:
@@ -223,153 +236,154 @@ class ReturnAnalyzer:
         
         # Step 1: tracer作成
         tracer = PcodeTracer(self.program, high_function, debug=self.debug)
-        
-        # Step 2: condition_tracker作成（まだビルドしない）
-        condition_tracker = ConditionTracker(tracer)
-        
-        # Step 3: phi_handler作成 → tracerに注入
-        from .phi_resolver import PhiHandler
-        phi_handler = PhiHandler(tracer, condition_tracker)
-        tracer.phi_handler = phi_handler
-        
-        # Step 4: ブロック情報構築（phi_handler準備後）
-        condition_tracker.build()
-        
+
         parameters = self._collect_parameters(high_function)
         parameters = self._augment_parameters_with_implicit_passthrough(
             parameters,
             tracer,
             active_functions,
         )
-        self._current_parameters = parameters
-        self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
-        image_base = None
-        try:
-            image_base = self.program.getImageBase().getOffset()
-        except Exception:
+        with self._analysis_context(parameters, None):
+            # Step 2: condition_tracker作成（まだビルドしない）
+            condition_tracker = ConditionTracker(tracer)
+
+            # Step 3: phi_handler作成 → tracerに注入
+            from .phi_resolver import PhiHandler
+            phi_handler = PhiHandler(tracer, condition_tracker)
+            tracer.phi_handler = phi_handler
+
+            # Step 4: ブロック情報構築（phi_handler準備後）
+            condition_tracker.build()
+
+            self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
             image_base = None
-        condition_tracker.refine_branch_conditions(
-            call_resolver=self._make_call_resolver(active_functions, function),
-            parameters=parameters,
-            read_memory_value=self._read_memory_value,
-            image_base=image_base,
-        )
-        effect_summary = self._build_effect_summary(
-            function,
-            high_function,
-            tracer,
-            condition_tracker,
-            parameters,
-            active_functions={function.getName()},
-        )
-        self._current_effect_summary = effect_summary
-        
-        # 戻り値の型を取得
-        return_type = self._get_return_type(high_function)
-        self._debug_print(f"Return type: {return_type}")
-        
-        # === Phase 1: 符号性検出 ===
-        signedness_result = self._detect_signedness(high_function)
-        if signedness_result:
-            self._debug_print(f"Inferred signedness: {signedness_result.signedness}")
-            if self.debug:
-                self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
-                self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
-        
-        return_infos = []
-        return_ops = tracer.find_return_ops()
-        
-        self._debug_print(f"Found {len(return_ops)} RETURN operations")
-        
-        for i, return_op in enumerate(return_ops):
-            self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
-            infos = self._analyze_return_op(
-                return_op,
+            try:
+                image_base = self.program.getImageBase().getOffset()
+            except Exception:
+                image_base = None
+            condition_tracker.refine_branch_conditions(
+                call_resolver=self._make_call_resolver(active_functions, function),
+                parameters=parameters,
+                resolve_callee_parameters=self._get_freshest_callee_parameters,
+                read_memory_value=self._read_memory_value,
+                image_base=image_base,
+            )
+            effect_summary = self._build_effect_summary(
+                function,
+                high_function,
                 tracer,
                 condition_tracker,
-                i,
-                current_function=function,
-                active_functions=active_functions,
+                parameters,
+                active_functions={function.getName()},
             )
-            return_infos.extend(infos)
-        
-        result = FunctionReturnAnalysis(
-            function_name=function.getName(),
-            entry_point=str(function.getEntryPoint()),
-            parameters=parameters,
-            returns=return_infos,
-            return_type=return_type,
-            signedness_result=signedness_result
-        )
-        result.unknown_event_count = len(tracer.unknown_tracker.events)
-        result.unknown_event_reasons = sorted(
-            {
-                getattr(event, "reason_str", None) or getattr(event.reason, "value", "unknown")
-                for event in tracer.unknown_tracker.events
-            }
-        )
+            self._current_effect_summary = effect_summary
 
-        if (
-            return_type
-            and return_type.strip().lower() == "void"
-            and effect_summary.synthetic_expr is not None
-            and not effect_summary.has_unsupported_call
-        ):
-            result.returns = [
-                ReturnInfo(
-                    address=str(function.getEntryPoint()),
-                    conditions=[],
-                    branch_index=0,
-                    value=effect_summary.synthetic_expr,
+            # 戻り値の型を取得
+            return_type = self._get_return_type(high_function)
+            self._debug_print(f"Return type: {return_type}")
+
+            # === Phase 1: 符号性検出 ===
+            signedness_result = self._detect_signedness(high_function)
+            if signedness_result:
+                self._debug_print(f"Inferred signedness: {signedness_result.signedness}")
+                if self.debug:
+                    self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
+                    self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
+
+            return_infos = []
+            return_ops = tracer.find_return_ops()
+
+            self._debug_print(f"Found {len(return_ops)} RETURN operations")
+
+            for i, return_op in enumerate(return_ops):
+                self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
+                infos = self._analyze_return_op(
+                    return_op,
+                    tracer,
+                    condition_tracker,
+                    i,
+                    current_function=function,
+                    active_functions=active_functions,
                 )
-            ]
+                return_infos.extend(infos)
 
-        recovered_returns = self._recover_switch_like_returns_from_decompiler(
-            results,
-            result,
-        )
-        if recovered_returns is not None:
-            result.returns = recovered_returns
-            result.recovered_from_decompiler = True
-            result.analysis_notes.append("switch_like_return_recovery")
-        else:
-            recovered_returns = self._recover_call_wrapper_returns(
+            result = FunctionReturnAnalysis(
+                function_name=function.getName(),
+                entry_point=str(function.getEntryPoint()),
+                parameters=parameters,
+                returns=return_infos,
+                return_type=return_type,
+                signedness_result=signedness_result
+            )
+            result.unknown_event_count = len(tracer.unknown_tracker.events)
+            result.unknown_event_reasons = sorted(
+                {
+                    getattr(event, "reason_str", None) or getattr(event.reason, "value", "unknown")
+                    for event in tracer.unknown_tracker.events
+                }
+            )
+
+            if (
+                return_type
+                and return_type.strip().lower() == "void"
+                and effect_summary.synthetic_expr is not None
+                and not effect_summary.has_unsupported_call
+            ):
+                result.returns = [
+                    ReturnInfo(
+                        address=str(function.getEntryPoint()),
+                        conditions=[],
+                        branch_index=0,
+                        value=effect_summary.synthetic_expr,
+                    )
+                ]
+
+            recovered_returns = self._recover_switch_like_returns_from_decompiler(
                 results,
                 result,
-                function,
-                tracer,
-                condition_tracker,
-                return_ops,
-                active_functions,
             )
             if recovered_returns is not None:
                 result.returns = recovered_returns
                 result.recovered_from_decompiler = True
-                result.analysis_notes.append("call_wrapper_return_recovery")
+                result.analysis_notes.append("switch_like_return_recovery")
+            else:
+                recovered_returns = self._recover_call_wrapper_returns(
+                    results,
+                    result,
+                    function,
+                    tracer,
+                    condition_tracker,
+                    return_ops,
+                    active_functions,
+                )
+                if recovered_returns is not None:
+                    result.returns = recovered_returns
+                    result.recovered_from_decompiler = True
+                    result.analysis_notes.append("call_wrapper_return_recovery")
 
-        self._synchronize_parameters_with_referenced_parameter_expressions(result)
-        result.returns = self._strip_stack_protector_only_conditions(result.returns)
-        self._mark_incomplete_control_flow(result)
+            self._synchronize_parameters_with_referenced_parameter_expressions(result)
+            result.returns = self._strip_stack_protector_only_conditions(result.returns)
+            self._mark_incomplete_control_flow(result)
 
-        # デバッグダンプ（解析結果の可視化）
-        self._dump_return_infos(result)
-        
-        # Unknown発生サマリー
-        if self.debug:
-            print("\n" + "=" * 70)
-            print("UNKNOWN EVENTS SUMMARY")
-            print("=" * 70)
-            print(tracer.unknown_tracker.get_summary())
-            phi_events = tracer.unknown_tracker.filter_phi_related()
-            if phi_events:
-                print("\n--- PHI-related events ---")
-                for event in phi_events:
-                    print(event.format_detail(indent=0))
-        elif len(tracer.unknown_tracker.events) > 0:
-            print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
-            print(f"  Use --debug flag for detailed report")
-        
-        return result
+            # デバッグダンプ（解析結果の可視化）
+            self._dump_return_infos(result)
+
+            # Unknown発生サマリー
+            if self.debug:
+                print("\n" + "=" * 70)
+                print("UNKNOWN EVENTS SUMMARY")
+                print("=" * 70)
+                print(tracer.unknown_tracker.get_summary())
+                phi_events = tracer.unknown_tracker.filter_phi_related()
+                if phi_events:
+                    print("\n--- PHI-related events ---")
+                    for event in phi_events:
+                        print(event.format_detail(indent=0))
+            elif len(tracer.unknown_tracker.events) > 0:
+                print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
+                print(f"  Use --debug flag for detailed report")
+
+            return result
 
     def _strip_stack_protector_only_conditions(
         self,
@@ -891,6 +905,11 @@ class ReturnAnalyzer:
             "CBRANCH",
             "BRANCHIND",
             "MULTIEQUAL",
+            "COPY",
+            "CAST",
+            "INT_ZEXT",
+            "INT_SEXT",
+            "SUBPIECE",
         }
 
     def _recover_structured_call_wrapper_from_c_text(
@@ -1351,7 +1370,9 @@ class ReturnAnalyzer:
 
         if next_index < len(body_lines):
             else_match = re.fullmatch(r"else\s*(\{)?", body_lines[next_index])
+            handled_else_branch = False
             if else_match:
+                handled_else_branch = True
                 else_start = next_index + 1
                 if not else_match.group(1):
                     if else_start >= len(body_lines) or body_lines[else_start] != "{":
@@ -1371,7 +1392,28 @@ class ReturnAnalyzer:
                     return if_index, states, [], False
                 merged_live.extend(else_live)
                 all_terminated.extend(else_terminated)
-            elif else_inputs:
+            else:
+                else_if_match = re.fullmatch(r"else\s+if\s*\((.+)\)\s*(\{)?", body_lines[next_index])
+                if else_if_match:
+                    handled_else_branch = True
+                    next_index, else_live, else_terminated, ok = self._execute_structured_wrapper_if(
+                        body_lines,
+                        next_index,
+                        else_inputs,
+                        else_if_match.group(1).strip(),
+                        bool(else_if_match.group(2)),
+                        parameters,
+                        active_functions,
+                        current_function,
+                    )
+                    if not ok:
+                        return if_index, states, [], False
+                    merged_live.extend(else_live)
+                    all_terminated.extend(else_terminated)
+                elif else_inputs:
+                    handled_else_branch = True
+                    merged_live.extend(else_inputs)
+            if not handled_else_branch and else_inputs:
                 merged_live.extend(else_inputs)
         elif else_inputs:
             merged_live.extend(else_inputs)
@@ -1884,6 +1926,17 @@ class ReturnAnalyzer:
         expr: Expression,
         parameters: List[Dict],
     ) -> bool:
+        signedness = self._infer_wrapper_expr_signedness(expr, parameters)
+        return signedness is True
+
+    def _infer_wrapper_expr_signedness(
+        self,
+        expr: Optional[Expression],
+        parameters: List[Dict],
+    ) -> Optional[bool]:
+        if expr is None:
+            return None
+
         if expr.data_type:
             type_lower = expr.data_type.lower()
             if "unsigned" in type_lower or type_lower.startswith("u"):
@@ -1902,12 +1955,40 @@ class ReturnAnalyzer:
                     return False
                 if any(token in data_type for token in ("int", "long", "short", "char")):
                     return True
-                return False
+                return None
 
         if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
-            return int(expr.value) < 0
+            return True if int(expr.value) < 0 else None
 
-        return False
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            return self._infer_wrapper_expr_signedness(expr.operands[0], parameters)
+
+        if expr.expr_type == ExpressionType.BINARY_OP and expr.operands:
+            if expr.operator in {
+                "INT_EQUAL",
+                "INT_NOTEQUAL",
+                "INT_LESS",
+                "INT_SLESS",
+                "INT_LESSEQUAL",
+                "INT_SLESSEQUAL",
+                "BOOL_AND",
+                "BOOL_OR",
+                "BOOL_XOR",
+            }:
+                return None
+
+            operand_signedness = {
+                value
+                for value in (
+                    self._infer_wrapper_expr_signedness(operand, parameters)
+                    for operand in expr.operands
+                )
+                if value is not None
+            }
+            if len(operand_signedness) == 1:
+                return operand_signedness.pop()
+
+        return None
 
     def _extract_wrapper_body_statements(self, c_text: str) -> Optional[List[str]]:
         body_lines = self._extract_structured_wrapper_body_lines(c_text)
@@ -1956,6 +2037,10 @@ class ReturnAnalyzer:
             line = re.sub(r"/\*.*?\*/", "", raw_line)
             line = line.split("//", 1)[0].strip()
             if not line:
+                continue
+            else_if_match = re.fullmatch(r"\}\s*else\s+if\s*\((.+)\)\s*\{", line)
+            if else_if_match:
+                normalized.extend(["}", f"else if ({else_if_match.group(1).strip()}) {{"])
                 continue
             if re.fullmatch(r"\}\s*else\s*\{", line):
                 normalized.extend(["}", "else {"])
@@ -3528,6 +3613,7 @@ class ReturnAnalyzer:
             callee_tracker.refine_branch_conditions(
                 call_resolver=self._make_call_resolver(active_functions | {function_name}, callee),
                 parameters=callee_parameters,
+                resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=image_base,
             )
@@ -4994,6 +5080,7 @@ class ReturnAnalyzer:
             call_resolver=self._make_call_resolver(active_functions or set(), current_function),
             effect_summary=self._current_effect_summary,
             parameters=self._current_parameters,
+            resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
         )
@@ -5070,6 +5157,7 @@ class ReturnAnalyzer:
                 call_resolver=self._make_call_resolver(active_functions or set(), current_function),
                 effect_summary=self._current_effect_summary,
                 parameters=self._current_parameters,
+                resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
             )
@@ -5099,6 +5187,7 @@ class ReturnAnalyzer:
                 call_resolver=self._make_call_resolver(active_functions or set(), current_function),
                 effect_summary=self._current_effect_summary,
                 parameters=self._current_parameters,
+                resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
             )

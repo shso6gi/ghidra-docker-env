@@ -145,6 +145,7 @@ class ConditionTracker:
         self,
         call_resolver=None,
         parameters: Optional[List[Dict[str, Any]]] = None,
+        resolve_callee_parameters=None,
         effect_summary=None,
         read_memory_value=None,
         image_base: Optional[int] = None,
@@ -161,6 +162,7 @@ class ConditionTracker:
             call_resolver=call_resolver,
             effect_summary=effect_summary,
             parameters=parameters,
+            resolve_callee_parameters=resolve_callee_parameters,
             read_memory_value=read_memory_value,
             image_base=image_base,
         )

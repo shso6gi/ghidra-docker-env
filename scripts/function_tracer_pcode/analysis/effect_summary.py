@@ -421,6 +421,13 @@ def _recover_call_argument_expressions(
     if not callee_parameters:
         return list(explicit_args)
 
+    explicit_args = _select_aligned_explicit_call_arguments(
+        call_op,
+        tracer,
+        caller_parameters,
+        callee_parameters,
+        explicit_args,
+    )
     recovered_args: List[Expression] = []
     for index, callee_param in enumerate(callee_parameters):
         explicit = explicit_args[index] if index < len(explicit_args) else None
@@ -467,10 +474,231 @@ def _recover_call_argument_expressions(
             )
         elif explicit is not None:
             recovered_args.append(explicit)
-
-    for index in range(len(recovered_args), len(explicit_args)):
-        recovered_args.append(explicit_args[index])
     return recovered_args
+
+
+def _select_aligned_explicit_call_arguments(
+    call_op,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> List[Expression]:
+    explicit = list(explicit_args)
+    if len(explicit) <= len(callee_parameters):
+        return explicit
+
+    preferred_args = [
+        _recover_preferred_call_argument_expression(
+            call_op,
+            tracer,
+            caller_parameters,
+            callee_param,
+            index,
+        )
+        for index, callee_param in enumerate(callee_parameters)
+    ]
+
+    total_explicit = len(explicit)
+    total_params = len(callee_parameters)
+    best_scores: Dict[Tuple[int, int], int] = {}
+    best_paths: Dict[Tuple[int, int], Tuple[int, ...]] = {}
+
+    def solve(explicit_index: int, param_index: int) -> int:
+        key = (explicit_index, param_index)
+        if key in best_scores:
+            return best_scores[key]
+
+        remaining_explicit = total_explicit - explicit_index
+        remaining_params = total_params - param_index
+        if remaining_explicit < remaining_params:
+            best_scores[key] = -10**9
+            best_paths[key] = ()
+            return best_scores[key]
+        if param_index >= total_params:
+            skip_score = -2 * remaining_explicit
+            best_scores[key] = skip_score
+            best_paths[key] = ()
+            return skip_score
+        if explicit_index >= total_explicit:
+            best_scores[key] = -10**9
+            best_paths[key] = ()
+            return best_scores[key]
+
+        skip_penalty = -1 if param_index == 0 else -6
+        skip_score = skip_penalty + solve(explicit_index + 1, param_index)
+        take_tail_score = solve(explicit_index + 1, param_index + 1)
+        if take_tail_score <= -10**8:
+            take_score = take_tail_score
+        else:
+            take_score = _score_call_argument_alignment(
+                explicit[explicit_index],
+                caller_parameters,
+                callee_parameters[param_index],
+                preferred_args[param_index],
+                explicit_index,
+                param_index,
+                total_explicit,
+                total_params,
+            ) + take_tail_score
+
+        if take_score > skip_score:
+            best_scores[key] = take_score
+            best_paths[key] = (explicit_index,) + best_paths.get(
+                (explicit_index + 1, param_index + 1),
+                (),
+            )
+        else:
+            best_scores[key] = skip_score
+            best_paths[key] = best_paths.get((explicit_index + 1, param_index), ())
+        return best_scores[key]
+
+    solve(0, 0)
+    selected_indices = list(best_paths.get((0, 0), ()))
+    if len(selected_indices) != total_params:
+        return explicit[:total_params]
+    return [explicit[index] for index in selected_indices]
+
+
+def _recover_preferred_call_argument_expression(
+    call_op,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_param: Dict,
+    index: int,
+) -> Optional[Expression]:
+    preferred = _recover_call_argument_from_storage(
+        call_op,
+        tracer,
+        caller_parameters,
+        callee_param,
+    )
+    if preferred is None:
+        preferred = _parameter_expression_from_matching_storage(
+            callee_param,
+            caller_parameters,
+            size=callee_param.get("size"),
+        )
+    if preferred is None and index < len(caller_parameters):
+        caller_param = caller_parameters[index]
+        caller_storage = _coerce_storage_info(caller_param.get("storage"))
+        callee_storage = _coerce_storage_info(callee_param.get("storage"))
+        if (
+            caller_storage is not None
+            and callee_storage is not None
+            and _storage_infos_match(caller_storage, callee_storage)
+        ):
+            preferred = _parameter_expression_from_descriptor(
+                caller_param,
+                size=callee_param.get("size"),
+            )
+    if preferred is None:
+        return None
+    return _normalize_call_argument_expression(preferred, index, caller_parameters)
+
+
+def _score_call_argument_alignment(
+    expr: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    callee_param: Optional[Dict],
+    preferred: Optional[Expression],
+    explicit_index: int,
+    param_index: int,
+    total_explicit: int,
+    total_params: int,
+) -> int:
+    if expr is None:
+        return -10**6
+
+    score = _call_argument_semantic_rank(expr, caller_parameters, callee_param) * 5
+    score += _call_argument_position_bias(
+        explicit_index,
+        param_index,
+        total_explicit,
+        total_params,
+    )
+    expr_name = _resolve_parameter_name(expr, caller_parameters)
+    preferred_name = _resolve_parameter_name(preferred, caller_parameters) if preferred is not None else None
+
+    if preferred is not None:
+        if _expressions_equivalent(expr, preferred):
+            score += 100
+        elif expr_name is not None and expr_name == preferred_name:
+            score += 85
+        else:
+            expr_size = max(1, int(expr.size or (callee_param or {}).get("size") or 8))
+            preferred_size = max(1, int(preferred.size or (callee_param or {}).get("size") or 8))
+            expr_location = canonicalize_location(expr, caller_parameters, size=expr_size)
+            preferred_location = canonicalize_location(preferred, caller_parameters, size=preferred_size)
+            if expr_location is not None and expr_location == preferred_location:
+                score += 70
+
+    if expr_name is not None:
+        score += 15
+        caller_param = next(
+            (param for param in caller_parameters if param.get("name") == expr_name),
+            None,
+        )
+        if caller_param is not None and callee_param is not None:
+            caller_storage = _coerce_storage_info(caller_param.get("storage"))
+            callee_storage = _coerce_storage_info(callee_param.get("storage"))
+            if (
+                caller_storage is not None
+                and callee_storage is not None
+                and _storage_infos_match(caller_storage, callee_storage)
+            ):
+                score += 45
+            try:
+                if int(caller_param.get("index", -1)) == int(callee_param.get("index", -2)):
+                    score += 10
+            except Exception:
+                pass
+    elif expr.expr_type == ExpressionType.CONSTANT:
+        if _parameter_descriptor_looks_pointer(callee_param):
+            try:
+                score += 10 if int(expr.value) == 0 else -5
+            except Exception:
+                score += 0
+        else:
+            score += 12
+    elif expr.expr_type == ExpressionType.PHI:
+        score += 16
+    elif expr.expr_type == ExpressionType.CALL:
+        score += 12
+    elif expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.MEMORY}:
+        score += 5
+
+    try:
+        callee_size = int((callee_param or {}).get("size") or 0)
+    except Exception:
+        callee_size = 0
+    try:
+        expr_size = int(expr.size or 0)
+    except Exception:
+        expr_size = 0
+    if callee_size > 0 and expr_size == callee_size:
+        score += 2
+
+    return score
+
+
+def _call_argument_position_bias(
+    explicit_index: int,
+    param_index: int,
+    total_explicit: int,
+    total_params: int,
+) -> int:
+    extra_prefix = total_explicit - total_params
+    if extra_prefix <= 0:
+        return 0
+
+    expected_index = extra_prefix + param_index
+    delta = explicit_index - expected_index
+    if delta == 0:
+        return 90
+    if delta < 0:
+        return -35 * abs(delta)
+    return -18 * delta
 
 
 def _should_preserve_explicit_indirect_target_argument(
@@ -875,8 +1103,23 @@ def _resolve_call_argument_expression(
     depth: int = 0,
     seen: Optional[Set[int]] = None,
 ) -> Expression:
+    try:
+        def_op = varnode.getDef()
+    except Exception:
+        def_op = None
+
     expr = tracer.trace_varnode(varnode, use_cache=False)
-    if canonicalize_param_location(expr, parameters, size=max(1, getattr(varnode, "getSize", lambda: 0)())) is not None:
+    if expr.expr_type == ExpressionType.PARAMETER:
+        return expr
+    if (
+        def_op is None
+        and canonicalize_param_location(
+            expr,
+            parameters,
+            size=max(1, getattr(varnode, "getSize", lambda: 0)()),
+        )
+        is not None
+    ):
         return expr
 
     recovered = _recover_parameter_expression_from_varnode(
@@ -1234,8 +1477,18 @@ def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dic
         high_var = varnode.getHigh()
     except Exception:
         high_var = None
+    try:
+        def_op = varnode.getDef()
+    except Exception:
+        def_op = None
 
     storage_info = tracer._get_storage_info_from_varnode(varnode)
+
+    # Defined varnodes can reuse a parameter-like HighSymbol after register allocation.
+    # Recovering passthrough parameters is handled by the recursive caller, so avoid
+    # directly relabeling call-defined temporaries as live-in parameters here.
+    if def_op is not None:
+        return None
 
     if high_var is not None:
         symbol = high_var.getSymbol()

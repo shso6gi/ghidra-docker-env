@@ -114,6 +114,7 @@ def test_return_analyzer_resolves_call_summary_with_argument_substitution():
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "(arg0 + 2)"
     assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 != 0)"]
+    assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 != 0)"]
 
 
 def test_return_analyzer_allows_safe_call_summary_despite_incomplete_control_flow():
@@ -155,7 +156,27 @@ def test_return_analyzer_allows_safe_call_summary_despite_incomplete_control_flo
     assert expanded is not None
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "(arg0 + 2)"
-    assert [cond.to_string() for cond in expanded[0].conditions] == ["(arg0 != 0)"]
+
+
+def test_return_analyzer_accepts_pure_passthrough_ops_after_terminal_call():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    class _FakeOp:
+        def __init__(self, mnemonic):
+            self._mnemonic = mnemonic
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+    call_op = _FakeOp("CALL")
+    copy_op = _FakeOp("COPY")
+    subpiece_op = _FakeOp("SUBPIECE")
+    return_op = _FakeOp("RETURN")
+    block_info = Mock(pcode_ops=[call_op, copy_op, subpiece_op, return_op])
+
+    terminal = analyzer._find_terminal_call_on_block_path([block_info], return_op)
+
+    assert terminal is call_op
 
 
 def test_expression_expander_inlines_direct_call_results():
@@ -332,6 +353,232 @@ def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
     assert expanded[0].value.operator == "SUBPIECE"
     assert expanded[0].value.size == 4
     assert expanded[0].value.operands[0].to_string() == "(arg0 + 1)"
+
+
+def test_expression_expander_recovers_callee_aligned_call_arguments_before_resolution():
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return "ram"
+
+    class _FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = _FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class _FakeVarnode:
+        def __init__(self, name, size=4):
+            self.name = name
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class _FakeOutput:
+        def __init__(self, size):
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class _FakeCallOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+            self._output = _FakeOutput(4)
+            self._seqnum = _FakeSeqnum(0x401020, 10)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    target_varnode = _FakeVarnode("callee_addr", size=8)
+    hidden_varnode = _FakeVarnode("hidden", size=4)
+    lhs_varnode = _FakeVarnode("lhs", size=4)
+    rhs_varnode = _FakeVarnode("rhs", size=4)
+    bias_varnode = _FakeVarnode("bias", size=4)
+    call_op = _FakeCallOp([target_varnode, hidden_varnode, lhs_varnode, rhs_varnode, bias_varnode])
+
+    class _FakeTracer:
+        debug = False
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            if varnode is target_varnode:
+                return Expression.constant(0x401000, 8)
+            raise AssertionError(f"unexpected direct trace: {varnode}")
+
+        def emit_unknown_event(self, **kwargs):
+            raise AssertionError(f"call should have been resolved: {kwargs}")
+
+        def _trace_pcode_op(self, *_args, **_kwargs):
+            raise AssertionError("recursive tracing fallback should not run")
+
+        def get_all_pcode_ops(self):
+            return [call_op]
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    captured = {}
+
+    def _resolve_call(function_name, args):
+        captured["target"] = function_name
+        captured["args"] = list(args)
+        return [ExpandedValue(Expression.constant(7, 4), [])]
+
+    expander = ExpressionExpander(
+        _FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        call_resolver=_resolve_call,
+        parameters=[
+            {
+                "name": "param_1",
+                "index": 0,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a0",
+                    "base_register_name": "a0",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+            {
+                "name": "param_2",
+                "index": 1,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a1",
+                    "base_register_name": "a1",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+            {
+                "name": "param_3",
+                "index": 2,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a2",
+                    "base_register_name": "a2",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+        ],
+        resolve_callee_parameters=lambda _name: [
+            {
+                "name": "lhs",
+                "index": 0,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a0",
+                    "base_register_name": "a0",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+            {
+                "name": "rhs",
+                "index": 1,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a1",
+                    "base_register_name": "a1",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+            {
+                "name": "bias",
+                "index": 2,
+                "size": 4,
+                "storage": {
+                    "is_register": True,
+                    "register_name": "a2",
+                    "base_register_name": "a2",
+                    "bit_offset_in_base": 0,
+                    "size_bits": 32,
+                    "base_register_size_bits": 32,
+                    "size": 4,
+                },
+            },
+        ],
+    )
+    expander._expand_input_varnode = Mock(
+        side_effect=lambda varnode, _conds, _depth: {
+            hidden_varnode: [
+                ExpandedValue(
+                    Expression.binary_op(
+                        "INT_SUB",
+                        _param_expr("param_1", 0, size=4),
+                        _param_expr("param_2", 1, size=4),
+                    ),
+                    [],
+                )
+            ],
+            lhs_varnode: [ExpandedValue(_param_expr("param_1", 0, size=4), [])],
+            rhs_varnode: [ExpandedValue(_param_expr("param_2", 1, size=4), [])],
+            bias_varnode: [ExpandedValue(Expression.constant(1, 4), [])],
+        }[varnode]
+    )
+
+    expanded = expander._expand_call_operation(
+        call_op,
+        [],
+        depth=0,
+        output_size=4,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "7"
+    assert captured["target"] == "callee"
+    assert [arg.to_string() for arg in captured["args"]] == ["param_1", "param_2", "1"]
 
 
 def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_table():
@@ -2008,6 +2255,105 @@ def test_return_analyzer_recovers_branching_call_wrapper_from_decompiler_text():
     ) == "(param_1 + 10)"
 
 
+def test_return_analyzer_recovers_else_if_call_wrapper_from_decompiler_text():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_branch_chain",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_2", "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "param_3", "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("void"),
+                conditions=[
+                    _cond_eq(
+                        Expression.binary_op("INT_LESS", _param_expr("param_2", 1, 4), _param_expr("param_1", 0, 4)),
+                        Expression.constant(0, 1),
+                    )
+                ],
+                branch_index=0,
+            )
+        ],
+        return_type="void",
+    )
+
+    c_text = """void fc_branch_chain(int param_1,int param_2,int param_3)
+{
+  int local_4;
+  if (param_2 < param_1) {
+    local_4 = fc_wrap_add_then_bias(param_1,param_2,1);
+  }
+  else if (param_3 < 0) {
+    local_4 = fc_wrap_scaled_delta(param_2,param_1);
+  }
+  else {
+    local_4 = fc_bias(param_3,0xfffffffd);
+  }
+  if (local_4 < 0x15) {
+    fc_sub(local_4,7);
+  }
+  else {
+    fc_scale(local_4,2);
+  }
+  return;
+}
+"""
+
+    def _resolve_call(function_name, args, active_functions, current_function=None):
+        if function_name == "fc_wrap_add_then_bias":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", Expression.binary_op("INT_ADD", args[0], args[1]), args[2]), [])]
+        if function_name == "fc_wrap_scaled_delta":
+            return [ExpandedValue(Expression.binary_op("INT_MULT", Expression.binary_op("INT_SUB", args[0], args[1]), Expression.constant(3, 4)), [])]
+        if function_name == "fc_bias":
+            return [ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])]
+        if function_name == "fc_sub":
+            return [ExpandedValue(Expression.binary_op("INT_SUB", args[0], args[1]), [])]
+        if function_name == "fc_scale":
+            return [ExpandedValue(Expression.binary_op("INT_MULT", args[0], args[1]), [])]
+        raise AssertionError(f"unexpected callee: {function_name}")
+
+    with patch.object(analyzer, "_get_decompiled_c_text", return_value=c_text):
+        with patch.object(analyzer, "_resolve_call_expansions", side_effect=_resolve_call):
+            recovered = analyzer._recover_call_wrapper_returns_from_decompiler(
+                Mock(),
+                analysis,
+                Mock(),
+                set(),
+            )
+
+    assert recovered is not None
+    values = {ret.value.to_string() for ret in recovered}
+    assert any("(param_1 + param_2)" in value and "- 7" in value for value in values)
+    assert any("(param_2 - param_1)" in value and "* 3" in value for value in values)
+    assert any("param_3" in value and ("4294967293" in value or "(-3)" in value) for value in values)
+
+
+def test_return_analyzer_uses_signed_compare_for_arithmetic_expr_built_from_signed_params():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    parameters = [
+        {"name": "param_1", "size": 4, "data_type": "int", "is_signed": True},
+        {"name": "param_2", "size": 4, "data_type": "int", "is_signed": True},
+    ]
+    expanded_local = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", _param_expr("param_1", 0, 4), _param_expr("param_2", 1, 4)),
+        Expression.constant(1, 4),
+    )
+
+    compare_expr = analyzer._parse_wrapper_condition_expr(
+        "21 <= local_24",
+        parameters,
+        {"local_24": expanded_local},
+    )
+
+    assert compare_expr is not None
+    assert compare_expr.operator == "INT_SLESSEQUAL"
+
+
 def test_return_analyzer_recovers_nested_dispatch_wrapper_from_decompiler_text():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     analysis = FunctionReturnAnalysis(
@@ -2744,6 +3090,143 @@ def test_return_analyzer_augments_wrapper_call_with_implicit_passthrough_registe
         "param_3",
     ]
     assert expanded[0].value.to_string() == "0"
+
+
+def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
+    parent = _FakeFunction("parent", 0x401000)
+    child = _FakeFunction("child", 0x402000)
+    analyzer = ReturnAnalyzer(program=_FakeProgram([parent, child]), debug=False)
+
+    class _FakeHighFunction:
+        def __init__(self, name: str):
+            self.name = name
+
+    class _FakeResults:
+        def __init__(self, function_name: str):
+            self._high_function = _FakeHighFunction(function_name)
+
+        def decompileCompleted(self):
+            return True
+
+        def getHighFunction(self):
+            return self._high_function
+
+    class _FakeDecompiler:
+        def decompileFunction(self, function, _timeout, _monitor):
+            return _FakeResults(function.getName())
+
+    class _FakeUnknownTracker:
+        def __init__(self):
+            self.events = []
+
+        def get_summary(self):
+            return ""
+
+        def filter_phi_related(self):
+            return []
+
+    class _FakeTracer:
+        def __init__(self, _program, _high_function, debug=False):
+            self.debug = debug
+            self.unknown_tracker = _FakeUnknownTracker()
+            self.phi_handler = None
+
+        def find_return_ops(self):
+            return []
+
+    class _FakeConditionTracker:
+        def __init__(self, _tracer):
+            pass
+
+        def build(self):
+            return None
+
+        def refine_branch_conditions(self, **_kwargs):
+            return 0
+
+    class _FakePhiHandler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    observed = {}
+
+    def _collect_parameters(high_function):
+        if high_function.name == "parent":
+            return [
+                {"name": "param_1", "index": 0, "size": 4},
+                {"name": "param_2", "index": 1, "size": 4},
+                {"name": "param_3", "index": 2, "size": 4},
+            ]
+        return [
+            {"name": "param_1", "index": 0, "size": 4},
+            {"name": "param_2", "index": 1, "size": 4},
+        ]
+
+    def _build_effect_summary(function, _high_function, _tracer, _condition_tracker, _parameters, active_functions):
+        if function.getName() == "parent":
+            child_analysis = analyzer.analyze_function(child, active_functions=active_functions)
+            assert child_analysis is not None
+            observed["after_child_params"] = [param["name"] for param in analyzer._current_parameters]
+            observed["after_child_effect_summary"] = analyzer._current_effect_summary
+        return Mock(synthetic_expr=None, has_unsupported_call=False)
+
+    with patch("scripts.function_tracer_pcode.analysis.analyzer.PcodeTracer", _FakeTracer), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+        _FakeConditionTracker,
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.phi_resolver.PhiHandler",
+        _FakePhiHandler,
+    ), patch.object(
+        analyzer,
+        "_get_decompiler",
+        return_value=_FakeDecompiler(),
+    ), patch.object(
+        analyzer,
+        "_collect_parameters",
+        side_effect=_collect_parameters,
+    ), patch.object(
+        analyzer,
+        "_augment_parameters_with_implicit_passthrough",
+        side_effect=lambda parameters, *_args, **_kwargs: parameters,
+    ), patch.object(
+        analyzer,
+        "_build_effect_summary",
+        side_effect=_build_effect_summary,
+    ), patch.object(
+        analyzer,
+        "_get_return_type",
+        return_value="int",
+    ), patch.object(
+        analyzer,
+        "_detect_signedness",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_recover_switch_like_returns_from_decompiler",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_recover_call_wrapper_returns",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_synchronize_parameters_with_referenced_parameter_expressions",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_mark_incomplete_control_flow",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_dump_return_infos",
+        return_value=None,
+    ):
+        analysis = analyzer.analyze_function(parent)
+
+    assert analysis is not None
+    assert [param["name"] for param in analysis.parameters] == ["param_1", "param_2", "param_3"]
+    assert observed["after_child_params"] == ["param_1", "param_2", "param_3"]
+    assert observed["after_child_effect_summary"] is None
 
 
 def test_return_analyzer_augments_current_parameters_with_implicit_passthrough_registers():

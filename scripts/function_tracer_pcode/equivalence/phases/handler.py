@@ -226,7 +226,8 @@ class PhaseHandler:
     
     def should_fix_return_type(
         self,
-        analysis: Optional[FunctionReturnAnalysis]
+        analysis: Optional[FunctionReturnAnalysis],
+        counterpart_analysis: Optional[FunctionReturnAnalysis] = None,
     ) -> bool:
         """戻り値の型が修正対象かチェック（パターンマッチ）"""
         if analysis is None or analysis.return_type is None:
@@ -244,8 +245,116 @@ class PhaseHandler:
                     f"Return type '{analysis.return_type}' matches pattern '{pattern}'"
                 )
                 return True
+
+        suspicious_override = self._get_suspicious_void_return_override(
+            analysis,
+            counterpart_analysis,
+        )
+        if suspicious_override is not None:
+            self._debug_print(
+                f"Return type '{analysis.return_type}' looks suspicious; "
+                f"will force '{suspicious_override}'"
+            )
+            return True
         
         return False
+
+    def _get_suspicious_void_return_override(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+        counterpart_analysis: Optional[FunctionReturnAnalysis],
+    ) -> Optional[str]:
+        if analysis is None:
+            return None
+
+        type_str = (analysis.return_type or "").lower().strip()
+        if type_str != "void":
+            return None
+
+        if len(analysis.returns) != 1:
+            return None
+
+        ret = analysis.returns[0]
+        expr_type = getattr(ret.value, "expr_type", None)
+        expr_type_name = getattr(expr_type, "name", None)
+        if expr_type_name != "UNKNOWN" or getattr(ret.value, "name", None) != "void":
+            return None
+
+        if analysis.unknown_event_count <= 0 and not analysis.unknown_event_reasons:
+            return None
+
+        if counterpart_analysis is None:
+            return None
+
+        counterpart_type = (counterpart_analysis.return_type or "").lower().strip()
+        if not counterpart_type or counterpart_type == "void":
+            return None
+
+        if counterpart_analysis.has_unresolved_return_value():
+            return None
+
+        explicit_counterpart_type = self._infer_explicit_integral_return_type_name(
+            counterpart_analysis.return_type
+        )
+        if explicit_counterpart_type is not None:
+            return explicit_counterpart_type
+
+        value_sizes = {
+            int(getattr(other_ret.value, "size", 0) or 0)
+            for other_ret in counterpart_analysis.returns
+            if getattr(getattr(other_ret.value, "expr_type", None), "name", None) != "UNKNOWN"
+            and int(getattr(other_ret.value, "size", 0) or 0) > 0
+        }
+        if len(value_sizes) == 1:
+            size = next(iter(value_sizes))
+            if size == 1:
+                return "char"
+            if size == 2:
+                return "short"
+            if size == 4:
+                return "int"
+            if size == 8:
+                return "long long"
+
+        return self.type_fixer_config.replacement_type_name
+
+    def _infer_explicit_integral_return_type_name(
+        self,
+        type_name: Optional[str],
+    ) -> Optional[str]:
+        if not type_name:
+            return None
+
+        normalized = type_name.lower().strip()
+        if not normalized or normalized == "void":
+            return None
+
+        if any(pattern in normalized for pattern in self.type_fixer_config.target_patterns):
+            return None
+
+        supported = (
+            "unsigned long long",
+            "long long",
+            "unsigned long",
+            "unsigned int",
+            "unsigned short",
+            "unsigned char",
+            "long",
+            "int",
+            "short",
+            "char",
+            "ulonglong",
+            "longlong",
+            "ulong",
+            "uint",
+            "ushort",
+            "uchar",
+        )
+        for candidate in supported:
+            if candidate in normalized:
+                return candidate
+
+        return None
     
     def should_fix_params(
         self,
@@ -477,8 +586,17 @@ class PhaseHandler:
         Returns:
             (applied, changed_binary1, changed_binary2)
         """
-        ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1)
-        ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2)
+        override_return_type1 = self._get_suspicious_void_return_override(
+            ctx.analysis1,
+            ctx.analysis2,
+        )
+        override_return_type2 = self._get_suspicious_void_return_override(
+            ctx.analysis2,
+            ctx.analysis1,
+        )
+
+        ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1, ctx.analysis2)
+        ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2, ctx.analysis1)
         
         if not (ret_needs_fix1 or ret_needs_fix2):
             return (False, False, False)
@@ -498,7 +616,8 @@ class PhaseHandler:
                 ctx.function_name1,
                 params1,
                 fix_return_type=True,
-                fix_param_types=False
+                fix_param_types=False,
+                override_return_type_name=override_return_type1,
             )
             ctx.type_fix_result.return_type_fixed_binary1 = ret_fixed1
             changed_binary1 = ret_fixed1
@@ -509,7 +628,8 @@ class PhaseHandler:
                 ctx.function_name2,
                 params2,
                 fix_return_type=True,
-                fix_param_types=False
+                fix_param_types=False,
+                override_return_type_name=override_return_type2,
             )
             ctx.type_fix_result.return_type_fixed_binary2 = ret_fixed2
             changed_binary2 = ret_fixed2

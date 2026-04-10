@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseContext
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.model import Expression, ReturnInfo
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 # ★ [P3] sys.path操作はconftest.pyで一元化されているため不要
@@ -197,6 +198,73 @@ class TestPhaseTransitionPolicy:
         assert changed1 is True, "binary1 should be changed"
         assert changed2 is False, "binary2 should NOT be changed (analysis2 is None)"
         assert ctx.type_fix_result.return_type_fixed_binary1 is True
+
+    def test_phase2_force_fixes_suspicious_void_return_when_counterpart_is_concrete(self, mock_program_x86):
+        """片側が suspicious な void return に潰れた場合は、相手側の concrete return を根拠に戻り値型修正を試す"""
+        config = TypeFixerConfig()
+        handler = PhaseHandler(config, debug=True)
+
+        concrete_analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="int",
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=Expression.constant(1, 4),
+                )
+            ],
+        )
+
+        void_analysis = create_mock_analysis(
+            function_name="test_func",
+            return_type="void",
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=Expression.unknown("void"),
+                )
+            ],
+        )
+        void_analysis.unknown_event_count = 1
+        void_analysis.unknown_event_reasons = ["call_out_of_scope"]
+
+        assert handler.should_fix_return_type(void_analysis, concrete_analysis) is True
+
+        type_fixer1 = Mock()
+        type_fixer1.fix_function_signature_by_name = Mock(return_value=(False, False))
+        type_fixer2 = Mock()
+        type_fixer2.fix_function_signature_by_name = Mock(return_value=(True, False))
+
+        ctx = PhaseContext(
+            program1=mock_program_x86,
+            program2=mock_program_x86,
+            function_name1="test_func",
+            function_name2="test_func",
+            binary1_name="binary1",
+            binary2_name="binary2",
+            decompile_timeout=60,
+            save_formula=False,
+            type_fix_result=TypeFixResult(),
+            original_signature1=None,
+            original_signature2=None,
+            analysis1=concrete_analysis,
+            analysis2=void_analysis,
+        )
+
+        applied, changed1, changed2 = handler.run_phase2_return_type_fix(
+            ctx,
+            type_fixer1,
+            type_fixer2,
+        )
+
+        assert applied is True
+        assert changed1 is False
+        assert changed2 is True
+        assert ctx.type_fix_result.return_type_fixed_binary2 is True
+        type_fixer2.fix_function_signature_by_name.assert_called_once()
+        assert type_fixer2.fix_function_signature_by_name.call_args.kwargs["override_return_type_name"] == "int"
     
     def test_phase4a_mips64_condition(self, mock_program_mips64, mock_program_x86):
         """Phase 4-A: MIPS64バイナリが含まれる場合のみ実行"""

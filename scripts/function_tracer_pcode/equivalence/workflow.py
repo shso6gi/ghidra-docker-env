@@ -422,8 +422,14 @@ def _maybe_retry_sat_return_type_fix(
     if ctx.analysis1 is None or ctx.analysis2 is None:
         return result, attempt_id, False
 
-    should_fix1 = checker.phase_handler.should_fix_return_type(ctx.analysis1)
-    should_fix2 = checker.phase_handler.should_fix_return_type(ctx.analysis2)
+    should_fix1 = checker.phase_handler.should_fix_return_type(
+        ctx.analysis1,
+        ctx.analysis2,
+    )
+    should_fix2 = checker.phase_handler.should_fix_return_type(
+        ctx.analysis2,
+        ctx.analysis1,
+    )
     if not (should_fix1 or should_fix2):
         return result, attempt_id, False
 
