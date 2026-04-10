@@ -282,6 +282,7 @@ def summarize_store_effects(
     condition_tracker,
     parameters: Sequence[Dict],
     direct_call_summary: Optional[Callable[[str, Sequence[Expression]], Optional["EffectSummary"]]] = None,
+    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
     resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
     debug: bool = False,
 ) -> EffectSummary:
@@ -299,20 +300,29 @@ def summarize_store_effects(
 
             if mnemonic == "STORE" and op.getNumInputs() >= 3:
                 addr_expr = tracer.trace_varnode(op.getInput(1), use_cache=False)
-                value_expr = tracer.trace_varnode(op.getInput(2), use_cache=False)
                 location = canonicalize_param_location(addr_expr, parameters, size=op.getInput(2).getSize())
                 if location is None:
                     continue
+                value_effects = _resolve_store_value_effects(
+                    op,
+                    tracer,
+                    parameters,
+                    direct_call_expander=direct_call_expander,
+                    resolve_callee_parameters=resolve_callee_parameters,
+                )
                 for path_conditions in path_sets:
-                    simplified = ConditionSimplifier.simplify_conditions(path_conditions)
-                    effects.append(
-                        StoreEffect(
-                            location=location,
-                            value=value_expr,
-                            conditions=simplified,
-                            order_key=_get_order_key(op),
+                    for value_expr, value_conditions in value_effects:
+                        simplified = ConditionSimplifier.simplify_conditions(
+                            list(path_conditions) + list(value_conditions)
                         )
-                    )
+                        effects.append(
+                            StoreEffect(
+                                location=location,
+                                value=value_expr,
+                                conditions=simplified,
+                                order_key=_get_order_key(op),
+                            )
+                        )
                 continue
 
             if mnemonic not in {"CALL", "CALLIND"} or direct_call_summary is None or op.getNumInputs() < 1:
@@ -346,7 +356,19 @@ def summarize_store_effects(
                     f"target={target_name} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
                 )
             callee_summary = direct_call_summary(target_name, args)
-            if callee_summary is None or not is_call_effect_summary_allowed(callee_summary):
+            if callee_summary is None:
+                has_unsupported_call = True
+                continue
+            if not callee_summary.effects:
+                if callee_summary.has_unsupported_call:
+                    has_unsupported_call = True
+                elif debug:
+                    print(
+                        "[EffectSummary] effect-free callee summary: "
+                        f"target={target_name}"
+                    )
+                continue
+            if not is_call_effect_summary_allowed(callee_summary):
                 has_unsupported_call = True
                 continue
 
@@ -409,6 +431,89 @@ def summarize_store_effects(
         synthetic_expr=synthetic_expr,
         has_unsupported_call=has_unsupported_call,
     )
+
+
+def _resolve_store_value_effects(
+    store_op,
+    tracer,
+    parameters: Sequence[Dict],
+    *,
+    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
+) -> List[Tuple[Expression, List[Condition]]]:
+    value_varnode = store_op.getInput(2)
+    resolved = _resolve_direct_call_value_effects(
+        value_varnode,
+        tracer,
+        parameters,
+        direct_call_expander=direct_call_expander,
+        resolve_callee_parameters=resolve_callee_parameters,
+    )
+    if resolved:
+        return resolved
+    return [(tracer.trace_varnode(value_varnode, use_cache=False), [])]
+
+
+def _resolve_direct_call_value_effects(
+    value_varnode,
+    tracer,
+    parameters: Sequence[Dict],
+    *,
+    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
+) -> List[Tuple[Expression, List[Condition]]]:
+    if direct_call_expander is None or value_varnode is None:
+        return []
+
+    try:
+        def_op = value_varnode.getDef()
+    except Exception:
+        def_op = None
+    if def_op is None or def_op.getMnemonic() not in {"CALL", "CALLIND"}:
+        return []
+
+    target_name = _resolve_call_target_name(tracer, def_op)
+    if not target_name:
+        return []
+
+    explicit_args = [
+        _normalize_call_argument_expression(
+            _resolve_call_argument_expression(def_op.getInput(i), tracer, parameters),
+            i - 1,
+            parameters,
+        )
+        for i in range(1, def_op.getNumInputs())
+    ]
+    callee_parameters = (
+        list(resolve_callee_parameters(target_name) or [])
+        if resolve_callee_parameters is not None
+        else []
+    )
+    args = _recover_call_argument_expressions(
+        def_op,
+        tracer,
+        parameters,
+        callee_parameters,
+        explicit_args,
+    )
+
+    expanded = direct_call_expander(target_name, args)
+    if not expanded:
+        return []
+
+    resolved: List[Tuple[Expression, List[Condition]]] = []
+    for item in expanded:
+        value = getattr(item, "value", None)
+        conditions = getattr(item, "conditions", None)
+        if not isinstance(value, Expression):
+            continue
+        if not _expression_is_call_scope_safe(value):
+            continue
+        normalized_conditions = ConditionSimplifier.simplify_conditions(list(conditions or []))
+        if ConditionSimplifier.is_contradiction(normalized_conditions):
+            continue
+        resolved.append((value, normalized_conditions))
+    return resolved
 
 
 def _recover_call_argument_expressions(
@@ -2472,7 +2577,6 @@ def normalize_post_state_expression(
 
     normalized = expr
 
-    canonicalized_changed = False
     if prefer_canonical_post_state:
         canonicalized = canonicalize_post_state_subexpressions(
             normalized,
@@ -2481,10 +2585,9 @@ def normalize_post_state_expression(
             parameters,
         )
         if canonicalized is not None:
-            canonicalized_changed = not _expressions_equivalent(normalized, canonicalized)
             normalized = canonicalized
 
-    if not canonicalized_changed:
+    if not prefer_canonical_post_state or _expressions_equivalent(normalized, expr):
         rewritten_definite = _rewrite_definite_post_state_subexpressions(
             normalized,
             return_conditions,
@@ -3569,9 +3672,10 @@ def _storage_matches_parameter(expr_storage: StorageInfo, param_storage: Storage
 
 
 def _constant_factor(expr: Expression) -> Optional[int]:
-    if expr.expr_type != ExpressionType.CONSTANT or not isinstance(expr.value, int):
+    value = _evaluate_constant_expression(expr)
+    if value is None:
         return None
-    return int(expr.value)
+    return int(value)
 
 
 def _concat(left: Expression, right: Expression) -> Expression:

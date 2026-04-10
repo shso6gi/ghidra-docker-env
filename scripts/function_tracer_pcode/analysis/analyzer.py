@@ -3,7 +3,7 @@
 
 import re
 from contextlib import contextmanager
-from typing import List, Dict, Optional, Any, Set, Tuple
+from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.storage import StorageInfo
@@ -12,6 +12,7 @@ from . import PcodeTracer
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
+    EffectSummary,
     _expressions_equivalent,
     _enumerate_constant_expression_branches,
     _resolve_call_target_name,
@@ -46,7 +47,7 @@ class ReturnAnalyzer:
         self.debug = debug
         self._decompiler = None
         self._current_parameters: List[Dict] = []
-        self._current_effect_summary = None
+        self._current_effect_summary: Optional[EffectSummary] = None
         self._effect_summary_cache: Dict[str, Any] = {}
         self._effect_summary_parameter_cache: Dict[str, List[Dict]] = {}
         self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
@@ -58,7 +59,7 @@ class ReturnAnalyzer:
             print(f"{prefix}[ReturnAnalyzer] {msg}")
 
     @contextmanager
-    def _analysis_context(self, parameters: List[Dict], effect_summary):
+    def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary]):
         """Temporarily bind per-analysis state and restore the parent context on exit."""
         previous_parameters = self._current_parameters
         previous_effect_summary = self._current_effect_summary
@@ -1129,7 +1130,7 @@ class ReturnAnalyzer:
                 if not live_states or any(last_call is None for _bindings, _conditions, last_call in live_states):
                     return index, live_states, terminated_states, False
                 terminated_states.extend(
-                    (dict(bindings), list(conditions), self._clone_expression(last_call))
+                    (dict(bindings), list(conditions), self._clone_expression(cast(Expression, last_call)))
                     for bindings, conditions, last_call in live_states
                 )
                 next_index = index + 1
@@ -2644,13 +2645,15 @@ class ReturnAnalyzer:
         if not callable(get_order_key):
             return True
 
-        call_order = get_order_key(call_op)
+        call_order = self._coerce_order_key(get_order_key(call_op))
         if call_order is None:
             return True
 
         for op in tracer.get_all_pcode_ops():
-            op_order = get_order_key(op)
-            if op_order is None or op_order >= call_order:
+            op_order = self._coerce_order_key(get_order_key(op))
+            if op_order is None:
+                continue
+            if op_order >= call_order:
                 continue
             output = getattr(op, "getOutput", lambda: None)()
             if output is None:
@@ -2701,6 +2704,18 @@ class ReturnAnalyzer:
             if same_base and overlaps:
                 return True
         return False
+
+    def _coerce_order_key(self, value: object) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        try:
+            return int(cast(Any, value))
+        except Exception:
+            return None
 
     def _synthesize_implicit_passthrough_parameter(
         self,
@@ -3655,12 +3670,14 @@ class ReturnAnalyzer:
         def resolve_callee_parameters(function_name: str):
             return self._get_freshest_callee_parameters(function_name)
 
+        current_function_name = function.getName()
         summary = summarize_store_effects(
             condition_tracker.block_by_index.values(),
             tracer,
             condition_tracker,
             parameters,
             direct_call_summary=summarize_call,
+            direct_call_expander=self._make_call_resolver(active_functions | {current_function_name}, function),
             resolve_callee_parameters=resolve_callee_parameters,
             debug=self.debug,
         )
@@ -3719,7 +3736,12 @@ class ReturnAnalyzer:
             )
             return None
 
-        param_names = [param.get("name") for param in analysis.parameters if param.get("name")]
+        param_names = [
+            name
+            for param in analysis.parameters
+            for name in [param.get("name")]
+            if isinstance(name, str) and name
+        ]
         if len(args) < len(param_names):
             self._debug_print(
                 f"Call expansion skipped for '{function_name}': "
@@ -3727,7 +3749,7 @@ class ReturnAnalyzer:
             )
             return None
 
-        replacements = dict(zip(param_names, args))
+        replacements: Dict[str, Expression] = dict(zip(param_names, args))
         allowed_names: Set[str] = set()
         for arg in args:
             allowed_names.update(arg.get_all_variables())
@@ -4018,22 +4040,23 @@ class ReturnAnalyzer:
         local_memory: Dict[Tuple[str, int], Expression] = {}
 
         for _ in range(max_steps):
+            typed_instruction = cast(Any, instruction)
             try:
-                current_offset = instruction.getAddress().getOffset()
+                current_offset = typed_instruction.getAddress().getOffset()
             except Exception:
                 current_offset = None
             if current_offset is not None:
                 if current_offset in visited_offsets:
                     self._debug_print(
-                        f"Local target resolution aborted at {instruction.getAddress()}: cycle detected"
+                        f"Local target resolution aborted at {typed_instruction.getAddress()}: cycle detected"
                     )
                     return None
                 visited_offsets.add(current_offset)
 
             try:
-                pcode_ops = instruction.getPcode()
+                pcode_ops = typed_instruction.getPcode()
             except Exception:
-                self._debug_print(f"Local target resolution failed: unable to get pcode at {instruction.getAddress()}")
+                self._debug_print(f"Local target resolution failed: unable to get pcode at {typed_instruction.getAddress()}")
                 return None
 
             branch_target = None
@@ -4049,7 +4072,7 @@ class ReturnAnalyzer:
                         current_function,
                     )
                     self._debug_print(
-                        f"Resolved local target {instruction.getAddress()} to return expression {value.to_string()}"
+                        f"Resolved local target {typed_instruction.getAddress()} to return expression {value.to_string()}"
                     )
                     return [ExpandedValue(value=value, conditions=[])]
 
@@ -4067,7 +4090,7 @@ class ReturnAnalyzer:
                     branch_target = self._resolve_local_branch_target(instruction)
                     if branch_target is None:
                         self._debug_print(
-                            f"Local target resolution aborted at {instruction.getAddress()}: "
+                            f"Local target resolution aborted at {typed_instruction.getAddress()}: "
                             "unresolved BRANCH target"
                         )
                         return None
@@ -4075,7 +4098,7 @@ class ReturnAnalyzer:
 
                 if mnemonic in {"CALL", "CALLIND", "CBRANCH", "BRANCHIND", "MULTIEQUAL"}:
                     self._debug_print(
-                        f"Local target resolution aborted at {instruction.getAddress()}: unsupported {mnemonic}"
+                        f"Local target resolution aborted at {typed_instruction.getAddress()}: unsupported {mnemonic}"
                     )
                     return None
 
@@ -4098,7 +4121,7 @@ class ReturnAnalyzer:
 
             if branch_target is not None:
                 self._debug_print(
-                    f"Local target {instruction.getAddress()} following BRANCH to {branch_target}"
+                    f"Local target {typed_instruction.getAddress()} following BRANCH to {branch_target}"
                 )
                 instruction = self._get_instruction_with_fallback(branch_target)
                 if instruction is None:
@@ -4108,7 +4131,7 @@ class ReturnAnalyzer:
                     return None
                 continue
 
-            next_instruction = instruction.getNext()
+            next_instruction = typed_instruction.getNext()
             if next_instruction is None:
                 break
             instruction = next_instruction
@@ -4365,7 +4388,8 @@ class ReturnAnalyzer:
                 return []
             get_varnodes = getattr(storage, "getVarnodes", None)
             if callable(get_varnodes):
-                return [vn for vn in get_varnodes() if vn is not None]
+                raw_varnodes = cast(Iterable[Any], get_varnodes())
+                return [vn for vn in raw_varnodes if vn is not None]
         except Exception:
             return []
         return []
@@ -4486,7 +4510,12 @@ class ReturnAnalyzer:
         if analysis.has_unknown_return() or analysis.has_overlapping_unconditional_returns():
             return False
 
-        param_names = {param.get("name") for param in analysis.parameters if param.get("name")}
+        param_names = {
+            name
+            for param in analysis.parameters
+            for name in [param.get("name")]
+            if isinstance(name, str) and name
+        }
         allowed_names: Set[str] = set()
         for arg in args:
             allowed_names.update(arg.get_all_variables())
@@ -4660,8 +4689,9 @@ class ReturnAnalyzer:
                 return None
             
             # Varnodeリストを取得
-            varnodes = storage.getVarnodes()
-            if not varnodes or len(varnodes) == 0:
+            raw_varnodes = getattr(storage, "getVarnodes", lambda: [])()
+            varnodes = [vn for vn in cast(Iterable[Any], raw_varnodes) if vn is not None]
+            if not varnodes:
                 return None
             
             first_vn = varnodes[0]
@@ -5495,13 +5525,28 @@ class ReturnAnalyzer:
                 )
 
         if has_effects:
+            assert effect_summary is not None
             canonicalized = normalize_post_state_expression(
                 normalized_value,
                 conditions,
                 effect_summary.effects,
                 self._current_parameters,
-                prefer_canonical_post_state=False,
+                prefer_canonical_post_state=True,
             )
+            if (
+                canonicalized is not None
+                and not _expressions_equivalent(canonicalized, normalized_value)
+                and self._count_memory_reads(canonicalized) > self._count_memory_reads(normalized_value)
+            ):
+                replayed = normalize_post_state_expression(
+                    canonicalized,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    prefer_canonical_post_state=False,
+                )
+                if replayed is not None:
+                    canonicalized = replayed
             if canonicalized is not None:
                 if self.debug and canonicalized is not normalized_value:
                     self._debug_print(
@@ -5511,6 +5556,16 @@ class ReturnAnalyzer:
                 normalized_value = canonicalized
 
         return normalized_value
+
+    def _count_memory_reads(self, expr: Optional[Expression]) -> int:
+        if expr is None:
+            return 0
+        count = 1 if expr.expr_type == ExpressionType.MEMORY else 0
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            return count + sum(self._count_memory_reads(value) for _cond, value in expr.value)
+        for operand in getattr(expr, "operands", []) or []:
+            count += self._count_memory_reads(operand)
+        return count
 
     def _contains_multiequal(self, varnode, depth: int = 0) -> bool:
         """Return値のチェーン内にMULTIEQUALが含まれるかチェック"""

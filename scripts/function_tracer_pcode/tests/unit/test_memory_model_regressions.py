@@ -2389,6 +2389,278 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
     assert [arg.to_string() for arg in captured["args"]] == ["param_3", "4294967293"]
 
 
+def test_summarize_store_effects_recovers_direct_call_store_values_from_call_expander():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size, def_op=None):
+            self.key = key
+            self._size = size
+            self._def_op = def_op
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return self._def_op
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+            self._seqnum = FakeSeqnum(0x401180, 2)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeStoreOp:
+        def __init__(self, call_op):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                FakeVarnode("value", 4, def_op=call_op),
+            ]
+            self._seqnum = FakeSeqnum(0x401190, 3)
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, *ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    class FakeTracer:
+        def _get_function_name(self, varnode):
+            if getattr(varnode, "key", None) == "target":
+                return "fc_add"
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "addr":
+                return Expression.parameter("slot", 0, size=8)
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 1, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 2, size=4)
+            if varnode.key == "value":
+                return Expression.unknown("call_out_of_scope:fc_add")
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeStoreOp(call_op))],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("slot", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+            _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
+        ],
+        direct_call_expander=lambda _name, args: [
+            ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
+        ],
+        resolve_callee_parameters=lambda _name: [
+            _param("a", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
+            _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+
+    assert summary.has_unsupported_call is False
+    assert len(summary.effects) == 1
+    assert summary.effects[0].location == CanonicalLocation("slot", 0, 4)
+    assert summary.effects[0].value.to_string() == "(lhs + rhs)"
+
+
+def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_summary():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size, def_op=None):
+            self.key = key
+            self._size = size
+            self._def_op = def_op
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return self._def_op
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+            self._output = FakeVarnode("ret", 4, def_op=self)
+            self._seqnum = FakeSeqnum(0x401180, 2)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeStoreOp:
+        def __init__(self, call_op):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                call_op.getOutput(),
+            ]
+            self._seqnum = FakeSeqnum(0x401190, 3)
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, *ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    class FakeTracer:
+        def _get_function_name(self, varnode):
+            if getattr(varnode, "key", None) == "target":
+                return "fc_add"
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "addr":
+                return Expression.parameter("slot", 0, size=8)
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 1, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 2, size=4)
+            if varnode.key == "ret":
+                return Expression.unknown("call_out_of_scope:fc_add")
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op, FakeStoreOp(call_op))],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("slot", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+            _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
+        ],
+        direct_call_summary=lambda _name, _args: EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[],
+            has_unsupported_call=False,
+        ),
+        direct_call_expander=lambda _name, args: [
+            ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
+        ],
+        resolve_callee_parameters=lambda _name: [
+            _param("a", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
+            _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+
+    assert summary.has_unsupported_call is False
+    assert len(summary.effects) == 1
+    assert summary.effects[0].location == CanonicalLocation("slot", 0, 4)
+    assert summary.effects[0].value.to_string() == "(lhs + rhs)"
+
+
 def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is_unresolved_phi():
     class FakeAddress:
         def __init__(self, offset):
@@ -2813,6 +3085,67 @@ def test_effect_summary_accepts_subpiece_lower_parameter_addresses():
     )
 
     assert location == CanonicalLocation("ptr", 0, 4)
+
+
+def test_effect_summary_accepts_ptradd_style_constant_offsets():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    addr_expr = Expression.binary_op(
+        "INT_ADD",
+        ptr,
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(1, 8),
+            Expression.constant(4, 8),
+        ),
+    )
+
+    location = canonicalize_param_location(
+        addr_expr,
+        [_param("ptr", size=8, is_signed=False)],
+        size=4,
+    )
+
+    assert location == CanonicalLocation("ptr", 4, 4)
+
+
+def test_normalize_post_state_expression_composes_same_location_increment_effects():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    field = Expression.binary_op(
+        "INT_ADD",
+        ptr,
+        Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(1, 8),
+            Expression.constant(4, 8),
+        ),
+    )
+    field_load = Expression.memory(field, size=4)
+    expr = Expression.binary_op("INT_ADD", field_load, Expression.constant(7, 4))
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("ptr", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(field, size=4), Expression.constant(1, 4)),
+            conditions=[],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("ptr", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(field, size=4), Expression.constant(1, 4)),
+            conditions=[],
+            order_key=2,
+        ),
+    ]
+
+    normalized = normalize_post_state_expression(
+        expr,
+        [],
+        effects,
+        [_param("ptr", size=8, is_signed=False)],
+        prefer_canonical_post_state=False,
+    )
+
+    assert normalized is not None
+    assert normalized.to_string() == "(((MEM[(ptr + 4)] + 1) + 1) + 7)"
 
 
 def test_effect_summary_keeps_load_when_multiple_writes_overlap():
@@ -4341,6 +4674,72 @@ def test_return_analyzer_prefers_definite_branch_store_value_over_canonical_post
     assert normalized_nonzero.to_string() == (
         "(((param_2 & 4294967295) ^ param_3) - (param_2 & 4294967295))"
     )
+
+
+def test_return_analyzer_canonicalizes_partially_replayed_post_state_before_reapplying_effects():
+    stats = Expression.parameter("param_1", 0, size=8)
+    a = Expression.parameter("param_2", 1, size=4)
+    b = Expression.parameter("param_3", 2, size=4)
+    delta = Expression.parameter("param_4", 3, size=4)
+    nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", stats, Expression.constant(0, 8)),
+        False,
+    )
+    count_addr = Expression.binary_op("INT_ADD", stats, Expression.constant(4, 8))
+    partially_replayed = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.binary_op("INT_ADD", a, b),
+            delta,
+        ),
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.binary_op("INT_ADD", Expression.memory(count_addr, size=4), Expression.constant(1, 4)),
+            Expression.constant(1, 4),
+        ),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3", "param_4"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op("INT_ADD", a, b),
+                conditions=[nonnull],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 4, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(count_addr, size=4), Expression.constant(1, 4)),
+                conditions=[nonnull],
+                order_key=2,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(stats, size=4), delta),
+                conditions=[nonnull],
+                order_key=3,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("param_1", 4, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(count_addr, size=4), Expression.constant(1, 4)),
+                conditions=[nonnull],
+                order_key=4,
+            ),
+        ],
+    )
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=4, index=1),
+        _param("param_3", size=4, index=2),
+        _param("param_4", size=4, index=3),
+    ]
+
+    normalized = analyzer._normalize_expanded_return_value(partially_replayed, [nonnull])
+
+    assert normalized.to_string() == "(((param_2 + param_3) + param_4) + ((MEM[(param_1 + 4)] + 1) + 1))"
 
 
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
