@@ -37,6 +37,8 @@ from ..normalize import (
     are_structurally_equivalent,
     get_structural_summary,
 )
+from ..param_semantics import infer_parameter_semantics
+from ..semantic_width import normalize_analysis_semantic_width
 from ..debug_trace import NormalizationRuleApplication
 
 
@@ -65,10 +67,32 @@ class PairwiseStrategy(CheckStrategy):
     ) -> StrategyResult:
         start_time = time.time()
 
+        hints1 = infer_parameter_semantics(analysis1)
+        hints2 = infer_parameter_semantics(analysis2)
+        analysis1 = normalize_analysis_semantic_width(
+            analysis1,
+            hints1,
+        )
+        analysis2 = normalize_analysis_semantic_width(
+            analysis2,
+            hints2,
+        )
+
+        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        analysis1 = normalize_analysis_semantic_width(
+            analysis1,
+            hints1,
+            base_ctx.get("extra_vars1", []),
+        )
+        analysis2 = normalize_analysis_semantic_width(
+            analysis2,
+            hints2,
+            base_ctx.get("extra_vars2", []),
+        )
+
         cases1 = self._extract_return_cases(analysis1)
         cases2 = self._extract_return_cases(analysis2)
 
-        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
         self._rewrite_cases_with_parameter_fragments(cases1, base_ctx.get("extra_vars1", []))
         self._rewrite_cases_with_parameter_fragments(cases2, base_ctx.get("extra_vars2", []))
         symbol_replace_fn1 = build_symbol_replacer(

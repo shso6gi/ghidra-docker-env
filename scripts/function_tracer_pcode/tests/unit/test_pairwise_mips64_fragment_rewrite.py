@@ -11,7 +11,12 @@ from scripts.function_tracer_pcode.equivalence.formula.variable import (
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.model import Condition, Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    Condition,
+    Expression,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 
 
 def _param(name: str) -> Expression:
@@ -129,3 +134,65 @@ def test_pairwise_rewrites_mips64_parameter_fragments_before_contradiction_check
         assert "in_a" not in cond.to_string()
     assert case2.conditions[0].to_string() == "(int(param_1) <= int(param_2))"
     assert case2.conditions[1].to_string() == "(int(param_3) < int(((param_2 * 3) + 1)))"
+
+
+def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="fc_widen_then_bias_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_const(0),
+                conditions=[
+                    Condition(_binary("INT_NOTEQUAL", _param("param_2"), _const(0)), negated=True)
+                ],
+            )
+        ],
+        return_type="int",
+    )
+
+    analysis2 = FunctionReturnAnalysis(
+        function_name="fc_widen_then_bias_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1002",
+                value=_const(1),
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_NOTEQUAL",
+                            _wide_param("in_a1_hi", "param_2"),
+                            _const(0, size=8),
+                        )
+                    )
+                ],
+            )
+        ],
+        return_type="long",
+    )
+
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [_fragment_info("in_a1_hi", "param_2", 1)],
+    }
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()

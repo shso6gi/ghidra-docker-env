@@ -152,3 +152,36 @@ def test_mips64_spurious_detection_uses_signed_or_guard_evidence():
     )
 
     assert constraints == {"param_1_1": ("signed", 32)}
+
+
+def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_both_types_are_long():
+    handler = MIPS64Handler(debug=True)
+
+    mips_analysis = create_mock_analysis(
+        function_name="fc_widen_then_bias_like",
+        parameters=[
+            {"name": "param_2", "data_type": "long", "size": 8, "index": 0},
+        ],
+    )
+    hinted_peer = create_mock_analysis(
+        function_name="fc_widen_then_bias_like",
+        parameters=[
+            {"name": "param_2", "data_type": "long", "size": 8, "index": 0},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    Condition(
+                        _binary("INT_NOTEQUAL", _mask32("param_2"), _const(0, 8), 1),
+                        negated=False,
+                    )
+                ],
+                value=_mask32("param_2"),
+            )
+        ],
+    )
+
+    override_map = handler.detect_param_type_mismatch(mips_analysis, hinted_peer)
+
+    assert override_map == {0: "int"}

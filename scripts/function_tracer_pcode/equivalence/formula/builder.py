@@ -13,6 +13,7 @@ from .params import (
 )
 from .returns import build_return_definition, get_return_size
 from ..param_semantics import infer_parameter_semantics
+from ..semantic_width import normalize_analysis_semantic_width
 from .types import (
     ExtraVariableInfo,
     FormulaBuildContext,
@@ -90,9 +91,21 @@ class FormulaBuilder:
         Returns:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
+        analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
+
         lines = []
         context = self._prepare_formula_context(
             analysis1, analysis2, func1_suffix, func2_suffix, emit_debug_info=True
+        )
+        render_analysis1 = normalize_analysis_semantic_width(
+            analysis1,
+            infer_parameter_semantics(analysis1),
+            context.extra_vars1,
+        )
+        render_analysis2 = normalize_analysis_semantic_width(
+            analysis2,
+            infer_parameter_semantics(analysis2),
+            context.extra_vars2,
         )
         
         # ヘッダー
@@ -115,7 +128,7 @@ class FormulaBuilder:
         lines.append(f"; Return value for {analysis1.function_name}")
         lines.append("; " + "-" * 40)
         return_var1 = f"return{func1_suffix}"
-        return_def1 = self._build_return_definition(analysis1, return_var1, all_vars1)
+        return_def1 = self._build_return_definition(render_analysis1, return_var1, all_vars1)
         lines.extend(return_def1)
         lines.append("")
         
@@ -124,7 +137,7 @@ class FormulaBuilder:
         lines.append(f"; Return value for {analysis2.function_name}")
         lines.append("; " + "-" * 40)
         return_var2 = f"return{func2_suffix}"
-        return_def2 = self._build_return_definition(analysis2, return_var2, all_vars2)
+        return_def2 = self._build_return_definition(render_analysis2, return_var2, all_vars2)
         lines.extend(return_def2)
         lines.append("")
         
@@ -223,6 +236,18 @@ class FormulaBuilder:
             constrained_fragments=constrained_fragments,
             param_fragment_constrained=param_fragment_constrained,
         )
+
+    def _normalize_analyses(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ):
+        """Apply semantic-width normalization before SMT lowering."""
+        hints1 = infer_parameter_semantics(analysis1)
+        hints2 = infer_parameter_semantics(analysis2)
+        normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
+        normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
+        return normalized1, normalized2, hints1, hints2
 
     def _build_base_header_lines(
         self,
@@ -813,6 +838,7 @@ class FormulaBuilder:
                 'return_size2': int,
             }
         """
+        analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
         context = self._prepare_formula_context(
             analysis1, analysis2, func1_suffix, func2_suffix
         )

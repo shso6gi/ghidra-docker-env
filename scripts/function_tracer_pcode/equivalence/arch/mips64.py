@@ -38,12 +38,16 @@ class MIPS64Handler:
         other_analysis: FunctionReturnAnalysis
     ) -> Dict[int, str]:
         """
-        MIPS64側とother側でパラメータ型が不一致（long vs int）の場合、
-        MIPS64側をintに上書きするマップを返す（Phase 4-A用）
-        
-        保守的な戦略: 片側がint/uint確定、もう片側がlong/ulongの場合のみ修正
+        MIPS64側とother側でパラメータ型/意味幅が不一致の場合、
+        MIPS64側を narrower な C 整数型に上書きするマップを返す（Phase 4-A用）
+
+        保守的な戦略:
+        - 片側がint/uint確定、もう片側がlong/ulongの場合のみ修正
+        - または other 側に explicit な semantic-width 証拠があり、
+          MIPS64側だけが 64bit のまま残っている場合に修正
         """
         override_map: Dict[int, str] = {}
+        other_hints = hint_objects_by_name(other_analysis)
         
         for i, (mips_param, other_param) in enumerate(
             zip(mips64_analysis.parameters, other_analysis.parameters)
@@ -62,8 +66,65 @@ class MIPS64Handler:
                     f"Param {i}: {mips_type} (MIPS64) vs {other_type} (other) "
                     f"-> override to {override_map[i]}"
                 )
+                continue
+
+            semantic_override = self._detect_semantic_width_override(
+                index=i,
+                mips_param=mips_param,
+                other_param=other_param,
+                other_hints=other_hints,
+            )
+            if semantic_override is not None:
+                override_map[i] = semantic_override
+                self._debug_print(
+                    f"Param {i}: {mips_type} (MIPS64) vs semantic hint "
+                    f"{other_hints.get(other_param.get('name', f'param_{i}'))} (other) "
+                    f"-> override to {semantic_override}"
+                )
         
         return override_map
+
+    def _detect_semantic_width_override(
+        self,
+        index: int,
+        mips_param: Dict[str, Any],
+        other_param: Dict[str, Any],
+        other_hints: Dict[str, ParameterSemanticHint],
+    ) -> Optional[str]:
+        """Use explicit cross-binary semantic-width evidence to narrow a MIPS64 param."""
+        mips_bits = self._get_param_size(mips_param) * 8
+        if mips_bits <= 32:
+            return None
+
+        other_name = other_param.get("name", f"param_{index}")
+        hint = other_hints.get(other_name)
+        if hint is None:
+            return None
+        if hint.narrow_bits >= mips_bits:
+            return None
+
+        mips_type = self._get_param_type_string(mips_param)
+        if not any(kw in mips_type for kw in ["long", "int8", "qword"]):
+            return None
+
+        override = self._type_name_for_semantic_hint(hint)
+        if override is None:
+            return None
+
+        return override
+
+    def _type_name_for_semantic_hint(
+        self,
+        hint: ParameterSemanticHint,
+    ) -> Optional[str]:
+        signed_prefix = "" if hint.signedness == "signed" else "unsigned "
+        if hint.narrow_bits == 32:
+            return f"{signed_prefix}int"
+        if hint.narrow_bits == 16:
+            return f"{signed_prefix}short"
+        if hint.narrow_bits == 8:
+            return f"{signed_prefix}char"
+        return None
     
     def _get_param_type_string(self, param: Dict[str, Any]) -> str:
         """パラメータの型文字列を取得"""
