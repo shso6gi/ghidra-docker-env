@@ -235,6 +235,150 @@ def test_simplify_conditions_keeps_only_strongest_interval_bounds():
     ]
 
 
+def test_normalize_for_contradiction_skips_full_render_for_large_expression(monkeypatch):
+    huge = _param("param_1")
+    for _ in range(64):
+        huge = Expression.binary_op("INT_ADD", huge, _const(1))
+
+    cond = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_NOTEQUAL",
+            operands=[huge, _const(0)],
+            size=1,
+        )
+    )
+
+    def _boom(_self, simplify=True):
+        raise AssertionError("to_string should not be used by contradiction normalization")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+
+    left, op, right, polarity = ConditionNormalizer.normalize_for_contradiction(cond)
+
+    assert op == "INT_EQUAL"
+    assert polarity is False
+    assert left or right
+
+
+def test_is_contradiction_skips_pairwise_check_for_duplicate_comparisons(monkeypatch):
+    duplicate_conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_SLESS",
+                operands=[_param("param_1"), _const(0)],
+                size=1,
+            ),
+            negated=True,
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_LESS",
+                operands=[Expression.binary_op("INT_ADD", _param("param_1"), _const(1)), _const(8)],
+                size=1,
+            ),
+            negated=True,
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[
+                    Expression.binary_op(
+                        "INT_SUB",
+                        Expression.binary_op(
+                            "INT_AND",
+                            Expression.binary_op("INT_ADD", _param("param_1"), _const(1)),
+                            _const(0xFFFFFFF8),
+                        ),
+                        _const(8),
+                    ),
+                    _const(0),
+                ],
+                size=1,
+            )
+        ),
+    ]
+    duplicate_conditions = duplicate_conditions + duplicate_conditions
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("comparison-only contradiction checks should not reach pairwise fallback")
+
+    monkeypatch.setattr(ConditionNormalizer, "are_contradictory", staticmethod(_boom))
+
+    assert ConditionSimplifier.is_contradiction(duplicate_conditions) is False
+
+
+def test_condition_simplifier_debug_paths_do_not_require_full_to_string(monkeypatch):
+    original_debug = ConditionSimplifier.DEBUG
+    original_limit = ConditionSimplifier._DEBUG_MESSAGE_LIMIT
+    original_counts = dict(ConditionSimplifier._debug_repeat_counts)
+    ConditionSimplifier.DEBUG = True
+    ConditionSimplifier._DEBUG_MESSAGE_LIMIT = 100
+    ConditionSimplifier._debug_repeat_counts.clear()
+    ConditionSimplifier._debug_message_count = 0
+    ConditionSimplifier._debug_suppressed = False
+
+    huge = _param("param_1")
+    for _ in range(64):
+        huge = Expression.binary_op("INT_ADD", huge, _const(1))
+
+    condition = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_NOTEQUAL",
+            operands=[huge, _const(0)],
+            size=1,
+        )
+    )
+
+    def _boom(_self, simplify=True):
+        raise AssertionError("ConditionSimplifier debug paths should not call Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+
+    try:
+        flattened = ConditionSimplifier.flatten_condition(condition)
+        assert len(flattened) == 1
+        assert ConditionSimplifier.is_contradiction([condition, condition]) is False
+    finally:
+        ConditionSimplifier.DEBUG = original_debug
+        ConditionSimplifier._DEBUG_MESSAGE_LIMIT = original_limit
+        ConditionSimplifier._debug_repeat_counts.clear()
+        ConditionSimplifier._debug_repeat_counts.update(original_counts)
+        ConditionSimplifier._debug_message_count = 0
+        ConditionSimplifier._debug_suppressed = False
+
+
+def test_condition_simplifier_debug_budget_suppresses_heavy_summaries(monkeypatch):
+    original_debug = ConditionSimplifier.DEBUG
+    original_limit = ConditionSimplifier._DEBUG_MESSAGE_LIMIT
+    ConditionSimplifier.DEBUG = True
+    ConditionSimplifier._DEBUG_MESSAGE_LIMIT = 0
+    ConditionSimplifier._debug_message_count = 0
+    ConditionSimplifier._debug_suppressed = False
+
+    huge = _param("param_1")
+    for _ in range(64):
+        huge = Expression.binary_op("INT_ADD", huge, _const(1))
+
+    def _boom(_self, simplify=True):
+        raise AssertionError("suppressed debug summaries should not call Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+
+    try:
+        summary = ConditionSimplifier._debug_condition_summary(Condition(huge))
+        assert summary == "<debug-suppressed>"
+    finally:
+        ConditionSimplifier.DEBUG = original_debug
+        ConditionSimplifier._DEBUG_MESSAGE_LIMIT = original_limit
+        ConditionSimplifier._debug_message_count = 0
+        ConditionSimplifier._debug_suppressed = False
+
+
 def test_simplify_conditions_reduces_phi_guard_under_selector_context():
     selector = Expression.binary_op("INT_SLESS", _param("param_2"), _param("param_1"))
     selector_is_zero = Expression.binary_op("INT_EQUAL", selector, _const(0))

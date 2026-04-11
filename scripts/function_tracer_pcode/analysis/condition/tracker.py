@@ -62,13 +62,29 @@ class ConditionTracker:
         self.block_by_hash: Dict[int, BasicBlockInfo] = {}
         self.block_by_index: Dict[int, BasicBlockInfo] = {}
         self.entry_block: Optional[BasicBlockInfo] = None
+        self._single_path_cache: Dict[int, List[Condition]] = {}
+        self._valid_block_paths_cache: Dict[tuple[int, int], List[tuple[list[BasicBlockInfo], list[Condition]]]] = {}
         
         self._built = False
+
+    def _clear_path_caches(self) -> None:
+        self._single_path_cache.clear()
+        self._valid_block_paths_cache.clear()
+
+    def _clone_conditions(self, conditions: List[Condition]) -> List[Condition]:
+        return list(conditions or [])
+
+    def _clone_block_paths(
+        self,
+        entries: List[tuple[list[BasicBlockInfo], list[Condition]]],
+    ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
+        return [(list(blocks), self._clone_conditions(conditions)) for blocks, conditions in entries]
 
     def build(self):
         """ブロック情報を構築。tracer.phi_handler セット後に呼び出すこと。"""
         if self._built:
             return
+        self._clear_path_caches()
         self._build_block_info()
         self._built = True
     
@@ -197,6 +213,8 @@ class ConditionTracker:
 
         if self.debug:
             self._debug_print(f"Refined {changed} branch condition(s)")
+        if changed:
+            self._clear_path_caches()
         return changed
 
     def _build_refined_branch_condition(
@@ -313,6 +331,12 @@ class ConditionTracker:
         
         if target_block.index == self.entry_block.index:
             return []
+
+        cached = self._single_path_cache.get(target_block.index)
+        if cached is not None:
+            if self.debug:
+                self._debug_print(f"get_path_conditions_to_block cache hit for block {target_block.index}:")
+            return self._clone_conditions(cached)
         
         all_paths: List[List[Condition]] = []
         self._find_paths_with_conditions(
@@ -348,13 +372,15 @@ class ConditionTracker:
             if self.debug:
                 best_conds = [ConditionSimplifier.get_simplified_condition_string(c) for c in best_path]
                 self._debug_print(f"  Selected valid path ({len(best_path)} conditions): {best_conds}", 1)
-            return best_path
+            self._single_path_cache[target_block.index] = self._clone_conditions(best_path)
+            return self._clone_conditions(best_path)
         
         # 有効なパスがない場合は最初のパスを返す（フォールバック）
         if all_paths:
             if self.debug:
                 self._debug_print(f"  WARNING: No valid paths, using first path as fallback", 1)
-            return all_paths[0]
+            self._single_path_cache[target_block.index] = self._clone_conditions(all_paths[0])
+            return self._clone_conditions(all_paths[0])
         return []
     
     def get_all_valid_paths_to_block(
@@ -397,6 +423,13 @@ class ConditionTracker:
         if target_block.index == self.entry_block.index:
             return [([self.entry_block], [])]
 
+        cache_key = (target_block.index, limit_paths)
+        cached = self._valid_block_paths_cache.get(cache_key)
+        if cached is not None:
+            if self.debug:
+                self._debug_print(f"get_all_valid_block_paths_to_block cache hit for block {target_block.index}:")
+            return self._clone_block_paths(cached)
+
         all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]] = []
         self._find_block_paths_with_conditions(
             current=self.entry_block,
@@ -406,11 +439,13 @@ class ConditionTracker:
             all_paths=all_paths,
             visited=set(),
         )
-        return self._filter_valid_block_paths(
+        filtered = self._filter_valid_block_paths(
             all_paths,
             target_index=target_block.index,
             limit_paths=limit_paths,
         )
+        self._valid_block_paths_cache[cache_key] = self._clone_block_paths(filtered)
+        return self._clone_block_paths(filtered)
     
     def _find_paths_with_conditions(
         self,

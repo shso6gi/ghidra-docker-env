@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .._pyghidra_support import load_pyghidra
 from ...config import GHIDRA_INSTALL_DIR
 from ..commands.analyze import analyze_and_output, get_target_functions, list_all_functions
 from ..commands.equivalence import run_equivalence_check
@@ -12,7 +13,7 @@ from ..commands.equivalence import run_equivalence_check
 
 def run_pyghidra_mode(args):
     """PyGhidra モードで実行する。"""
-    import pyghidra
+    pyghidra = load_pyghidra()
 
     if args.equiv:
         run_equivalence_check(args)

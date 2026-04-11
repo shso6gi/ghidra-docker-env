@@ -54,6 +54,9 @@ class PcodeTracer:
         self.program = program
         self.high_function = high_function
         self.debug = debug
+        self._debug_message_limit = 4000
+        self._debug_message_count = 0
+        self._debug_suppressed = False
         
         # トレース済みのキャッシュ（一意なキー -> Expression）
         self._trace_cache: Dict[str, Expression] = {}
@@ -70,6 +73,23 @@ class PcodeTracer:
         self.phi_handler: Optional['PhiHandler'] = None
         
         self._collect_debug_info()
+
+    def _debug_print(self, msg: str) -> None:
+        if not self.debug:
+            return
+        if self._debug_message_count >= self._debug_message_limit:
+            if not self._debug_suppressed:
+                print(
+                    f"[PcodeTracer] debug output suppressed after "
+                    f"{self._debug_message_limit} messages"
+                )
+                self._debug_suppressed = True
+            return
+        self._debug_message_count += 1
+        print(msg)
+
+    def _debug_available(self) -> bool:
+        return self.debug and self._debug_message_count < self._debug_message_limit
     
     def _get_op_key(self, pcode_op) -> str:
         """PcodeOpの一意なキーを生成（同一seqnumの異なるopを区別）"""
@@ -130,24 +150,30 @@ class PcodeTracer:
     def _collect_debug_info(self):
         """デバッグ用の情報を収集"""
         if self.debug:
-            print("\n" + "=" * 60)
-            print("DEBUG: PcodeTracer Initialization")
-            print("=" * 60)
+            self._debug_print("\n" + "=" * 60)
+            self._debug_print("DEBUG: PcodeTracer Initialization")
+            self._debug_print("=" * 60)
             
             local_map = self.high_function.getLocalSymbolMap()
             if local_map:
-                print("\nLocal Symbols:")
+                self._debug_print("\nLocal Symbols:")
                 for sym in local_map.getSymbols():
-                    print(f"  - {sym.getName()}: type={sym.getDataType()}, "
-                          f"isParam={sym.isParameter()}, storage={sym.getStorage()}")
+                    if not self._debug_available():
+                        break
+                    self._debug_print(
+                        f"  - {sym.getName()}: type={sym.getDataType()}, "
+                        f"isParam={sym.isParameter()}, storage={sym.getStorage()}"
+                    )
                     
                     high_var = sym.getHighVariable()
                     if high_var:
                         rep = high_var.getRepresentative()
                         if rep:
-                            print(f"    Representative Varnode: {rep}, "
-                                  f"addr={rep.getAddress()}, size={rep.getSize()}")
-            print("=" * 60 + "\n")
+                            self._debug_print(
+                                f"    Representative Varnode: {rep}, "
+                                f"addr={rep.getAddress()}, size={rep.getSize()}"
+                            )
+            self._debug_print("=" * 60 + "\n")
     
     def clear_cache(self):
         """キャッシュをクリア"""
@@ -166,7 +192,7 @@ class PcodeTracer:
         )
         self.unknown_tracker.record(event)
         if self.debug:
-            print(event.format_detail(indent=depth))
+            self._debug_print(event.format_detail(indent=depth))
     
     def _get_storage_info_from_varnode(self, varnode) -> Optional[StorageInfo]:
         """VarnodeからStorageInfoを作成"""
@@ -215,7 +241,7 @@ class PcodeTracer:
             return storage_info
         except Exception as e:
             if self.debug:
-                print(f"  [Warning] Failed to get storage info: {e}")
+                self._debug_print(f"  [Warning] Failed to get storage info: {e}")
             return None
     
     def trace_varnode(self, varnode, depth: int = 0, use_cache: bool = True) -> Expression:
@@ -240,50 +266,52 @@ class PcodeTracer:
                                     depth=depth, note=f"Exceeded {MAX_TRACE_DEPTH}")
             return Expression.unknown("max_depth_exceeded")
         
-        if self.debug:
+        if self._debug_available():
             self._debug_print_varnode(varnode, depth)
         
         return self._trace_varnode_internal(varnode, depth, use_cache)
     
     def _debug_print_varnode(self, varnode, depth: int):
         """Varnodeのデバッグ情報を出力"""
+        if not self._debug_available():
+            return
         indent = "  " * depth
-        print(f"\n{indent}DEBUG trace_varnode (depth={depth}):")
-        print(f"{indent}  varnode: {varnode}")
-        print(f"{indent}  address: {varnode.getAddress()}")
-        print(f"{indent}  size: {varnode.getSize()}")
-        print(f"{indent}  isConstant: {varnode.isConstant()}")
-        print(f"{indent}  isRegister: {varnode.isRegister()}")
-        print(f"{indent}  isUnique: {varnode.isUnique()}")
-        print(f"{indent}  isAddress: {varnode.isAddress()}")
-        print(f"{indent}  isInput: {varnode.isInput()}")
+        self._debug_print(f"\n{indent}DEBUG trace_varnode (depth={depth}):")
+        self._debug_print(f"{indent}  varnode: {varnode}")
+        self._debug_print(f"{indent}  address: {varnode.getAddress()}")
+        self._debug_print(f"{indent}  size: {varnode.getSize()}")
+        self._debug_print(f"{indent}  isConstant: {varnode.isConstant()}")
+        self._debug_print(f"{indent}  isRegister: {varnode.isRegister()}")
+        self._debug_print(f"{indent}  isUnique: {varnode.isUnique()}")
+        self._debug_print(f"{indent}  isAddress: {varnode.isAddress()}")
+        self._debug_print(f"{indent}  isInput: {varnode.isInput()}")
         
         def_op = varnode.getDef()
-        print(f"{indent}  getDef(): {def_op}")
+        self._debug_print(f"{indent}  getDef(): {def_op}")
         if def_op:
-            print(f"{indent}    def mnemonic: {def_op.getMnemonic()}")
-            print(f"{indent}    def seqnum: {def_op.getSeqnum()}")
+            self._debug_print(f"{indent}    def mnemonic: {def_op.getMnemonic()}")
+            self._debug_print(f"{indent}    def seqnum: {def_op.getSeqnum()}")
         
         high_var = varnode.getHigh()
-        print(f"{indent}  getHigh(): {high_var}")
+        self._debug_print(f"{indent}  getHigh(): {high_var}")
         if high_var:
-            print(f"{indent}    high name: {high_var.getName()}")
-            print(f"{indent}    high type: {type(high_var).__name__}")
+            self._debug_print(f"{indent}    high name: {high_var.getName()}")
+            self._debug_print(f"{indent}    high type: {type(high_var).__name__}")
             symbol = high_var.getSymbol()
-            print(f"{indent}    symbol: {symbol}")
+            self._debug_print(f"{indent}    symbol: {symbol}")
             if symbol:
-                print(f"{indent}      symbol name: {symbol.getName()}")
-                print(f"{indent}      isParameter: {symbol.isParameter()}")
+                self._debug_print(f"{indent}      symbol name: {symbol.getName()}")
+                self._debug_print(f"{indent}      isParameter: {symbol.isParameter()}")
         
         # ストレージ情報を出力
         storage_info = self._get_storage_info_from_varnode(varnode)
         if storage_info:
-            print(f"{indent}  storage_info:")
-            print(f"{indent}    is_register: {storage_info.is_register}")
-            print(f"{indent}    register_name: {storage_info.register_name}")
-            print(f"{indent}    base_register_name: {storage_info.base_register_name}")
-            print(f"{indent}    bit_offset_in_base: {storage_info.bit_offset_in_base}")
-            print(f"{indent}    size_bits: {storage_info.size_bits}")
+            self._debug_print(f"{indent}  storage_info:")
+            self._debug_print(f"{indent}    is_register: {storage_info.is_register}")
+            self._debug_print(f"{indent}    register_name: {storage_info.register_name}")
+            self._debug_print(f"{indent}    base_register_name: {storage_info.base_register_name}")
+            self._debug_print(f"{indent}    bit_offset_in_base: {storage_info.bit_offset_in_base}")
+            self._debug_print(f"{indent}    size_bits: {storage_info.size_bits}")
     
     def _trace_varnode_internal(self, varnode, depth: int, use_cache: bool = True) -> Expression:
         """Varnodeトレースの内部処理"""
@@ -291,8 +319,8 @@ class PcodeTracer:
         # 1. 定数かどうかチェック（最優先）
         if varnode.isConstant():
             value = varnode.getOffset()
-            if self.debug:
-                print(f"  -> Constant: 0x{value:x}")
+            if self._debug_available():
+                self._debug_print(f"  -> Constant: 0x{value:x}")
             return Expression.constant(value, varnode.getSize())
         
         # ストレージ情報を取得
@@ -302,13 +330,13 @@ class PcodeTracer:
         def_op = varnode.getDef()
         
         if def_op is not None:
-            if self.debug:
-                print(f"  -> Has def: {def_op.getMnemonic()}")
+            if self._debug_available():
+                self._debug_print(f"  -> Has def: {def_op.getMnemonic()}")
             return self._trace_pcode_op(def_op, depth + 1, use_cache)
         
         # 3. 定義がない場合は、入力変数
-        if self.debug:
-            print(f"  -> No def, checking high variable")
+        if self._debug_available():
+            self._debug_print("  -> No def, checking high variable")
         
         high_var = varnode.getHigh()
         if high_var:
@@ -324,8 +352,8 @@ class PcodeTracer:
                         pass
                     dtype = str(symbol.getDataType()) if symbol.getDataType() else None
                     
-                    if self.debug:
-                        print(f"  -> Parameter: {sym_name} (index={param_idx})")
+                    if self._debug_available():
+                        self._debug_print(f"  -> Parameter: {sym_name} (index={param_idx})")
                     
                     return Expression.parameter(
                         sym_name, param_idx, dtype, varnode.getSize(),
@@ -334,8 +362,8 @@ class PcodeTracer:
                 else:
                     dtype = str(symbol.getDataType()) if symbol.getDataType() else None
                     
-                    if self.debug:
-                        print(f"  -> Variable (from symbol): {sym_name}")
+                    if self._debug_available():
+                        self._debug_print(f"  -> Variable (from symbol): {sym_name}")
                     
                     return Expression.variable(
                         sym_name, dtype, varnode.getSize(),
@@ -344,8 +372,8 @@ class PcodeTracer:
             
             name = high_var.getName()
             if name and name != "UNNAMED":
-                if self.debug:
-                    print(f"  -> Variable (from high name): {name}")
+                if self._debug_available():
+                    self._debug_print(f"  -> Variable (from high name): {name}")
                 return Expression.variable(
                     name, size=varnode.getSize(),
                     storage_info=storage_info
@@ -356,10 +384,10 @@ class PcodeTracer:
             reg = self.program.getRegister(varnode.getAddress(), varnode.getSize())
             if reg:
                 reg_name = reg.getName()
-                if self.debug:
-                    print(f"  -> Register (input): {reg_name}")
-                    print(f"     isInput: {varnode.isInput()}")
-                    print(f"     storage_info: {storage_info}")  # 追加
+                if self._debug_available():
+                    self._debug_print(f"  -> Register (input): {reg_name}")
+                    self._debug_print(f"     isInput: {varnode.isInput()}")
+                    self._debug_print(f"     storage_info: {storage_info}")
                 
                 # 入力varnodeの場合は変数として扱う
                 return Expression.variable(
@@ -370,8 +398,8 @@ class PcodeTracer:
         # 5. アドレス空間の変数（メモリ）
         if varnode.isAddress():
             addr = varnode.getAddress()
-            if self.debug:
-                print(f"  -> Memory address: {addr}")
+            if self._debug_available():
+                self._debug_print(f"  -> Memory address: {addr}")
             return Expression.memory(
                 Expression.constant(addr.getOffset(), 8),
                 varnode.getSize()
@@ -380,13 +408,13 @@ class PcodeTracer:
         # 6. ユニーク変数
         if varnode.isUnique():
             offset = varnode.getOffset()
-            if self.debug:
-                print(f"  -> Unique (untraced): 0x{offset:x}")
+            if self._debug_available():
+                self._debug_print(f"  -> Unique (untraced): 0x{offset:x}")
             return Expression.unknown(f"unique_0x{offset:x}")
         
         # 7. 不明
-        if self.debug:
-            print(f"  -> Unknown")
+        if self._debug_available():
+            self._debug_print("  -> Unknown")
         
         key = VarnodeKey.from_varnode(varnode)
         return Expression.unknown(f"untraced_{key.space}_0x{key.offset:x}")
@@ -397,14 +425,14 @@ class PcodeTracer:
         
         # キャッシュチェック
         if use_cache and op_key in self._trace_cache:
-            if self.debug:
-                print(f"  -> Cache hit for {pcode_op.getMnemonic()} (key={op_key})")
+            if self._debug_available():
+                self._debug_print(f"  -> Cache hit for {pcode_op.getMnemonic()} (key={op_key})")
             return self._trace_cache[op_key]
         
         # 循環検出
         if op_key in self._trace_stack:
-            if self.debug:
-                print(f"  -> Circular reference detected (key={op_key})")
+            if self._debug_available():
+                self._debug_print(f"  -> Circular reference detected (key={op_key})")
             self.emit_unknown_event(reason="circular_reference", def_op=pcode_op,
                                     depth=depth, note=f"Key {op_key} already in stack")
             return Expression.unknown("circular_reference")
@@ -423,12 +451,12 @@ class PcodeTracer:
         """PcodeOpトレースの内部処理"""
         mnemonic = pcode_op.getMnemonic()
         
-        if self.debug:
+        if self._debug_available():
             indent = "  " * depth
-            print(f"\n{indent}DEBUG trace_pcode_op (depth={depth}):")
-            print(f"{indent}  mnemonic: {mnemonic}")
-            print(f"{indent}  num_inputs: {pcode_op.getNumInputs()}")
-            print(f"{indent}  key: {self._get_op_key(pcode_op)}")
+            self._debug_print(f"\n{indent}DEBUG trace_pcode_op (depth={depth}):")
+            self._debug_print(f"{indent}  mnemonic: {mnemonic}")
+            self._debug_print(f"{indent}  num_inputs: {pcode_op.getNumInputs()}")
+            self._debug_print(f"{indent}  key: {self._get_op_key(pcode_op)}")
         
         inputs = []
         for i in range(pcode_op.getNumInputs()):
@@ -527,8 +555,8 @@ class PcodeTracer:
         
         # MULTIEQUAL - PhiHandlerで展開
         if mnemonic == "MULTIEQUAL":
-            if self.debug:
-                print(f"\n{' ' * depth}  MULTIEQUAL detected - expanding via PhiHandler")
+            if self._debug_available():
+                self._debug_print(f"\n{' ' * depth}  MULTIEQUAL detected - expanding via PhiHandler")
             
             if self.phi_handler is None:
                 self.emit_unknown_event(
@@ -631,8 +659,8 @@ class PcodeTracer:
             return Expression.unknown("subpiece_insufficient_inputs")
         
         # その他
-        if self.debug:
-            print(f"  -> Unhandled opcode: {mnemonic}")
+        if self._debug_available():
+            self._debug_print(f"  -> Unhandled opcode: {mnemonic}")
         
         if inputs:
             traced_inputs = [self.trace_varnode(inp, depth, use_cache) for inp in inputs]

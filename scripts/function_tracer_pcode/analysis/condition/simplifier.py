@@ -15,12 +15,136 @@ class ConditionSimplifier:
     
     # デバッグフラグ（外部から設定可能）
     DEBUG: bool = False
+    _DEBUG_MESSAGE_LIMIT: int = 2000
+    _debug_message_count: int = 0
+    _debug_suppressed: bool = False
+    _DEBUG_REPEAT_LIMIT: int = 8
+    _debug_repeat_counts: Dict[Tuple[str, str], int] = {}
     
     @classmethod
+    def reset_debug_state(cls) -> None:
+        cls._debug_message_count = 0
+        cls._debug_suppressed = False
+        cls._debug_repeat_counts.clear()
+
+    @classmethod
+    def _debug_available(cls) -> bool:
+        return cls.DEBUG and cls._debug_message_count < cls._DEBUG_MESSAGE_LIMIT
+
+    @classmethod
     def _debug_print(cls, msg: str, indent: int = 0):
-        if cls.DEBUG:
-            prefix = "  " * indent
-            print(f"{prefix}[CondSimplifier] {msg}")
+        if not cls.DEBUG:
+            return
+        if cls._debug_message_count >= cls._DEBUG_MESSAGE_LIMIT:
+            if not cls._debug_suppressed:
+                prefix = "  " * indent
+                print(
+                    f"{prefix}[CondSimplifier] debug output suppressed after "
+                    f"{cls._DEBUG_MESSAGE_LIMIT} messages"
+                )
+                cls._debug_suppressed = True
+            return
+        cls._debug_message_count += 1
+        prefix = "  " * indent
+        print(f"{prefix}[CondSimplifier] {msg}")
+
+    @classmethod
+    def _debug_expr_summary(cls, expr: Optional[Expression], max_depth: int = 4) -> str:
+        if not cls._debug_available():
+            return "<debug-suppressed>"
+        if expr is None:
+            return "None"
+
+        visited: Set[int] = set()
+
+        def _render(node: Optional[Expression], depth: int) -> str:
+            if node is None:
+                return "None"
+            if depth <= 0:
+                return "..."
+
+            node_id = id(node)
+            if node_id in visited:
+                return "<cycle>"
+            visited.add(node_id)
+
+            try:
+                expr_type = getattr(node, "expr_type", None)
+                if expr_type == ExpressionType.CONSTANT:
+                    try:
+                        value = node.value
+                    except Exception:
+                        value = "?"
+                    return f"CONST({value})"
+                if expr_type == ExpressionType.PARAMETER:
+                    return f"PARAM({node.name or '?'})"
+                if expr_type == ExpressionType.VARIABLE:
+                    return f"VAR({node.name or '?'})"
+                if expr_type == ExpressionType.UNKNOWN:
+                    return f"UNKNOWN({node.name or '?'})"
+                if expr_type == ExpressionType.PHI:
+                    branches = node.value or []
+                    return f"PHI(branches={len(branches)})"
+                if expr_type == ExpressionType.CALL:
+                    return f"CALL({node.name or '?'}, argc={len(node.operands or [])})"
+                if expr_type == ExpressionType.MEMORY:
+                    operand = node.operands[0] if node.operands else None
+                    return f"MEM[{_render(operand, depth - 1)}]"
+                if expr_type == ExpressionType.UNARY_OP:
+                    operand = node.operands[0] if node.operands else None
+                    return f"{node.operator or 'UNARY'}({_render(operand, depth - 1)})"
+                if expr_type == ExpressionType.BINARY_OP:
+                    left = node.operands[0] if node.operands else None
+                    right = node.operands[1] if len(node.operands) > 1 else None
+                    return (
+                        f"{node.operator or 'BINARY'}"
+                        f"({_render(left, depth - 1)}, {_render(right, depth - 1)})"
+                    )
+                return getattr(expr_type, "name", str(expr_type))
+            finally:
+                visited.discard(node_id)
+
+        return _render(expr, max_depth)
+
+    @classmethod
+    def _debug_condition_summary(cls, condition: Optional[Condition], max_depth: int = 4) -> str:
+        if condition is None:
+            return "None"
+        expr_summary = cls._debug_expr_summary(condition.expression, max_depth=max_depth)
+        return f"(not {expr_summary})" if condition.negated else expr_summary
+
+    @classmethod
+    def _debug_condition_event(
+        cls,
+        event: str,
+        condition: Condition,
+        indent: int = 0,
+    ) -> None:
+        if not cls._debug_available():
+            return
+
+        summary = cls._debug_condition_summary(condition)
+        key = (event, summary)
+        count = cls._debug_repeat_counts.get(key, 0) + 1
+        if len(cls._debug_repeat_counts) > 4096:
+            cls._debug_repeat_counts.clear()
+        cls._debug_repeat_counts[key] = count
+
+        if count <= cls._DEBUG_REPEAT_LIMIT:
+            cls._debug_print(f"{event}: {summary}", indent)
+        elif count == cls._DEBUG_REPEAT_LIMIT + 1:
+            cls._debug_print(
+                f"{event}: {summary} (further repeats suppressed)",
+                indent,
+            )
+
+    @classmethod
+    def _conditions_structurally_equal(cls, left: Condition, right: Condition) -> bool:
+        if left.negated != right.negated:
+            return False
+        if left.expression is right.expression:
+            return True
+        return left.expression.equals(right.expression)
     
     @classmethod
     def normalize_to_canonical(cls, condition: Condition) -> Tuple[str, str, str, bool]:
@@ -196,6 +320,8 @@ class ConditionSimplifier:
             elif fact.kind == "lower":
                 signed = fact.signed
                 current = group["lower"][signed]
+                if fact.value is None or fact.inclusive is None:
+                    continue
                 candidate = (fact.value, fact.inclusive, index)
                 if current is None:
                     group["lower"][signed] = candidate
@@ -223,6 +349,8 @@ class ConditionSimplifier:
             elif fact.kind == "upper":
                 signed = fact.signed
                 current = group["upper"][signed]
+                if fact.value is None or fact.inclusive is None:
+                    continue
                 candidate = (fact.value, fact.inclusive, index)
                 if current is None:
                     group["upper"][signed] = candidate
@@ -338,7 +466,7 @@ class ConditionSimplifier:
         expr = condition.expression
         negated = condition.negated
         
-        cls._debug_print(f"flatten_condition: expr={expr.to_string()}, negated={negated}", 1)
+        cls._debug_condition_event("flatten_condition", Condition(expr, negated), 1)
         
         # 二重否定を解消
         while expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE":
@@ -533,7 +661,7 @@ class ConditionSimplifier:
                 rewritten = Condition(reduced_expr, cond.negated)
                 flattened = cls.flatten_condition(rewritten)
                 reduced.extend(flattened)
-                if len(flattened) != 1 or flattened[0].to_string() != cond.to_string():
+                if len(flattened) != 1 or not cls._conditions_structurally_equal(flattened[0], cond):
                     changed = True
             if not changed:
                 return current
@@ -555,7 +683,7 @@ class ConditionSimplifier:
         cls._debug_print("Checking contradiction (enhanced)")
         cls._debug_print(f"Input conditions ({len(conditions)}):")
         for i, cond in enumerate(conditions):
-            cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
+            cls._debug_print(f"  [{i}] {cls._debug_condition_summary(cond)}", 1)
 
         for i, cond in enumerate(conditions):
             truth_value = cls.evaluate_condition_truth(cond)
@@ -564,7 +692,7 @@ class ConditionSimplifier:
                     f"  CONTRADICTION DETECTED: condition {i} is constant false",
                     1
                 )
-                cls._debug_print(f"    {i}: {cond.to_string()}", 2)
+                cls._debug_print(f"    {i}: {cls._debug_condition_summary(cond)}", 2)
                 cls._debug_print("=" * 60)
                 return True
 
@@ -576,20 +704,27 @@ class ConditionSimplifier:
         
         cls._debug_print(f"After flattening ({len(flattened)} conditions):")
         for i, cond in enumerate(flattened):
-            cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
+            cls._debug_print(f"  [{i}] {cls._debug_condition_summary(cond)}", 1)
         
         flattened = cls._contextually_reduce_conditions(flattened)
 
         cls._debug_print(f"After contextual reduction ({len(flattened)} conditions):")
         for i, cond in enumerate(flattened):
-            cls._debug_print(f"  [{i}] {cond.to_string()}", 1)
+            cls._debug_print(f"  [{i}] {cls._debug_condition_summary(cond)}", 1)
 
         # Step 2: 矛盾判定専用の正規化を使用
         # key: (left, op, right), value: {True, False} (polarities)
         comparison_map: Dict[Tuple[str, str, str], Set[bool]] = {}
+        unique_canonicals: Dict[Tuple[str, str, str, bool], Tuple[int, Condition]] = {}
+        fallback_conditions: List[Tuple[int, Condition]] = []
         
-        for cond in flattened:
-            left, op, right, polarity = ConditionNormalizer.normalize_for_contradiction(cond)
+        for index, cond in enumerate(flattened):
+            canonical = ConditionNormalizer.normalize_for_contradiction(cond)
+            if canonical in unique_canonicals:
+                continue
+            unique_canonicals[canonical] = (index, cond)
+
+            left, op, right, polarity = canonical
             
             if cls.DEBUG:
                 pol_str = "pos" if polarity else "neg"
@@ -603,6 +738,8 @@ class ConditionSimplifier:
                 if key not in comparison_map:
                     comparison_map[key] = set()
                 comparison_map[key].add(polarity)
+            else:
+                fallback_conditions.append((index, cond))
         
         if cls.DEBUG:
             cls._debug_print(f"Comparison map ({len(comparison_map)} unique keys):")
@@ -623,23 +760,24 @@ class ConditionSimplifier:
         
         # Step 4: ペア間の矛盾チェック（補助的）
         # normalize_for_contradiction() が同じkeyにマップしない矛盾もチェック
-        flattened_pairs = [(i, flattened[i]) for i in range(len(flattened))]
-        for i in range(len(flattened_pairs)):
-            for j in range(i + 1, len(flattened_pairs)):
-                cond_i = flattened_pairs[i][1]
-                cond_j = flattened_pairs[j][1]
+        for i in range(len(fallback_conditions)):
+            for j in range(i + 1, len(fallback_conditions)):
+                index_i, cond_i = fallback_conditions[i]
+                index_j, cond_j = fallback_conditions[j]
                 
                 if ConditionNormalizer.are_contradictory(cond_i, cond_j):
                     cls._debug_print(
-                        f"  CONTRADICTION: condition {i} and {j} are contradictory",
+                        f"  CONTRADICTION: condition {index_i} and {index_j} are contradictory",
                         1
                     )
-                    cls._debug_print(f"    {i}: {cond_i.to_string()}", 2)
-                    cls._debug_print(f"    {j}: {cond_j.to_string()}", 2)
+                    cls._debug_print(f"    {index_i}: {cls._debug_condition_summary(cond_i)}", 2)
+                    cls._debug_print(f"    {index_j}: {cls._debug_condition_summary(cond_j)}", 2)
                     cls._debug_print("=" * 60)
                     return True
 
-        if cls._has_scalar_contradiction(flattened):
+        unique_flattened = [cond for _index, cond in unique_canonicals.values()]
+
+        if cls._has_scalar_contradiction(unique_flattened):
             cls._debug_print("=" * 60)
             return True
         
@@ -720,6 +858,8 @@ class ConditionSimplifier:
                 group["ne"].setdefault(fact.raw_value, current_index)
             elif fact.kind == "lower":
                 signed = fact.signed
+                if fact.value is None or fact.inclusive is None:
+                    continue
                 candidate = (fact.value, fact.inclusive, current_index)
                 current = group["lower"][signed]
                 if current is None:
@@ -747,6 +887,8 @@ class ConditionSimplifier:
                         group["lower"][signed] = candidate
             elif fact.kind == "upper":
                 signed = fact.signed
+                if fact.value is None or fact.inclusive is None:
+                    continue
                 candidate = (fact.value, fact.inclusive, current_index)
                 current = group["upper"][signed]
                 if current is None:

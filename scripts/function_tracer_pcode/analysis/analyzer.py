@@ -71,6 +71,55 @@ class ReturnAnalyzer:
             prefix = "  " * indent
             print(f"{prefix}[ReturnAnalyzer] {msg}")
 
+    def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
+        if expr is None:
+            return "None"
+
+        visited: Set[int] = set()
+
+        def _render(node: Optional[Expression], depth: int) -> str:
+            if node is None:
+                return "None"
+            if depth <= 0:
+                return "..."
+
+            node_id = id(node)
+            if node_id in visited:
+                return "<cycle>"
+            visited.add(node_id)
+
+            expr_type = getattr(node, "expr_type", None)
+            expr_type_name = getattr(expr_type, "name", str(expr_type))
+            try:
+                if expr_type == ExpressionType.CONSTANT:
+                    return f"CONST({int(node.value)})"
+                if expr_type == ExpressionType.PARAMETER:
+                    return f"PARAM({node.name or '?'})"
+                if expr_type == ExpressionType.VARIABLE:
+                    return f"VAR({node.name or '?'})"
+                if expr_type == ExpressionType.UNKNOWN:
+                    return f"UNKNOWN({node.name or '?'})"
+                if expr_type == ExpressionType.CALL:
+                    return f"CALL({node.name or '?'}, argc={len(node.operands or [])})"
+                if expr_type == ExpressionType.MEMORY:
+                    inner = _render((node.operands or [None])[0], depth - 1)
+                    return f"MEM[{inner}]"
+                if expr_type == ExpressionType.UNARY_OP:
+                    inner = _render((node.operands or [None])[0], depth - 1)
+                    return f"{node.operator or 'UNARY'}({inner})"
+                if expr_type == ExpressionType.BINARY_OP:
+                    operands = node.operands or []
+                    left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
+                    right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
+                    return f"{node.operator or 'BINARY'}({left}, {right})"
+                if expr_type == ExpressionType.PHI:
+                    return f"PHI(branches={len(node.value or [])})"
+                return expr_type_name
+            finally:
+                visited.discard(node_id)
+
+        return _render(expr, max_depth)
+
     @contextmanager
     def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary]):
         """Temporarily bind per-analysis state and restore the parent context on exit."""
@@ -112,8 +161,14 @@ class ReturnAnalyzer:
     
     def dispose(self):
         if self._decompiler is not None:
-            self._decompiler.dispose()
-            self._decompiler = None
+            try:
+                self._decompiler.dispose()
+            except Exception as exc:
+                exc_text = str(exc).lower()
+                if "jvm is not running" not in exc_text and "java virtual machine is not running" not in exc_text:
+                    raise
+            finally:
+                self._decompiler = None
     
     def _dump_return_infos(self, analysis: FunctionReturnAnalysis):
         """
@@ -139,7 +194,7 @@ class ReturnAnalyzer:
             
             # 値の文字列表現
             try:
-                value_str = ret_info.value.to_string()
+                value_str = self._debug_expr_summary(ret_info.value)
                 self._debug_print(f"    value: {value_str}", 1)
             except Exception as e:
                 self._debug_print(f"    value: (error converting to string: {e})", 1)
@@ -231,6 +286,7 @@ class ReturnAnalyzer:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
         ConditionSimplifier.DEBUG = self.debug
+        ConditionSimplifier.reset_debug_state()
         
         active_functions = set(active_functions or set())
         active_functions.add(function.getName())
@@ -5440,7 +5496,9 @@ class ReturnAnalyzer:
                     ConditionSimplifier.get_simplified_condition_string(c)
                     for c in simplified_conds
                 ]
-                self._debug_print(f"Expansion {i}: value={resolved_value.to_string()}")
+                self._debug_print(
+                    f"Expansion {i}: value={self._debug_expr_summary(resolved_value)}"
+                )
                 self._debug_print(f"  conditions={cond_strs}")
 
             results.append(
@@ -5558,7 +5616,8 @@ class ReturnAnalyzer:
                 ]
                 self._debug_print(
                     "skipping complementary return-case collapse due to overlapping "
-                    f"different-valued case: value={other.value.to_string()} conditions={cond_dump}"
+                    f"different-valued case: value={self._debug_expr_summary(other.value)} "
+                    f"conditions={cond_dump}"
                 )
             return False
 
@@ -5610,7 +5669,7 @@ class ReturnAnalyzer:
                 for cond in normalized_conditions
             ]
             self._debug_print(
-                f"{reason}: value={primary.value.to_string()} conditions={cond_dump}"
+                f"{reason}: value={self._debug_expr_summary(primary.value)} conditions={cond_dump}"
             )
         return ReturnInfo(
             address=primary.address,
@@ -5647,7 +5706,7 @@ class ReturnAnalyzer:
             if self.debug and normalized_value is not value:
                 self._debug_print(
                     "Reduced PHI-bearing expanded return under active conditions: "
-                    f"{value.to_string()} -> {normalized_value.to_string()}"
+                    f"{self._debug_expr_summary(value)} -> {self._debug_expr_summary(normalized_value)}"
                 )
 
         if has_effects:
@@ -5677,7 +5736,8 @@ class ReturnAnalyzer:
                 if self.debug and canonicalized is not normalized_value:
                     self._debug_print(
                         "Normalized expanded return with definite post-state replay: "
-                        f"{normalized_value.to_string()} -> {canonicalized.to_string()}"
+                        f"{self._debug_expr_summary(normalized_value)} -> "
+                        f"{self._debug_expr_summary(canonicalized)}"
                     )
                 normalized_value = canonicalized
 

@@ -5,14 +5,28 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .._pyghidra_support import load_pyghidra
 from ...config import GHIDRA_INSTALL_DIR
 from ...io import output_result
 from .analyze import get_target_functions
 
 
+def _safe_close_context(manager) -> None:
+    """Best-effort cleanup that tolerates a stopped JVM during interruption."""
+    if manager is None:
+        return
+    try:
+        manager.__exit__(None, None, None)
+    except Exception as exc:
+        exc_text = str(exc).lower()
+        if "jvm is not running" in exc_text or "java virtual machine is not running" in exc_text:
+            return
+        raise
+
+
 def run_equivalence_check(args):
     """等価性判定を実行する。"""
-    import pyghidra
+    pyghidra = load_pyghidra()
 
     from ...equivalence import EquivalenceChecker, TypeFixerConfig
 
@@ -79,27 +93,44 @@ def run_equivalence_check(args):
         print("  pip install cvc5")
         sys.exit(1)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        with pyghidra.open_project(temp_dir, "EquivCheckProject", create=True) as project:
-            loader1 = pyghidra.program_loader().project(project).source(binary1_path).name("binary1")
-            with loader1.load() as result1:
-                program1 = result1.getPrimaryDomainObject()
-                pyghidra.analyze(program1)
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_cm = pyghidra.open_project(temp_dir, "EquivCheckProject", create=True)
+            project = project_cm.__enter__()
+            try:
+                loader1 = pyghidra.program_loader().project(project).source(binary1_path).name("binary1")
+                result1_cm = loader1.load()
+                result1 = result1_cm.__enter__()
+                try:
+                    program1 = result1.getPrimaryDomainObject()
+                    pyghidra.analyze(program1)
 
-                loader2 = pyghidra.program_loader().project(project).source(binary2_path).name("binary2")
-                with loader2.load() as result2:
-                    program2 = result2.getPrimaryDomainObject()
-                    pyghidra.analyze(program2)
+                    loader2 = pyghidra.program_loader().project(project).source(binary2_path).name("binary2")
+                    result2_cm = loader2.load()
+                    result2 = result2_cm.__enter__()
+                    try:
+                        program2 = result2.getPrimaryDomainObject()
+                        pyghidra.analyze(program2)
 
-                    result = checker.check_from_binaries(
-                        program1,
-                        program2,
-                        func_name1,
-                        func_name2,
-                        decompile_timeout=args.timeout,
-                        save_formula=args.save_formula,
-                        retry_with_type_fix=retry_with_type_fix,
-                    )
+                        result = checker.check_from_binaries(
+                            program1,
+                            program2,
+                            func_name1,
+                            func_name2,
+                            decompile_timeout=args.timeout,
+                            save_formula=args.save_formula,
+                            retry_with_type_fix=retry_with_type_fix,
+                        )
+                    finally:
+                        _safe_close_context(result2_cm)
+                finally:
+                    _safe_close_context(result1_cm)
+            finally:
+                _safe_close_context(project_cm)
+    except KeyboardInterrupt:
+        if not args.quiet:
+            print("\nInterrupted by user.")
+        sys.exit(130)
 
     output_content = result.to_string(
         verbose=args.verbose,

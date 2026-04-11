@@ -73,12 +73,16 @@ class StructuralRecurrenceSummarizer:
             return None
 
         param_expr = self._parameter_expression(param_info)
+        param_name = param_expr.name
+        if not param_name:
+            self._debug(f"Declined '{function_name}': parameter name is unavailable")
+            return None
         recursive_ret = recursive_returns[0]
         base_ret = base_returns[0]
 
-        lower_bound = self._infer_lower_bound_from_conditions(recursive_ret.conditions, param_expr.name)
+        lower_bound = self._infer_lower_bound_from_conditions(recursive_ret.conditions, param_name)
         if lower_bound is None:
-            lower_bound = self._infer_lower_bound_from_base_conditions(base_ret.conditions, param_expr.name)
+            lower_bound = self._infer_lower_bound_from_base_conditions(base_ret.conditions, param_name)
         if lower_bound is None:
             self._debug(f"Declined '{function_name}': could not infer recursion/base split bound")
             return None
@@ -96,7 +100,7 @@ class StructuralRecurrenceSummarizer:
             return None
 
         call_arg_expr = self.tracer.trace_varnode(self_call_ops[0].getInput(1), use_cache=False)
-        step = self._extract_unit_step_from_call_argument(call_arg_expr, param_expr.name)
+        step = self._extract_unit_step_from_call_argument(call_arg_expr, param_name)
         if step != -1:
             self._debug(
                 f"Declined '{function_name}': recursive call argument is not a unit decrement "
@@ -112,7 +116,7 @@ class StructuralRecurrenceSummarizer:
             )
             return None
 
-        affine = self._extract_affine_term(addend_expr, param_expr.name)
+        affine = self._extract_affine_term(addend_expr, param_name)
         if affine is None:
             self._debug(
                 f"Declined '{function_name}': addend is not affine in the counter "
@@ -209,11 +213,13 @@ class StructuralRecurrenceSummarizer:
     def _constant_value(self, expr: Optional[Expression]) -> Optional[int]:
         if not self._is_constant_expression(expr):
             return None
+        assert expr is not None
         return int(expr.value)
 
     def _raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]:
         if not self._is_constant_expression(expr):
             return None
+        assert expr is not None
         return int(expr.value)
 
     def _signed_constant_value(
@@ -224,6 +230,7 @@ class StructuralRecurrenceSummarizer:
         raw_value = self._raw_constant_value(expr)
         if raw_value is None:
             return None
+        assert expr is not None
         bit_width = int(bit_width_hint or ((expr.size or 0) * 8))
         if bit_width <= 0:
             return raw_value

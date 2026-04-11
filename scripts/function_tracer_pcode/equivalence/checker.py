@@ -20,7 +20,7 @@ from .strategies.pairwise import PairwiseStrategy
 from .strategies.monolithic import MonolithicStrategy
 from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
-from .recursive_abstraction import abstract_recursive_calls
+from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
 from .workflow import run_check_from_binaries
 
 

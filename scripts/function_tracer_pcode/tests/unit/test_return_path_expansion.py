@@ -115,6 +115,68 @@ def test_condition_tracker_collects_all_valid_block_paths_to_return():
     assert condition_strings[1] in (["(param_1 == 0)"], ["(not (param_1 != 0))"])
 
 
+def test_condition_tracker_caches_valid_block_paths():
+    class _FakeBlock:
+        def __init__(self, index):
+            self._index = index
+
+        def getIndex(self):
+            return self._index
+
+    tracer = Mock()
+    tracer.high_function = Mock()
+    tracer.debug = False
+
+    tracker = ConditionTracker(tracer)
+    entry_block = _FakeBlock(0)
+    target_block = _FakeBlock(1)
+
+    entry_info = Mock(index=0)
+    target_info = Mock(index=1)
+    tracker.entry_block = entry_info
+
+    calls = {"count": 0}
+
+    def _fake_find(**kwargs):
+        calls["count"] += 1
+        kwargs["all_paths"].append(([entry_info, target_info], []))
+
+    tracker._find_block_paths_with_conditions = _fake_find  # type: ignore[method-assign]
+
+    first = tracker.get_all_valid_block_paths_to_block(target_info)
+    second = tracker.get_all_valid_block_paths_to_block(target_info)
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert calls["count"] == 1
+
+
+def test_condition_tracker_caches_single_best_path_conditions():
+    tracer = Mock()
+    tracer.high_function = Mock()
+    tracer.debug = False
+
+    tracker = ConditionTracker(tracer)
+    tracker.entry_block = Mock(index=0)
+    target_info = Mock(index=3)
+
+    cond = _cond("INT_NOTEQUAL", _param("param_1"), Expression.constant(0, 4))
+    calls = {"count": 0}
+
+    def _fake_find(**kwargs):
+        calls["count"] += 1
+        kwargs["all_paths"].append([cond])
+
+    tracker._find_paths_with_conditions = _fake_find  # type: ignore[method-assign]
+
+    first = tracker.get_path_conditions_to_block(target_info)
+    second = tracker.get_path_conditions_to_block(target_info)
+
+    assert [c.to_string() for c in first] == ["(param_1 != 0)"]
+    assert [c.to_string() for c in second] == ["(param_1 != 0)"]
+    assert calls["count"] == 1
+
+
 def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 

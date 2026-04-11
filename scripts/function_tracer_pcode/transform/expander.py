@@ -4,6 +4,10 @@
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType, StorageInfo
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
+from ..config.settings import (
+    EXPANDER_MAX_COMBINATION_ATTEMPTS,
+    EXPANDER_MAX_OPERATION_CASES,
+)
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_name,
@@ -46,7 +50,7 @@ class ExpandedValue:
         """
         canonical_strs = []
         for cond in self.conditions:
-            canonical = ConditionNormalizer.normalize(cond)
+            canonical = ConditionNormalizer.normalize_for_contradiction(cond)
             # (left, op, right, pos) をタプル文字列化
             canonical_str = f"{canonical[0]}|{canonical[1]}|{canonical[2]}|{canonical[3]}"
             canonical_strs.append(canonical_str)
@@ -92,11 +96,152 @@ class ExpressionExpander:
         self.image_base = image_base
         self.record_deferred_call = record_deferred_call
         self._expanding_ops: Set[str] = set()
+        self._debug_message_limit = 4000
+        self._debug_message_count = 0
+        self._debug_suppressed = False
+        self._max_operation_cases = int(EXPANDER_MAX_OPERATION_CASES)
+        self._max_combination_attempts = int(EXPANDER_MAX_COMBINATION_ATTEMPTS)
     
     def _debug_print(self, msg: str, indent: int = 0):
-        if self.debug:
-            prefix = "  " * indent
-            print(f"{prefix}[Expander] {msg}")
+        if not self.debug:
+            return
+        if self._debug_message_count >= self._debug_message_limit:
+            if not self._debug_suppressed:
+                prefix = "  " * indent
+                print(
+                    f"{prefix}[Expander] debug output suppressed after "
+                    f"{self._debug_message_limit} messages"
+                )
+                self._debug_suppressed = True
+            return
+        self._debug_message_count += 1
+        prefix = "  " * indent
+        print(f"{prefix}[Expander] {msg}")
+
+    def _debug_available(self) -> bool:
+        return self.debug and self._debug_message_count < self._debug_message_limit
+
+    def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
+        """巨大式の full render を避けたデバッグ用サマリー。"""
+        if not self._debug_available():
+            return "<debug-suppressed>"
+        if expr is None:
+            return "None"
+
+        visited: Set[int] = set()
+
+        def _render(node: Optional[Expression], depth: int) -> str:
+            if node is None:
+                return "None"
+            if depth <= 0:
+                return "..."
+
+            node_id = id(node)
+            if node_id in visited:
+                return "<cycle>"
+            visited.add(node_id)
+
+            expr_type = getattr(node, "expr_type", None)
+            expr_type_name = getattr(expr_type, "name", str(expr_type))
+            try:
+                if expr_type == ExpressionType.CONSTANT:
+                    try:
+                        value = int(node.value)
+                    except Exception:
+                        value = "?"
+                    return f"CONST({value})"
+                if expr_type == ExpressionType.PARAMETER:
+                    return f"PARAM({node.name or '?'})"
+                if expr_type == ExpressionType.VARIABLE:
+                    return f"VAR({node.name or '?'})"
+                if expr_type == ExpressionType.UNKNOWN:
+                    return f"UNKNOWN({node.name or '?'})"
+                if expr_type == ExpressionType.CALL:
+                    arg_count = len(node.operands or [])
+                    return f"CALL({node.name or '?'}, argc={arg_count})"
+                if expr_type == ExpressionType.MEMORY:
+                    inner = _render((node.operands or [None])[0], depth - 1)
+                    return f"MEM[{inner}]"
+                if expr_type == ExpressionType.UNARY_OP:
+                    inner = _render((node.operands or [None])[0], depth - 1)
+                    return f"{node.operator or 'UNARY'}({inner})"
+                if expr_type == ExpressionType.BINARY_OP:
+                    operands = node.operands or []
+                    left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
+                    right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
+                    return f"{node.operator or 'BINARY'}({left}, {right})"
+                if expr_type == ExpressionType.PHI:
+                    branches = node.value or []
+                    return f"PHI(branches={len(branches)})"
+                return expr_type_name
+            finally:
+                visited.discard(node_id)
+
+        return _render(expr, max_depth)
+
+    def _debug_condition_summary(self, condition: Optional[Condition], max_depth: int = 4) -> str:
+        if not self._debug_available():
+            return "<debug-suppressed>"
+        if condition is None:
+            return "None"
+        expr_summary = self._debug_expr_summary(condition.expression, max_depth=max_depth)
+        return f"(not {expr_summary})" if condition.negated else expr_summary
+
+    def _debug_expr(self, label: str, expr: Optional[Expression], indent: int = 0) -> None:
+        if not self._debug_available():
+            return
+        self._debug_print(f"{label}{self._debug_expr_summary(expr)}", indent)
+
+    def _expr_signature(self, expr: Optional[Expression]) -> str:
+        return ConditionNormalizer._expr_key(expr)
+
+    def _condition_signature(self, conditions: List[Condition]) -> str:
+        if not conditions:
+            return ""
+        parts: List[str] = []
+        for cond in conditions:
+            normalized = ConditionNormalizer.normalize_for_contradiction(cond)
+            parts.append(
+                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{int(normalized[3])}"
+            )
+        parts.sort()
+        return ";;".join(parts)
+
+    def _finalize_combined_results(
+        self,
+        mnemonic: str,
+        values: List[ExpandedValue],
+        base_conditions: List[Condition],
+        depth: int,
+        over_budget: bool = False,
+    ) -> List[ExpandedValue]:
+        limit = self._max_operation_cases
+        deduped = self._deduplicate_expanded_values(
+            values,
+            depth,
+            limit=limit,
+            label=f"{mnemonic} combinations",
+        )
+
+        if over_budget:
+            budget_unknown = ExpandedValue(
+                Expression.unknown(f"{mnemonic}_budget_exceeded"),
+                list(base_conditions),
+            )
+            budget_key = (
+                self._expr_signature(budget_unknown.value),
+                budget_unknown.get_condition_signature(),
+            )
+            existing_keys = {
+                (self._expr_signature(ev.value), ev.get_condition_signature())
+                for ev in deduped
+            }
+            if budget_key not in existing_keys:
+                deduped.append(budget_unknown)
+
+        return deduped if deduped else [
+            ExpandedValue(Expression.unknown(f"{mnemonic}_contradiction"), base_conditions)
+        ]
 
     def _coerce_value_to_output_size(self, value: Expression, output_size: int) -> Expression:
         """CALL 出力サイズに合わせて値式を正規化する。"""
@@ -238,8 +383,7 @@ class ExpressionExpander:
                 input_conditions = []
                 traced_value = self.tracer.trace_varnode(input_varnode, depth + 1, use_cache=False)
                 traced_value = self._canonicalize_traced_expression(traced_value, input_conditions)
-                value_str = traced_value.to_string()
-                self._debug_print(f"  traced_value: {value_str}", depth + 1)
+                self._debug_expr("  traced_value: ", traced_value, depth + 1)
                 
                 # SMT表現も取得（エラー時はスキップ）
                 try:
@@ -294,12 +438,10 @@ class ExpressionExpander:
                         all_expanded.append(ExpandedValue(canonical_value, input_conditions))
                         cases_emitted += 1
                         if self.debug:
-                            val_str = canonical_value.to_string()
-                            if len(val_str) > 80:
-                                val_str = val_str[:80] + "..."
-                            self._debug_print(
-                                f"  Path[{path_idx}] -> EMIT multiequal canonical: {val_str}",
-                                depth + 1
+                            self._debug_expr(
+                                f"  Path[{path_idx}] -> EMIT multiequal canonical: ",
+                                canonical_value,
+                                depth + 1,
                             )
                         continue
 
@@ -313,12 +455,10 @@ class ExpressionExpander:
                         all_expanded.append(ExpandedValue(canonical_value, input_conditions))
                         cases_emitted += 1
                         if self.debug:
-                            val_str = canonical_value.to_string()
-                            if len(val_str) > 80:
-                                val_str = val_str[:80] + "..."
-                            self._debug_print(
-                                f"  Path[{path_idx}] -> EMIT canonicalized: {val_str}",
-                                depth + 1
+                            self._debug_expr(
+                                f"  Path[{path_idx}] -> EMIT canonicalized: ",
+                                canonical_value,
+                                depth + 1,
                             )
                         continue
                 
@@ -334,12 +474,10 @@ class ExpressionExpander:
                         all_expanded.append(ev)
                         cases_emitted += 1
                         if self.debug:
-                            val_str = ev.value.to_string()
-                            if len(val_str) > 80:
-                                val_str = val_str[:80] + "..."
-                            self._debug_print(
-                                f"  Path[{path_idx}] -> EMIT: {val_str}",
-                                depth + 1
+                            self._debug_expr(
+                                f"  Path[{path_idx}] -> EMIT: ",
+                                ev.value,
+                                depth + 1,
                             )
                     else:
                         self._debug_print(
@@ -363,9 +501,11 @@ class ExpressionExpander:
         return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
     
     def _deduplicate_expanded_values(
-        self, 
+        self,
         values: List[ExpandedValue],
-        depth: int
+        depth: int,
+        limit: Optional[int] = None,
+        label: str = "expanded values",
     ) -> List[ExpandedValue]:
         """
         展開値の重複排除（値と条件の両方を考慮）
@@ -380,41 +520,32 @@ class ExpressionExpander:
         if not values:
             return []
         
-        self._debug_print(f"Deduplicating {len(values)} expanded values...", depth)
+        self._debug_print(f"Deduplicating {len(values)} {label}...", depth)
         
-        # (value_smt, condition_signature) でグループ化
-        groups: Dict[Tuple[str, str], List[ExpandedValue]] = {}
-        
+        # (value_sig, condition_signature) でグループ化
+        groups: Dict[Tuple[str, str], ExpandedValue] = {}
+
         for ev in values:
-            try:
-                value_smt = ev.value.to_smt()
-            except:
-                value_smt = ev.value.to_string()
-            
-            cond_sig = ev.get_condition_signature()
-            key = (value_smt, cond_sig)
-            
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(ev)
+            key = (self._expr_signature(ev.value), ev.get_condition_signature())
+            current = groups.get(key)
+            if current is None or len(ev.conditions) < len(current.conditions):
+                groups[key] = ev
         
         self._debug_print(f"  Grouped into {len(groups)} unique (value, condition) pairs", depth)
         
         # 各グループから代表を1つ選ぶ（条件が最も短いもの）
-        result = []
-        for key, group in groups.items():
-            best = min(group, key=lambda e: len(e.conditions))
-            result.append(best)
+        result = list(groups.values())
         
         # 上限チェック
-        if len(result) > self.MAX_CASES_PER_MULTIEQUAL:
+        applied_limit = self.MAX_CASES_PER_MULTIEQUAL if limit is None else limit
+        if len(result) > applied_limit:
             self._debug_print(
-                f"  WARNING: Too many cases ({len(result)}), limiting to {self.MAX_CASES_PER_MULTIEQUAL}",
+                f"  WARNING: Too many cases ({len(result)}), limiting to {applied_limit}",
                 depth
             )
             # 条件が短い順にソート
             result = sorted(result, key=lambda e: len(e.conditions))
-            result = result[:self.MAX_CASES_PER_MULTIEQUAL]
+            result = result[:applied_limit]
         
         self._debug_print(f"  Final result: {len(result)} unique cases", depth)
         return result
@@ -447,7 +578,7 @@ class ExpressionExpander:
             if candidate is not None:
                 self._debug_print(
                     "Using canonical MULTIEQUAL location for branch expansion: "
-                    f"{candidate.to_string()}",
+                    f"{self._debug_expr_summary(candidate)}",
                     depth,
                 )
         return inferred
@@ -596,7 +727,7 @@ class ExpressionExpander:
             )
         if collapsed is not None:
             self._debug_print(
-                f"Collapsed nested MULTIEQUAL to canonical memory: {collapsed.to_string()}",
+                f"Collapsed nested MULTIEQUAL to canonical memory: {self._debug_expr_summary(collapsed)}",
                 depth,
             )
         return collapsed
@@ -620,9 +751,10 @@ class ExpressionExpander:
             depth + 1,
         )
         if inferred_location is None:
-            if self.debug:
+            if self._debug_available():
                 branch_summaries = [
-                    f"{ev.value.to_string()} @ {[c.to_string() for c in ev.conditions]}"
+                    f"{self._debug_expr_summary(ev.value)} @ "
+                    f"{[self._debug_condition_summary(c) for c in ev.conditions]}"
                     for ev in observations
                 ]
                 self._debug_print(
@@ -635,6 +767,7 @@ class ExpressionExpander:
         if candidate is None:
             return None
 
+        assert self.effect_summary is not None
         rewritten = rewrite_loads_from_effects(
             candidate,
             current_conditions,
@@ -646,7 +779,7 @@ class ExpressionExpander:
         if self.debug:
             self._debug_print(
                 "Resolved nested MULTIEQUAL via effect summary: "
-                f"{candidate.to_string()} -> {resolved.to_string()}",
+                f"{self._debug_expr_summary(candidate)} -> {self._debug_expr_summary(resolved)}",
                 depth,
             )
         return resolved
@@ -747,7 +880,7 @@ class ExpressionExpander:
             if all_match:
                 if self.debug:
                     self._debug_print(
-                        f"Inferred MULTIEQUAL canonical location by branch match: {candidate.to_string()}",
+                        f"Inferred MULTIEQUAL canonical location by branch match: {self._debug_expr_summary(candidate)}",
                         depth,
                     )
                 return location
@@ -814,7 +947,7 @@ class ExpressionExpander:
                 if self.debug and not _expressions_equivalent(traced, canonicalized):
                     self._debug_print(
                         "Canonicalized MULTIEQUAL branch memory leaf: "
-                        f"{traced.to_string()} -> {canonicalized.to_string()}",
+                        f"{self._debug_expr_summary(traced)} -> {self._debug_expr_summary(canonicalized)}",
                         depth,
                     )
         if canonicalized is traced:
@@ -852,16 +985,17 @@ class ExpressionExpander:
             if self.debug:
                 self._debug_print(
                     "Observed-load rewrite resolved: "
-                    f"{expr.to_string()} -> {rewritten_observed.to_string()}",
+                    f"{self._debug_expr_summary(expr)} -> {self._debug_expr_summary(rewritten_observed)}",
                     0,
                 )
+            rewritten_base = rewritten_observed if rewritten_observed is not None else expr
             normalized = normalize_post_state_expression(
-                rewritten_observed if rewritten_observed is not None else expr,
+                rewritten_base,
                 conditions,
                 self.effect_summary.effects,
                 self.parameters,
             )
-            return normalized if normalized is not None else rewritten_observed
+            return normalized if normalized is not None else rewritten_base
         canonicalized = canonicalize_post_state_subexpressions(
             expr,
             conditions,
@@ -974,6 +1108,8 @@ class ExpressionExpander:
                 simplified = ConditionSimplifier.simplify_conditions(operand_case.conditions)
                 if ConditionSimplifier.is_contradiction(simplified):
                     continue
+                if expr.operator is None:
+                    continue
                 rebuilt = Expression.unary_op(expr.operator, operand_case.value)
                 rebuilt.size = expr.size
                 expanded.append(ExpandedValue(rebuilt, simplified))
@@ -993,6 +1129,8 @@ class ExpressionExpander:
                         list(left_case.conditions) + list(right_case.conditions)
                     )
                     if ConditionSimplifier.is_contradiction(combined_conditions):
+                        continue
+                    if expr.operator is None:
                         continue
                     rebuilt = Expression.binary_op(
                         expr.operator,
@@ -1058,7 +1196,7 @@ class ExpressionExpander:
             )
             if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
                 self._debug_print(
-                    f"  Direct operation trace resolved: {traced_value.to_string()}",
+                    f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
                     depth,
                 )
                 return [ExpandedValue(traced_value, conditions)]
@@ -1258,10 +1396,11 @@ class ExpressionExpander:
                                 and not _expressions_equivalent(arg, canonical_arg)
                             )
                             if should_replace:
+                                assert canonical_arg is not None
                                 if self.debug:
                                     self._debug_print(
                                         "Stabilized explicit CALL arg from original input: "
-                                        f"{arg.to_string()} -> {canonical_arg.to_string()}",
+                                        f"{self._debug_expr_summary(arg)} -> {self._debug_expr_summary(canonical_arg)}",
                                         depth,
                                     )
                                 stabilized_args.append(canonical_arg)
@@ -1279,6 +1418,8 @@ class ExpressionExpander:
                                 effective_args,
                             )
 
+                    if self.call_resolver is None:
+                        continue
                     resolved = self.call_resolver(target_name, effective_args)
                     if not resolved:
                         if self.debug:
@@ -1315,8 +1456,9 @@ class ExpressionExpander:
         fallback_name = _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
         placeholder_name = None
         if self.record_deferred_call is not None:
+            deferred_args = [arg for arg in (canonical_explicit_args or []) if arg is not None]
             try:
-                placeholder_name = self.record_deferred_call(fallback_name, list(canonical_explicit_args or []))
+                placeholder_name = self.record_deferred_call(fallback_name, deferred_args)
             except Exception:
                 placeholder_name = None
         self.tracer.emit_unknown_event(
@@ -1440,7 +1582,7 @@ class ExpressionExpander:
         if location is None:
             if self.debug:
                 self._debug_print(
-                    f"INDIRECT post-state read fell back to pre-state value: {fallback_expr.to_string()}",
+                    f"INDIRECT post-state read fell back to pre-state value: {self._debug_expr_summary(fallback_expr)}",
                     depth,
                 )
             return fallback_expr
@@ -1459,7 +1601,7 @@ class ExpressionExpander:
 
         if self.debug and not _expressions_equivalent(resolved, fallback_expr):
             self._debug_print(
-                f"Resolved INDIRECT post-state read via effect summary: {fallback_expr.to_string()} -> {resolved.to_string()}",
+                f"Resolved INDIRECT post-state read via effect summary: {self._debug_expr_summary(fallback_expr)} -> {self._debug_expr_summary(resolved)}",
                 depth,
             )
         return resolved
@@ -1494,7 +1636,7 @@ class ExpressionExpander:
             )
             if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
                 self._debug_print(
-                    f"  Direct operation trace resolved: {traced_value.to_string()}",
+                    f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
                     depth,
                 )
                 return [ExpandedValue(traced_value, base_conditions)]
@@ -1552,27 +1694,82 @@ class ExpressionExpander:
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
         self._debug_print(f"Combining expansions for {mnemonic}", depth)
+
+        normalized_inputs: List[List[ExpandedValue]] = []
+        for index, expansions in enumerate(input_expansions):
+            if len(expansions) > 1:
+                normalized = self._deduplicate_expanded_values(
+                    expansions,
+                    depth + 1,
+                    limit=self._max_operation_cases,
+                    label=f"{mnemonic} input[{index}]",
+                )
+            else:
+                normalized = expansions
+            normalized_inputs.append(normalized)
+        input_expansions = normalized_inputs
         
         if len(input_expansions) == 0:
             return [ExpandedValue(Expression.unknown(f"{mnemonic}_no_input"), base_conditions)]
         
         if len(input_expansions) == 1:
             result = []
+            seen_keys: Set[Tuple[str, str]] = set()
             for ev in input_expansions[0]:
                 combined_conds = base_conditions + ev.conditions
+                pre_key = (
+                    self._expr_signature(ev.value),
+                    self._condition_signature(combined_conds),
+                )
+                if pre_key in seen_keys:
+                    continue
+                seen_keys.add(pre_key)
                 if not ConditionSimplifier.is_contradiction(combined_conds):
                     if mnemonic in ("INT_NEGATE", "INT_2COMP", "BOOL_NEGATE", "INT_ZEXT", "INT_SEXT"):
                         new_value = Expression.unary_op(mnemonic, ev.value)
                     else:
                         new_value = ev.value
                     result.append(ExpandedValue(new_value, combined_conds))
-            return result if result else [ExpandedValue(Expression.unknown(f"{mnemonic}_contradiction"), base_conditions)]
+            return self._finalize_combined_results(
+                mnemonic,
+                result,
+                base_conditions,
+                depth,
+            )
         
         if len(input_expansions) == 2:
             result = []
+            seen_pairs: Set[Tuple[str, str, str, str, int, Optional[int]]] = set()
+            attempts = 0
             for left_ev in input_expansions[0]:
                 for right_ev in input_expansions[1]:
+                    attempts += 1
+                    if attempts > self._max_combination_attempts:
+                        self._debug_print(
+                            f"  Combination budget exceeded at {attempts} attempts; "
+                            f"returning conservative summary",
+                            depth,
+                        )
+                        return self._finalize_combined_results(
+                            mnemonic,
+                            result,
+                            base_conditions,
+                            depth,
+                            over_budget=True,
+                        )
+
                     combined_conds = base_conditions + left_ev.conditions + right_ev.conditions
+                    pre_key = (
+                        self._expr_signature(left_ev.value),
+                        self._expr_signature(right_ev.value),
+                        self._condition_signature(combined_conds),
+                        mnemonic,
+                        output_size,
+                        read_order_key,
+                    )
+                    if pre_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pre_key)
                     
                     if ConditionSimplifier.is_contradiction(combined_conds):
                         self._debug_print(f"  Combination contradictory, skip", depth)
@@ -1598,9 +1795,14 @@ class ExpressionExpander:
                             new_value.size = output_size
                     simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
                     result.append(ExpandedValue(new_value, simplified_conds))
-                    self._debug_print(f"  Combined: {new_value.to_string()}", depth)
-            
-            return result if result else [ExpandedValue(Expression.unknown(f"{mnemonic}_contradiction"), base_conditions)]
+                    self._debug_expr("  Combined: ", new_value, depth)
+
+            return self._finalize_combined_results(
+                mnemonic,
+                result,
+                base_conditions,
+                depth,
+            )
         
         # 3つ以上の入力
         self._debug_print(f"  Too many inputs ({len(input_expansions)}), falling back", depth)

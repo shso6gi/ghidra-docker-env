@@ -58,11 +58,44 @@ class PhiHandler:
         self.condition_tracker = condition_tracker
         self.debug = tracer.debug
         self._expanding_ops: Set[str] = set()
+        self._expansion_cache: Dict[str, List[ExpandedBranch]] = {}
+        self._expansion_cache_limit = 2048
+        self._debug_message_limit = 4000
+        self._debug_message_count = 0
+        self._debug_suppressed = False
     
     def _debug_print(self, msg: str, indent: int = 0):
-        if self.debug:
-            prefix = "  " * indent
-            print(f"{prefix}[PhiHandler] {msg}")
+        if not self.debug:
+            return
+        if self._debug_message_count >= self._debug_message_limit:
+            if not self._debug_suppressed:
+                prefix = "  " * indent
+                print(
+                    f"{prefix}[PhiHandler] debug output suppressed after "
+                    f"{self._debug_message_limit} messages"
+                )
+                self._debug_suppressed = True
+            return
+        self._debug_message_count += 1
+        prefix = "  " * indent
+        print(f"{prefix}[PhiHandler] {msg}")
+
+    def _condition_signature(self, conditions: List[Condition]) -> str:
+        canonical = []
+        for cond in conditions or []:
+            normalized = ConditionNormalizer.normalize_for_contradiction(cond)
+            canonical.append(
+                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{normalized[3]}"
+            )
+        canonical.sort()
+        return ";;".join(canonical)
+
+    def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> str:
+        op_key = self.tracer._get_stable_op_key(multiequal_op)
+        return f"{op_key}::{self._condition_signature(base_conditions)}"
+
+    def _clone_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
+        return [ExpandedBranch(list(branch.conditions), branch.value) for branch in branches]
     
     def _same_varnode_id(self, vn1, vn2) -> bool:
         """VarnodeのID（space+offset+size）一致チェック"""
@@ -135,6 +168,12 @@ class PhiHandler:
             base_conditions = []
         
         op_key = self.tracer._get_stable_op_key(multiequal_op)
+        cache_key = self._cache_key(multiequal_op, base_conditions)
+
+        cached = self._expansion_cache.get(cache_key)
+        if cached is not None:
+            self._debug_print(f"Cache hit for MULTIEQUAL: {op_key}", depth)
+            return self._clone_branches(cached)
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular reference detected", depth)
@@ -143,7 +182,11 @@ class PhiHandler:
         self._expanding_ops.add(op_key)
         
         try:
-            return self._expand_internal(multiequal_op, base_conditions, depth)
+            expanded = self._expand_internal(multiequal_op, base_conditions, depth)
+            if len(self._expansion_cache) >= self._expansion_cache_limit:
+                self._expansion_cache.clear()
+            self._expansion_cache[cache_key] = self._clone_branches(expanded)
+            return self._clone_branches(expanded)
         finally:
             self._expanding_ops.discard(op_key)
     
