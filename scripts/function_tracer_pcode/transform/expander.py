@@ -79,6 +79,7 @@ class ExpressionExpander:
         resolve_callee_parameters: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
+        record_deferred_call: Optional[Callable[[str, List[Expression]], str]] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -89,6 +90,7 @@ class ExpressionExpander:
         self.resolve_callee_parameters = resolve_callee_parameters
         self.read_memory_value = read_memory_value
         self.image_base = image_base
+        self.record_deferred_call = record_deferred_call
         self._expanding_ops: Set[str] = set()
     
     def _debug_print(self, msg: str, indent: int = 0):
@@ -164,7 +166,7 @@ class ExpressionExpander:
         depth: int
     ) -> List[ExpandedValue]:
         """MULTIEQUALを展開"""
-        op_key = self.tracer._get_op_key(multiequal_op)
+        op_key = self.tracer._get_stable_op_key(multiequal_op)
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular MULTIEQUAL detected: {op_key}", depth)
@@ -1158,6 +1160,20 @@ class ExpressionExpander:
 
         if not resolved_targets or self.call_resolver is None:
             target_name = _resolve_call_target_name(self.tracer, pcode_op)
+            explicit_args = [
+                _resolve_call_argument_expression(
+                    pcode_op.getInput(index),
+                    self.tracer,
+                    self.parameters,
+                )
+                for index in range(1, pcode_op.getNumInputs())
+            ]
+            placeholder_name = None
+            if self.record_deferred_call is not None and target_name:
+                try:
+                    placeholder_name = self.record_deferred_call(target_name, explicit_args)
+                except Exception:
+                    placeholder_name = None
             self.tracer.emit_unknown_event(
                 reason="call_out_of_scope",
                 varnode=pcode_op.getOutput(),
@@ -1166,7 +1182,14 @@ class ExpressionExpander:
                 note=f"{pcode_op.getMnemonic()} target={target_name or 'UNKNOWN_FUNC'}",
                 context="expander",
             )
-            return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{target_name or 'UNKNOWN_FUNC'}"), base_conditions)]
+            return [
+                ExpandedValue(
+                    Expression.unknown(
+                        placeholder_name or f"call_out_of_scope:{target_name or 'UNKNOWN_FUNC'}"
+                    ),
+                    base_conditions,
+                )
+            ]
 
         arg_expansions: List[List[ExpandedValue]] = []
         explicit_input_varnodes = [
@@ -1290,6 +1313,12 @@ class ExpressionExpander:
             return self._deduplicate_expanded_values(result, depth)
 
         fallback_name = _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
+        placeholder_name = None
+        if self.record_deferred_call is not None:
+            try:
+                placeholder_name = self.record_deferred_call(fallback_name, list(canonical_explicit_args or []))
+            except Exception:
+                placeholder_name = None
         self.tracer.emit_unknown_event(
             reason="call_out_of_scope",
             varnode=pcode_op.getOutput(),
@@ -1298,7 +1327,14 @@ class ExpressionExpander:
             note=f"{pcode_op.getMnemonic()} target={fallback_name}",
             context="expander",
         )
-        return [ExpandedValue(Expression.unknown(f"call_out_of_scope:{fallback_name}"), base_conditions)]
+        return [
+            ExpandedValue(
+                Expression.unknown(
+                    placeholder_name or f"call_out_of_scope:{fallback_name}"
+                ),
+                base_conditions,
+            )
+        ]
 
     def _infer_indirect_output_location(
         self,

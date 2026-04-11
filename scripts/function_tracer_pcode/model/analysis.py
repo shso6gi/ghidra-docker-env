@@ -26,6 +26,22 @@ class ReturnInfo:
             "branch_index": self.branch_index
         }
 
+
+@dataclass
+class DeferredCallInfo:
+    """解析時に展開できなかった呼び出しサイトの情報。"""
+
+    placeholder_name: str
+    target_name: str
+    arguments: List["Expression"] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "placeholder_name": self.placeholder_name,
+            "target_name": self.target_name,
+            "arguments": [arg.to_dict() for arg in self.arguments],
+        }
+
 @dataclass
 class SignednessResult:
     """符号性推定の結果（軽量版）"""
@@ -90,6 +106,7 @@ class FunctionReturnAnalysis:
     analysis_notes: List[str] = field(default_factory=list)
     recovered_from_decompiler: bool = False
     incomplete_control_flow: bool = False
+    deferred_calls: Dict[str, DeferredCallInfo] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         result = {
@@ -103,6 +120,10 @@ class FunctionReturnAnalysis:
             "analysis_notes": list(self.analysis_notes),
             "recovered_from_decompiler": self.recovered_from_decompiler,
             "incomplete_control_flow": self.incomplete_control_flow,
+            "deferred_calls": {
+                name: info.to_dict()
+                for name, info in self.deferred_calls.items()
+            },
         }
         
         if self.signedness_result:

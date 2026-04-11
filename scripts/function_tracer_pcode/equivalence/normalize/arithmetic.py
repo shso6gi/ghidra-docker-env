@@ -16,6 +16,10 @@ def normalize_arithmetic(
     - x - y -> x + (-y)
     - x + 0 -> x
     - 0 + x -> x
+    - x * 0 -> 0
+    - 0 * x -> 0
+    - x * 1 -> x
+    - 1 * x -> x
     - 加算木の平坦化と順序正規化
     """
     if expr.expr_type != ExpressionType.BINARY_OP:
@@ -28,6 +32,8 @@ def normalize_arithmetic(
 
     if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD":
         expr = _canonicalize_add(expr)
+    elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_MULT":
+        expr = _simplify_mult_identities(expr)
 
     if expr is not expr_before:
         context.record_rule(
@@ -100,6 +106,28 @@ def _build_add_tree(terms):
 
 def _is_zero_constant(expr: Expression) -> bool:
     return expr.expr_type == ExpressionType.CONSTANT and expr.value == 0
+
+
+def _is_one_constant(expr: Expression) -> bool:
+    return expr.expr_type == ExpressionType.CONSTANT and expr.value == 1
+
+
+def _simplify_mult_identities(expr: Expression) -> Expression:
+    if len(expr.operands) != 2:
+        return expr
+
+    left, right = expr.operands
+    if _is_zero_constant(left) or _is_zero_constant(right):
+        zero = Expression.constant(0, size=expr.size or max(left.size, right.size))
+        zero.size = expr.size or zero.size
+        return zero
+    if _is_one_constant(left):
+        right.size = expr.size or right.size
+        return right
+    if _is_one_constant(right):
+        left.size = expr.size or left.size
+        return left
+    return expr
 
 
 def _term_sort_key(expr: Expression):

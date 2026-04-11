@@ -7,8 +7,14 @@ from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.storage import StorageInfo
-from ..model.analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from ..config.settings import (
+    BOUNDED_CALL_MAX_CASES,
+    BOUNDED_CALL_REFINEMENT_ENABLED,
+    BOUNDED_CALL_UNROLL_LIMIT,
+)
 from . import PcodeTracer
+from .bounded_refinement import BoundedCallRefiner
 from .condition import ConditionTracker, ConditionSimplifier
 from .signedness import SignednessDetector
 from .effect_summary import (
@@ -23,6 +29,7 @@ from .effect_summary import (
     substitute_expression,
 )
 from .memory_resolver import concretize_readonly_loads
+from .recurrence_summary import StructuralRecurrenceSummarizer
 
 
 class ReturnAnalyzer:
@@ -52,6 +59,12 @@ class ReturnAnalyzer:
         self._effect_summary_parameter_cache: Dict[str, List[Dict]] = {}
         self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
         self._local_target_cache: Dict[int, Optional[List[Any]]] = {}
+        self._current_deferred_calls: Dict[str, DeferredCallInfo] = {}
+        self._deferred_call_counter: int = 0
+        self._analysis_in_progress: Dict[str, FunctionReturnAnalysis] = {}
+        self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
+        self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
+        self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -63,13 +76,16 @@ class ReturnAnalyzer:
         """Temporarily bind per-analysis state and restore the parent context on exit."""
         previous_parameters = self._current_parameters
         previous_effect_summary = self._current_effect_summary
+        previous_deferred_calls = self._current_deferred_calls
         self._current_parameters = parameters
         self._current_effect_summary = effect_summary
+        self._current_deferred_calls = {}
         try:
             yield
         finally:
             self._current_parameters = previous_parameters
             self._current_effect_summary = previous_effect_summary
+            self._current_deferred_calls = previous_deferred_calls
     
     def _get_decompiler(self):
         if self._decompiler is None:
@@ -314,7 +330,8 @@ class ReturnAnalyzer:
                 parameters=parameters,
                 returns=return_infos,
                 return_type=return_type,
-                signedness_result=signedness_result
+                signedness_result=signedness_result,
+                deferred_calls=dict(self._current_deferred_calls),
             )
             result.unknown_event_count = len(tracer.unknown_tracker.events)
             result.unknown_event_reasons = sorted(
@@ -362,6 +379,26 @@ class ReturnAnalyzer:
                     result.recovered_from_decompiler = True
                     result.analysis_notes.append("call_wrapper_return_recovery")
 
+            summary = self._apply_structural_recurrence_summary(
+                function,
+                high_function,
+                result,
+                tracer,
+            )
+            if summary is not None:
+                result.returns = summary[0]
+                result.analysis_notes.append(summary[1])
+
+            self._analysis_in_progress[function.getName()] = result
+            try:
+                self._apply_bounded_call_refinement(
+                    result,
+                    active_functions,
+                    function.getName(),
+                )
+            finally:
+                self._analysis_in_progress.pop(function.getName(), None)
+
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             result.returns = self._strip_stack_protector_only_conditions(result.returns)
             self._mark_incomplete_control_flow(result)
@@ -385,6 +422,26 @@ class ReturnAnalyzer:
                 print(f"  Use --debug flag for detailed report")
 
             return result
+
+    def _apply_structural_recurrence_summary(
+        self,
+        function,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+        tracer: PcodeTracer,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        if analysis is None or not analysis.returns:
+            return None
+
+        should_try = analysis.has_unresolved_return_value() or any(
+            reason in {"call_out_of_scope", "max_depth_exceeded", "phi_no_valid_branch", "phi_circular"}
+            for reason in getattr(analysis, "unknown_event_reasons", [])
+        )
+        if not should_try:
+            return None
+
+        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        return summarizer.try_summarize_function(function, high_function, analysis)
 
     def _strip_stack_protector_only_conditions(
         self,
@@ -610,9 +667,12 @@ class ReturnAnalyzer:
             reasons.append("unknown_return")
         if analysis.has_overlapping_unconditional_returns():
             reasons.append("overlapping_unconditional_returns")
-        if any(
-            reason in {"call_out_of_scope", "callind_out_of_scope"}
-            for reason in analysis.unknown_event_reasons
+        if (
+            analysis.has_unresolved_return_value()
+            and any(
+                reason in {"call_out_of_scope", "callind_out_of_scope"}
+                for reason in analysis.unknown_event_reasons
+            )
         ):
             reasons.append("indirect_control_flow_unresolved")
 
@@ -625,6 +685,63 @@ class ReturnAnalyzer:
                 analysis.analysis_notes.append(reason)
                 seen.add(reason)
         analysis.incomplete_control_flow = bool(reasons)
+
+    def _make_deferred_call_recorder(self, target_function_name: str):
+        def record_call(target_name: str, args: List[Expression]) -> str:
+            placeholder_name = f"call_out_of_scope:{target_name}#{self._deferred_call_counter}"
+            self._deferred_call_counter += 1
+            cloned_args = [self._clone_expression(arg) for arg in args]
+            self._current_deferred_calls[placeholder_name] = DeferredCallInfo(
+                placeholder_name=placeholder_name,
+                target_name=target_name,
+                arguments=cloned_args,
+            )
+            if self.debug:
+                arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
+                self._debug_print(
+                    f"Recorded deferred call in '{target_function_name}': "
+                    f"{placeholder_name} -> {target_name}([{arg_dump}])"
+                )
+            return placeholder_name
+
+        return record_call
+
+    def _apply_bounded_call_refinement(
+        self,
+        analysis: FunctionReturnAnalysis,
+        active_functions: Set[str],
+        current_function_name: str,
+    ) -> None:
+        if (
+            not self._bounded_call_refinement_enabled
+            or analysis is None
+            or not analysis.deferred_calls
+            or self._bounded_call_unroll_limit <= 0
+        ):
+            return
+
+        def provide_analysis(function_name: str) -> Optional[FunctionReturnAnalysis]:
+            if function_name == current_function_name:
+                return analysis
+            in_progress = self._analysis_in_progress.get(function_name)
+            if in_progress is not None:
+                return in_progress
+            if function_name in active_functions:
+                return None
+            return self._get_or_analyze_call_target(function_name, active_functions)
+
+        refiner = BoundedCallRefiner(
+            provide_analysis,
+            max_unroll=self._bounded_call_unroll_limit,
+            max_cases=self._bounded_call_max_cases,
+            debug=self.debug,
+        )
+        changed = refiner.refine_analysis(analysis)
+        if changed:
+            self._debug_print(
+                f"Applied bounded call refinement to '{analysis.function_name}' "
+                f"(remaining deferred calls={len(analysis.deferred_calls)})"
+            )
 
     def _recover_switch_like_returns_from_decompiler(
         self,
@@ -5138,6 +5255,9 @@ class ReturnAnalyzer:
             resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
+            record_deferred_call=self._make_deferred_call_recorder(
+                current_function.getName() if current_function is not None else "<unknown>"
+            ),
         )
 
         path_condition_sets = all_path_conditions or []
@@ -5215,6 +5335,9 @@ class ReturnAnalyzer:
                 resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
+                record_deferred_call=self._make_deferred_call_recorder(
+                    current_function.getName() if current_function is not None else "<unknown>"
+                ),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:
@@ -5245,6 +5368,9 @@ class ReturnAnalyzer:
                 resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
+                record_deferred_call=self._make_deferred_call_recorder(
+                    current_function.getName() if current_function is not None else "<unknown>"
+                ),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:

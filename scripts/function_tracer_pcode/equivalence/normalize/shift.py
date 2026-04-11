@@ -32,6 +32,26 @@ def normalize_shift_amounts(
     left = expr.operands[0]
     right = expr.operands[1]
 
+    if left.expr_type == ExpressionType.CONSTANT and int(left.value) == 0:
+        zero = Expression.constant(0, size=expr.size or left.size)
+        zero.size = expr.size or zero.size
+        context.record_rule(
+            rule_name="SHIFT_ZERO_SIMPLIFICATION",
+            before_expr=expr.to_smt(),
+            after_expr=zero.to_smt(),
+            reason="Shifted zero remains zero for all shift counts",
+        )
+        return zero
+
+    if right.expr_type == ExpressionType.CONSTANT and int(right.value) == 0:
+        context.record_rule(
+            rule_name="SHIFT_ZERO_SIMPLIFICATION",
+            before_expr=expr.to_smt(),
+            after_expr=left.to_smt(),
+            reason="Shift by zero preserves the left operand",
+        )
+        return left
+
     normalized_right = _normalize_shift_count(right, context)
     if normalized_right is right:
         return expr

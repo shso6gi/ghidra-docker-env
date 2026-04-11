@@ -206,6 +206,136 @@ def test_normalize_expression_flattens_and_sorts_add_tree():
     assert normalized.to_smt() == "(bvadd param_1 param_2)"
 
 
+def test_normalize_expression_simplifies_width_adapters():
+    param32 = make_param("param_1", size=4)
+    widened = Expression.unary_op("INT_ZEXT", param32)
+    widened.size = 8
+    expr = Expression.binary_op("SUBPIECE", widened, make_const(0))
+    expr.size = 4
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.expr_type == ExpressionType.PARAMETER
+    assert normalized.name == "param_1"
+    assert normalized.size == 4
+
+
+def test_normalize_expression_folds_extended_constants_and_mul_identities():
+    param32 = make_param("param_1", size=4)
+    one32 = make_const(1, size=4)
+    zero32 = make_const(0, size=4)
+    wide_one = Expression.unary_op("INT_ZEXT", one32)
+    wide_one.size = 8
+    wide_zero = Expression.unary_op("INT_ZEXT", zero32)
+    wide_zero.size = 8
+    wide_param = Expression.unary_op("INT_ZEXT", param32)
+    wide_param.size = 8
+
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_MULT",
+                operands=[wide_one, wide_param],
+                size=8,
+            ),
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_MULT",
+                operands=[wide_zero, wide_param],
+                size=8,
+            ),
+        ],
+        size=8,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.expr_type == ExpressionType.UNARY_OP
+    assert normalized.operator == "INT_ZEXT"
+    assert normalized.operands[0].name == "param_1"
+    assert normalized.size == 8
+
+
+def test_normalize_expression_simplifies_trivial_shifts():
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[make_const(0, size=8), make_param("param_1", size=8)],
+        size=8,
+    )
+    normalized = normalize_expression(expr, NormalizationContext())
+    assert normalized.expr_type == ExpressionType.CONSTANT
+    assert normalized.value == 0
+
+
+def test_normalize_expression_canonicalizes_arithmetic_series_closed_form():
+    param = make_param("param_1", size=4)
+    nm1 = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(1, size=4)],
+        size=4,
+    )
+    nm2 = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(2, size=4)],
+        size=4,
+    )
+    square = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[nm1, nm1],
+        size=4,
+    )
+    wide_prod = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[
+            Expression.unary_op("INT_ZEXT", nm1),
+            Expression.unary_op("INT_ZEXT", nm2),
+        ],
+        size=8,
+    )
+    wide_prod.operands[0].size = 8
+    wide_prod.operands[1].size = 8
+    tri_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_AND",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_RIGHT",
+                operands=[wide_prod, make_const(1, size=8)],
+                size=8,
+            ),
+            make_const(0xFFFFFFFF, size=8),
+        ],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[square, param],
+                size=4,
+            ),
+            tri_prev,
+        ],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == "((_ extract 31 0) (bvlshr (bvmul ((_ zero_extend 32) param_1) (bvadd ((_ zero_extend 32) param_1) (_ bv1 64))) (_ bv1 64)))"
+
+
 def test_normalize_expression_canonicalizes_modulo_expansion():
     dividend, divisor, modulo_expansion = make_modulo_expansion()
     expr = modulo_expansion

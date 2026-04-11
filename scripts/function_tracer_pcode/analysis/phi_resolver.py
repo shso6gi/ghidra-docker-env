@@ -104,10 +104,10 @@ class PhiHandler:
             if input_def is multiequal_op:
                 return (True, "def_object_same")
             # keyが同じでもオブジェクトが異なれば別SSAバージョン
-            input_def_key = self.tracer._get_op_key(input_def)
-            multiequal_key = self.tracer._get_op_key(multiequal_op)
+            input_def_key = self.tracer._get_stable_op_key(input_def)
+            multiequal_key = self.tracer._get_stable_op_key(multiequal_op)
             if input_def_key == multiequal_key:
-                return (False, f"key_collision_{input_def.getMnemonic()}")
+                return (True, f"logical_self_ref_{input_def.getMnemonic()}")
             return (False, f"different_def_{input_def.getMnemonic()}")
         
         return (False, "")
@@ -134,7 +134,7 @@ class PhiHandler:
         if base_conditions is None:
             base_conditions = []
         
-        op_key = self.tracer._get_op_key(multiequal_op)
+        op_key = self.tracer._get_stable_op_key(multiequal_op)
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular reference detected", depth)
@@ -157,7 +157,7 @@ class PhiHandler:
         self._debug_print("=" * 60, depth)
         self._debug_print("Expanding MULTIEQUAL", depth)
         
-        op_key = self.tracer._get_op_key(multiequal_op)
+        op_key = self.tracer._get_stable_op_key(multiequal_op)
         self._debug_print(f"MULTIEQUAL op_key: {op_key}", depth)
         
         output_varnode = multiequal_op.getOutput()

@@ -6,13 +6,14 @@
 """
 
 from .storage import StorageInfo
-from .analysis import ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
 from .signature import FunctionSignature
 
 __all__ = [
     "StorageInfo",
+    "DeferredCallInfo",
     "ReturnInfo",
     "FunctionReturnAnalysis",
     "Expression",

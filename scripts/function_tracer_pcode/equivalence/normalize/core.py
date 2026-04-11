@@ -11,6 +11,8 @@ from .abs import normalize_bitwise_abs
 from .division import normalize_division_signs
 from .division_signedness import normalize_division_signedness
 from .context import NormalizationContext
+from .width import normalize_width_adapters
+from .series import normalize_series_patterns
 
 
 def normalize_expression(
@@ -67,28 +69,36 @@ def normalize_expression(
             reason="Removed double negation"
         )
 
-    # 2. 剰余展開の正規化
+    # 2. 幅アダプタの簡約
+    expr_before = expr
+    expr = normalize_width_adapters(expr, context)
+
+    # 3. arithmetic-series の閉形式正規化
+    expr_before = expr
+    expr = normalize_series_patterns(expr, context)
+
+    # 4. 剰余展開の正規化
     expr_before = expr
     expr = normalize_modulo_patterns(expr, context)
 
-    # 3. 加算・減算の正規形化
+    # 5. 加算・減算の正規形化
     expr_before = expr
     expr = normalize_arithmetic(expr, context)
 
-    # 4. shift amount の正規化
+    # 6. shift amount の正規化
     expr_before = expr
     expr = normalize_shift_amounts(expr, context)
 
-    # 5. abs ビットハックの簡約
+    # 7. abs ビットハックの簡約
     expr_before = expr
     expr = normalize_bitwise_abs(expr, context)
 
-    # 6. 除算の符号正規化（安全性チェック付き）
+    # 8. 除算の符号正規化（安全性チェック付き）
     expr_before = expr
     expr = normalize_division_signs(expr, context)
     # ルール記録はnormalize_division_signs内で行われる
     
-    # 7. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
+    # 9. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
     expr_before = expr
     expr = normalize_division_signedness(expr, context)
     # ルール記録はnormalize_division_signedness内で行われる

@@ -82,6 +82,43 @@ class PcodeTracer:
         obj_id = id(pcode_op)
         return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{obj_id}"
 
+    def _get_stable_op_key(self, pcode_op) -> str:
+        """
+        PcodeOp の論理的な安定キーを返す。
+
+        `id()` ベースのキーは同一論理 op を別ラッパーとして取得した場合に
+        一致しないため、循環検出や自己参照判定には不向きである。
+        その用途では seqnum / mnemonic / output storage を用いた安定キーを使う。
+        """
+        if pcode_op is None:
+            return "null-op"
+
+        seq = pcode_op.getSeqnum()
+        output = None
+        try:
+            output = pcode_op.getOutput()
+        except Exception:
+            output = None
+
+        output_key = "no-output"
+        if output is not None:
+            try:
+                addr = output.getAddress()
+                space = addr.getAddressSpace().getName() if addr is not None else "unknown"
+                output_key = f"{space}:{output.getOffset()}:{output.getSize()}"
+            except Exception:
+                output_key = f"output:{output.hashCode()}"
+
+        if seq:
+            target = seq.getTarget()
+            order = seq.getOrder()
+            return f"{target}:{order}:{pcode_op.getMnemonic()}:{output_key}"
+
+        try:
+            return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{output_key}"
+        except Exception:
+            return f"noseq:{pcode_op.getMnemonic()}:{output_key}"
+
     def _get_op_order_key(self, pcode_op) -> Optional[int]:
         """PcodeOp の単調順序キーを返す。"""
         seq = pcode_op.getSeqnum()

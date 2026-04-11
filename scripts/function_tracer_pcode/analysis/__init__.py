@@ -4,6 +4,7 @@
 from .tracer import PcodeTracer, VarnodeKey
 from .analyzer import ReturnAnalyzer
 from .phi_resolver import PhiHandler, PhiBranch, ExpandedBranch
+from .bounded_refinement import BoundedCallRefiner
 
 __all__ = [
     'PcodeTracer',
@@ -12,4 +13,5 @@ __all__ = [
     'PhiHandler',
     'PhiBranch',
     'ExpandedBranch',
+    'BoundedCallRefiner',
 ]
