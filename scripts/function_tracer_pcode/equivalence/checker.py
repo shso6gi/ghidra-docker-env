@@ -20,6 +20,7 @@ from .strategies.pairwise import PairwiseStrategy
 from .strategies.monolithic import MonolithicStrategy
 from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
+from .recursive_abstraction import abstract_recursive_calls
 from .workflow import run_check_from_binaries
 
 
@@ -30,6 +31,7 @@ from .workflow import run_check_from_binaries
 class StageID(Enum):
     """Stage識別子"""
     S_PAIRWISE = "S_PAIRWISE"
+    S_ABSTRACT_RECURSIVE_SUMMARY = "S_ABSTRACT_RECURSIVE_SUMMARY"
     S_MONOLITHIC_FALLBACK = "S_MONOLITHIC_FALLBACK"
 
 
@@ -44,6 +46,7 @@ class StageSpec:
 # デフォルトの Stage plan
 DEFAULT_STAGE_PLAN: List[StageSpec] = [
     StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+    StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
     StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
 ]
 
@@ -98,6 +101,7 @@ class EquivalenceChecker:
         if strategy == "pairwise":
             self.stage_plan = [
                 StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+                StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
                 StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
             ]
             self.check_strategy = self.pairwise_strategy
@@ -541,6 +545,7 @@ class EquivalenceChecker:
     ) -> EquivalenceResult:
         """Stage plan を実行"""
         result = None
+        last_result = None
         stage_path = []
         
         for stage_spec in self.stage_plan:
@@ -554,25 +559,56 @@ class EquivalenceChecker:
             # Stage を実行
             if stage_spec.strategy == "pairwise":
                 strategy = self.pairwise_strategy
+            elif stage_spec.strategy == "abstract_pairwise":
+                strategy = None
             elif stage_spec.strategy == "monolithic":
                 strategy = self.monolithic_strategy
             else:
                 raise ValueError(f"Unknown strategy: {stage_spec.strategy}")
             
             # Strategy を実行
-            result = self.check(
-                analysis1, analysis2,
-                binary1_name, binary2_name,
-                save_formula,
-                type_fix_result=type_fix_result,
-                retry_count=retry_count,
-                original_signature1=original_signature1,
-                original_signature2=original_signature2,
-                force_strategy=strategy
-            )
+            if stage_spec.strategy == "abstract_pairwise":
+                result = self._run_recursive_abstraction_stage(
+                    analysis1,
+                    analysis2,
+                    binary1_name,
+                    binary2_name,
+                    save_formula,
+                    type_fix_result,
+                    retry_count,
+                    original_signature1,
+                    original_signature2,
+                )
+                if result is None:
+                    self._debug_print(
+                        f"Stage {stage_id.value}: no abstraction candidate - proceeding to next fallback"
+                    )
+                    stage_path.pop()
+                    if self._should_skip_monolithic_fallback(analysis1, analysis2):
+                        self._debug_print(
+                            "Stage S_MONOLITHIC_FALLBACK: skipped due to incomplete control-flow summary"
+                        )
+                        if last_result is None:
+                            raise RuntimeError(
+                                "Recursive abstraction produced no candidate and no prior stage result exists"
+                            )
+                        return last_result
+                    continue
+            else:
+                result = self.check(
+                    analysis1, analysis2,
+                    binary1_name, binary2_name,
+                    save_formula,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                    force_strategy=strategy
+                )
             
             # stage_path を記録
             result.stage_path = stage_path.copy()
+            last_result = result
             
             # 結果判定
             if result.is_equivalent is True:
@@ -586,6 +622,9 @@ class EquivalenceChecker:
             else:
                 # UNKNOWN/TIMEOUT
                 if stage_id == StageID.S_PAIRWISE:
+                    self._debug_print(f"Stage {stage_id.value}: UNKNOWN - proceeding to fallback")
+                    continue
+                elif stage_id == StageID.S_ABSTRACT_RECURSIVE_SUMMARY:
                     if self._should_skip_monolithic_fallback(analysis1, analysis2):
                         self._debug_print(
                             "Stage S_MONOLITHIC_FALLBACK: skipped due to incomplete control-flow summary"
@@ -614,6 +653,44 @@ class EquivalenceChecker:
         return (
             analysis1.should_skip_monolithic_fallback()
             or analysis2.should_skip_monolithic_fallback()
+        )
+
+    def _run_recursive_abstraction_stage(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        binary1_name: str,
+        binary2_name: str,
+        save_formula: bool,
+        type_fix_result: Optional[TypeFixResult],
+        retry_count: int,
+        original_signature1: Optional[FunctionSignature],
+        original_signature2: Optional[FunctionSignature],
+    ) -> Optional[EquivalenceResult]:
+        abstraction = abstract_recursive_calls(
+            analysis1,
+            analysis2,
+            debug=self.debug,
+        )
+        if not abstraction.applied:
+            self._debug_print("Recursive abstraction fallback: no compatible deferred-call matches")
+            return None
+
+        self._debug_print(
+            "Recursive abstraction fallback: matched "
+            f"{len(abstraction.matches)} deferred recursive call(s)"
+        )
+        return self.check(
+            abstraction.analysis1,
+            abstraction.analysis2,
+            binary1_name,
+            binary2_name,
+            save_formula,
+            type_fix_result=type_fix_result,
+            retry_count=retry_count,
+            original_signature1=original_signature1,
+            original_signature2=original_signature2,
+            force_strategy=self.pairwise_strategy,
         )
     
     def check(
