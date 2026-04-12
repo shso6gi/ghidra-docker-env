@@ -156,6 +156,7 @@ def _rewrite_analysis_with_abstract_calls(
         recovered_from_decompiler=analysis.recovered_from_decompiler,
         incomplete_control_flow=analysis.incomplete_control_flow,
         deferred_calls=dict(analysis.deferred_calls),
+        effect_summary=analysis.effect_summary,
     )
 
     existing_indices = {

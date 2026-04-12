@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from .condition import Condition
     from .expression import Expression
     from ..analysis.signedness import SignednessEvidence
+    from ..analysis.effect_summary import EffectSummary
 
 @dataclass
 class ReturnInfo:
@@ -107,6 +108,7 @@ class FunctionReturnAnalysis:
     recovered_from_decompiler: bool = False
     incomplete_control_flow: bool = False
     deferred_calls: Dict[str, DeferredCallInfo] = field(default_factory=dict)
+    effect_summary: Optional["EffectSummary"] = None
 
     def to_dict(self) -> Dict:
         result = {

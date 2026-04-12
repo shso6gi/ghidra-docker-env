@@ -19,8 +19,10 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    lower_post_state_expression_for_smt,
     memory_expression_for_location,
     normalize_post_state_expression,
+    post_state_read_expression_for_location,
     rewrite_loads_from_effects,
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
@@ -998,7 +1000,7 @@ def test_rewrite_location_read_from_effects_drops_stack_local_nonnull_phi_guard(
     assert rewritten.to_string() == "(a + b)"
 
 
-def test_return_analyzer_normalizes_synthetic_post_state_reads_via_effect_summary():
+def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering():
     analyzer = ReturnAnalyzer(program=object(), debug=False)
     analyzer._current_parameters = [
         _param("param_1", size=4, is_signed=False, index=0),
@@ -1042,8 +1044,16 @@ def test_return_analyzer_normalizes_synthetic_post_state_reads_via_effect_summar
 
     normalized = analyzer._normalize_expanded_return_value(expr, [])
 
-    assert "__locread__" not in normalized.to_string()
-    assert normalized.to_string() == "((param_1 - param_2) + ((param_1 + param_2) * 4))"
+    assert "__locread__" in normalized.to_string()
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered.to_string() == "((param_1 - param_2) + ((param_1 + param_2) * 4))"
 
 
 def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_read():
@@ -3259,6 +3269,44 @@ def test_effect_summary_does_not_reapply_commuted_self_referential_store():
     assert rewritten.to_string() == "(delta + MEM[(box + 4)])"
 
 
+def test_normalize_post_state_expression_does_not_replay_existing_effect_value_twice():
+    trace = Expression.parameter("trace", 0, size=8)
+    trace_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", trace, Expression.constant(0, 8)),
+        False,
+    )
+    steps_addr = Expression.binary_op("INT_ADD", trace, Expression.constant(4, 8))
+    already_replayed = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(steps_addr, size=4),
+        Expression.constant(1, 4),
+    )
+
+    normalized = normalize_post_state_expression(
+        already_replayed,
+        [trace_nonnull],
+        [
+            StoreEffect(
+                location=CanonicalLocation("trace", 4, 4),
+                value=already_replayed,
+                conditions=[trace_nonnull],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("trace", 4, 4),
+                value=already_replayed,
+                conditions=[trace_nonnull],
+                order_key=2,
+            ),
+        ],
+        [_param("trace", size=8, is_signed=False)],
+        prefer_canonical_post_state=False,
+    )
+
+    assert normalized is not None
+    assert normalized.to_string() == "(MEM[(trace + 4)] + 1)"
+
+
 def test_call_effect_summary_policy_accepts_interdependent_swap_writes():
     summary = EffectSummary(
         parameter_names=["a", "b"],
@@ -3992,6 +4040,270 @@ def test_normalize_post_state_expression_rewrites_double_indirect_post_state_loa
     )
 
     assert normalized.to_string() == "(value + 1)"
+
+
+def test_post_state_read_expression_for_location_can_build_symbolic_reads():
+    expr = post_state_read_expression_for_location(
+        CanonicalLocation("trace", 4, 4),
+        [_param("trace", size=8, is_signed=False)],
+        symbolic=True,
+    )
+
+    assert expr is not None
+    assert expr.expr_type.name == "VARIABLE"
+    assert "__locread__" in expr.to_string()
+
+
+def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_until_smt_lowering():
+    trace = Expression.parameter("trace", 0, size=8)
+    start = Expression.parameter("start", 1, size=4)
+    limit = Expression.parameter("limit", 2, size=4)
+    steps_addr = Expression.binary_op("INT_ADD", trace, Expression.constant(4, 8))
+    odd_delta = Expression.unary_op("INT_2COMP", start)
+
+    trace_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", trace, Expression.constant(0, 8)),
+        False,
+    )
+    loop_active = Condition(
+        Expression.binary_op("INT_SLESS", start, limit),
+        False,
+    )
+    odd_iteration = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_AND", start, Expression.constant(1, 4)),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    final_iter = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            limit,
+            Expression.binary_op("INT_ADD", start, Expression.constant(1, 4)),
+        ),
+        False,
+    )
+
+    explicit_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
+        Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+
+    normalized = normalize_post_state_expression(
+        explicit_expr,
+        [trace_nonnull, loop_active, odd_iteration, final_iter],
+        effects,
+        [
+            _param("trace", size=8, is_signed=False),
+            _param("start", size=4, index=1),
+            _param("limit", size=4, index=2),
+        ],
+        symbolic_post_state=True,
+    )
+
+    assert normalized is not None
+    assert "__locread__" in normalized.to_string()
+
+
+def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged_guards():
+    trace = Expression.parameter("trace", 0, size=8)
+    start = Expression.parameter("start", 1, size=4)
+    limit = Expression.parameter("limit", 2, size=4)
+    steps_addr = Expression.binary_op("INT_ADD", trace, Expression.constant(4, 8))
+    odd_delta = Expression.unary_op("INT_2COMP", start)
+
+    trace_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", trace, Expression.constant(0, 8)),
+        False,
+    )
+    loop_active = Condition(
+        Expression.binary_op("INT_SLESS", start, limit),
+        False,
+    )
+    final_iter = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            limit,
+            Expression.binary_op("INT_ADD", start, Expression.constant(1, 4)),
+        ),
+        False,
+    )
+    odd_iteration = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_AND", start, Expression.constant(1, 4)),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    even_iteration = odd_iteration.negate()
+
+    params = [
+        _param("trace", size=8, is_signed=False),
+        _param("start", size=4, index=1),
+        _param("limit", size=4, index=2),
+    ]
+    symbolic_expr = Expression.binary_op(
+        "INT_ADD",
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 4, 4),
+            params,
+            symbolic=True,
+        ),
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 0, 4),
+            params,
+            symbolic=True,
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
+            conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+
+    lowered = lower_post_state_expression_for_smt(
+        symbolic_expr,
+        [trace_nonnull, loop_active, final_iter],
+        effects,
+        params,
+    )
+
+    assert lowered is not None
+    lowered_smt = lowered.to_smt()
+    assert "__locread__" not in lowered_smt
+    assert "ite" in lowered_smt
+    assert "bvneg start" in lowered_smt
+    assert "select mem32 trace" in lowered_smt
+
+
+def test_formula_builder_lowers_symbolic_post_state_reads_before_smt_emission():
+    trace = Expression.parameter("trace", 0, size=8)
+    start = Expression.parameter("start", 1, size=4)
+    limit = Expression.parameter("limit", 2, size=4)
+
+    trace_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", trace, Expression.constant(0, 8)),
+        False,
+    )
+    loop_active = Condition(
+        Expression.binary_op("INT_SLESS", start, limit),
+        False,
+    )
+    final_iter = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            limit,
+            Expression.binary_op("INT_ADD", start, Expression.constant(1, 4)),
+        ),
+        False,
+    )
+    odd_iteration = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_AND", start, Expression.constant(1, 4)),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    even_iteration = odd_iteration.negate()
+
+    params = [
+        _param("trace", size=8, is_signed=False),
+        _param("start", size=4, index=1),
+        _param("limit", size=4, index=2),
+    ]
+    steps_addr = Expression.binary_op("INT_ADD", trace, Expression.constant(4, 8))
+    value_expr = Expression.binary_op(
+        "INT_ADD",
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 4, 4),
+            params,
+            symbolic=True,
+        ),
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 0, 4),
+            params,
+            symbolic=True,
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), Expression.unary_op("INT_2COMP", start)),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
+            conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=value_expr,
+                conditions=[trace_nonnull, loop_active, final_iter],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["trace", "start", "limit"],
+            effects=effects,
+        ),
+    )
+
+    formula = FormulaBuilder(debug=False, exclude_ub=False).build_equivalence_formula_extended(
+        analysis,
+        analysis,
+    ).formula
+
+    assert "__locread__" not in formula
+    assert "ite" in formula
 
 
 def test_normalize_post_state_expression_collapses_ordered_alias_updates_to_post_state_memory():
@@ -4739,7 +5051,16 @@ def test_return_analyzer_canonicalizes_partially_replayed_post_state_before_reap
 
     normalized = analyzer._normalize_expanded_return_value(partially_replayed, [nonnull])
 
-    assert normalized.to_string() == "(((param_2 + param_3) + param_4) + ((MEM[(param_1 + 4)] + 1) + 1))"
+    assert "__locread__" in normalized.to_string()
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [nonnull],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered.to_string() == "(((param_2 + param_3) + param_4) + ((MEM[(param_1 + 4)] + 1) + 1))"
 
 
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions():

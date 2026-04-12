@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from ...model import Condition, ReturnInfo
 from ...analysis.condition.simplifier import ConditionSimplifier
+from ...analysis.effect_summary import lower_post_state_expression_for_smt
 from ..formula.returns import coerce_value_to_bitvec_width
 
 
@@ -19,6 +20,8 @@ class ReturnCase:
         return_info: ReturnInfo,
         return_type: Optional[str] = None,
         source_indices: Optional[List[int]] = None,
+        parameters: Optional[List[Dict]] = None,
+        effect_summary=None,
     ):
         self.index = index
         self.conditions = conditions
@@ -26,6 +29,8 @@ class ReturnCase:
         self.return_info = return_info
         self.return_type = return_type
         self.source_indices = source_indices or [index]
+        self.parameters = parameters or []
+        self.effect_summary = effect_summary
         self.conditions_smt: Optional[List[str]] = None
         self._value_smt_cache: Dict[tuple, str] = {}
 
@@ -49,11 +54,22 @@ class ReturnCase:
         if result is not None:
             return result
 
-        result = str(self.value_expr.to_smt())
+        rendered_expr = self.value_expr
+        if self.effect_summary is not None and getattr(self.effect_summary, "effects", None):
+            lowered_expr = lower_post_state_expression_for_smt(
+                self.value_expr,
+                self.conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            if lowered_expr is not None:
+                rendered_expr = lowered_expr
+
+        result = str(rendered_expr.to_smt())
         result = param_replace_fn(result)
         if target_bits is not None:
             result = coerce_value_to_bitvec_width(
-                self.value_expr,
+                rendered_expr,
                 result,
                 target_bits,
                 use_sign_extension=use_sign_extension,

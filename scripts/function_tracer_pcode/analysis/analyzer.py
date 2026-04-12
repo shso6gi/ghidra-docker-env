@@ -24,6 +24,7 @@ from .effect_summary import (
     _enumerate_constant_expression_branches,
     _resolve_call_target_name,
     _reduce_expression_under_conditions,
+    expression_contains_synthetic_location_reads,
     normalize_post_state_expression,
     summarize_store_effects,
     substitute_condition,
@@ -343,6 +344,7 @@ class ReturnAnalyzer:
                 return_type=return_type,
                 signedness_result=signedness_result,
                 deferred_calls=dict(self._current_deferred_calls),
+                effect_summary=effect_summary,
             )
             result.unknown_event_count = len(tracer.unknown_tracker.events)
             result.unknown_event_reasons = sorted(
@@ -5864,6 +5866,16 @@ class ReturnAnalyzer:
 
         if len(left_residual) == 1 and len(right_residual) == 1:
             if ConditionSimplifier.are_contradictory_conditions(left_residual[0], right_residual[0]):
+                if (
+                    expression_contains_synthetic_location_reads(left.value)
+                    or expression_contains_synthetic_location_reads(right.value)
+                ):
+                    if self.debug:
+                        self._debug_print(
+                            "skipping complementary return-case collapse due to "
+                            "symbolic post-state reads in value"
+                        )
+                    return None
                 if not self._can_safely_collapse_complementary_return_pair(
                     left,
                     right,
@@ -6017,6 +6029,7 @@ class ReturnAnalyzer:
                 effect_summary.effects,
                 self._current_parameters,
                 prefer_canonical_post_state=True,
+                symbolic_post_state=True,
             )
             if (
                 canonicalized is not None

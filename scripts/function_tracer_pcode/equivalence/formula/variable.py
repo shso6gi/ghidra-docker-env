@@ -298,7 +298,11 @@ class VariableAnalyzer:
                         self._collect_variable_sizes(cond.expression, var_sizes)
         
         # パラメータ以外の変数を抽出
-        extra_var_names = set(all_vars_with_storage.keys()) - param_names
+        extra_var_names = {
+            name
+            for name in (set(all_vars_with_storage.keys()) - param_names)
+            if not str(name).startswith("__locread__")
+        }
         
         self._debug_print(f"Found {len(extra_var_names)} extra variables: {extra_var_names}")
 

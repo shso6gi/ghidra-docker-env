@@ -1838,9 +1838,16 @@ def rewrite_loads_from_effects(
 
     synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
     if expr.expr_type == ExpressionType.VARIABLE and synthetic_location is not None:
+        fallback_expr = post_state_read_expression_for_location(
+            synthetic_location,
+            parameters,
+            symbolic=False,
+        )
+        if fallback_expr is None:
+            fallback_expr = expr
         return _rewrite_canonical_location_read(
-            expr,
-            expr,
+            fallback_expr,
+            fallback_expr,
             synthetic_location,
             return_conditions,
             effects,
@@ -1848,6 +1855,7 @@ def rewrite_loads_from_effects(
             max_order_key=max_order_key,
             blocked_locations=active_blocked_locations,
             cycle_components=active_cycle_components,
+            definite_post_state=True,
         )
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
@@ -1939,6 +1947,7 @@ def rewrite_location_read_from_effects(
     max_order_key: Optional[int] = None,
     blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
     cycle_components: Optional[Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]] = None,
+    definite_post_state: bool = False,
 ) -> Expression:
     candidate = memory_expression_for_location(location, parameters)
     if candidate is None:
@@ -1953,6 +1962,7 @@ def rewrite_location_read_from_effects(
         max_order_key=max_order_key,
         blocked_locations=blocked_locations,
         cycle_components=cycle_components,
+        definite_post_state=definite_post_state,
     )
 
 
@@ -1966,6 +1976,7 @@ def _rewrite_canonical_location_read(
     max_order_key: Optional[int] = None,
     blocked_locations: Optional[Sequence[CanonicalLocation]] = None,
     cycle_components: Optional[Dict[CanonicalLocation, FrozenSet[CanonicalLocation]]] = None,
+    definite_post_state: bool = False,
 ) -> Expression:
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     active_blocked_locations = list(blocked_locations or [])
@@ -2005,6 +2016,16 @@ def _rewrite_canonical_location_read(
 
     if not matched:
         return fallback_expr
+
+    if definite_post_state and _all_residual_guards_empty(matched):
+        replayed_state = _replay_definite_active_effects_for_location(
+            location,
+            normalized_return_conditions,
+            effects,
+            parameters,
+        )
+        if replayed_state is not None:
+            return replayed_state
 
     if _has_overlapping_guards(matched):
         return fallback_expr
@@ -2409,6 +2430,23 @@ def collapse_post_state_expr_to_canonical_memory(
     parameters: Sequence[Dict],
     return_conditions: Optional[Sequence[Condition]] = None,
 ) -> Optional[Expression]:
+    return collapse_post_state_expr_to_canonical_read(
+        expr,
+        effects,
+        parameters,
+        return_conditions=return_conditions,
+        symbolic_post_state=False,
+    )
+
+
+def collapse_post_state_expr_to_canonical_read(
+    expr: Optional[Expression],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
     if expr is None or not effects or not parameters:
         return None
     if expr.expr_type == ExpressionType.MEMORY:
@@ -2421,7 +2459,11 @@ def collapse_post_state_expr_to_canonical_memory(
         key=_location_sort_key,
     )
     for location in locations:
-        candidate = memory_expression_for_location(location, parameters)
+        candidate = post_state_read_expression_for_location(
+            location,
+            parameters,
+            symbolic=symbolic_post_state,
+        )
         if candidate is None:
             continue
         rewritten = rewrite_loads_from_effects(
@@ -2444,10 +2486,6 @@ def collapse_post_state_expr_to_canonical_memory(
         normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
         if _expressions_equivalent(normalized_expr, normalized_replayed):
             return candidate
-
-    return None
-
-
 def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     expr: Optional[Expression],
     effects: Sequence[StoreEffect],
@@ -2505,22 +2543,31 @@ def canonicalize_post_state_subexpressions(
     return_conditions: Sequence[Condition],
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
 ) -> Optional[Expression]:
     if expr is None:
         return None
 
-    collapsed = collapse_post_state_expr_to_canonical_memory(
+    collapsed = collapse_post_state_expr_to_canonical_read(
         expr,
         effects,
         parameters,
         return_conditions=return_conditions,
+        symbolic_post_state=symbolic_post_state,
     )
     if collapsed is not None:
         return collapsed
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
         rewritten_operands = [
-            canonicalize_post_state_subexpressions(op, return_conditions, effects, parameters)
+            canonicalize_post_state_subexpressions(
+                op,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+            )
             for op in expr.operands
         ]
         rebuilt = _rebuild_expression_from_optional_operands(
@@ -2542,6 +2589,7 @@ def canonicalize_post_state_subexpressions(
                 combined_conditions,
                 effects,
                 parameters,
+                symbolic_post_state=symbolic_post_state,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -2561,6 +2609,7 @@ def normalize_post_state_expression(
     parameters: Sequence[Dict],
     *,
     prefer_canonical_post_state: bool = True,
+    symbolic_post_state: bool = False,
 ) -> Optional[Expression]:
     """
     Normalize equivalent post-state expressions to a stable canonical form.
@@ -2583,6 +2632,7 @@ def normalize_post_state_expression(
             return_conditions,
             effects,
             parameters,
+            symbolic_post_state=symbolic_post_state,
         )
         if canonicalized is not None:
             normalized = canonicalized
@@ -2597,7 +2647,10 @@ def normalize_post_state_expression(
         if rewritten_definite is not None:
             normalized = rewritten_definite
 
-    if expression_contains_complex_location_reads(normalized, parameters):
+    if (
+        expression_contains_complex_location_reads(normalized, parameters)
+        and not (symbolic_post_state and expression_contains_synthetic_location_reads(normalized))
+    ):
         rewritten_post_state = rewrite_loads_from_effects(
             normalized,
             return_conditions,
@@ -2609,6 +2662,33 @@ def normalize_post_state_expression(
 
     reduced = _reduce_expression_under_conditions(normalized, return_conditions)
     return reduced if reduced is not None else normalized
+
+
+def lower_post_state_expression_for_smt(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    """
+    Materialize symbolic post-state reads into guarded pre-state expressions.
+
+    The analysis pipeline may keep post-state reads in a symbolic canonical form
+    so architecture-specific expansion differences can still be merged safely.
+    Before SMT lowering, we replay the relevant effect summary under the active
+    return conditions to recover a path-sensitive expression.
+    """
+    if expr is None:
+        return None
+
+    lowered = rewrite_loads_from_effects(
+        expr,
+        return_conditions,
+        effects,
+        parameters,
+    )
+    reduced = _reduce_expression_under_conditions(lowered, return_conditions)
+    return reduced if reduced is not None else lowered
 
 
 def _rewrite_definite_post_state_subexpressions(
@@ -2679,6 +2759,15 @@ def _rewrite_definite_post_state_subexpressions(
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
     ):
+        expr_location = canonicalize_expr_read_location(expr, parameters)
+        if expr_location is not None and _matches_existing_effect_value(
+            expr,
+            expr_location,
+            return_conditions,
+            effects,
+            parameters,
+        ):
+            return expr
         rewritten_operands = [
             _rewrite_definite_post_state_subexpressions(
                 operand,
@@ -2995,6 +3084,21 @@ def memory_expression_for_location(
         addr.size = max(1, addr.size or param_size)
 
     return Expression.memory(addr, size=location.size)
+
+
+def post_state_read_expression_for_location(
+    location: CanonicalLocation,
+    parameters: Sequence[Dict],
+    *,
+    symbolic: bool = False,
+) -> Optional[Expression]:
+    location = _normalize_canonical_location(location)
+    if symbolic:
+        return Expression.variable(
+            _synthetic_location_read_name(location),
+            size=max(1, location.size),
+        )
+    return memory_expression_for_location(location, parameters)
 
 
 def _reduce_expression_under_conditions(
@@ -3694,6 +3798,10 @@ def _has_overlapping_guards(matched: Sequence[Tuple[int, List[Condition], Expres
             if not ConditionSimplifier.is_contradiction(residual_i + residual_j):
                 return True
     return False
+
+
+def _all_residual_guards_empty(matched: Sequence[Tuple[int, List[Condition], Expression]]) -> bool:
+    return all(not list(residual) for _order, residual, _value in matched)
 
 
 def _get_order_key(op) -> int:

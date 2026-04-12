@@ -38,6 +38,8 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
             value_expr=normalized_value,
             return_info=ret_info,
             return_type=analysis.return_type,
+            parameters=list(analysis.parameters or []),
+            effect_summary=getattr(analysis, "effect_summary", None),
         )
         key = _build_return_case_key(case)
         existing = merged_cases.get(key)

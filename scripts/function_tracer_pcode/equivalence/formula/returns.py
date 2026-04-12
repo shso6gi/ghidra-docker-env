@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
+from ...analysis.effect_summary import lower_post_state_expression_for_smt
 from ...model import Expression, FunctionReturnAnalysis
 from ...model.render_smt import (
     expression_contains_signed_comparison,
@@ -234,14 +235,26 @@ def build_return_definition(
         else:
             cond_str = "true"
 
-        value_smt = replace_symbol_names(ret.value.to_smt(), param_infos)
+        rendered_value = ret.value
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is not None and getattr(effect_summary, "effects", None):
+            lowered_value = lower_post_state_expression_for_smt(
+                ret.value,
+                ret.conditions,
+                effect_summary.effects,
+                analysis.parameters,
+            )
+            if lowered_value is not None:
+                rendered_value = lowered_value
+
+        value_smt = replace_symbol_names(rendered_value.to_smt(), param_infos)
         use_sign_extension = should_sign_extend_value(
             analysis.return_type,
-            ret.value,
+            rendered_value,
             ret.conditions,
         )
         value_smt = coerce_value_to_bitvec_width(
-            ret.value,
+            rendered_value,
             value_smt,
             return_size,
             use_sign_extension=use_sign_extension,

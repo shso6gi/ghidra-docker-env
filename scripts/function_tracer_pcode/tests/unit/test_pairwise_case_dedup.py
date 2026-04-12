@@ -15,6 +15,13 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
     extract_return_cases,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
+    post_state_read_expression_for_location,
+)
+from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -133,6 +140,116 @@ def test_extract_return_cases_keeps_distinct_conditions_separate():
     assert len(cases) == 2
     assert cases[0].source_indices == [0]
     assert cases[1].source_indices == [1]
+
+
+def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summary():
+    trace = Expression(ExpressionType.PARAMETER, name="trace", size=8)
+    start = Expression(ExpressionType.PARAMETER, name="start", size=4)
+    limit = Expression(ExpressionType.PARAMETER, name="limit", size=4)
+
+    trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
+    loop_active = _cond("INT_SLESS", start, limit)
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    odd_iteration = _cond(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_AND", start, _const(1)),
+        _const(0),
+    )
+    even_iteration = odd_iteration.negate()
+
+    params = [
+        {"name": "trace", "index": 0, "size": 8},
+        {"name": "start", "index": 1, "size": 4},
+        {"name": "limit", "index": 2, "size": 4},
+    ]
+    steps_addr = Expression.binary_op("INT_ADD", trace, _const(4))
+    value_expr = Expression.binary_op(
+        "INT_ADD",
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 4, 4),
+            params,
+            symbolic=True,
+        ),
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 0, 4),
+            params,
+            symbolic=True,
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
+            conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=value_expr,
+                conditions=[trace_nonnull, loop_active, final_iter],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["trace", "start", "limit"],
+            effects=effects,
+        ),
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    smt = cases[0].get_value_smt(lambda expr: expr)
+    assert "__locread__" not in smt
+    assert "ite" in smt
+    assert "bvneg start" in smt
+
+
+def test_return_analyzer_does_not_collapse_complementary_symbolic_post_state_cases():
+    params = [{"name": "trace", "index": 0, "size": 8}]
+    symbolic_value = post_state_read_expression_for_location(
+        CanonicalLocation("trace", 0, 4),
+        params,
+        symbolic=True,
+    )
+    assert symbolic_value is not None
+
+    zero = _cond("INT_EQUAL", _param("param_1"), _const(0))
+    nonzero = zero.negate()
+    infos = [
+        ReturnInfo(
+            address="0x1001",
+            value=symbolic_value,
+            conditions=[zero],
+        ),
+        ReturnInfo(
+            address="0x1001",
+            value=symbolic_value,
+            conditions=[nonzero],
+        ),
+    ]
+
+    merged = ReturnAnalyzer(program=None, debug=False)._merge_equivalent_return_infos(infos)
+
+    assert len(merged) == 2
 
 
 def test_build_pair_query_coerces_case_values_to_return_width():
