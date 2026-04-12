@@ -83,3 +83,82 @@ def test_condition_tracker_refines_unknown_branch_condition_via_call_summary():
     assert "call_out_of_scope" not in refined.to_string()
     assert "unknown" not in refined.to_smt()
     assert "ite" in refined.to_smt()
+
+
+def test_condition_tracker_refines_phi_branch_condition_via_expander():
+    tracer = Mock()
+    tracer.high_function = Mock()
+    tracer.debug = False
+
+    tracker = ConditionTracker(tracer)
+
+    class _FakeCondVarnode:
+        def getSize(self):
+            return 1
+
+    cond_varnode = _FakeCondVarnode()
+    phi_value = Expression.phi(
+        [
+            (Condition(_slt(_const(0), _param("param_1", 0))), _const(1)),
+            (None, Expression.unknown("phi_circular")),
+        ]
+    )
+    raw_condition = Expression.binary_op(
+        "INT_EQUAL",
+        phi_value,
+        Expression.binary_op("INT_MULT", phi_value, _param("param_2", 1)),
+    )
+    block_info = Mock()
+    block_info.index = 11
+    block_info.branch_condition = raw_condition
+    block_info.branch_condition_varnode = cond_varnode
+    tracker.block_by_index = {11: block_info}
+
+    expanded_values = [
+        ExpandedValue(
+            Expression.binary_op(
+                "INT_EQUAL",
+                _const(1),
+                Expression.binary_op(
+                    "INT_MULT",
+                    Expression.binary_op("INT_SDIV", _const(1), _param("param_2", 1)),
+                    _param("param_2", 1),
+                ),
+            ),
+            [Condition(_slt(_const(0), _param("param_1", 0)))],
+        ),
+        ExpandedValue(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression.binary_op("INT_OR", _param("param_1", 0), _const(1)),
+                Expression.binary_op(
+                    "INT_MULT",
+                    Expression.binary_op(
+                        "INT_SDIV",
+                        Expression.binary_op("INT_OR", _param("param_1", 0), _const(1)),
+                        _param("param_2", 1),
+                    ),
+                    _param("param_2", 1),
+                ),
+            ),
+            [Condition(_slt(_const(1), _param("param_1", 0)))],
+        ),
+    ]
+
+    class _FakeExpander:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def expand_from_varnode(self, varnode, base_conditions, depth=0):
+            assert varnode is cond_varnode
+            assert base_conditions == []
+            return expanded_values
+
+    with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", _FakeExpander):
+        changed = tracker.refine_branch_conditions(call_resolver=Mock(), parameters=[])
+
+    assert changed == 1
+    refined = block_info.branch_condition
+    assert refined.expr_type == ExpressionType.PHI
+    assert "// param_2" in refined.to_string()
+    assert "phi_circular" not in refined.to_string()

@@ -189,7 +189,7 @@ class ConditionTracker:
             cond_varnode = block_info.branch_condition_varnode
             if raw_condition is None or cond_varnode is None:
                 continue
-            if not self._expression_contains_unknown_or_call(raw_condition):
+            if not self._expression_requires_refinement(raw_condition):
                 continue
 
             expanded_values = expander.expand_from_varnode(cond_varnode, [])
@@ -234,14 +234,14 @@ class ConditionTracker:
                 continue
             if not expression_returns_bool(value):
                 continue
-            if self._expression_contains_unknown_or_call(value):
+            if self._expression_requires_refinement(value):
                 continue
 
             simplified_conditions = condition_simplifier.simplify_conditions(conditions)
             if condition_simplifier.is_contradiction(simplified_conditions):
                 continue
             if any(
-                self._expression_contains_unknown_or_call(cond.expression)
+                self._expression_requires_refinement(cond.expression)
                 for cond in simplified_conditions
             ):
                 continue
@@ -285,24 +285,24 @@ class ConditionTracker:
         phi_expr.size = output_size or phi_expr.size
         return phi_expr
 
-    def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
+    def _expression_requires_refinement(self, expr: Optional[Expression]) -> bool:
         if expr is None:
             return False
 
         expr_kind = expr.expr_type.__class__
-        if expr.expr_type in (expr_kind.UNKNOWN, expr_kind.CALL):
+        if expr.expr_type in (expr_kind.UNKNOWN, expr_kind.CALL, expr_kind.PHI):
             return True
 
         if expr.expr_type == expr_kind.PHI and expr.value:
             for cond, value in expr.value:
-                if cond is not None and self._expression_contains_unknown_or_call(cond.expression):
+                if cond is not None and self._expression_requires_refinement(cond.expression):
                     return True
-                if self._expression_contains_unknown_or_call(value):
+                if self._expression_requires_refinement(value):
                     return True
             return False
 
         for operand in getattr(expr, "operands", []) or []:
-            if self._expression_contains_unknown_or_call(operand):
+            if self._expression_requires_refinement(operand):
                 return True
 
         return False
