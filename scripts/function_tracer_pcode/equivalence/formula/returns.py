@@ -6,7 +6,10 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from ...analysis.effect_summary import lower_post_state_expression_for_smt
+from ...analysis.effect_summary import (
+    expression_contains_synthetic_location_reads,
+    lower_post_state_expression_for_smt,
+)
 from ...model import Expression, FunctionReturnAnalysis
 from ...model.render_smt import (
     expression_contains_signed_comparison,
@@ -237,7 +240,11 @@ def build_return_definition(
 
         rendered_value = ret.value
         effect_summary = getattr(analysis, "effect_summary", None)
-        if effect_summary is not None and getattr(effect_summary, "effects", None):
+        if (
+            effect_summary is not None
+            and getattr(effect_summary, "effects", None)
+            and expression_contains_synthetic_location_reads(ret.value)
+        ):
             lowered_value = lower_post_state_expression_for_smt(
                 ret.value,
                 ret.conditions,

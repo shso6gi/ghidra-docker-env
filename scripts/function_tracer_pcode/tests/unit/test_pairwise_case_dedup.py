@@ -223,6 +223,165 @@ def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summ
     assert "bvneg start" in smt
 
 
+def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effect_summary():
+    trace = Expression(ExpressionType.PARAMETER, name="trace", size=8)
+    start = Expression(ExpressionType.PARAMETER, name="start", size=4)
+    limit = Expression(ExpressionType.PARAMETER, name="limit", size=4)
+
+    trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
+    loop_active = _cond("INT_SLESS", start, limit)
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    odd_iteration = _cond(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_AND", start, _const(1)),
+        _const(0),
+    )
+    even_iteration = odd_iteration.negate()
+
+    params = [
+        {"name": "trace", "index": 0, "size": 8},
+        {"name": "start", "index": 1, "size": 4},
+        {"name": "limit", "index": 2, "size": 4},
+    ]
+    steps_addr = Expression.binary_op("INT_ADD", trace, _const(4))
+    value_expr = Expression.binary_op(
+        "INT_ADD",
+        post_state_read_expression_for_location(
+            CanonicalLocation("trace", 0, 4),
+            params,
+            symbolic=True,
+        ),
+        Expression.binary_op(
+            "INT_SUB",
+            Expression.binary_op(
+                "INT_ADD",
+                limit,
+                post_state_read_expression_for_location(
+                    CanonicalLocation("trace", 4, 4),
+                    params,
+                    symbolic=True,
+                ),
+            ),
+            start,
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
+            conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("trace", 4, 4),
+            value=Expression.binary_op(
+                "INT_SUB",
+                Expression.binary_op("INT_ADD", limit, Expression.memory(steps_addr, size=4)),
+                start,
+            ),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=value_expr,
+                conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["trace", "start", "limit"],
+            effects=effects,
+        ),
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    smt = cases[0].get_value_smt(lambda expr: expr)
+    assert "__locread__" not in smt
+    assert "select mem32 trace" in smt
+    assert "select mem32 (bvadd trace (_ bv4 64))" in smt
+
+
+def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_again():
+    trace = Expression(ExpressionType.PARAMETER, name="param_1", size=8)
+    start = Expression(ExpressionType.PARAMETER, name="param_2", size=4)
+    limit = Expression(ExpressionType.PARAMETER, name="param_3", size=4)
+
+    trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
+    loop_active = _cond("INT_SLESS", start, limit)
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    odd_iteration = _cond(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_AND", start, _const(1)),
+        _const(0),
+    )
+
+    params = [
+        {"name": "param_1", "index": 0, "size": 8},
+        {"name": "param_2", "index": 1, "size": 4},
+        {"name": "param_3", "index": 2, "size": 4},
+    ]
+    steps_addr = Expression.binary_op("INT_ADD", trace, _const(4))
+    explicit_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+        Expression.binary_op("INT_ADD", _neg(start), Expression.memory(trace, size=4)),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("param_1", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("param_1", 4, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+            conditions=[trace_nonnull, loop_active, final_iter],
+            order_key=6,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=explicit_expr,
+                conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["param_1", "param_2", "param_3"],
+            effects=effects,
+        ),
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    smt = cases[0].get_value_smt(lambda expr: expr)
+    assert "__locread__" not in smt
+    assert smt.count("(bvneg param_2)") == 1
+    assert smt.count("(_ bv1 32)") == 1
+
+
 def test_return_analyzer_does_not_collapse_complementary_symbolic_post_state_cases():
     params = [{"name": "trace", "index": 0, "size": 8}]
     symbolic_value = post_state_read_expression_for_location(

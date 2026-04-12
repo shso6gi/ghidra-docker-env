@@ -18,6 +18,11 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
+)
 from scripts.function_tracer_pcode.transform.rewrite import (
     ExpressionRewriter,
     rewrite_analysis_returns,
@@ -82,6 +87,51 @@ def test_rewrite_analysis_returns_normalizes_condition_expressions():
     assert any(rule.startswith("condition[0]:") for rule, _, _ in results[0].history)
     assert condition_expr.operator == "INT_SLESS"
     assert condition_expr.operands[0].operator == "INT_SREM"
+
+
+def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
+    rewriter = ExpressionRewriter(direction=ExpressionRewriter.NORMALIZE_TO_MODULO)
+    effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=_const(1),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_signed_modulo_expansion(_param("param_1"), _param("param_2")),
+                conditions=[],
+            )
+        ],
+        return_type="long",
+        unknown_event_count=3,
+        unknown_event_reasons=["r1"],
+        analysis_notes=["n1"],
+        recovered_from_decompiler=True,
+        incomplete_control_flow=True,
+        deferred_calls={"placeholder": Mock()},
+        effect_summary=effect_summary,
+    )
+
+    rewritten, _ = rewrite_analysis_returns(analysis, rewriter)
+
+    assert rewritten.effect_summary is effect_summary
+    assert rewritten.unknown_event_count == 3
+    assert rewritten.unknown_event_reasons == ["r1"]
+    assert rewritten.analysis_notes == ["n1"]
+    assert rewritten.recovered_from_decompiler is True
+    assert rewritten.incomplete_control_flow is True
+    assert "placeholder" in rewritten.deferred_calls
 
 
 def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions():

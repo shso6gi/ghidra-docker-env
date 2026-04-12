@@ -358,6 +358,13 @@ def rewrite_analysis_returns(
         returns=new_returns,
         return_type=analysis.return_type,
         signedness_result=analysis.signedness_result,
+        unknown_event_count=analysis.unknown_event_count,
+        unknown_event_reasons=list(analysis.unknown_event_reasons),
+        analysis_notes=list(analysis.analysis_notes),
+        recovered_from_decompiler=analysis.recovered_from_decompiler,
+        incomplete_control_flow=analysis.incomplete_control_flow,
+        deferred_calls=dict(analysis.deferred_calls),
+        effect_summary=analysis.effect_summary,
     )
     
     return new_analysis, rewrite_results

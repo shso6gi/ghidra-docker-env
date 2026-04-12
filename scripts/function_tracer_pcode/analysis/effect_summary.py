@@ -1886,15 +1886,30 @@ def rewrite_loads_from_effects(
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
         expr_location = canonicalize_expr_read_location(expr, parameters)
-        if expr_location is not None and _matches_existing_effect_value(
-            expr,
-            expr_location,
-            return_conditions,
-            effects,
-            parameters,
-            max_order_key=max_order_key,
-        ):
-            return expr
+        if expr_location is not None:
+            matching_effect = _find_matching_effect_value(
+                expr,
+                expr_location,
+                return_conditions,
+                effects,
+                parameters,
+                max_order_key=max_order_key,
+            )
+            if matching_effect is not None:
+                effect_order, matched_value = matching_effect
+                if not expression_contains_synthetic_location_reads(expr):
+                    return expr
+
+                materialized_value = rewrite_loads_from_effects(
+                    matched_value,
+                    return_conditions,
+                    effects,
+                    parameters,
+                    max_order_key=effect_order,
+                    blocked_locations=active_blocked_locations,
+                    cycle_components=active_cycle_components,
+                )
+                return materialized_value
         new_operands = [
             rewrite_loads_from_effects(
                 op,
@@ -2154,6 +2169,27 @@ def _matches_existing_effect_value(
     parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
 ) -> bool:
+    return (
+        _find_matching_effect_value(
+            expr,
+            location,
+            return_conditions,
+            effects,
+            parameters,
+            max_order_key=max_order_key,
+        )
+        is not None
+    )
+
+
+def _find_matching_effect_value(
+    expr: Expression,
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    max_order_key: Optional[int] = None,
+) -> Optional[Tuple[int, Expression]]:
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     for effect in effects:
         normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
@@ -2169,19 +2205,21 @@ def _matches_existing_effect_value(
             expr,
             effect.value,
             normalized_return_conditions + normalized_effect_conditions,
+            parameters,
         ):
-            return True
-    return False
+            return effect.order_key, effect.value
+    return None
 
 
 def _expression_matches_value_under_conditions(
     expr: Expression,
     value: Expression,
     conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
 ) -> bool:
     reduced_expr = _reduce_expression_under_conditions(expr, conditions)
     reduced_value = _reduce_expression_under_conditions(value, conditions)
-    if _expressions_equivalent(reduced_expr, reduced_value):
+    if _expressions_equivalent_under_conditions(reduced_expr, reduced_value, conditions, parameters):
         return True
     if reduced_value.expr_type != ExpressionType.PHI or not reduced_value.value:
         return False
@@ -2191,7 +2229,7 @@ def _expression_matches_value_under_conditions(
             combined.append(cond)
         if ConditionSimplifier.is_contradiction(combined):
             continue
-        if _expression_matches_value_under_conditions(reduced_expr, branch_value, combined):
+        if _expression_matches_value_under_conditions(reduced_expr, branch_value, combined, parameters):
             return True
     return False
 
@@ -2393,6 +2431,137 @@ def _expressions_equivalent(left: Optional[Expression], right: Optional[Expressi
     )
 
 
+def _expression_contains_parameter_name(expr: Optional[Expression], name: str) -> bool:
+    if expr is None:
+        return False
+    if expr.expr_type == ExpressionType.PARAMETER and expr.name == name:
+        return True
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and _expression_contains_parameter_name(cond.expression, name):
+                return True
+            if _expression_contains_parameter_name(value, name):
+                return True
+        return False
+    return any(_expression_contains_parameter_name(op, name) for op in getattr(expr, "operands", []) or [])
+
+
+def _collect_parameter_replacements_from_conditions(
+    conditions: Sequence[Condition],
+) -> Dict[str, Expression]:
+    replacements: Dict[str, Expression] = {}
+    for cond in conditions or []:
+        if cond is None or cond.negated:
+            continue
+        expr = getattr(cond, "expression", None)
+        if (
+            expr is None
+            or expr.expr_type != ExpressionType.BINARY_OP
+            or expr.operator != "INT_EQUAL"
+            or len(expr.operands) != 2
+        ):
+            continue
+        left, right = expr.operands
+        if left.expr_type == ExpressionType.PARAMETER and not _expression_contains_parameter_name(right, left.name):
+            replacements[left.name] = right
+            continue
+        if right.expr_type == ExpressionType.PARAMETER and not _expression_contains_parameter_name(left, right.name):
+            replacements[right.name] = left
+    return replacements
+
+
+def _apply_condition_parameter_replacements(
+    expr: Optional[Expression],
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+    replacements = _collect_parameter_replacements_from_conditions(conditions)
+    if not replacements:
+        return expr
+
+    current = expr
+    for _ in range(4):
+        rewritten = substitute_expression(current, replacements, parameters)
+        if _expressions_equivalent(rewritten, current):
+            break
+        current = rewritten
+    return current
+
+
+def _additive_signature(expr: Optional[Expression]) -> Optional[Tuple[int, Tuple[Tuple[str, int], ...], int]]:
+    if expr is None:
+        return None
+
+    bit_width = int(getattr(expr, "size", 0) or 0)
+    modulus = 1 << bit_width if bit_width > 0 else None
+    term_counts: Dict[str, int] = {}
+    const_value = 0
+
+    def visit(node: Expression, sign: int) -> bool:
+        nonlocal const_value, bit_width, modulus
+        if node is None:
+            return False
+        node_bits = int(getattr(node, "size", 0) or 0)
+        if node_bits > bit_width:
+            bit_width = node_bits
+            modulus = 1 << bit_width if bit_width > 0 else None
+
+        if node.expr_type == ExpressionType.CONSTANT:
+            value = int(node.value)
+            const_value = const_value + (sign * value)
+            if modulus is not None:
+                const_value %= modulus
+            return True
+
+        if node.expr_type == ExpressionType.UNARY_OP and node.operands:
+            if node.operator in {"INT_2COMP", "INT_NEGATE"}:
+                return visit(node.operands[0], -sign)
+            return False
+
+        if node.expr_type == ExpressionType.BINARY_OP and len(node.operands) == 2:
+            if node.operator == "INT_ADD":
+                return visit(node.operands[0], sign) and visit(node.operands[1], sign)
+            if node.operator == "INT_SUB":
+                return visit(node.operands[0], sign) and visit(node.operands[1], -sign)
+
+        key = node.to_string()
+        term_counts[key] = term_counts.get(key, 0) + sign
+        if term_counts[key] == 0:
+            term_counts.pop(key, None)
+        return True
+
+    if not visit(expr, 1):
+        return None
+
+    if modulus is not None:
+        const_value %= modulus
+    terms = tuple(sorted((key, coeff) for key, coeff in term_counts.items() if coeff))
+    return const_value, terms, bit_width
+
+
+def _expressions_equivalent_under_conditions(
+    left: Optional[Expression],
+    right: Optional[Expression],
+    conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+) -> bool:
+    if _expressions_equivalent(left, right):
+        return True
+
+    left_rewritten = _apply_condition_parameter_replacements(left, conditions, parameters)
+    right_rewritten = _apply_condition_parameter_replacements(right, conditions, parameters)
+    if _expressions_equivalent(left_rewritten, right_rewritten):
+        return True
+
+    left_sig = _additive_signature(left_rewritten)
+    right_sig = _additive_signature(right_rewritten)
+    if left_sig is None or right_sig is None:
+        return False
+    return left_sig == right_sig
+
+
 def build_void_effect_summary_expr(effects: Sequence[StoreEffect]) -> Optional[Expression]:
     groups: Dict[CanonicalLocation, List[StoreEffect]] = {}
     for effect in effects:
@@ -2473,7 +2642,12 @@ def collapse_post_state_expr_to_canonical_read(
             parameters,
         )
         normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
-        if _expressions_equivalent(normalized_expr, normalized_rewritten):
+        if _expressions_equivalent_under_conditions(
+            normalized_expr,
+            normalized_rewritten,
+            active_conditions,
+            parameters,
+        ):
             return candidate
         replayed = _replay_definite_active_effects_for_location(
             location,
@@ -2484,7 +2658,12 @@ def collapse_post_state_expr_to_canonical_read(
         if replayed is None:
             continue
         normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
-        if _expressions_equivalent(normalized_expr, normalized_replayed):
+        if _expressions_equivalent_under_conditions(
+            normalized_expr,
+            normalized_replayed,
+            active_conditions,
+            parameters,
+        ):
             return candidate
 def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     expr: Optional[Expression],
@@ -2521,7 +2700,12 @@ def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
             parameters,
         )
         normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
-        if _expressions_equivalent(normalized_expr, normalized_rewritten):
+        if _expressions_equivalent_under_conditions(
+            normalized_expr,
+            normalized_rewritten,
+            active_conditions,
+            parameters,
+        ):
             return candidate
         replayed = _replay_definite_active_effects_for_location(
             location,
@@ -2532,7 +2716,12 @@ def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
         if replayed is None:
             continue
         normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
-        if _expressions_equivalent(normalized_expr, normalized_replayed):
+        if _expressions_equivalent_under_conditions(
+            normalized_expr,
+            normalized_replayed,
+            active_conditions,
+            parameters,
+        ):
             return candidate
 
     return None
@@ -2610,6 +2799,7 @@ def normalize_post_state_expression(
     *,
     prefer_canonical_post_state: bool = True,
     symbolic_post_state: bool = False,
+    preserve_composite_location_wrappers: bool = False,
 ) -> Optional[Expression]:
     """
     Normalize equivalent post-state expressions to a stable canonical form.
@@ -2643,6 +2833,7 @@ def normalize_post_state_expression(
             return_conditions,
             effects,
             parameters,
+            preserve_composite_location_wrappers=preserve_composite_location_wrappers,
         )
         if rewritten_definite is not None:
             normalized = rewritten_definite
@@ -2697,6 +2888,7 @@ def _rewrite_definite_post_state_subexpressions(
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
     rewrite_memory_leaf: bool = False,
+    preserve_composite_location_wrappers: bool = False,
 ) -> Optional[Expression]:
     """
     Replay definite active effects into post-state subexpressions.
@@ -2716,6 +2908,7 @@ def _rewrite_definite_post_state_subexpressions(
             effects,
             parameters,
             rewrite_memory_leaf=True,
+            preserve_composite_location_wrappers=preserve_composite_location_wrappers,
         )
         current = expr
         if rewritten_addr is not expr.operands[0]:
@@ -2766,7 +2959,7 @@ def _rewrite_definite_post_state_subexpressions(
             return_conditions,
             effects,
             parameters,
-        ):
+        ) and not expression_contains_synthetic_location_reads(expr):
             return expr
         rewritten_operands = [
             _rewrite_definite_post_state_subexpressions(
@@ -2775,9 +2968,21 @@ def _rewrite_definite_post_state_subexpressions(
                 effects,
                 parameters,
                 rewrite_memory_leaf=True,
+                preserve_composite_location_wrappers=preserve_composite_location_wrappers,
             )
             for operand in expr.operands
         ]
+        if preserve_composite_location_wrappers and expr_location is not None:
+            nested_same_location = False
+            for operand in expr.operands:
+                operand_location = canonicalize_expr_read_location(operand, parameters)
+                if operand_location != expr_location:
+                    continue
+                if operand.expr_type != ExpressionType.MEMORY:
+                    nested_same_location = True
+                    break
+            if nested_same_location:
+                return expr
         rebuilt = _rebuild_expression_from_optional_operands(
             expr,
             rewritten_operands,
@@ -2798,6 +3003,7 @@ def _rewrite_definite_post_state_subexpressions(
                 effects,
                 parameters,
                 rewrite_memory_leaf=True,
+                preserve_composite_location_wrappers=preserve_composite_location_wrappers,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)

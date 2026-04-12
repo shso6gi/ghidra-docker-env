@@ -21,10 +21,12 @@ from .signedness import SignednessDetector
 from .effect_summary import (
     EffectSummary,
     _expressions_equivalent,
+    _expressions_equivalent_under_conditions,
     _enumerate_constant_expression_branches,
     _resolve_call_target_name,
     _reduce_expression_under_conditions,
     expression_contains_synthetic_location_reads,
+    lower_post_state_expression_for_smt,
     normalize_post_state_expression,
     summarize_store_effects,
     substitute_condition,
@@ -6023,6 +6025,7 @@ class ReturnAnalyzer:
 
         if has_effects:
             assert effect_summary is not None
+            rejected_symbolic_canonicalization = False
             canonicalized = normalize_post_state_expression(
                 normalized_value,
                 conditions,
@@ -6045,6 +6048,42 @@ class ReturnAnalyzer:
                 )
                 if replayed is not None:
                     canonicalized = replayed
+            if (
+                canonicalized is not None
+                and expression_contains_synthetic_location_reads(canonicalized)
+                and not _expressions_equivalent(canonicalized, normalized_value)
+            ):
+                lowered_roundtrip = lower_post_state_expression_for_smt(
+                    canonicalized,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                )
+                if lowered_roundtrip is None or not _expressions_equivalent_under_conditions(
+                    lowered_roundtrip,
+                    normalized_value,
+                    conditions,
+                    self._current_parameters,
+                ):
+                    rejected_symbolic_canonicalization = True
+                    if self.debug:
+                        self._debug_print(
+                            "Rejected symbolic post-state canonicalization due to non-equivalent round trip: "
+                            f"{self._debug_expr_summary(normalized_value)} -> "
+                            f"{self._debug_expr_summary(canonicalized)}"
+                        )
+                    canonicalized = normalized_value
+            if rejected_symbolic_canonicalization:
+                fallback_replayed = normalize_post_state_expression(
+                    normalized_value,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    prefer_canonical_post_state=False,
+                    preserve_composite_location_wrappers=True,
+                )
+                if fallback_replayed is not None:
+                    canonicalized = fallback_replayed
             if canonicalized is not None:
                 if self.debug and canonicalized is not normalized_value:
                     self._debug_print(
