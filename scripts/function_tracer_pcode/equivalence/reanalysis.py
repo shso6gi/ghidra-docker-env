@@ -27,9 +27,12 @@ def analyze_and_check_with_analysis(
             ctx.function_name1, ctx.decompile_timeout
         )
         if analysis1 is None:
+            error_message = analyzer1.get_last_function_lookup_error() or (
+                f"Function '{ctx.function_name1}' not found in {ctx.binary1_name}"
+            )
             return None, None, create_context_error_result(
                 ctx=ctx,
-                error_message=f"Function '{ctx.function_name1}' not found in {ctx.binary1_name}",
+                error_message=error_message,
                 start_time=start_time,
                 retry_count=retry_count,
             )
@@ -43,9 +46,12 @@ def analyze_and_check_with_analysis(
             ctx.function_name2, ctx.decompile_timeout
         )
         if analysis2 is None:
+            error_message = analyzer2.get_last_function_lookup_error() or (
+                f"Function '{ctx.function_name2}' not found in {ctx.binary2_name}"
+            )
             return analysis1, None, create_context_error_result(
                 ctx=ctx,
-                error_message=f"Function '{ctx.function_name2}' not found in {ctx.binary2_name}",
+                error_message=error_message,
                 start_time=start_time,
                 retry_count=retry_count,
                 analysis1=analysis1,
@@ -98,9 +104,12 @@ def selective_reanalysis_and_check(
                 ctx.function_name1, ctx.decompile_timeout
             )
             if analysis1 is None:
+                error_message = analyzer1.get_last_function_lookup_error() or (
+                    f"Function '{ctx.function_name1}' not found after type fix"
+                )
                 return create_reanalysis_error(
                     ctx,
-                    f"Function '{ctx.function_name1}' not found after type fix",
+                    error_message,
                     retry_count,
                 )
         finally:
@@ -123,9 +132,12 @@ def selective_reanalysis_and_check(
                 ctx.function_name2, ctx.decompile_timeout
             )
             if analysis2 is None:
+                error_message = analyzer2.get_last_function_lookup_error() or (
+                    f"Function '{ctx.function_name2}' not found after type fix"
+                )
                 return create_reanalysis_error(
                     ctx,
-                    f"Function '{ctx.function_name2}' not found after type fix",
+                    error_message,
                     retry_count,
                 )
         finally:

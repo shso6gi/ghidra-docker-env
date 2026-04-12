@@ -89,6 +89,10 @@ class PairwiseStrategy(CheckStrategy):
             hints2,
             base_ctx.get("extra_vars2", []),
         )
+        sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
+            analysis1,
+            analysis2,
+        )
 
         cases1 = self._extract_return_cases(analysis1)
         cases2 = self._extract_return_cases(analysis2)
@@ -121,6 +125,21 @@ class PairwiseStrategy(CheckStrategy):
             symbol_replace_fn2,
             label="Case2",
         )
+        sat_unsafety_reasons.extend(
+            self._collect_return_coverage_unsafety_reasons(
+                base_ctx,
+                cases1,
+                cases2,
+                symbol_replace_fn1,
+                symbol_replace_fn2,
+            )
+        )
+        if "function1:return_coverage_gap" in sat_unsafety_reasons:
+            if "return_case_coverage_gap" not in analysis1.analysis_notes:
+                analysis1.analysis_notes.append("return_case_coverage_gap")
+        if "function2:return_coverage_gap" in sat_unsafety_reasons:
+            if "return_case_coverage_gap" not in analysis2.analysis_notes:
+                analysis2.analysis_notes.append("return_case_coverage_gap")
         total_pairs = len(cases1) * len(cases2)
 
         self._debug_print("=" * 60)
@@ -200,6 +219,15 @@ class PairwiseStrategy(CheckStrategy):
                     all_normalization_rules.extend(result.normalization_rules)
 
                 if result.is_equivalent is False:
+                    if sat_unsafety_reasons:
+                        unknown_count += 1
+                        self._debug_print(
+                            "  Pair "
+                            f"{pair_id}: SAT downgraded to UNKNOWN due to unsafe analysis "
+                            f"summary ({', '.join(sat_unsafety_reasons)})"
+                        )
+                        continue
+
                     is_decisive = validate_counterexample_across_cases(
                         self,
                         base_ctx,

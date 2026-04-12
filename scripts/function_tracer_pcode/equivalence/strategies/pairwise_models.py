@@ -6,8 +6,7 @@ from typing import Dict, List, Optional
 from ...model import Condition, ReturnInfo
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.effect_summary import (
-    expression_contains_synthetic_location_reads,
-    lower_post_state_expression_for_smt,
+    lower_post_state_expression_for_smt_if_needed,
 )
 from ..formula.returns import coerce_value_to_bitvec_width
 
@@ -61,9 +60,8 @@ class ReturnCase:
         if (
             self.effect_summary is not None
             and getattr(self.effect_summary, "effects", None)
-            and expression_contains_synthetic_location_reads(self.value_expr)
         ):
-            lowered_expr = lower_post_state_expression_for_smt(
+            lowered_expr = lower_post_state_expression_for_smt_if_needed(
                 self.value_expr,
                 self.conditions,
                 self.effect_summary.effects,

@@ -69,6 +69,7 @@ class ReturnAnalyzer:
         self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
+        self._last_function_lookup_error: Optional[str] = None
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -416,6 +417,11 @@ class ReturnAnalyzer:
 
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             result.returns = self._strip_stack_protector_only_conditions(result.returns)
+            if (
+                result.has_symbolic_post_state_reads()
+                and "symbolic_post_state_reads" not in result.analysis_notes
+            ):
+                result.analysis_notes.append("symbolic_post_state_reads")
             self._mark_incomplete_control_flow(result)
 
             # デバッグダンプ（解析結果の可視化）
@@ -452,6 +458,11 @@ class ReturnAnalyzer:
             reason in {"call_out_of_scope", "max_depth_exceeded", "phi_no_valid_branch", "phi_circular"}
             for reason in getattr(analysis, "unknown_event_reasons", [])
         )
+        if not should_try and getattr(analysis, "effect_summary", None) is not None:
+            should_try = bool(
+                getattr(analysis.effect_summary, "effects", None)
+                and len(getattr(analysis, "returns", []) or []) >= 2
+            )
         if not should_try:
             return None
 
@@ -6025,65 +6036,11 @@ class ReturnAnalyzer:
 
         if has_effects:
             assert effect_summary is not None
-            rejected_symbolic_canonicalization = False
-            canonicalized = normalize_post_state_expression(
+            canonicalized = self._normalize_return_value_with_effect_summary(
                 normalized_value,
                 conditions,
-                effect_summary.effects,
-                self._current_parameters,
-                prefer_canonical_post_state=True,
-                symbolic_post_state=True,
+                effect_summary,
             )
-            if (
-                canonicalized is not None
-                and not _expressions_equivalent(canonicalized, normalized_value)
-                and self._count_memory_reads(canonicalized) > self._count_memory_reads(normalized_value)
-            ):
-                replayed = normalize_post_state_expression(
-                    canonicalized,
-                    conditions,
-                    effect_summary.effects,
-                    self._current_parameters,
-                    prefer_canonical_post_state=False,
-                )
-                if replayed is not None:
-                    canonicalized = replayed
-            if (
-                canonicalized is not None
-                and expression_contains_synthetic_location_reads(canonicalized)
-                and not _expressions_equivalent(canonicalized, normalized_value)
-            ):
-                lowered_roundtrip = lower_post_state_expression_for_smt(
-                    canonicalized,
-                    conditions,
-                    effect_summary.effects,
-                    self._current_parameters,
-                )
-                if lowered_roundtrip is None or not _expressions_equivalent_under_conditions(
-                    lowered_roundtrip,
-                    normalized_value,
-                    conditions,
-                    self._current_parameters,
-                ):
-                    rejected_symbolic_canonicalization = True
-                    if self.debug:
-                        self._debug_print(
-                            "Rejected symbolic post-state canonicalization due to non-equivalent round trip: "
-                            f"{self._debug_expr_summary(normalized_value)} -> "
-                            f"{self._debug_expr_summary(canonicalized)}"
-                        )
-                    canonicalized = normalized_value
-            if rejected_symbolic_canonicalization:
-                fallback_replayed = normalize_post_state_expression(
-                    normalized_value,
-                    conditions,
-                    effect_summary.effects,
-                    self._current_parameters,
-                    prefer_canonical_post_state=False,
-                    preserve_composite_location_wrappers=True,
-                )
-                if fallback_replayed is not None:
-                    canonicalized = fallback_replayed
             if canonicalized is not None:
                 if self.debug and canonicalized is not normalized_value:
                     self._debug_print(
@@ -6094,6 +6051,85 @@ class ReturnAnalyzer:
                 normalized_value = canonicalized
 
         return normalized_value
+
+    def _normalize_return_value_with_effect_summary(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        canonicalized = normalize_post_state_expression(
+            value,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+            prefer_canonical_post_state=True,
+            symbolic_post_state=True,
+        )
+        if self._should_replay_canonicalized_return(canonicalized, value):
+            replayed = normalize_post_state_expression(
+                canonicalized,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                prefer_canonical_post_state=False,
+            )
+            if replayed is not None:
+                canonicalized = replayed
+
+        if self._symbolic_post_state_roundtrip_rejected(canonicalized, value, conditions, effect_summary):
+            if self.debug:
+                self._debug_print(
+                    "Rejected symbolic post-state canonicalization due to non-equivalent round trip: "
+                    f"{self._debug_expr_summary(value)} -> "
+                    f"{self._debug_expr_summary(canonicalized)}"
+                )
+            fallback_replayed = normalize_post_state_expression(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                prefer_canonical_post_state=False,
+                preserve_composite_location_wrappers=True,
+            )
+            return fallback_replayed if fallback_replayed is not None else value
+
+        return canonicalized
+
+    def _should_replay_canonicalized_return(
+        self,
+        canonicalized: Optional[Expression],
+        original: Expression,
+    ) -> bool:
+        return (
+            canonicalized is not None
+            and not _expressions_equivalent(canonicalized, original)
+            and self._count_memory_reads(canonicalized) > self._count_memory_reads(original)
+        )
+
+    def _symbolic_post_state_roundtrip_rejected(
+        self,
+        canonicalized: Optional[Expression],
+        original: Expression,
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> bool:
+        if canonicalized is None or _expressions_equivalent(canonicalized, original):
+            return False
+        if not expression_contains_synthetic_location_reads(canonicalized):
+            return False
+        lowered_roundtrip = lower_post_state_expression_for_smt(
+            canonicalized,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        return lowered_roundtrip is None or not _expressions_equivalent_under_conditions(
+            lowered_roundtrip,
+            original,
+            conditions,
+            self._current_parameters,
+        )
 
     def _expression_contains_unresolved_value(self, expr: Optional[Expression]) -> bool:
         if expr is None:
@@ -6156,11 +6192,16 @@ class ReturnAnalyzer:
         return False
     
     def analyze_function_by_name(self, function_name: str, timeout: int = 60) -> Optional[FunctionReturnAnalysis]:
+        self._last_function_lookup_error = None
         function = self._find_function_by_name(function_name)
         if function is None:
-            self._debug_print(f"Function '{function_name}' not found")
+            self._last_function_lookup_error = f"Function '{function_name}' not found"
+            self._debug_print(self._last_function_lookup_error)
             return None
         return self.analyze_function(function, timeout)
+
+    def get_last_function_lookup_error(self) -> Optional[str]:
+        return self._last_function_lookup_error
 
     def _concretize_readonly_loads(
         self,
@@ -6211,24 +6252,7 @@ class ReturnAnalyzer:
     
     def _find_function_by_name(self, function_name: str):
         function_manager = self.program.getFunctionManager()
-        functions = function_manager.getFunctions(True)
-        
-        for func in functions:
+        for func in function_manager.getFunctions(True):
             if func.getName() == function_name:
                 return func
-
-        match = re.fullmatch(r"(?:thunk_)?FUN_([0-9a-fA-F]+)", function_name or "")
-        if not match:
-            return None
-
-        try:
-            addr_value = int(match.group(1), 16)
-            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
-            addr = default_space.getAddress(addr_value)
-        except Exception:
-            return None
-
-        func = function_manager.getFunctionAt(addr)
-        if func is None:
-            func = function_manager.getFunctionContaining(addr)
-        return func
+        return None

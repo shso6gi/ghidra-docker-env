@@ -210,6 +210,28 @@ class FunctionReturnAnalysis:
                     return True
         return False
 
+    def _expression_contains_symbolic_post_state_reads(self, expr) -> bool:
+        """式木に synthetic post-state read が残っているか。"""
+        if expr is None:
+            return False
+
+        from ..analysis.effect_summary import (
+            expression_contains_synthetic_location_reads,
+        )
+
+        return expression_contains_synthetic_location_reads(expr)
+
+    def has_symbolic_post_state_reads(self) -> bool:
+        """戻り値・ガードに __locread__ 由来の symbolic post-state read が残っているか。"""
+        for ret in self.returns:
+            if self._expression_contains_symbolic_post_state_reads(ret.value):
+                return True
+            for cond in ret.conditions:
+                cond_expr = getattr(cond, "expression", None)
+                if cond_expr is not None and self._expression_contains_symbolic_post_state_reads(cond_expr):
+                    return True
+        return False
+
     def count_unconditional_returns(self) -> int:
         """条件なしの return 候補数を返す。"""
         return sum(1 for ret in self.returns if not ret.conditions)
@@ -220,8 +242,37 @@ class FunctionReturnAnalysis:
 
     def should_skip_monolithic_fallback(self) -> bool:
         """解析が不完全で monolithic fallback を避けるべきか。"""
+        if "return_case_coverage_gap" in self.analysis_notes:
+            return True
         if self.recovered_from_decompiler:
             return False
         if not self.incomplete_control_flow:
-            return False
+            return "return_case_coverage_gap" in self.analysis_notes
         return self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns()
+
+    def get_decisive_sat_unsafety_reasons(self) -> List[str]:
+        """
+        SAT を「非等価の決め手」として扱うには危険な要因を列挙する。
+
+        UNKNOWN へ倒すべき保守条件のみを返し、UNSAT 証明の利用は妨げない。
+        """
+        reasons: List[str] = []
+
+        if self.has_unresolved_return_value():
+            reasons.append("unresolved_return_value")
+        if self.has_symbolic_post_state_reads():
+            reasons.append("symbolic_post_state_reads")
+        if self.has_overlapping_unconditional_returns():
+            reasons.append("overlapping_unconditional_returns")
+        if self.incomplete_control_flow and not self.recovered_from_decompiler:
+            reasons.append("incomplete_control_flow")
+
+        for note in self.analysis_notes:
+            if note in {
+                "indirect_control_flow_unresolved",
+                "symbolic_post_state_reads",
+                "return_case_coverage_gap",
+            } and note not in reasons:
+                reasons.append(note)
+
+        return reasons

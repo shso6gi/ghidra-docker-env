@@ -7,8 +7,7 @@ import re
 from typing import Dict, List, Optional
 
 from ...analysis.effect_summary import (
-    expression_contains_synthetic_location_reads,
-    lower_post_state_expression_for_smt,
+    lower_post_state_expression_for_smt_if_needed,
 )
 from ...model import Expression, FunctionReturnAnalysis
 from ...model.render_smt import (
@@ -243,9 +242,8 @@ def build_return_definition(
         if (
             effect_summary is not None
             and getattr(effect_summary, "effects", None)
-            and expression_contains_synthetic_location_reads(ret.value)
         ):
-            lowered_value = lower_post_state_expression_for_smt(
+            lowered_value = lower_post_state_expression_for_smt_if_needed(
                 ret.value,
                 ret.conditions,
                 effect_summary.effects,

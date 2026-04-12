@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import binascii
 from dataclasses import dataclass
+from itertools import product
 import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -51,6 +52,7 @@ class EffectSummary:
 _SYNTHETIC_LOCATION_BASE_PREFIX = "__locbase__"
 _SYNTHETIC_LOCATION_READ_PREFIX = "__locread__"
 _STACK_FRAME_LOCATION_BASE = f"{_SYNTHETIC_LOCATION_BASE_PREFIX}stackframe"
+_MAX_CALL_ARGUMENT_VARIANTS = 16
 
 
 def _encode_signed_token(value: int) -> str:
@@ -355,69 +357,99 @@ def summarize_store_effects(
                     "[EffectSummary] call arguments: "
                     f"target={target_name} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
                 )
-            callee_summary = direct_call_summary(target_name, args)
-            if callee_summary is None:
-                has_unsupported_call = True
-                continue
-            if not callee_summary.effects:
-                if callee_summary.has_unsupported_call:
-                    has_unsupported_call = True
-                elif debug:
-                    print(
-                        "[EffectSummary] effect-free callee summary: "
-                        f"target={target_name}"
-                    )
-                continue
-            if not is_call_effect_summary_allowed(callee_summary):
-                has_unsupported_call = True
-                continue
-
-            for effect in callee_summary.effects:
-                substitution_args = _choose_effect_substitution_args(
-                    effect.location,
-                    callee_summary.parameter_names,
-                    args,
-                    parameters,
-                )
-                substituted_location = substitute_location(
-                    effect.location,
-                    callee_summary.parameter_names,
-                    substitution_args,
-                    parameters,
-                )
-                if substituted_location is None:
-                    if debug:
-                        arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
-                        print(
-                            "[EffectSummary] skip substituted effect: "
-                            f"callee_loc={effect.location} args=[{arg_dump}]"
-                        )
-                    continue
-                substitutions = dict(zip(callee_summary.parameter_names, substitution_args))
-                substituted_value = substitute_expression(effect.value, substitutions, parameters)
-                substituted_conditions = [
-                    substitute_condition(cond, substitutions, parameters)
-                    for cond in effect.conditions
+            for path_conditions in path_sets:
+                normalized_path_conditions = ConditionSimplifier.simplify_conditions(list(path_conditions))
+                path_reduced_args = [
+                    _reduce_expression_under_conditions(arg, normalized_path_conditions)
+                    for arg in args
                 ]
-                if debug:
-                    cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
+                arg_variants = _enumerate_call_argument_variants(path_reduced_args)
+                if debug and len(arg_variants) > 1:
                     print(
-                        "[EffectSummary] substituted effect: "
-                        f"callee_loc={effect.location} caller_loc={substituted_location} "
-                        f"value={substituted_value.to_string()} conditions=[{cond_dump}]"
+                        "[EffectSummary] enumerated call argument variants: "
+                        f"target={target_name} count={len(arg_variants)}"
                     )
-                for path_conditions in path_sets:
-                    merged_conditions = ConditionSimplifier.simplify_conditions(
-                        list(path_conditions) + substituted_conditions
+                for variant_conditions, variant_args in arg_variants:
+                    active_conditions = ConditionSimplifier.simplify_conditions(
+                        list(normalized_path_conditions) + list(variant_conditions)
                     )
-                    effects.append(
-                        StoreEffect(
-                            location=substituted_location,
-                            value=substituted_value,
-                            conditions=merged_conditions,
-                            order_key=_get_order_key(op),
+                    callee_summary = direct_call_summary(target_name, variant_args)
+                    if callee_summary is None:
+                        has_unsupported_call = True
+                        continue
+                    if not callee_summary.effects:
+                        if callee_summary.has_unsupported_call:
+                            has_unsupported_call = True
+                        elif debug:
+                            print(
+                                "[EffectSummary] effect-free callee summary: "
+                                f"target={target_name}"
+                            )
+                        continue
+                    if not is_call_effect_summary_allowed(callee_summary):
+                        has_unsupported_call = True
+                        continue
+
+                    for effect in callee_summary.effects:
+                        substitution_args = _choose_effect_substitution_args(
+                            effect.location,
+                            callee_summary.parameter_names,
+                            variant_args,
+                            parameters,
                         )
-                    )
+                        substituted_location = substitute_location(
+                            effect.location,
+                            callee_summary.parameter_names,
+                            substitution_args,
+                            parameters,
+                        )
+                        if substituted_location is None:
+                            if debug:
+                                arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
+                                print(
+                                    "[EffectSummary] skip substituted effect: "
+                                    f"callee_loc={effect.location} args=[{arg_dump}]"
+                                )
+                            continue
+                        substitutions = dict(zip(callee_summary.parameter_names, substitution_args))
+                        substituted_value = substitute_expression(effect.value, substitutions, parameters)
+                        substituted_value = _reduce_expression_under_conditions(
+                            substituted_value,
+                            active_conditions,
+                        )
+                        substituted_conditions = [
+                            substitute_condition(cond, substitutions, parameters)
+                            for cond in effect.conditions
+                        ]
+                        substituted_conditions = _reduce_conditions_under_context(
+                            substituted_conditions,
+                            active_conditions,
+                        )
+                        merged_conditions = ConditionSimplifier.simplify_conditions(
+                            list(active_conditions) + substituted_conditions
+                        )
+                        substituted_value = _reduce_expression_under_conditions(
+                            substituted_value,
+                            merged_conditions,
+                        )
+                        if debug:
+                            cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
+                            variant_dump = ", ".join(cond.to_string() for cond in variant_conditions)
+                            merged_dump = ", ".join(cond.to_string() for cond in merged_conditions)
+                            print(
+                                "[EffectSummary] substituted effect: "
+                                f"callee_loc={effect.location} caller_loc={substituted_location} "
+                                f"value={substituted_value.to_string()} conditions=[{cond_dump}] "
+                                f"arg_variant_conditions=[{variant_dump}] merged_conditions=[{merged_dump}]"
+                            )
+                        effects.append(
+                            StoreEffect(
+                                location=substituted_location,
+                                value=substituted_value,
+                                conditions=merged_conditions,
+                                order_key=_get_order_key(op),
+                            )
+                        )
 
     synthetic_expr = build_void_effect_summary_expr(effects)
     if debug:
@@ -580,6 +612,122 @@ def _recover_call_argument_expressions(
         elif explicit is not None:
             recovered_args.append(explicit)
     return recovered_args
+
+
+def _enumerate_call_argument_variants(
+    args: Sequence[Expression],
+    *,
+    limit: int = _MAX_CALL_ARGUMENT_VARIANTS,
+) -> List[Tuple[List[Condition], List[Expression]]]:
+    if not args:
+        return [([], [])]
+
+    per_arg_variants = [
+        _enumerate_expression_variants(arg, limit=limit)
+        for arg in args
+    ]
+    combined: List[Tuple[List[Condition], List[Expression]]] = []
+    seen = set()
+    for variant_tuple in product(*per_arg_variants):
+        merged_conditions: List[Condition] = []
+        merged_args: List[Expression] = []
+        for branch_conditions, branch_expr in variant_tuple:
+            merged_conditions.extend(branch_conditions)
+            merged_args.append(branch_expr)
+        simplified = ConditionSimplifier.simplify_conditions(merged_conditions)
+        if ConditionSimplifier.is_contradiction(simplified):
+            continue
+        key = (
+            tuple(cond.to_string() for cond in simplified),
+            tuple(arg.to_string() for arg in merged_args),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append((simplified, merged_args))
+        if len(combined) >= limit:
+            break
+    return combined or [([], list(args))]
+
+
+def _enumerate_expression_variants(
+    expr: Optional[Expression],
+    *,
+    limit: int = _MAX_CALL_ARGUMENT_VARIANTS,
+) -> List[Tuple[List[Condition], Expression]]:
+    if expr is None:
+        return []
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        resolved: List[Tuple[List[Condition], Expression]] = []
+        seen = set()
+        for cond, value in expr.value:
+            for branch_conditions, branch_value in _enumerate_expression_variants(value, limit=limit):
+                merged_conditions = list(branch_conditions)
+                if cond is not None:
+                    merged_conditions.insert(0, cond)
+                simplified = ConditionSimplifier.simplify_conditions(merged_conditions)
+                if ConditionSimplifier.is_contradiction(simplified):
+                    continue
+                key = (
+                    tuple(cond_item.to_string() for cond_item in simplified),
+                    branch_value.to_string(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append((simplified, branch_value))
+                if len(resolved) >= limit:
+                    break
+            if len(resolved) >= limit:
+                break
+        return resolved or [([], expr)]
+
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+        operand_variants = [
+            _enumerate_expression_variants(operand, limit=limit)
+            for operand in expr.operands
+        ]
+        if operand_variants and any(len(variants) > 1 or variants[0][0] for variants in operand_variants):
+            resolved = []
+            seen = set()
+            for variant_tuple in product(*operand_variants):
+                merged_conditions: List[Condition] = []
+                merged_operands: List[Expression] = []
+                for branch_conditions, branch_expr in variant_tuple:
+                    merged_conditions.extend(branch_conditions)
+                    merged_operands.append(branch_expr)
+                simplified = ConditionSimplifier.simplify_conditions(merged_conditions)
+                if ConditionSimplifier.is_contradiction(simplified):
+                    continue
+                rebuilt = _clone_expression_with_operands(expr, merged_operands)
+                key = (
+                    tuple(cond.to_string() for cond in simplified),
+                    rebuilt.to_string(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append((simplified, rebuilt))
+                if len(resolved) >= limit:
+                    break
+            return resolved or [([], expr)]
+
+    return [([], expr)]
+
+
+def _reduce_conditions_under_context(
+    conditions: Sequence[Condition],
+    context_conditions: Sequence[Condition],
+) -> List[Condition]:
+    reduced: List[Condition] = []
+    for cond in conditions or []:
+        reduced_expr = _reduce_expression_under_conditions(
+            cond.expression,
+            list(context_conditions),
+        )
+        reduced.append(Condition(reduced_expr, cond.negated))
+    return ConditionSimplifier.simplify_conditions(reduced)
 
 
 def _select_aligned_explicit_call_arguments(
@@ -2882,6 +3030,23 @@ def lower_post_state_expression_for_smt(
     return reduced if reduced is not None else lowered
 
 
+def lower_post_state_expression_for_smt_if_needed(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None or not expression_contains_synthetic_location_reads(expr):
+        return expr
+    lowered = lower_post_state_expression_for_smt(
+        expr,
+        return_conditions,
+        effects,
+        parameters,
+    )
+    return lowered if lowered is not None else expr
+
+
 def _rewrite_definite_post_state_subexpressions(
     expr: Optional[Expression],
     return_conditions: Sequence[Condition],
@@ -2972,17 +3137,13 @@ def _rewrite_definite_post_state_subexpressions(
             )
             for operand in expr.operands
         ]
-        if preserve_composite_location_wrappers and expr_location is not None:
-            nested_same_location = False
-            for operand in expr.operands:
-                operand_location = canonicalize_expr_read_location(operand, parameters)
-                if operand_location != expr_location:
-                    continue
-                if operand.expr_type != ExpressionType.MEMORY:
-                    nested_same_location = True
-                    break
-            if nested_same_location:
-                return expr
+        if _should_preserve_composite_location_wrapper(
+            expr,
+            expr_location,
+            parameters,
+            preserve_composite_location_wrappers=preserve_composite_location_wrappers,
+        ):
+            return expr
         rebuilt = _rebuild_expression_from_optional_operands(
             expr,
             rewritten_operands,
@@ -3014,6 +3175,24 @@ def _rewrite_definite_post_state_subexpressions(
         return rebuilt
 
     return expr
+
+
+def _should_preserve_composite_location_wrapper(
+    expr: Expression,
+    expr_location: Optional[CanonicalLocation],
+    parameters: Sequence[Dict],
+    *,
+    preserve_composite_location_wrappers: bool,
+) -> bool:
+    if not preserve_composite_location_wrappers or expr_location is None:
+        return False
+    for operand in expr.operands:
+        operand_location = canonicalize_expr_read_location(operand, parameters)
+        if operand_location != expr_location:
+            continue
+        if operand.expr_type != ExpressionType.MEMORY:
+            return True
+    return False
 
 
 def _replay_definite_active_effects_for_location(

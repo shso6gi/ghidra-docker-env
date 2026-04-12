@@ -2972,6 +2972,352 @@ def test_summarize_store_effects_uses_callee_aligned_subset_for_hidden_call_oper
     assert [arg.to_string() for arg in captured_args["args"]] == ["param_1", "param_2", "1"]
 
 
+def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_effects():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size=4):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", size=8),
+                FakeVarnode("ptr", size=8),
+                FakeVarnode("delta", size=4),
+            ]
+            self._seqnum = FakeSeqnum(0x401180, 12)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[
+                Condition(
+                    Expression.binary_op(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", 0, size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    False,
+                )
+            ]]
+
+    class FakeTracer:
+        def __init__(self, op):
+            self._op = op
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def get_all_pcode_ops(self):
+            return [self._op]
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "ptr":
+                return Expression.parameter("param_1", 0, data_type="int *", size=8)
+            if varnode.key == "delta":
+                return Expression.phi(
+                    [
+                        (
+                            Condition(
+                                Expression.binary_op(
+                                    "INT_EQUAL",
+                                    Expression.binary_op(
+                                        "INT_AND",
+                                        Expression.parameter("param_2", 1, size=4),
+                                        Expression.constant(1, size=4),
+                                    ),
+                                    Expression.constant(0, size=4),
+                                ),
+                                False,
+                            ),
+                            Expression.parameter("param_2", 1, size=4),
+                        ),
+                        (
+                            Condition(
+                                Expression.binary_op(
+                                    "INT_EQUAL",
+                                    Expression.binary_op(
+                                        "INT_AND",
+                                        Expression.parameter("param_2", 1, size=4),
+                                        Expression.constant(1, size=4),
+                                    ),
+                                    Expression.constant(0, size=4),
+                                ),
+                                True,
+                            ),
+                            Expression.unary_op("INT_2COMP", Expression.parameter("param_2", 1, size=4)),
+                        ),
+                    ]
+                )
+            return Expression.constant(0x401180, 8)
+
+    call_op = FakeCallOp()
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(call_op),
+        FakeConditionTracker(),
+        [
+            _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
+            _param("param_2", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        direct_call_summary=lambda _name, _args: EffectSummary(
+            parameter_names=["ptr", "delta"],
+            effects=[
+                StoreEffect(
+                    location=CanonicalLocation("ptr", 0, 4),
+                    value=Expression.binary_op(
+                        "INT_ADD",
+                        Expression.memory(Expression.parameter("ptr", 0, data_type="int *", size=8), size=4),
+                        Expression.parameter("delta", 1, size=4),
+                    ),
+                    conditions=[],
+                    order_key=1,
+                ),
+            ],
+        ),
+        resolve_callee_parameters=lambda _name: [
+            _param("ptr", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
+            _param("delta", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        debug=False,
+    )
+
+    assert len(summary.effects) == 2
+    effect_conditions = {tuple(cond.to_string() for cond in effect.conditions): effect.value.to_string() for effect in summary.effects}
+    assert any("((param_2 & 1) == 0)" in " ".join(conds) for conds in effect_conditions)
+    assert any("not ((param_2 & 1) == 0)" in " ".join(conds) for conds in effect_conditions)
+    assert any(value == "(MEM[param_1] + param_2)" for value in effect_conditions.values())
+    assert any(value == "(MEM[param_1] + (-param_2))" for value in effect_conditions.values())
+
+
+def test_summarize_store_effects_reduces_phi_argument_and_path_conditions_under_active_path():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size=4):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return None
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", size=8),
+                FakeVarnode("ptr", size=8),
+                FakeVarnode("delta", size=4),
+            ]
+            self._seqnum = FakeSeqnum(0x401188, 13)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    phi_counter = Expression.phi(
+        [
+            (
+                None,
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.unknown("phi_circular"),
+                    Expression.constant(1, size=4),
+                ),
+            ),
+            (
+                Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression.parameter("param_1", 0, size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    True,
+                ),
+                Expression.parameter("param_2", 1, size=4),
+            ),
+        ]
+    )
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[
+                Condition(
+                    Expression.binary_op(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", 0, size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    False,
+                ),
+                Condition(
+                    Expression.binary_op(
+                        "INT_SLESS",
+                        phi_counter,
+                        Expression.parameter("param_3", 2, size=4),
+                    ),
+                    False,
+                ),
+                Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression.binary_op(
+                            "INT_AND",
+                            phi_counter,
+                            Expression.constant(1, size=4),
+                        ),
+                        Expression.constant(0, size=4),
+                    ),
+                    False,
+                ),
+            ]]
+
+    class FakeTracer:
+        def __init__(self, op):
+            self._op = op
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def get_all_pcode_ops(self):
+            return [self._op]
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "ptr":
+                return Expression.parameter("param_1", 0, data_type="int *", size=8)
+            if varnode.key == "delta":
+                return phi_counter
+            return Expression.constant(0x401188, 8)
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(call_op),
+        FakeConditionTracker(),
+        [
+            _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
+            _param("param_2", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
+            _param("param_3", size=4, is_signed=True, index=2, storage=_reg_storage("a2", size_bytes=4)),
+        ],
+        direct_call_summary=lambda _name, _args: EffectSummary(
+            parameter_names=["ptr", "delta"],
+            effects=[
+                StoreEffect(
+                    location=CanonicalLocation("ptr", 0, 4),
+                    value=Expression.binary_op(
+                        "INT_ADD",
+                        Expression.memory(Expression.parameter("ptr", 0, data_type="int *", size=8), size=4),
+                        Expression.parameter("delta", 1, size=4),
+                    ),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        ),
+        resolve_callee_parameters=lambda _name: [
+            _param("ptr", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
+            _param("delta", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        debug=False,
+    )
+
+    assert len(summary.effects) == 1
+    effect = summary.effects[0]
+    assert effect.value.to_string() == "(MEM[param_1] + param_2)"
+    cond_strings = [cond.to_string() for cond in effect.conditions]
+    assert "(param_1 != 0)" in cond_strings
+    assert "(param_2 < param_3)" in cond_strings
+    assert "((param_2 & 1) == 0)" in cond_strings
+
+
 def test_summarize_store_effects_captures_double_indirect_parameter_store():
     class FakeAddress:
         def __init__(self, offset):
@@ -7042,54 +7388,6 @@ def test_type_fixer_does_not_pattern_fix_pointer_types():
 
     assert fixer._should_fix_type("undefined4")
     assert not fixer._should_fix_type("undefined4 *")
-
-
-def test_return_analyzer_find_function_by_name_resolves_fun_address_via_containing():
-    class _FakeFunction:
-        def __init__(self, name):
-            self._name = name
-
-        def getName(self):
-            return self._name
-
-    class _FakeFunctionManager:
-        def __init__(self, containing):
-            self._containing = containing
-
-        def getFunctions(self, _forward):
-            return []
-
-        def getFunctionAt(self, _addr):
-            return None
-
-        def getFunctionContaining(self, _addr):
-            return self._containing
-
-    class _FakeAddressSpace:
-        def getAddress(self, value):
-            return value
-
-    class _FakeAddressFactory:
-        def getDefaultAddressSpace(self):
-            return _FakeAddressSpace()
-
-    class _FakeProgram:
-        def __init__(self, containing):
-            self._manager = _FakeFunctionManager(containing)
-            self._factory = _FakeAddressFactory()
-
-        def getFunctionManager(self):
-            return self._manager
-
-        def getAddressFactory(self):
-            return self._factory
-
-    analyzer = ReturnAnalyzer(_FakeProgram(_FakeFunction("mem_void_write_if_needed")), debug=False)
-
-    resolved = analyzer._find_function_by_name("FUN_120001514")
-
-    assert resolved is not None
-    assert resolved.getName() == "mem_void_write_if_needed"
 
 
 def test_tracer_get_function_name_accepts_ram_address_varnode():

@@ -146,6 +146,55 @@ def validate_counterexample_across_cases(
     - 元の SAT ペアが実際に到達不能なら偽反例
     - 他の到達可能ケース対で値が等しいなら、case split が不完全で偽反例の可能性が高い
     """
+    return _validate_counterexample_model(
+        strategy,
+        base_ctx,
+        cases1,
+        cases2,
+        param_replace_fn1,
+        param_replace_fn2,
+        counterexample_raw,
+        decisive_pairs={sat_case_indices},
+    )
+
+
+def validate_counterexample_globally(
+    strategy,
+    base_ctx: Dict[str, Any],
+    cases1: Sequence,
+    cases2: Sequence,
+    param_replace_fn1,
+    param_replace_fn2,
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    monolithic SAT 反例が case split 全体で一意に非等価を示すか検証する。
+
+    到達可能な equal pair が 1 つでもあれば、同一モデルが複数の枝割り当てを
+    同時に満たしており、反例は曖昧とみなして UNKNOWN へ倒す。
+    """
+    return _validate_counterexample_model(
+        strategy,
+        base_ctx,
+        cases1,
+        cases2,
+        param_replace_fn1,
+        param_replace_fn2,
+        counterexample_raw,
+        decisive_pairs=None,
+    )
+
+
+def _validate_counterexample_model(
+    strategy,
+    base_ctx: Dict[str, Any],
+    cases1: Sequence,
+    cases2: Sequence,
+    param_replace_fn1,
+    param_replace_fn2,
+    counterexample_raw: Optional[Dict[str, Any]],
+    decisive_pairs: Optional[Sequence[Tuple[int, int]]],
+) -> bool:
     if not counterexample_raw:
         return True
 
@@ -153,8 +202,9 @@ def validate_counterexample_across_cases(
     if not model_assertions:
         return True
 
-    sat_i, sat_j = sat_case_indices
+    decisive_pair_set = set(decisive_pairs or [])
     decisive_pair_feasible = False
+    feasible_distinguishing_pair = False
 
     for i, case1 in enumerate(cases1):
         for j, case2 in enumerate(cases2):
@@ -176,7 +226,7 @@ def validate_counterexample_across_cases(
             if not feasible:
                 continue
 
-            if i == sat_i and j == sat_j:
+            if (i, j) in decisive_pair_set:
                 decisive_pair_feasible = True
 
             equal = _check_pair_equality_under_model(
@@ -199,10 +249,17 @@ def validate_counterexample_across_cases(
                     f"  Counterexample is ambiguous: model also matches equal pair ({i},{j})"
                 )
                 return False
+            feasible_distinguishing_pair = True
 
-    if not decisive_pair_feasible:
+    if decisive_pair_set and not decisive_pair_feasible:
         strategy._debug_print(
-            f"  Counterexample rejected: original SAT pair ({sat_i},{sat_j}) is infeasible under the model"
+            "  Counterexample rejected: original SAT pair is infeasible under the model"
+        )
+        return False
+
+    if not feasible_distinguishing_pair:
+        strategy._debug_print(
+            "  Counterexample rejected: no feasible distinguishing case pair under the model"
         )
         return False
 

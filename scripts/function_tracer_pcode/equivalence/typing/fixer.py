@@ -301,9 +301,7 @@ class TypeFixer:
     def _find_function_by_name(self, function_name: str):
         """関数名から関数オブジェクトを取得"""
         function_manager = self.program.getFunctionManager()
-        functions = function_manager.getFunctions(True)
-        
-        for func in functions:
+        for func in function_manager.getFunctions(True):
             if func.getName() == function_name:
                 return func
         return None

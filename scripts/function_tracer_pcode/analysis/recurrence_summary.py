@@ -3,9 +3,16 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Tuple
+from collections import Counter
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, Expression, ExpressionType, ReturnInfo
+from .condition import ConditionSimplifier
+from .effect_summary import (
+    CanonicalLocation,
+    _reduce_expression_under_conditions,
+    canonicalize_location,
+)
 
 
 class StructuralRecurrenceSummarizer:
@@ -32,10 +39,13 @@ class StructuralRecurrenceSummarizer:
     def try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
         if function is None or high_function is None or analysis is None:
             return None
-        if len(getattr(analysis, "parameters", []) or []) != 1:
-            return None
 
-        summary = self._try_summarize_linear_self_recursion(function, high_function, analysis)
+        if len(getattr(analysis, "parameters", []) or []) == 1:
+            summary = self._try_summarize_linear_self_recursion(function, high_function, analysis)
+            if summary is not None:
+                return summary
+
+        summary = self._try_summarize_branch_accumulator_loop(analysis)
         if summary is not None:
             return summary
         return None
@@ -167,6 +177,666 @@ class StructuralRecurrenceSummarizer:
             f"(lower_bound={lower_bound}, coeff={coeff}, bias={bias}, base={base_value})"
         )
         return summarized_returns, "linear_self_recursion_summary"
+
+    def _try_summarize_branch_accumulator_loop(
+        self,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        if analysis is None or not analysis.returns or len(analysis.parameters or []) < 3:
+            self._debug("Declined branch-accumulator summary: insufficient returns/parameters")
+            return None
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            self._debug("Declined branch-accumulator summary: no effect summary")
+            return None
+
+        loop_params = self._infer_loop_parameter_pair(analysis)
+        if loop_params is None:
+            self._debug("Declined branch-accumulator summary: could not infer loop parameter pair")
+            return None
+        start_name, limit_name = loop_params
+
+        pointer_param = self._infer_pointer_parameter_name(analysis)
+        if not pointer_param:
+            self._debug("Declined branch-accumulator summary: could not infer pointer parameter")
+            return None
+
+        working_returns = list(analysis.returns)
+        base_case = self._find_no_loop_base_case(working_returns, pointer_param, start_name, limit_name)
+        if base_case is None:
+            self._debug(
+                "Declined branch-accumulator summary: could not identify no-loop base case "
+                f"(pointer={pointer_param}, start={start_name}, limit={limit_name})"
+            )
+            return None
+
+        step_cases = self._find_one_step_cases(working_returns, pointer_param, start_name, limit_name)
+        if step_cases is None:
+            synthesized = self._synthesize_one_step_cases_from_effects(
+                analysis,
+                base_case,
+                pointer_param,
+                start_name,
+                limit_name,
+            )
+            if not synthesized:
+                self._debug("Declined branch-accumulator summary: could not synthesize one-step cases from effects")
+                return None
+            working_returns.extend(synthesized)
+            step_cases = self._find_one_step_cases(working_returns, pointer_param, start_name, limit_name)
+            if step_cases is None:
+                self._debug("Declined branch-accumulator summary: synthesized one-step cases still did not match")
+                return None
+
+        even_case, odd_case = step_cases
+        base_expr = base_case.value
+        even_delta = self._extract_additive_delta(even_case.value, base_expr, analysis.parameters or [])
+        odd_delta = self._extract_additive_delta(odd_case.value, base_expr, analysis.parameters or [])
+        if even_delta is None or odd_delta is None:
+            self._debug("Declined branch-accumulator summary: could not isolate additive deltas")
+            return None
+
+        even_affine = self._extract_affine_term(even_delta, start_name)
+        odd_affine = self._extract_affine_term(odd_delta, start_name)
+        if even_affine is None or odd_affine is None:
+            self._debug("Declined branch-accumulator summary: one-step deltas are not affine in the loop counter")
+            return None
+
+        null_case = self._find_pointer_null_case(working_returns, pointer_param)
+        loop_even_value = self._build_parity_split_loop_value(
+            base_expr,
+            start_name,
+            limit_name,
+            even_affine,
+            odd_affine,
+            start_is_even=True,
+        )
+        loop_odd_value = self._build_parity_split_loop_value(
+            base_expr,
+            start_name,
+            limit_name,
+            even_affine,
+            odd_affine,
+            start_is_even=False,
+        )
+        if loop_even_value is None or loop_odd_value is None:
+            self._debug("Declined branch-accumulator summary: failed to build closed-form loop values")
+            return None
+
+        loop_conditions_common = [
+            self._pointer_nonnull_condition(pointer_param, analysis),
+            Condition(
+                Expression.binary_op(
+                    "INT_SLESS",
+                    self._param_expr(analysis, start_name),
+                    self._param_expr(analysis, limit_name),
+                ),
+                False,
+            ),
+        ]
+        even_start_cond = Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression.binary_op(
+                    "INT_AND",
+                    self._param_expr(analysis, start_name),
+                    Expression.constant(1, self._param_expr(analysis, start_name).size or 4),
+                ),
+                Expression.constant(0, self._param_expr(analysis, start_name).size or 4),
+            ),
+            False,
+        )
+        odd_start_cond = even_start_cond.negate()
+
+        summarized: List[ReturnInfo] = []
+        if null_case is not None:
+            summarized.append(null_case)
+        summarized.append(base_case)
+        summarized.append(
+            ReturnInfo(
+                address=base_case.address,
+                value=loop_even_value,
+                conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [even_start_cond]),
+                branch_index=10_100,
+            )
+        )
+        summarized.append(
+            ReturnInfo(
+                address=base_case.address,
+                value=loop_odd_value,
+                conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [odd_start_cond]),
+                branch_index=10_101,
+            )
+        )
+        self._debug(
+            "Recovered counted loop branch-accumulator summary "
+            f"(start={start_name}, limit={limit_name}, even={even_affine}, odd={odd_affine})"
+        )
+        return summarized, "counted_loop_branch_accumulator_summary"
+
+    def _infer_pointer_parameter_name(self, analysis) -> Optional[str]:
+        for param in analysis.parameters or []:
+            name = str(param.get("name") or "")
+            data_type = str(param.get("data_type") or "")
+            if name and "*" in data_type:
+                return name
+        return None
+
+    def _infer_loop_parameter_pair(self, analysis) -> Optional[Tuple[str, str]]:
+        candidates: Counter[Tuple[str, str]] = Counter()
+        all_conditions: List[Condition] = []
+        for ret in analysis.returns or []:
+            all_conditions.extend(ret.conditions or [])
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is not None:
+            for effect in effect_summary.effects or []:
+                all_conditions.extend(effect.conditions or [])
+
+        for cond in all_conditions:
+            pair = self._match_less_parameter_pair(cond)
+            if pair is not None:
+                candidates[pair] += 1
+        if not candidates:
+            return None
+        return candidates.most_common(1)[0][0]
+
+    def _match_less_parameter_pair(self, condition: Condition) -> Optional[Tuple[str, str]]:
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+        if expr.operator not in {"INT_SLESS", "INT_LESS"}:
+            return None
+        left_name = self._parameter_name_from_expr(expr.operands[0])
+        right_name = self._parameter_name_from_expr(expr.operands[1])
+        if not left_name or not right_name or left_name == right_name:
+            return None
+        if condition.negated:
+            return None
+        return left_name, right_name
+
+    def _parameter_name_from_expr(self, expr: Optional[Expression]) -> Optional[str]:
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+            return expr.name
+        normalized = self._normalize_counter_view(expr, getattr(expr, "name", None) or "")
+        if normalized is not None and normalized[0].name:
+            return normalized[0].name
+        return None
+
+    def _param_expr(self, analysis, name: str) -> Expression:
+        for param in analysis.parameters or []:
+            if param.get("name") != name:
+                continue
+            return Expression.parameter(
+                name,
+                index=int(param.get("index", 0)),
+                data_type=param.get("data_type"),
+                size=int(param.get("size", 4) or 4),
+            )
+        return Expression.parameter(name, size=4)
+
+    def _find_pointer_null_case(
+        self,
+        returns: Sequence[ReturnInfo],
+        pointer_name: str,
+    ) -> Optional[ReturnInfo]:
+        for ret in returns:
+            if not self._return_is_constant(ret):
+                continue
+            if any(self._condition_is_pointer_null(cond, pointer_name) for cond in ret.conditions or []):
+                return ret
+        return None
+
+    def _find_no_loop_base_case(
+        self,
+        returns: Sequence[ReturnInfo],
+        pointer_name: str,
+        start_name: str,
+        limit_name: str,
+    ) -> Optional[ReturnInfo]:
+        for ret in returns:
+            if self._return_is_constant(ret):
+                continue
+            has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in ret.conditions or [])
+            has_not_less = any(self._condition_is_not_less(cond, start_name, limit_name) for cond in ret.conditions or [])
+            if has_nonnull and has_not_less:
+                return ret
+        return None
+
+    def _find_one_step_cases(
+        self,
+        returns: Sequence[ReturnInfo],
+        pointer_name: str,
+        start_name: str,
+        limit_name: str,
+    ) -> Optional[Tuple[ReturnInfo, ReturnInfo]]:
+        even_case = None
+        odd_case = None
+        for ret in returns:
+            conditions = ret.conditions or []
+            has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conditions)
+            has_loop = any(self._condition_is_less(cond, start_name, limit_name) for cond in conditions)
+            has_one_step = any(self._condition_is_step_equality(cond, start_name, limit_name) for cond in conditions)
+            if not (has_nonnull and has_loop and has_one_step):
+                continue
+            parity = self._extract_counter_parity(conditions, start_name)
+            if parity is True:
+                even_case = ret
+            elif parity is False:
+                odd_case = ret
+        if even_case is None or odd_case is None:
+            return None
+        return even_case, odd_case
+
+    def _synthesize_one_step_cases_from_effects(
+        self,
+        analysis,
+        base_case: ReturnInfo,
+        pointer_name: str,
+        start_name: str,
+        limit_name: str,
+    ) -> List[ReturnInfo]:
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None:
+            return []
+        coeffs = self._extract_linear_location_coefficients(base_case.value, analysis.parameters or [])
+        if not coeffs:
+            return []
+
+        grouped: Dict[Tuple[str, ...], List] = {}
+        for effect in effect_summary.effects or []:
+            conds = ConditionSimplifier.simplify_conditions(effect.conditions or [])
+            key = tuple(sorted(cond.to_string() for cond in conds))
+            grouped.setdefault(key, []).append((conds, effect))
+
+        synthesized: List[ReturnInfo] = []
+        for grouped_effects in grouped.values():
+            conds = grouped_effects[0][0]
+            if not any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conds):
+                continue
+            if not any(self._condition_is_less(cond, start_name, limit_name) for cond in conds):
+                continue
+            parity = self._extract_counter_parity(conds, start_name)
+            if parity is None:
+                continue
+
+            delta_terms: List[Expression] = []
+            for _conds, effect in grouped_effects:
+                coeff = coeffs.get(effect.location)
+                if coeff in (None, 0):
+                    continue
+                delta_expr = self._extract_store_delta_expr(effect, analysis.parameters or [])
+                if delta_expr is None:
+                    return []
+                reduced_delta = _reduce_expression_under_conditions(delta_expr, conds)
+                scaled = self._scale_expression(reduced_delta, coeff)
+                if scaled is not None:
+                    delta_terms.append(scaled)
+            if not delta_terms:
+                continue
+
+            delta_sum = self._sum_expression_terms(delta_terms)
+            if delta_sum is None:
+                continue
+            value = Expression.binary_op("INT_ADD", base_case.value, delta_sum)
+            value.size = base_case.value.size
+            step_eq = Condition(
+                Expression.binary_op(
+                    "INT_EQUAL",
+                    self._param_expr(analysis, limit_name),
+                    Expression.binary_op(
+                        "INT_ADD",
+                        self._param_expr(analysis, start_name),
+                        Expression.constant(1, self._param_expr(analysis, start_name).size or 4),
+                    ),
+                ),
+                False,
+            )
+            synthesized.append(
+                ReturnInfo(
+                    address=base_case.address,
+                    value=value,
+                    conditions=ConditionSimplifier.simplify_conditions(list(conds) + [step_eq]),
+                    branch_index=9_000 if parity else 9_001,
+                )
+            )
+        return synthesized
+
+    def _extract_linear_location_coefficients(
+        self,
+        expr: Expression,
+        parameters: Sequence[dict],
+    ) -> Dict[CanonicalLocation, int]:
+        coeffs: Dict[CanonicalLocation, int] = {}
+        for sign, term in self._flatten_add_terms(expr):
+            if term.expr_type == ExpressionType.CONSTANT:
+                continue
+            if term.expr_type != ExpressionType.MEMORY or not term.operands:
+                return {}
+            location = canonicalize_location(term.operands[0], parameters, size=term.size)
+            if location is None:
+                return {}
+            coeffs[location] = coeffs.get(location, 0) + sign
+        return {loc: coeff for loc, coeff in coeffs.items() if coeff != 0}
+
+    def _extract_store_delta_expr(
+        self,
+        effect,
+        parameters: Sequence[dict],
+    ) -> Optional[Expression]:
+        current_read = Expression.memory(
+            self._address_expr_for_location(effect.location, parameters),
+            size=effect.location.size,
+        )
+        delta = self._extract_additive_delta(effect.value, current_read, parameters)
+        if delta is not None:
+            return delta
+        if effect.value.equals(current_read):
+            return Expression.constant(0, size=effect.location.size)
+        return None
+
+    def _address_expr_for_location(
+        self,
+        location: CanonicalLocation,
+        parameters: Sequence[dict],
+    ) -> Expression:
+        base_param = None
+        for param in parameters:
+            if param.get("name") == location.base_param:
+                base_param = param
+                break
+        base_expr = Expression.parameter(
+            location.base_param,
+            index=int((base_param or {}).get("index", 0)),
+            data_type=(base_param or {}).get("data_type"),
+            size=int((base_param or {}).get("size", 8) or 8),
+        )
+        if location.offset == 0:
+            return base_expr
+        return Expression.binary_op(
+            "INT_ADD",
+            base_expr,
+            Expression.constant(location.offset, size=base_expr.size or 8),
+        )
+
+    def _extract_additive_delta(
+        self,
+        expr: Expression,
+        base_expr: Expression,
+        parameters: Sequence[dict],
+    ) -> Optional[Expression]:
+        expr_terms = self._flatten_add_terms(expr)
+        base_terms = self._flatten_add_terms(base_expr)
+        remaining = list(expr_terms)
+        for sign, term in base_terms:
+            matched = False
+            for index, (cand_sign, cand_term) in enumerate(remaining):
+                if cand_sign != sign:
+                    continue
+                if not self._terms_equivalent(cand_term, term, parameters):
+                    continue
+                del remaining[index]
+                matched = True
+                break
+            if not matched:
+                return None
+        return self._sum_expression_terms(
+            [self._scale_expression(term, sign) for sign, term in remaining if self._scale_expression(term, sign) is not None]
+        )
+
+    def _terms_equivalent(
+        self,
+        left: Expression,
+        right: Expression,
+        parameters: Sequence[dict],
+    ) -> bool:
+        if left.equals(right):
+            return True
+        if (
+            left.expr_type == ExpressionType.MEMORY
+            and right.expr_type == ExpressionType.MEMORY
+            and left.operands
+            and right.operands
+        ):
+            left_loc = canonicalize_location(left.operands[0], parameters, size=left.size)
+            right_loc = canonicalize_location(right.operands[0], parameters, size=right.size)
+            if left_loc is not None and right_loc is not None:
+                return left_loc == right_loc
+        return left.to_string() == right.to_string()
+
+    def _flatten_add_terms(
+        self,
+        expr: Expression,
+        sign: int = 1,
+    ) -> List[Tuple[int, Expression]]:
+        if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
+            return self._flatten_add_terms(expr.operands[0], sign) + self._flatten_add_terms(expr.operands[1], sign)
+        if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_SUB" and len(expr.operands) == 2:
+            return self._flatten_add_terms(expr.operands[0], sign) + self._flatten_add_terms(expr.operands[1], -sign)
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "INT_2COMP" and expr.operands:
+            return self._flatten_add_terms(expr.operands[0], -sign)
+        return [(sign, expr)]
+
+    def _scale_expression(self, expr: Expression, factor: int) -> Optional[Expression]:
+        if factor == 0:
+            return None
+        if factor == 1:
+            return expr
+        if factor == -1:
+            negated = Expression.unary_op("INT_2COMP", expr)
+            negated.size = expr.size
+            return negated
+        return Expression.binary_op(
+            "INT_MULT",
+            Expression.constant(factor, size=expr.size or 4),
+            expr,
+        )
+
+    def _sum_expression_terms(
+        self,
+        terms: Sequence[Optional[Expression]],
+    ) -> Optional[Expression]:
+        normalized = [term for term in terms if term is not None]
+        if not normalized:
+            return Expression.constant(0, 4)
+        total = normalized[0]
+        for term in normalized[1:]:
+            total = Expression.binary_op("INT_ADD", total, term)
+            total.size = max(total.size, term.size)
+        return total
+
+    def _build_parity_split_loop_value(
+        self,
+        base_expr: Expression,
+        start_name: str,
+        limit_name: str,
+        even_affine: Tuple[int, int],
+        odd_affine: Tuple[int, int],
+        start_is_even: bool,
+    ) -> Optional[Expression]:
+        start_expr = self._param_expr_placeholder(start_name, base_expr.size or 4)
+        limit_expr = self._param_expr_placeholder(limit_name, base_expr.size or 4)
+        size = start_expr.size or 4
+        n_expr = Expression.binary_op("INT_SUB", limit_expr, start_expr)
+        n_expr.size = size
+        one = Expression.constant(1, size)
+        two = Expression.constant(2, size)
+
+        if start_is_even:
+            n_even = Expression.binary_op("INT_SDIV", Expression.binary_op("INT_ADD", n_expr, one), two)
+            n_odd = Expression.binary_op("INT_SDIV", n_expr, two)
+            first_even = start_expr
+            first_odd = Expression.binary_op("INT_ADD", start_expr, one)
+        else:
+            n_even = Expression.binary_op("INT_SDIV", n_expr, two)
+            n_odd = Expression.binary_op("INT_SDIV", Expression.binary_op("INT_ADD", n_expr, one), two)
+            first_even = Expression.binary_op("INT_ADD", start_expr, one)
+            first_odd = start_expr
+        for item in (n_even, n_odd, first_even, first_odd):
+            item.size = size
+
+        sum_even = self._build_arithmetic_progression_sum(first_even, n_even, size)
+        sum_odd = self._build_arithmetic_progression_sum(first_odd, n_odd, size)
+        contrib_terms: List[Expression] = []
+        even_sum_term = self._scale_expression(sum_even, even_affine[0])
+        odd_sum_term = self._scale_expression(sum_odd, odd_affine[0])
+        if even_sum_term is not None:
+            contrib_terms.append(even_sum_term)
+        if odd_sum_term is not None:
+            contrib_terms.append(odd_sum_term)
+        even_count_term = self._scale_expression(n_even, even_affine[1])
+        odd_count_term = self._scale_expression(n_odd, odd_affine[1])
+        if even_count_term is not None:
+            contrib_terms.append(even_count_term)
+        if odd_count_term is not None:
+            contrib_terms.append(odd_count_term)
+        contrib = self._sum_expression_terms(contrib_terms)
+        if contrib is None:
+            return None
+        total = Expression.binary_op("INT_ADD", base_expr, contrib)
+        total.size = base_expr.size
+        return total
+
+    def _param_expr_placeholder(self, name: str, size: int) -> Expression:
+        return Expression.parameter(name, size=size)
+
+    def _build_arithmetic_progression_sum(
+        self,
+        first_term: Expression,
+        count: Expression,
+        size: int,
+    ) -> Expression:
+        one = Expression.constant(1, size)
+        count_minus_one = Expression.binary_op("INT_SUB", count, one)
+        count_minus_one.size = size
+        tail = Expression.binary_op("INT_ADD", first_term, count_minus_one)
+        tail.size = size
+        pair_sum = Expression.binary_op("INT_ADD", first_term, tail)
+        pair_sum.size = size
+        product = Expression.binary_op("INT_MULT", count, pair_sum)
+        product.size = size
+        half = Expression.binary_op("INT_SDIV", product, Expression.constant(2, size))
+        half.size = size
+        return half
+
+    def _condition_is_pointer_null(self, condition: Condition, pointer_name: str) -> bool:
+        return self._match_pointer_equality(condition, pointer_name, expect_zero=True)
+
+    def _condition_is_pointer_nonnull(self, condition: Condition, pointer_name: str) -> bool:
+        return self._match_pointer_equality(condition, pointer_name, expect_zero=False)
+
+    def _pointer_nonnull_condition(self, pointer_name: str, analysis) -> Condition:
+        ptr_expr = self._param_expr(analysis, pointer_name)
+        return Condition(
+            Expression.binary_op(
+                "INT_NOTEQUAL",
+                ptr_expr,
+                Expression.constant(0, size=ptr_expr.size or 8),
+            ),
+            False,
+        )
+
+    def _match_pointer_equality(self, condition: Condition, pointer_name: str, expect_zero: bool) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return False
+        if expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return False
+        left_name = self._parameter_name_from_expr(expr.operands[0])
+        right_name = self._parameter_name_from_expr(expr.operands[1])
+        left_const = self._constant_value(expr.operands[0])
+        right_const = self._constant_value(expr.operands[1])
+        matches = (
+            (left_name == pointer_name and right_const == 0)
+            or (right_name == pointer_name and left_const == 0)
+        )
+        if not matches:
+            return False
+        is_equal = expr.operator == "INT_EQUAL"
+        if condition.negated:
+            is_equal = not is_equal
+        return is_equal if expect_zero else not is_equal
+
+    def _condition_is_less(self, condition: Condition, start_name: str, limit_name: str) -> bool:
+        relation = self._parameter_comparison_relation(condition)
+        if relation is None:
+            return False
+        left_name, relation_name, right_name = relation
+        return (
+            (left_name == start_name and right_name == limit_name and relation_name == "<")
+            or (left_name == limit_name and right_name == start_name and relation_name == ">")
+        )
+
+    def _condition_is_not_less(self, condition: Condition, start_name: str, limit_name: str) -> bool:
+        relation = self._parameter_comparison_relation(condition)
+        if relation is None:
+            return False
+        left_name, relation_name, right_name = relation
+        return (
+            (left_name == start_name and right_name == limit_name and relation_name == ">=")
+            or (left_name == limit_name and right_name == start_name and relation_name == "<=")
+        )
+
+    def _condition_is_step_equality(self, condition: Condition, start_name: str, limit_name: str) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_EQUAL" or len(expr.operands) != 2:
+            return False
+        left_name = self._parameter_name_from_expr(expr.operands[0])
+        right_name = self._parameter_name_from_expr(expr.operands[1])
+        if left_name == limit_name and self._expr_is_add_one_of_param(expr.operands[1], start_name):
+            return not condition.negated
+        if right_name == limit_name and self._expr_is_add_one_of_param(expr.operands[0], start_name):
+            return not condition.negated
+        return False
+
+    def _expr_is_add_one_of_param(self, expr: Expression, param_name: str) -> bool:
+        if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_ADD" or len(expr.operands) != 2:
+            return False
+        left_name = self._parameter_name_from_expr(expr.operands[0])
+        right_name = self._parameter_name_from_expr(expr.operands[1])
+        left_const = self._constant_value(expr.operands[0])
+        right_const = self._constant_value(expr.operands[1])
+        return (
+            (left_name == param_name and right_const == 1)
+            or (right_name == param_name and left_const == 1)
+        )
+
+    def _extract_counter_parity(
+        self,
+        conditions: Sequence[Condition],
+        counter_name: str,
+    ) -> Optional[bool]:
+        for condition in conditions or []:
+            expr = getattr(condition, "expression", None)
+            if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_EQUAL" or len(expr.operands) != 2:
+                continue
+            bitand = None
+            zero_const = None
+            if self._constant_value(expr.operands[0]) == 0:
+                bitand = expr.operands[1]
+                zero_const = expr.operands[0]
+            elif self._constant_value(expr.operands[1]) == 0:
+                bitand = expr.operands[0]
+                zero_const = expr.operands[1]
+            if bitand is None or zero_const is None:
+                continue
+            if bitand.expr_type != ExpressionType.BINARY_OP or bitand.operator != "INT_AND" or len(bitand.operands) != 2:
+                continue
+            if self._constant_value(bitand.operands[0]) == 1:
+                counter_expr = bitand.operands[1]
+            elif self._constant_value(bitand.operands[1]) == 1:
+                counter_expr = bitand.operands[0]
+            else:
+                continue
+            if self._parameter_name_from_expr(counter_expr) != counter_name:
+                continue
+            is_even = not condition.negated
+            return is_even
+        return None
+
+    def _return_is_constant(self, ret: ReturnInfo) -> bool:
+        return ret.value is not None and ret.value.expr_type == ExpressionType.CONSTANT
 
     def _iter_pcode_ops(self, high_function) -> Iterable:
         for basic_block in high_function.getBasicBlocks():
@@ -421,6 +1091,23 @@ class StructuralRecurrenceSummarizer:
             if relation is None:
                 return None
         return relation, constant
+
+    def _parameter_comparison_relation(self, condition: Condition) -> Optional[Tuple[str, str, str]]:
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+        relation = self._comparison_to_relation(expr.operator, swapped=False)
+        if relation is None:
+            return None
+        left_name = self._parameter_name_from_expr(expr.operands[0])
+        right_name = self._parameter_name_from_expr(expr.operands[1])
+        if not left_name or not right_name or left_name == right_name:
+            return None
+        if condition.negated:
+            relation = self._negate_relation(relation)
+            if relation is None:
+                return None
+        return left_name, relation, right_name
 
     def _is_condition_counter_view(self, expr: Optional[Expression], param_name: str) -> bool:
         if expr is None:
