@@ -239,9 +239,12 @@ class PhiHandler:
                     f"Self-reference detected: {self_ref_reason}", depth + 1
                 )
             
-            # 入力ブロックの条件を収集
-            input_conditions = base_conditions.copy()
-            
+            # 自己参照スキップ
+            if is_self_ref:
+                self._debug_print(f"Skipping self-reference input", depth + 1)
+                continue
+
+            input_condition_sets: List[List[Condition]] = [list(base_conditions)]
             if i < in_size:
                 in_block = phi_parent.getIn(i)
                 if in_block:
@@ -250,44 +253,42 @@ class PhiHandler:
                         self._debug_print(
                             f"In-edge block: index={in_block.getIndex()}", depth + 1
                         )
-                        path_conds = self.condition_tracker.get_path_conditions_to_block(
+                        all_valid_paths = self.condition_tracker.get_all_valid_paths_to_block(
                             in_block_info
                         )
-                        input_conditions.extend(path_conds)
-                        
                         edge_cond = self._get_edge_condition(in_block_info, phi_parent)
-                        if edge_cond:
-                            input_conditions.append(edge_cond)
-                        
-                        if self.debug:
-                            cond_strs = [c.to_string() for c in input_conditions]
-                            self._debug_print(
-                                f"Input conditions ({len(input_conditions)}): {cond_strs}",
-                                depth + 1
-                            )
-            
-            # 矛盾チェック
-            if ConditionSimplifier.is_contradiction(input_conditions):
-                self._debug_print(f"Conditions are contradictory, skipping", depth + 1)
-                continue
-            
-            # 自己参照スキップ
-            if is_self_ref:
-                self._debug_print(f"Skipping self-reference input", depth + 1)
-                continue
-            
-            # 入力値を展開
-            self._debug_print(f"Tracing input value...", depth + 1)
-            expanded_values = self._trace_input_value(
-                input_varnode, input_conditions, depth + 1
-            )
-            
-            for ev in expanded_values:
-                if ev.is_valid():
+
+                        input_condition_sets = []
+                        for path_conds in all_valid_paths or [[]]:
+                            input_conditions = list(base_conditions) + list(path_conds)
+                            if edge_cond:
+                                input_conditions.append(edge_cond)
+                            input_condition_sets.append(input_conditions)
+
+            for cond_index, input_conditions in enumerate(input_condition_sets):
+                if self.debug:
+                    cond_strs = [c.to_string() for c in input_conditions]
                     self._debug_print(
-                        f"Valid branch: {ev.value.to_string()}", depth + 1
+                        f"Input conditions[{cond_index}] ({len(input_conditions)}): {cond_strs}",
+                        depth + 1
                     )
-                    all_branches.append(ev)
+
+                if ConditionSimplifier.is_contradiction(input_conditions):
+                    self._debug_print(f"Conditions are contradictory, skipping", depth + 1)
+                    continue
+
+                # 入力値を展開
+                self._debug_print(f"Tracing input value...", depth + 1)
+                expanded_values = self._trace_input_value(
+                    input_varnode, input_conditions, depth + 1
+                )
+
+                for ev in expanded_values:
+                    if ev.is_valid():
+                        self._debug_print(
+                            f"Valid branch: {ev.value.to_string()}", depth + 1
+                        )
+                        all_branches.append(ev)
         
         # ★ 統計サマリー
         if self.debug:

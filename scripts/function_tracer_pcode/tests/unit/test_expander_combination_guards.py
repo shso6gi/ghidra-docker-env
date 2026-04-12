@@ -79,3 +79,25 @@ def test_combine_input_expansions_adds_unknown_when_budget_exceeded(monkeypatch)
         ev.value.expr_type.name == "UNKNOWN" and ev.value.name == "INT_ADD_budget_exceeded"
         for ev in result
     )
+
+
+def test_combine_input_expansions_drops_fully_contradictory_pairs(monkeypatch):
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "is_contradiction",
+        classmethod(lambda cls, conds: True),
+    )
+
+    left = ExpandedValue(Expression.parameter("x"), [])
+    right = ExpandedValue(Expression.constant(4, 4), [])
+
+    result = expander._combine_input_expansions_with_conditions(
+        "INT_ADD",
+        [[left], [right]],
+        [],
+        depth=0,
+    )
+
+    assert result == []

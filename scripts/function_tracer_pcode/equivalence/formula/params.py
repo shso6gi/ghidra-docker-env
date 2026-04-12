@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from .types import ExtraVariableInfo, ParameterInfo, ParameterPair
+
+if TYPE_CHECKING:
+    from .variable import ExtraVariableAnalysis, ParameterFragmentInfo
 
 
 def collect_param_info(params: List[Dict], suffix: str) -> List[ParameterInfo]:
@@ -112,6 +115,74 @@ def build_parameter_constraint(pair: ParameterPair) -> List[str]:
         )
 
     return lines
+
+
+def build_fragment_backed_parameter_constraint(
+    pair: ParameterPair,
+    fragment_info1: Optional["ParameterFragmentInfo"] = None,
+    fragment_info2: Optional["ParameterFragmentInfo"] = None,
+) -> Optional[List[str]]:
+    """Use parameter-fragment evidence to constrain full-width equality."""
+    if pair.param1 is None or pair.param2 is None:
+        return None
+
+    param1 = pair.param1
+    param2 = pair.param2
+
+    if param1.bit_width < param2.bit_width:
+        fragment_info = fragment_info1
+        narrow = param1
+        wide = param2
+    elif param2.bit_width < param1.bit_width:
+        fragment_info = fragment_info2
+        narrow = param2
+        wide = param1
+    else:
+        return None
+
+    if fragment_info is None:
+        return None
+    if fragment_info.parent_param_index != pair.index:
+        return None
+    if fragment_info.parent_param_bit_width != narrow.bit_width:
+        return None
+    if fragment_info.base_register_size_bits != wide.bit_width:
+        return None
+
+    extend_bits = wide.bit_width - narrow.bit_width
+    if extend_bits <= 0:
+        return None
+
+    ext_op = (
+        "sign_extend"
+        if fragment_info.extension_type.name == "SIGN_EXTEND"
+        else "zero_extend"
+    )
+    return [
+        (
+            f"; {wide.smt_name}: fully constrained from fragment-backed "
+            f"{narrow.smt_name} via {ext_op}"
+        ),
+        (
+            f"(assert (= {wide.smt_name} ((_ {ext_op} {extend_bits}) "
+            f"{narrow.smt_name})))"
+        ),
+    ]
+
+
+def collect_fragment_infos_by_param_index(
+    analyses: Dict[str, "ExtraVariableAnalysis"],
+) -> Dict[int, "ParameterFragmentInfo"]:
+    """Collect at most one safely-constrainable fragment per parameter index."""
+    result: Dict[int, "ParameterFragmentInfo"] = {}
+    for analysis in analyses.values():
+        if not analysis.can_safely_constrain() or analysis.fragment_info is None:
+            continue
+        parent_index = analysis.fragment_info.parent_param_index
+        if parent_index < 0 or parent_index in result:
+            continue
+        result[parent_index] = analysis.fragment_info
+    return result
 
 
 def build_parameter_semantic_constraints(params: List[ParameterInfo]) -> List[str]:

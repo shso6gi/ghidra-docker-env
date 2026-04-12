@@ -296,6 +296,59 @@ def test_return_analyzer_collapses_same_value_under_stack_guard_like_conditions(
     assert results[0].conditions == []
 
 
+def test_return_analyzer_drops_budget_fallback_when_precise_case_has_same_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selector = _param("param_1")
+    zero = Expression.constant(0, 4)
+    cond = _cond("INT_NOTEQUAL", selector, zero)
+
+    precise = Expression.constant(7, 4)
+    noisy = Expression.binary_op(
+        "INT_ADD",
+        Expression.constant(1, 4),
+        Expression.unknown("INT_ADD_budget_exceeded"),
+    )
+
+    expanded_values = [
+        ExpandedValue(noisy, [cond]),
+        ExpandedValue(precise, [cond]),
+    ]
+
+    results = analyzer._build_return_infos_from_expansions(
+        address="0x2400",
+        expanded_values=expanded_values,
+        return_index=5,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "7"
+    assert [c.to_string() for c in results[0].conditions] == [cond.to_string()]
+
+
+def test_return_analyzer_drops_unresolved_case_when_precise_case_has_same_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selector = _param("param_1")
+    zero = Expression.constant(0, 4)
+    cond = _cond("INT_NOTEQUAL", selector, zero)
+
+    expanded_values = [
+        ExpandedValue(Expression.unknown("phi_no_valid_branch"), [cond]),
+        ExpandedValue(Expression.constant(0, 4), [cond]),
+    ]
+
+    results = analyzer._build_return_infos_from_expansions(
+        address="0x2800",
+        expanded_values=expanded_values,
+        return_index=6,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "0"
+    assert [c.to_string() for c in results[0].conditions] == [cond.to_string()]
+
+
 def test_return_analyzer_drops_stack_protector_condition_from_sole_return_case():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 

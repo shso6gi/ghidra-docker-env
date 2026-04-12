@@ -5,6 +5,8 @@ from typing import List, Dict, Optional, Tuple, Set, Any
 
 from ...model import FunctionReturnAnalysis
 from .params import (
+    build_fragment_backed_parameter_constraint,
+    collect_fragment_infos_by_param_index,
     build_parameter_constraint,
     build_parameter_semantic_constraints,
     build_parameter_pairs,
@@ -288,7 +290,13 @@ class FormulaBuilder:
         if semantic_lines:
             lines.extend(semantic_lines)
 
-        lines.extend(self._build_param_constraints_section(param_pairs))
+        lines.extend(
+            self._build_param_constraints_section(
+                param_pairs,
+                var_analyses1,
+                var_analyses2,
+            )
+        )
 
         constrained_fragments: List[str] = []
         param_fragment_constrained: List[str] = []
@@ -493,7 +501,9 @@ class FormulaBuilder:
     
     def _build_param_constraints_section(
         self,
-        param_pairs: List[ParameterPair]
+        param_pairs: List[ParameterPair],
+        analyses1: Dict[str, ExtraVariableAnalysis],
+        analyses2: Dict[str, ExtraVariableAnalysis],
     ) -> List[str]:
         """パラメータ制約セクションを構築"""
         lines = []
@@ -502,8 +512,18 @@ class FormulaBuilder:
         lines.append("; For matching bit widths: direct equality unless semantic narrowing is inferred")
         lines.append("; For different bit widths: overlapping bits equal, upper bits free")
         lines.append("; " + "-" * 40)
-        
+
+        fragments1 = collect_fragment_infos_by_param_index(analyses1)
+        fragments2 = collect_fragment_infos_by_param_index(analyses2)
         for pair in param_pairs:
+            fragment_constraint_lines = self._build_fragment_backed_parameter_constraint(
+                pair,
+                fragments1,
+                fragments2,
+            )
+            if fragment_constraint_lines:
+                lines.extend(fragment_constraint_lines)
+                continue
             constraint_lines = self._build_parameter_constraint(pair)
             lines.extend(constraint_lines)
         
@@ -648,6 +668,18 @@ class FormulaBuilder:
         - 異なるビット幅: 重複するビット（下位ビット）のみ等価、上位ビットは自由
         """
         return build_parameter_constraint(pair)
+
+    def _build_fragment_backed_parameter_constraint(
+        self,
+        pair: ParameterPair,
+        fragments1: Dict[int, Any],
+        fragments2: Dict[int, Any],
+    ) -> Optional[List[str]]:
+        return build_fragment_backed_parameter_constraint(
+            pair,
+            fragments1.get(pair.index),
+            fragments2.get(pair.index),
+        )
     
     def _get_return_size(self, analysis: FunctionReturnAnalysis) -> int:
         """return値のビット幅を取得"""

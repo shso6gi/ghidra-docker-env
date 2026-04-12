@@ -15,7 +15,7 @@ from ..config.settings import (
 )
 from . import PcodeTracer
 from .bounded_refinement import BoundedCallRefiner
-from .condition import ConditionTracker, ConditionSimplifier
+from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalizer
 from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
@@ -5764,7 +5764,52 @@ class ReturnAnalyzer:
                     branch_index=return_index * 100 + i,
                 )
             )
-        return self._merge_equivalent_return_infos(results)
+        pruned = self._prune_less_precise_return_infos(results)
+        return self._merge_equivalent_return_infos(pruned)
+
+    def _prune_less_precise_return_infos(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> List[ReturnInfo]:
+        if len(return_infos) < 2:
+            return return_infos
+
+        grouped: Dict[Tuple[str, str], List[ReturnInfo]] = {}
+        for info in return_infos:
+            key = (
+                info.address,
+                ConditionNormalizer.conditions_signature(info.conditions),
+            )
+            grouped.setdefault(key, []).append(info)
+
+        pruned: List[ReturnInfo] = []
+        for group in grouped.values():
+            has_precise = any(
+                not self._expression_contains_unresolved_value(info.value)
+                for info in group
+            )
+            if not has_precise:
+                pruned.extend(group)
+                continue
+
+            kept_group = [
+                info
+                for info in group
+                if not self._expression_contains_unresolved_value(info.value)
+            ]
+            if not kept_group:
+                pruned.extend(group)
+                continue
+
+            dropped = len(group) - len(kept_group)
+            if dropped > 0 and self.debug:
+                self._debug_print(
+                    "Dropped less precise unresolved return cases under an "
+                    "already-resolved condition region"
+                )
+            pruned.extend(kept_group)
+
+        return pruned
 
     def _merge_equivalent_return_infos(
         self,
@@ -5997,6 +6042,32 @@ class ReturnAnalyzer:
                 normalized_value = canonicalized
 
         return normalized_value
+
+    def _expression_contains_unresolved_value(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return True
+
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type is None:
+            return True
+
+        if expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
+            return True
+
+        if expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None and self._expression_contains_unresolved_value(cond_expr):
+                    return True
+                if self._expression_contains_unresolved_value(value):
+                    return True
+            return False
+
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_unresolved_value(operand):
+                return True
+
+        return False
 
     def _count_memory_reads(self, expr: Optional[Expression]) -> int:
         if expr is None:

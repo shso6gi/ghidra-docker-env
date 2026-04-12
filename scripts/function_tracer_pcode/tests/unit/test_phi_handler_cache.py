@@ -2,7 +2,7 @@
 """PhiHandler caching regressions."""
 
 from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler
-from scripts.function_tracer_pcode.model import Expression
+from scripts.function_tracer_pcode.model import Condition, Expression
 
 
 class _FakeAddressSpace:
@@ -86,6 +86,9 @@ class _FakeConditionTracker:
     def get_path_conditions_to_block(self, _block_info):
         return []
 
+    def get_all_valid_paths_to_block(self, _block_info):
+        return [[]]
+
 
 class _FakeMultiequal:
     def __init__(self, inputs, output, parent, stable_key: str):
@@ -147,3 +150,40 @@ def test_phi_handler_reuses_cached_multiequal_expansion():
     assert len(first) == 2
     assert len(second) == 2
     assert tracer.calls == 2
+
+
+def test_phi_handler_uses_alternative_valid_path_when_first_path_contradicts():
+    class _TrackerWithFallbackPath:
+        def __init__(self, bad_condition, good_condition):
+            self.bad_condition = bad_condition
+            self.good_condition = good_condition
+
+        def get_block_by_hash(self, block):
+            return _FakeBlockInfo(block)
+
+        def get_path_conditions_to_block(self, _block_info):
+            return [self.bad_condition]
+
+        def get_all_valid_paths_to_block(self, _block_info):
+            return [[self.bad_condition], [self.good_condition]]
+
+    tracer = _FakeTracer()
+    param = Expression.parameter("param_1", size=4)
+    zero = Expression.constant(0, 4)
+    nonzero = Condition(Expression.binary_op("INT_NOTEQUAL", param, zero), False)
+    zero_only = Condition(Expression.binary_op("INT_NOTEQUAL", param, zero), True)
+
+    handler = PhiHandler(tracer, _TrackerWithFallbackPath(zero_only, nonzero))
+
+    in_block = _FakeBlock(10)
+    phi_block = _FakeBlock(12)
+    phi_block._ins = [in_block]
+
+    output = _FakeVarnode("register", 0x5000, 4, "out")
+    input_a = _FakeVarnode("register", 0x5008, 4, "a")
+    multiequal = _FakeMultiequal([input_a], output, phi_block, "phi:path-fallback")
+
+    expanded = handler.expand_multiequal(multiequal, [nonzero], 0)
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "v_20488"

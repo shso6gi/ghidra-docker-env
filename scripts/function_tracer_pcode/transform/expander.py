@@ -129,6 +129,15 @@ class ExpressionExpander:
             return
         self._debug_print(f"{label}{self._debug_expr_summary(expr)}", indent)
 
+    def _normalize_expansion_conditions(
+        self,
+        conditions: List[Condition],
+    ) -> List[Condition]:
+        """PHI を含む条件も文脈に応じて簡約した上で展開に流す。"""
+        if not conditions:
+            return []
+        return ConditionSimplifier.simplify_conditions(list(conditions))
+
     def _finalize_combined_results(
         self,
         mnemonic: str,
@@ -161,9 +170,24 @@ class ExpressionExpander:
             if budget_key not in existing_keys:
                 deduped.append(budget_unknown)
 
-        return deduped if deduped else [
-            ExpandedValue(Expression.unknown(f"{mnemonic}_contradiction"), base_conditions)
-        ]
+        if deduped:
+            return deduped
+
+        if over_budget:
+            return [
+                ExpandedValue(
+                    Expression.unknown(f"{mnemonic}_budget_exceeded"),
+                    list(base_conditions),
+                )
+            ]
+
+        # All candidate combinations were contradictory. Emitting an UNKNOWN branch
+        # here pollutes the surrounding control-flow summary with an impossible case.
+        self._debug_print(
+            f"  All {mnemonic} combinations contradictory under current conditions; dropping branch",
+            depth,
+        )
+        return []
 
     def _coerce_value_to_output_size(self, value: Expression, output_size: int) -> Expression:
         """CALL 出力サイズに合わせて値式を正規化する。"""
@@ -338,6 +362,7 @@ class ExpressionExpander:
                 input_conditions = list(base_conditions) + path_conditions.copy()
                 if edge_cond:
                     input_conditions.append(edge_cond)
+                input_conditions = self._normalize_expansion_conditions(input_conditions)
                 
                 if self.debug:
                     self._debug_print(f"  Path[{path_idx}]: {len(path_conditions)} condition(s)", depth + 1)
@@ -749,6 +774,7 @@ class ExpressionExpander:
                 branch_conditions = list(base_conditions) + path_conditions.copy()
                 if edge_cond:
                     branch_conditions.append(edge_cond)
+                branch_conditions = self._normalize_expansion_conditions(branch_conditions)
                 if ConditionSimplifier.is_contradiction(branch_conditions):
                     continue
                 try:

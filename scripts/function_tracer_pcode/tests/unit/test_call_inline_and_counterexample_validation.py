@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executo
     solve_query_twostage,
     validate_counterexample_across_cases,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
@@ -5104,6 +5104,80 @@ def test_expand_multiequal_carries_base_conditions_into_predicate_filtering():
     assert expanded[0].value.to_string() == "phi_no_valid_branch"
     assert expanded[0].conditions == [base_condition]
     expander._expand_input_varnode.assert_not_called()
+
+
+def test_expand_multiequal_simplifies_phi_conditions_before_recursive_expansion():
+    class _FakeParent:
+        def __init__(self, pred):
+            self._pred = pred
+
+        def getInSize(self):
+            return 1
+
+        def getIn(self, index):
+            assert index == 0
+            return self._pred
+
+    class _FakeOp:
+        def __init__(self, parent, input_varnode):
+            self._parent = parent
+            self._input_varnode = input_varnode
+
+        def getParent(self):
+            return self._parent
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input_varnode
+
+    input_varnode = Mock()
+    pred_block = object()
+    block_info = Mock(index=7)
+    condition_tracker = Mock()
+    condition_tracker.get_block_by_hash.return_value = block_info
+    condition_tracker.get_all_valid_paths_to_block.return_value = [[]]
+
+    param = Expression.parameter("param_2", size=4)
+    zero = Expression.constant(0, 4)
+    two = Expression.constant(2, 4)
+    select_first_branch = Condition(Expression.binary_op("INT_SLESS", param, two))
+    selected_expr = Expression.binary_op("INT_EQUAL", Expression.memory(Expression.constant(0x100, 8), size=4), zero)
+    fallback_expr = Expression.binary_op("INT_EQUAL", Expression.memory(Expression.constant(0x200, 8), size=4), zero)
+    edge_condition = Condition(
+        Expression.phi([
+            (select_first_branch, selected_expr),
+            (None, fallback_expr),
+        ]),
+        negated=True,
+    )
+
+    expander = ExpressionExpander(Mock(), condition_tracker=condition_tracker, debug=False)
+    expander._get_edge_condition = Mock(return_value=edge_condition)
+    expander._varnode_requires_recursive_expansion = Mock(return_value=True)
+
+    def _expand_input(input_vn, conditions, depth):
+        assert input_vn is input_varnode
+        assert all(cond.expression.expr_type != ExpressionType.PHI for cond in conditions)
+        rendered = {cond.to_string() for cond in conditions}
+        assert select_first_branch.to_string() in rendered
+        assert f"(not {selected_expr.to_string()})" in rendered
+        return [ExpandedValue(Expression.constant(3, 4), conditions)]
+
+    expander._expand_input_varnode = Mock(side_effect=_expand_input)
+
+    expanded = expander._expand_multiequal_internal(
+        _FakeOp(_FakeParent(pred_block), input_varnode),
+        [select_first_branch],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_string() == "3"
+    assert all(cond.expression.expr_type != ExpressionType.PHI for cond in expanded[0].conditions)
+    expander._expand_input_varnode.assert_called_once()
 
 
 def test_counterexample_validation_rejects_ambiguous_sat_model():

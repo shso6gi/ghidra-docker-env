@@ -2,6 +2,14 @@
 """FormulaBuilder の ABI・追加 assertion まわりのテスト。"""
 
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.params import (
+    build_fragment_backed_parameter_constraint,
+)
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo, ParameterPair
+from scripts.function_tracer_pcode.equivalence.formula.variable import (
+    ExtensionType,
+    ParameterFragmentInfo,
+)
 from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
@@ -229,6 +237,35 @@ class TestABIConstraints:
         assert "semantic lower 32 bits must match" in formula
         assert "((_ extract 31 0) x_1)" in formula
         assert "((_ extract 31 0) x_2)" in formula
+
+    def test_fragment_backed_parameter_constraint_ties_wide_param_to_extended_narrow_value(self):
+        pair = ParameterPair(
+            index=0,
+            param1=ParameterInfo("param_1", "param_1_1", 32, 0, is_signed=True),
+            param2=ParameterInfo("param_1", "param_1_2", 64, 0, is_signed=True),
+        )
+        fragment_info = ParameterFragmentInfo(
+            fragment_name="in_a0_hi",
+            fragment_bit_width=32,
+            parent_param_name="param_1",
+            parent_param_index=0,
+            parent_param_bit_width=32,
+            extension_type=ExtensionType.SIGN_EXTEND,
+            bit_offset_in_base=32,
+            bit_length=32,
+            base_register_name="a0",
+            base_register_size_bits=64,
+        )
+
+        lines = build_fragment_backed_parameter_constraint(
+            pair,
+            fragment_info1=fragment_info,
+        )
+
+        assert lines is not None
+        text = "\n".join(lines)
+        assert "fragment-backed" in text
+        assert "(assert (= param_1_2 ((_ sign_extend 32) param_1_1)))" in text
 
 
 class TestNoRsplit:
