@@ -16,6 +16,7 @@ from ..config.settings import (
 from . import PcodeTracer
 from .bounded_refinement import BoundedCallRefiner
 from .condition import ConditionTracker, ConditionSimplifier
+from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
     EffectSummary,
@@ -72,53 +73,7 @@ class ReturnAnalyzer:
             print(f"{prefix}[ReturnAnalyzer] {msg}")
 
     def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
-        if expr is None:
-            return "None"
-
-        visited: Set[int] = set()
-
-        def _render(node: Optional[Expression], depth: int) -> str:
-            if node is None:
-                return "None"
-            if depth <= 0:
-                return "..."
-
-            node_id = id(node)
-            if node_id in visited:
-                return "<cycle>"
-            visited.add(node_id)
-
-            expr_type = getattr(node, "expr_type", None)
-            expr_type_name = getattr(expr_type, "name", str(expr_type))
-            try:
-                if expr_type == ExpressionType.CONSTANT:
-                    return f"CONST({int(node.value)})"
-                if expr_type == ExpressionType.PARAMETER:
-                    return f"PARAM({node.name or '?'})"
-                if expr_type == ExpressionType.VARIABLE:
-                    return f"VAR({node.name or '?'})"
-                if expr_type == ExpressionType.UNKNOWN:
-                    return f"UNKNOWN({node.name or '?'})"
-                if expr_type == ExpressionType.CALL:
-                    return f"CALL({node.name or '?'}, argc={len(node.operands or [])})"
-                if expr_type == ExpressionType.MEMORY:
-                    inner = _render((node.operands or [None])[0], depth - 1)
-                    return f"MEM[{inner}]"
-                if expr_type == ExpressionType.UNARY_OP:
-                    inner = _render((node.operands or [None])[0], depth - 1)
-                    return f"{node.operator or 'UNARY'}({inner})"
-                if expr_type == ExpressionType.BINARY_OP:
-                    operands = node.operands or []
-                    left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
-                    right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
-                    return f"{node.operator or 'BINARY'}({left}, {right})"
-                if expr_type == ExpressionType.PHI:
-                    return f"PHI(branches={len(node.value or [])})"
-                return expr_type_name
-            finally:
-                visited.discard(node_id)
-
-        return _render(expr, max_depth)
+        return summarize_expression(expr, max_depth=max_depth)
 
     @contextmanager
     def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary]):
@@ -4567,6 +4522,68 @@ class ReturnAnalyzer:
             return []
         return []
 
+    def _infer_abi_return_storages(self) -> List[StorageInfo]:
+        """関数シグネチャが void に潰れていても使える保守的な返り値レジスタ候補。"""
+        try:
+            lang = self.program.getLanguage() if self.program is not None else None
+            lang_id = str(lang.getLanguageID()) if lang is not None else ""
+            processor = str(lang.getProcessor()) if lang is not None else ""
+            pointer_size = int(self.program.getDefaultPointerSize()) if self.program is not None else 8
+        except Exception:
+            lang_id = ""
+            processor = ""
+            pointer_size = 8
+
+        arch_tag = f"{lang_id} {processor}".upper()
+        base_bits = max(pointer_size * 8, 32)
+
+        def _reg(base_name: str) -> StorageInfo:
+            return StorageInfo(
+                is_register=True,
+                space_name="register",
+                size=max(base_bits // 8, 4),
+                size_bits=base_bits,
+                register_name=base_name,
+                base_register_name=base_name,
+                base_register_size=max(base_bits // 8, 4),
+                base_register_size_bits=base_bits,
+                bit_offset_in_base=0,
+            )
+
+        if "MIPS" in arch_tag:
+            return [_reg("v0")]
+        if "AARCH64" in arch_tag or "ARM:LE:64" in arch_tag or "ARM:BE:64" in arch_tag:
+            return [_reg("x0")]
+        if "ARM" in arch_tag:
+            return [_reg("r0")]
+        if "X86" in arch_tag and "64" in arch_tag:
+            return [_reg("rax")]
+        if "X86" in arch_tag or "IA-32" in arch_tag:
+            return [_reg("eax")]
+        return []
+
+    def _get_implicit_return_target_storages(
+        self,
+        function,
+        tracer: PcodeTracer,
+    ) -> List[StorageInfo]:
+        target_storages: List[StorageInfo] = []
+        for return_varnode in self._get_function_return_varnodes(function):
+            storage = tracer._get_storage_info_from_varnode(return_varnode)
+            if storage is not None:
+                target_storages.append(storage)
+
+        if target_storages:
+            return target_storages
+
+        fallback = self._infer_abi_return_storages()
+        if self.debug and fallback:
+            names = [storage.base_register_name or storage.register_name or "?" for storage in fallback]
+            self._debug_print(
+                f"Using ABI fallback return storages: {names}"
+            )
+        return fallback
+
     def _get_instruction_with_fallback(self, addr):
         listing = self.program.getListing()
         instruction = listing.getInstructionAt(addr)
@@ -4978,6 +4995,7 @@ class ReturnAnalyzer:
                 path_conditions,
                 return_index,
                 all_path_conditions=all_valid_path_conditions,
+                path_entries=path_entries,
                 active_functions=active_functions,
                 current_function=current_function,
             )
@@ -5141,10 +5159,24 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
+        path_entries=None,
         active_functions: Optional[Set[str]] = None,
         current_function=None,
     ) -> Optional[List[ReturnInfo]]:
         """RETURN オペランドが欠落している場合に、返り値レジスタ由来の値を復元する。"""
+        path_recovered = self._recover_implicit_return_from_block_paths(
+            return_op,
+            address,
+            tracer,
+            condition_tracker,
+            return_index,
+            path_entries,
+            active_functions=active_functions,
+            current_function=current_function,
+        )
+        if path_recovered is not None:
+            return path_recovered
+
         source_varnode = self._find_implicit_return_source_varnode(
             return_op,
             tracer,
@@ -5195,53 +5227,276 @@ class ReturnAnalyzer:
             current_function=current_function,
         )
 
+    def _recover_implicit_return_from_block_paths(
+        self,
+        return_op,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_index: int,
+        path_entries,
+        active_functions: Optional[Set[str]] = None,
+        current_function=None,
+    ) -> Optional[List[ReturnInfo]]:
+        """RETURN block 以前の path 上にある返り値レジスタ更新から暗黙 return を復元する。"""
+        normalized_entries = self._coerce_block_path_entries(path_entries)
+        if not normalized_entries:
+            return None
+
+        recovered_results: List[ReturnInfo] = []
+        unresolved_paths: List[int] = []
+
+        for path_idx, (block_path, conditions) in enumerate(normalized_entries):
+            source_varnode = self._find_implicit_return_source_varnode(
+                return_op,
+                tracer,
+                condition_tracker,
+                current_function,
+                block_path=block_path,
+                path_conditions=conditions,
+            )
+            if source_varnode is None:
+                unresolved_paths.append(path_idx)
+                continue
+
+            recovered_results.extend(
+                self._analyze_return_value(
+                    source_varnode,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    list(conditions),
+                    return_index * 1000 + path_idx,
+                    all_path_conditions=[list(conditions)],
+                    active_functions=active_functions,
+                    current_function=current_function,
+                )
+            )
+
+        if recovered_results and not unresolved_paths:
+            if self.debug:
+                self._debug_print(
+                    "Implicit return path recovery succeeded for all RETURN path variants"
+                )
+            return self._merge_equivalent_return_infos(recovered_results)
+
+        if self.debug and unresolved_paths:
+            self._debug_print(
+                "Implicit return path recovery could not resolve source varnode on "
+                f"path(s) {unresolved_paths}"
+            )
+        return None
+
     def _find_implicit_return_source_varnode(
         self,
         return_op,
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
         current_function=None,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
     ):
         """同一 basic block 内で返り値レジスタへ最後に書いた varnode を探す。"""
-        return_varnodes = self._get_function_return_varnodes(current_function)
-        if not return_varnodes:
-            return None
+        search_blocks = None
+        if block_path:
+            search_blocks = list(block_path)
+        else:
+            return_parent = getattr(return_op, "getParent", lambda: None)()
+            return_block = condition_tracker.get_block_by_hash(return_parent)
+            if return_block is None:
+                return None
+            search_blocks = [return_block]
 
-        return_parent = getattr(return_op, "getParent", lambda: None)()
-        return_block = condition_tracker.get_block_by_hash(return_parent)
-        if return_block is None:
-            return None
-
-        target_storages = []
-        for return_varnode in return_varnodes:
-            storage = tracer._get_storage_info_from_varnode(return_varnode)
-            if storage is not None:
-                target_storages.append(storage)
+        target_storages = self._get_implicit_return_target_storages(current_function, tracer)
         if not target_storages:
             return None
 
         candidate = None
-        for pcode_op in return_block.pcode_ops:
-            if pcode_op is return_op:
-                break
-            output = getattr(pcode_op, "getOutput", lambda: None)()
-            if output is None:
-                continue
-            output_storage = tracer._get_storage_info_from_varnode(output)
-            if output_storage is None:
-                continue
-            if not any(
-                self._storages_overlap_for_return_recovery(output_storage, target_storage)
-                for target_storage in target_storages
-            ):
-                continue
-            candidate = output
+        for block_info in search_blocks:
+            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
+                if pcode_op is return_op:
+                    break
+                output = getattr(pcode_op, "getOutput", lambda: None)()
+                if output is None:
+                    continue
+                output_storage = tracer._get_storage_info_from_varnode(output)
+                if output_storage is None:
+                    continue
+                if not any(
+                    self._storages_overlap_for_return_recovery(output_storage, target_storage)
+                    for target_storage in target_storages
+                ):
+                    continue
+                candidate = output
+
+        candidate = self._select_path_specific_return_source(
+            candidate,
+            block_path,
+            condition_tracker=condition_tracker,
+            path_conditions=path_conditions,
+        )
 
         if candidate is not None and self.debug:
             self._debug_print(
                 f"Implicit return source matched to block-local output {candidate}"
             )
         return candidate
+
+    def _select_path_specific_return_source(
+        self,
+        candidate,
+        block_path,
+        condition_tracker: Optional[ConditionTracker] = None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        """PHI 出力をそのまま返す代わりに、実際の predecessor に対応する入力へ絞る。"""
+        if candidate is None or not block_path or len(block_path) < 2:
+            return candidate
+
+        normalized_path = [getattr(entry, "block", entry) for entry in block_path]
+        selected = candidate
+        max_refinements = max(1, len(normalized_path))
+
+        for _ in range(max_refinements):
+            def_op = getattr(selected, "getDef", lambda: None)()
+            if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                break
+
+            phi_parent = getattr(def_op, "getParent", lambda: None)()
+            phi_index = self._find_block_index_on_path(normalized_path, phi_parent)
+            if phi_index is None or phi_index <= 0:
+                break
+
+            predecessor = normalized_path[phi_index - 1]
+            refined = self._select_multiequal_input_for_return_path(
+                multiequal_op=def_op,
+                predecessor=predecessor,
+                condition_tracker=condition_tracker,
+                path_conditions=path_conditions,
+            )
+            if refined is None or refined is selected:
+                break
+
+            if self.debug:
+                self._debug_print(
+                    "Refined implicit return PHI source to predecessor-specific input "
+                    f"{refined}"
+                )
+            selected = refined
+
+        return selected
+
+    def _find_block_index_on_path(self, block_path, target_block) -> Optional[int]:
+        if target_block is None:
+            return None
+
+        for index in range(len(block_path) - 1, -1, -1):
+            if self._blocks_match(block_path[index], target_block):
+                return index
+        return None
+
+    def _select_multiequal_input_for_return_path(
+        self,
+        multiequal_op,
+        predecessor,
+        condition_tracker: Optional[ConditionTracker] = None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        phi_parent = getattr(multiequal_op, "getParent", lambda: None)()
+        get_in_size = getattr(phi_parent, "getInSize", None)
+        get_in = getattr(phi_parent, "getIn", None)
+        if not callable(get_in_size) or not callable(get_in):
+            return None
+
+        current_condition_keys = self._build_condition_signature_set(path_conditions or [])
+        best_input = None
+        best_score: Optional[Tuple[int, int, int]] = None
+
+        try:
+            for index in range(int(get_in_size())):
+                incoming = get_in(index)
+                score = self._score_multiequal_incoming_for_return_path(
+                    incoming,
+                    predecessor,
+                    condition_tracker,
+                    current_condition_keys,
+                )
+                candidate_input = multiequal_op.getInput(index)
+                if candidate_input is None:
+                    continue
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_input = candidate_input
+        except Exception:
+            return None
+
+        return best_input
+
+    def _score_multiequal_incoming_for_return_path(
+        self,
+        incoming_block,
+        predecessor,
+        condition_tracker: Optional[ConditionTracker],
+        current_condition_keys: Set[str],
+    ) -> Tuple[int, int, int]:
+        predecessor_match = 1 if self._blocks_match(incoming_block, predecessor) else 0
+        if condition_tracker is None or not current_condition_keys:
+            return (predecessor_match, 0, 0)
+
+        block_info = condition_tracker.get_block_by_hash(incoming_block)
+        if block_info is None:
+            return (predecessor_match, 0, 0)
+
+        incoming_conditions = condition_tracker.get_path_conditions_to_block(block_info)
+        incoming_keys = self._build_condition_signature_set(incoming_conditions)
+        if not incoming_keys:
+            return (predecessor_match, 0, 0)
+
+        matched = len(incoming_keys & current_condition_keys)
+        specificity = len(incoming_keys)
+        return (matched, predecessor_match, specificity)
+
+    def _build_condition_signature_set(self, conditions: List[Condition]) -> Set[str]:
+        from .condition.simplifier import ConditionSimplifier
+
+        signatures: Set[str] = set()
+        for condition in conditions:
+            try:
+                signatures.add(ConditionSimplifier.get_simplified_condition_string(condition))
+            except Exception:
+                try:
+                    signatures.add(condition.to_string())
+                except Exception:
+                    continue
+        return signatures
+
+    def _blocks_match(self, lhs, rhs) -> bool:
+        if lhs is rhs:
+            return True
+        try:
+            if lhs == rhs:
+                return True
+        except Exception:
+            pass
+
+        lhs_start = self._get_block_start_address(lhs)
+        rhs_start = self._get_block_start_address(rhs)
+        if lhs_start is not None and rhs_start is not None:
+            return lhs_start == rhs_start
+
+        return False
+
+    def _get_block_start_address(self, block) -> Optional[str]:
+        get_start = getattr(block, "getStart", None)
+        if not callable(get_start):
+            return None
+        try:
+            start = get_start()
+        except Exception:
+            return None
+        if start is None:
+            return None
+        return str(start)
 
     def _find_terminal_call_before_return(
         self,

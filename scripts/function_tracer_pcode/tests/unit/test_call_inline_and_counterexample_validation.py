@@ -1489,6 +1489,324 @@ def test_return_analyzer_recovers_implicit_return_from_same_block_output():
     assert mock_analyze.call_args.args[0] is source_varnode
 
 
+def test_return_analyzer_recovers_implicit_return_from_predecessor_block_path_output():
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._parent = object()
+            self._seq = Mock()
+            self._seq.getTarget.return_value = "0x1000"
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getParent(self):
+            return self._parent
+
+        def getSeqnum(self):
+            return self._seq
+
+        def getNumInputs(self):
+            return 1
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+
+    source_varnode = Mock(name="source_varnode")
+    return_varnode = Mock(name="return_varnode")
+    return_op = _FakeOp("RETURN")
+
+    pred_block = Mock(index=1, pcode_ops=[_FakeOp("COPY", output=source_varnode)])
+    return_block = Mock(index=2, pcode_ops=[return_op])
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: (
+        _FakeStorage("v0", "v0", 64, 0)
+        if vn is source_varnode
+        else _FakeStorage("v0_lo", "v0", 32, 32)
+    )
+
+    current_function = Mock()
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    recovered = [
+        ReturnInfo(address="0x1000", value=Expression.constant(13, 4), conditions=[], branch_index=0)
+    ]
+    with patch.object(analyzer, "_analyze_return_value", return_value=recovered) as mock_analyze:
+        result = analyzer._analyze_implicit_return_value(
+            return_op,
+            "0x1000",
+            tracer,
+            condition_tracker,
+            [],
+            0,
+            all_path_conditions=[[]],
+            path_entries=[([pred_block, return_block], [])],
+            active_functions=set(),
+            current_function=current_function,
+        )
+
+    assert result == recovered
+    assert mock_analyze.call_args.args[0] is source_varnode
+
+
+def test_return_analyzer_uses_abi_fallback_return_storage_when_signature_is_void():
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._parent = object()
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getParent(self):
+            return self._parent
+
+    program = Mock()
+    language = Mock()
+    language.getLanguageID.return_value = "MIPS:BE:64:default"
+    language.getProcessor.return_value = "MIPS"
+    program.getLanguage.return_value = language
+    program.getDefaultPointerSize.return_value = 8
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+    condition_tracker = Mock()
+
+    source_varnode = Mock(name="source_varnode")
+    return_op = _FakeOp("RETURN")
+    pred_block = Mock(index=1, pcode_ops=[_FakeOp("COPY", output=source_varnode)])
+    return_block = Mock(index=2, pcode_ops=[return_op])
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: _FakeStorage("v0_lo", "v0", 32, 32)
+
+    current_function = Mock()
+    current_function.getReturn.return_value = None
+
+    recovered = [
+        ReturnInfo(address="0x1000", value=Expression.constant(21, 4), conditions=[], branch_index=0)
+    ]
+    with patch.object(analyzer, "_analyze_return_value", return_value=recovered) as mock_analyze:
+        result = analyzer._analyze_implicit_return_value(
+            return_op,
+            "0x1000",
+            tracer,
+            condition_tracker,
+            [],
+            0,
+            all_path_conditions=[[]],
+            path_entries=[([pred_block, return_block], [])],
+            active_functions=set(),
+            current_function=current_function,
+        )
+
+    assert result == recovered
+    assert mock_analyze.call_args.args[0] is source_varnode
+
+
+def test_return_analyzer_prefers_phi_input_for_actual_predecessor_path():
+    class _FakeBlock:
+        def __init__(self, index):
+            self.index = index
+            self._ins = []
+
+        def getInSize(self):
+            return len(self._ins)
+
+        def getIn(self, index):
+            return self._ins[index]
+
+    class _FakePhiOp:
+        def __init__(self, inputs, parent):
+            self._inputs = inputs
+            self._parent = parent
+
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+        def getParent(self):
+            return self._parent
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    predecessor_a = _FakeBlock(1)
+    predecessor_b = _FakeBlock(2)
+    return_block = _FakeBlock(3)
+    return_block._ins = [predecessor_a, predecessor_b]
+
+    input_a = Mock(name="input_a")
+    input_b = Mock(name="input_b")
+    phi_output = Mock(name="phi_output")
+    phi_output.getDef.return_value = _FakePhiOp([input_a, input_b], return_block)
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selected = analyzer._select_path_specific_return_source(
+        phi_output,
+        [predecessor_b, return_block],
+    )
+
+    assert selected is input_b
+
+
+def test_return_analyzer_prefers_phi_input_when_phi_block_is_not_last_path_block():
+    class _FakeBlock:
+        def __init__(self, index):
+            self.index = index
+            self._ins = []
+
+        def getInSize(self):
+            return len(self._ins)
+
+        def getIn(self, index):
+            return self._ins[index]
+
+    class _FakePhiOp:
+        def __init__(self, inputs, parent):
+            self._inputs = inputs
+            self._parent = parent
+
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+        def getParent(self):
+            return self._parent
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    entry_block = _FakeBlock(0)
+    predecessor_a = _FakeBlock(1)
+    predecessor_b = _FakeBlock(2)
+    phi_block = _FakeBlock(3)
+    return_block = _FakeBlock(4)
+    phi_block._ins = [predecessor_a, predecessor_b]
+
+    input_a = Mock(name="input_a")
+    input_b = Mock(name="input_b")
+    phi_output = Mock(name="phi_output")
+    phi_output.getDef.return_value = _FakePhiOp([input_a, input_b], phi_block)
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selected = analyzer._select_path_specific_return_source(
+        phi_output,
+        [entry_block, predecessor_b, phi_block, return_block],
+    )
+
+    assert selected is input_b
+
+
+def test_return_analyzer_prefers_phi_input_whose_block_conditions_match_return_path():
+    class _FakeBlock:
+        def __init__(self, index):
+            self.index = index
+            self._ins = []
+
+        def getInSize(self):
+            return len(self._ins)
+
+        def getIn(self, index):
+            return self._ins[index]
+
+        def hashCode(self):
+            return self.index
+
+    class _FakePhiOp:
+        def __init__(self, inputs, parent):
+            self._inputs = inputs
+            self._parent = parent
+
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+        def getParent(self):
+            return self._parent
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    predecessor_a = _FakeBlock(1)
+    predecessor_b = _FakeBlock(2)
+    phi_block = _FakeBlock(3)
+    return_block = _FakeBlock(4)
+    phi_block._ins = [predecessor_a, predecessor_b]
+
+    input_a = Mock(name="input_a")
+    input_b = Mock(name="input_b")
+    phi_output = Mock(name="phi_output")
+    phi_output.getDef.return_value = _FakePhiOp([input_a, input_b], phi_block)
+
+    current_conditions = [
+        _cond_ne(_param_expr("param_1", 0, size=4), Expression.constant(1, 4)),
+        _cond_eq(_param_expr("param_2", 1, size=4), Expression.constant(1, 4)),
+    ]
+
+    fake_tracker = Mock()
+    fake_tracker.get_block_by_hash.side_effect = lambda block: block
+    fake_tracker.get_path_conditions_to_block.side_effect = lambda block: {
+        predecessor_a: [_cond_eq(_param_expr("param_2", 1, size=4), Expression.constant(1, 4))],
+        predecessor_b: [
+            _cond_eq(_param_expr("param_2", 1, size=4), Expression.constant(1, 4)),
+            _cond_ne(_param_expr("param_1", 0, size=4), Expression.constant(1, 4)),
+        ],
+    }[block]
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    selected = analyzer._select_path_specific_return_source(
+        phi_output,
+        [predecessor_a, phi_block, return_block],
+        condition_tracker=fake_tracker,
+        path_conditions=current_conditions,
+    )
+
+    assert selected is input_b
+
+
 def test_return_analyzer_falls_back_to_terminal_call_wrapper_recovery():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()

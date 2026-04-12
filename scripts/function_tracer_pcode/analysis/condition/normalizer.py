@@ -18,6 +18,22 @@ class ConditionNormalizer:
     _CONTRADICTION_CACHE_LIMIT = 8192
     _expr_key_cache: Dict[Expression, str] = {}
     _contradiction_cache: Dict[Tuple[Expression, bool], Tuple[str, str, str, bool]] = {}
+
+    @classmethod
+    def expression_signature(cls, expr: Optional[Expression]) -> str:
+        """Stable structural key suitable for caches and deduplication."""
+        return cls._expr_key(expr)
+
+    @classmethod
+    def conditions_signature(cls, conditions) -> str:
+        canonical = []
+        for cond in conditions or []:
+            normalized = cls.normalize_for_contradiction(cond)
+            canonical.append(
+                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{int(normalized[3])}"
+            )
+        canonical.sort()
+        return ";;".join(canonical)
     
     @staticmethod
     def normalize(condition: Condition) -> Tuple[str, str, str, bool]:

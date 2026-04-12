@@ -3,6 +3,7 @@
 
 from typing import Any, List, Dict, Set, Optional, Tuple
 from ...model import Expression, Condition, ExpressionType
+from ..debug import summarize_expression, summarize_condition
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 from .normalizer import ConditionNormalizer
 from .scalar import ScalarConstraint, extract_scalar_constraint
@@ -52,66 +53,13 @@ class ConditionSimplifier:
     def _debug_expr_summary(cls, expr: Optional[Expression], max_depth: int = 4) -> str:
         if not cls._debug_available():
             return "<debug-suppressed>"
-        if expr is None:
-            return "None"
-
-        visited: Set[int] = set()
-
-        def _render(node: Optional[Expression], depth: int) -> str:
-            if node is None:
-                return "None"
-            if depth <= 0:
-                return "..."
-
-            node_id = id(node)
-            if node_id in visited:
-                return "<cycle>"
-            visited.add(node_id)
-
-            try:
-                expr_type = getattr(node, "expr_type", None)
-                if expr_type == ExpressionType.CONSTANT:
-                    try:
-                        value = node.value
-                    except Exception:
-                        value = "?"
-                    return f"CONST({value})"
-                if expr_type == ExpressionType.PARAMETER:
-                    return f"PARAM({node.name or '?'})"
-                if expr_type == ExpressionType.VARIABLE:
-                    return f"VAR({node.name or '?'})"
-                if expr_type == ExpressionType.UNKNOWN:
-                    return f"UNKNOWN({node.name or '?'})"
-                if expr_type == ExpressionType.PHI:
-                    branches = node.value or []
-                    return f"PHI(branches={len(branches)})"
-                if expr_type == ExpressionType.CALL:
-                    return f"CALL({node.name or '?'}, argc={len(node.operands or [])})"
-                if expr_type == ExpressionType.MEMORY:
-                    operand = node.operands[0] if node.operands else None
-                    return f"MEM[{_render(operand, depth - 1)}]"
-                if expr_type == ExpressionType.UNARY_OP:
-                    operand = node.operands[0] if node.operands else None
-                    return f"{node.operator or 'UNARY'}({_render(operand, depth - 1)})"
-                if expr_type == ExpressionType.BINARY_OP:
-                    left = node.operands[0] if node.operands else None
-                    right = node.operands[1] if len(node.operands) > 1 else None
-                    return (
-                        f"{node.operator or 'BINARY'}"
-                        f"({_render(left, depth - 1)}, {_render(right, depth - 1)})"
-                    )
-                return getattr(expr_type, "name", str(expr_type))
-            finally:
-                visited.discard(node_id)
-
-        return _render(expr, max_depth)
+        return summarize_expression(expr, max_depth=max_depth)
 
     @classmethod
     def _debug_condition_summary(cls, condition: Optional[Condition], max_depth: int = 4) -> str:
-        if condition is None:
-            return "None"
-        expr_summary = cls._debug_expr_summary(condition.expression, max_depth=max_depth)
-        return f"(not {expr_summary})" if condition.negated else expr_summary
+        if not cls._debug_available():
+            return "<debug-suppressed>"
+        return summarize_condition(condition, max_depth=max_depth)
 
     @classmethod
     def _debug_condition_event(

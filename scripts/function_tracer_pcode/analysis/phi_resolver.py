@@ -26,13 +26,7 @@ class ExpandedBranch:
         return f"ExpandedBranch(conds={conds}, value={self.value.to_string()})"
 
     def get_condition_signature(self) -> str:
-        canonical_strs = []
-        for cond in self.conditions:
-            canonical = ConditionNormalizer.normalize(cond)
-            canonical_str = f"{canonical[0]}|{canonical[1]}|{canonical[2]}|{canonical[3]}"
-            canonical_strs.append(canonical_str)
-        canonical_strs.sort()
-        return ";;".join(canonical_strs)
+        return ConditionNormalizer.conditions_signature(self.conditions)
 
 
 class PhiBranch:
@@ -81,14 +75,7 @@ class PhiHandler:
         print(f"{prefix}[PhiHandler] {msg}")
 
     def _condition_signature(self, conditions: List[Condition]) -> str:
-        canonical = []
-        for cond in conditions or []:
-            normalized = ConditionNormalizer.normalize_for_contradiction(cond)
-            canonical.append(
-                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{normalized[3]}"
-            )
-        canonical.sort()
-        return ";;".join(canonical)
+        return ConditionNormalizer.conditions_signature(conditions)
 
     def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> str:
         op_key = self.tracer._get_stable_op_key(multiequal_op)

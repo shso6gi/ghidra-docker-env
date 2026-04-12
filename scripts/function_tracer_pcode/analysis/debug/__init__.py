@@ -8,6 +8,7 @@ from .unknown_trace import (
     VarnodeInfo,
     PcodeOpInfo,
 )
+from .render import summarize_expression, summarize_condition
 
 __all__ = [
     'UnknownTracker',
@@ -15,4 +16,6 @@ __all__ = [
     'UnknownReason',
     'VarnodeInfo',
     'PcodeOpInfo',
+    'summarize_expression',
+    'summarize_condition',
 ]

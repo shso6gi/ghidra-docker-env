@@ -4,6 +4,7 @@
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType, StorageInfo
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
+from ..analysis.debug import summarize_expression, summarize_condition
 from ..config.settings import (
     EXPANDER_MAX_COMBINATION_ATTEMPTS,
     EXPANDER_MAX_OPERATION_CASES,
@@ -48,16 +49,7 @@ class ExpandedValue:
         
         条件を正規化して、ソート済みの文字列として返す
         """
-        canonical_strs = []
-        for cond in self.conditions:
-            canonical = ConditionNormalizer.normalize_for_contradiction(cond)
-            # (left, op, right, pos) をタプル文字列化
-            canonical_str = f"{canonical[0]}|{canonical[1]}|{canonical[2]}|{canonical[3]}"
-            canonical_strs.append(canonical_str)
-        
-        # ソートして順序に依存しないようにする
-        canonical_strs.sort()
-        return ";;".join(canonical_strs)
+        return ConditionNormalizer.conditions_signature(self.conditions)
     
     def __repr__(self):
         conds = [c.to_string() for c in self.conditions]
@@ -125,87 +117,17 @@ class ExpressionExpander:
         """巨大式の full render を避けたデバッグ用サマリー。"""
         if not self._debug_available():
             return "<debug-suppressed>"
-        if expr is None:
-            return "None"
-
-        visited: Set[int] = set()
-
-        def _render(node: Optional[Expression], depth: int) -> str:
-            if node is None:
-                return "None"
-            if depth <= 0:
-                return "..."
-
-            node_id = id(node)
-            if node_id in visited:
-                return "<cycle>"
-            visited.add(node_id)
-
-            expr_type = getattr(node, "expr_type", None)
-            expr_type_name = getattr(expr_type, "name", str(expr_type))
-            try:
-                if expr_type == ExpressionType.CONSTANT:
-                    try:
-                        value = int(node.value)
-                    except Exception:
-                        value = "?"
-                    return f"CONST({value})"
-                if expr_type == ExpressionType.PARAMETER:
-                    return f"PARAM({node.name or '?'})"
-                if expr_type == ExpressionType.VARIABLE:
-                    return f"VAR({node.name or '?'})"
-                if expr_type == ExpressionType.UNKNOWN:
-                    return f"UNKNOWN({node.name or '?'})"
-                if expr_type == ExpressionType.CALL:
-                    arg_count = len(node.operands or [])
-                    return f"CALL({node.name or '?'}, argc={arg_count})"
-                if expr_type == ExpressionType.MEMORY:
-                    inner = _render((node.operands or [None])[0], depth - 1)
-                    return f"MEM[{inner}]"
-                if expr_type == ExpressionType.UNARY_OP:
-                    inner = _render((node.operands or [None])[0], depth - 1)
-                    return f"{node.operator or 'UNARY'}({inner})"
-                if expr_type == ExpressionType.BINARY_OP:
-                    operands = node.operands or []
-                    left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
-                    right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
-                    return f"{node.operator or 'BINARY'}({left}, {right})"
-                if expr_type == ExpressionType.PHI:
-                    branches = node.value or []
-                    return f"PHI(branches={len(branches)})"
-                return expr_type_name
-            finally:
-                visited.discard(node_id)
-
-        return _render(expr, max_depth)
+        return summarize_expression(expr, max_depth=max_depth)
 
     def _debug_condition_summary(self, condition: Optional[Condition], max_depth: int = 4) -> str:
         if not self._debug_available():
             return "<debug-suppressed>"
-        if condition is None:
-            return "None"
-        expr_summary = self._debug_expr_summary(condition.expression, max_depth=max_depth)
-        return f"(not {expr_summary})" if condition.negated else expr_summary
+        return summarize_condition(condition, max_depth=max_depth)
 
     def _debug_expr(self, label: str, expr: Optional[Expression], indent: int = 0) -> None:
         if not self._debug_available():
             return
         self._debug_print(f"{label}{self._debug_expr_summary(expr)}", indent)
-
-    def _expr_signature(self, expr: Optional[Expression]) -> str:
-        return ConditionNormalizer._expr_key(expr)
-
-    def _condition_signature(self, conditions: List[Condition]) -> str:
-        if not conditions:
-            return ""
-        parts: List[str] = []
-        for cond in conditions:
-            normalized = ConditionNormalizer.normalize_for_contradiction(cond)
-            parts.append(
-                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{int(normalized[3])}"
-            )
-        parts.sort()
-        return ";;".join(parts)
 
     def _finalize_combined_results(
         self,
@@ -229,11 +151,11 @@ class ExpressionExpander:
                 list(base_conditions),
             )
             budget_key = (
-                self._expr_signature(budget_unknown.value),
+                ConditionNormalizer.expression_signature(budget_unknown.value),
                 budget_unknown.get_condition_signature(),
             )
             existing_keys = {
-                (self._expr_signature(ev.value), ev.get_condition_signature())
+                (ConditionNormalizer.expression_signature(ev.value), ev.get_condition_signature())
                 for ev in deduped
             }
             if budget_key not in existing_keys:
@@ -526,7 +448,7 @@ class ExpressionExpander:
         groups: Dict[Tuple[str, str], ExpandedValue] = {}
 
         for ev in values:
-            key = (self._expr_signature(ev.value), ev.get_condition_signature())
+            key = (ConditionNormalizer.expression_signature(ev.value), ev.get_condition_signature())
             current = groups.get(key)
             if current is None or len(ev.conditions) < len(current.conditions):
                 groups[key] = ev
@@ -1718,8 +1640,8 @@ class ExpressionExpander:
             for ev in input_expansions[0]:
                 combined_conds = base_conditions + ev.conditions
                 pre_key = (
-                    self._expr_signature(ev.value),
-                    self._condition_signature(combined_conds),
+                    ConditionNormalizer.expression_signature(ev.value),
+                    ConditionNormalizer.conditions_signature(combined_conds),
                 )
                 if pre_key in seen_keys:
                     continue
@@ -1760,9 +1682,9 @@ class ExpressionExpander:
 
                     combined_conds = base_conditions + left_ev.conditions + right_ev.conditions
                     pre_key = (
-                        self._expr_signature(left_ev.value),
-                        self._expr_signature(right_ev.value),
-                        self._condition_signature(combined_conds),
+                        ConditionNormalizer.expression_signature(left_ev.value),
+                        ConditionNormalizer.expression_signature(right_ev.value),
+                        ConditionNormalizer.conditions_signature(combined_conds),
                         mnemonic,
                         output_size,
                         read_order_key,
