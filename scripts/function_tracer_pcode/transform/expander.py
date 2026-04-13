@@ -1256,8 +1256,13 @@ class ExpressionExpander:
             ]
             placeholder_name = None
             if self.record_deferred_call is not None and target_name:
+                deferred_args = self._recover_deferred_call_arguments(
+                    pcode_op,
+                    target_name,
+                    explicit_args,
+                )
                 try:
-                    placeholder_name = self.record_deferred_call(target_name, explicit_args)
+                    placeholder_name = self.record_deferred_call(target_name, deferred_args)
                 except Exception:
                     placeholder_name = None
             self.tracer.emit_unknown_event(
@@ -1302,6 +1307,7 @@ class ExpressionExpander:
             )
 
         result: List[ExpandedValue] = []
+        fallback_args_by_target: Dict[str, List[Expression]] = {}
 
         def resolve_with_args(
             arg_index: int,
@@ -1365,6 +1371,10 @@ class ExpressionExpander:
                                 callee_parameters,
                                 effective_args,
                             )
+                    fallback_args_by_target.setdefault(
+                        target_name,
+                        list(effective_args),
+                    )
 
                     if self.call_resolver is None:
                         continue
@@ -1401,10 +1411,17 @@ class ExpressionExpander:
         if result:
             return self._deduplicate_expanded_values(result, depth)
 
-        fallback_name = _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
+        fallback_name = self._select_deferred_call_target_name(resolved_targets, pcode_op)
         placeholder_name = None
         if self.record_deferred_call is not None:
-            deferred_args = [arg for arg in (canonical_explicit_args or []) if arg is not None]
+            deferred_args = fallback_args_by_target.get(fallback_name)
+            if deferred_args is None:
+                recovered_seed_args = [arg for arg in (canonical_explicit_args or []) if arg is not None]
+                deferred_args = self._recover_deferred_call_arguments(
+                    pcode_op,
+                    fallback_name,
+                    recovered_seed_args,
+                )
             try:
                 placeholder_name = self.record_deferred_call(fallback_name, deferred_args)
             except Exception:
@@ -1425,6 +1442,45 @@ class ExpressionExpander:
                 base_conditions,
             )
         ]
+
+    def _select_deferred_call_target_name(
+        self,
+        resolved_targets: List[Tuple[str, List[Condition]]],
+        pcode_op,
+    ) -> str:
+        unique_targets = {
+            target_name
+            for target_name, _target_conditions in (resolved_targets or [])
+            if target_name
+        }
+        if len(unique_targets) == 1:
+            return next(iter(unique_targets))
+        return _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
+
+    def _recover_deferred_call_arguments(
+        self,
+        pcode_op,
+        target_name: str,
+        explicit_args: List[Expression],
+    ) -> List[Expression]:
+        deferred_args = list(explicit_args or [])
+        if self.resolve_callee_parameters is None or not target_name:
+            return deferred_args
+
+        callee_parameters = list(self.resolve_callee_parameters(target_name) or [])
+        if not callee_parameters:
+            return deferred_args
+
+        recovered = _recover_call_argument_expressions(
+            pcode_op,
+            self.tracer,
+            self.parameters,
+            callee_parameters,
+            deferred_args,
+        )
+        if recovered:
+            return recovered
+        return deferred_args
 
     def _infer_indirect_output_location(
         self,

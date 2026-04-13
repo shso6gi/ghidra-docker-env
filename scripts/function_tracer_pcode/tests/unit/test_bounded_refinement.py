@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
+    expression_contains_synthetic_location_reads,
+    post_state_read_expression_for_location,
+)
 from scripts.function_tracer_pcode.model import Condition, DeferredCallInfo, Expression, ReturnInfo
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
@@ -160,3 +167,114 @@ def test_bounded_call_refiner_respects_case_cap():
 
     assert changed is True
     assert len(analysis.returns) == 3
+
+
+def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
+    trace = Expression.parameter("trace", 0, size=8)
+    start = Expression.parameter("start", 1, size=4)
+    limit = Expression.parameter("limit", 2, size=4)
+    steps_addr = Expression.binary_op("INT_ADD", trace, _const(4, size=8))
+    callee_parameters = [
+        {"name": "trace", "index": 0, "size": 8},
+        {"name": "start", "index": 1, "size": 4},
+        {"name": "limit", "index": 2, "size": 4},
+    ]
+
+    trace_nonnull = _cond("INT_NOTEQUAL", trace, Expression.constant(0, size=8))
+    loop_active = _cond("INT_SLESS", start, limit)
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    odd_iteration = _cond(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_AND", start, _const(1)),
+        _const(0),
+    )
+
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[
+            {"name": "trace", "index": 0, "data_type": "int *", "size": 8},
+            {"name": "start", "index": 1, "data_type": "int", "size": 4},
+            {"name": "limit", "index": 2, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x5000",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    post_state_read_expression_for_location(
+                        CanonicalLocation("trace", 0, 4),
+                        callee_parameters,
+                        symbolic=True,
+                    ),
+                    post_state_read_expression_for_location(
+                        CanonicalLocation("trace", 4, 4),
+                        callee_parameters,
+                        symbolic=True,
+                    ),
+                ),
+                conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            )
+        ],
+        return_type="int",
+    )
+    callee.effect_summary = EffectSummary(
+        parameter_names=["trace", "start", "limit"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("trace", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), Expression.unary_op("INT_2COMP", start)),
+                conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+                order_key=1,
+            ),
+            StoreEffect(
+                location=CanonicalLocation("trace", 4, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+                conditions=[trace_nonnull, loop_active, final_iter],
+                order_key=2,
+            ),
+        ],
+    )
+
+    placeholder = "call_out_of_scope:callee#0"
+    caller = create_mock_analysis(
+        "wrapper",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+            {"name": "param_3", "index": 2, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x4000",
+                value=Expression.unknown(placeholder),
+                conditions=[_cond("INT_NOTEQUAL", _param("param_1", 0, size=8), Expression.constant(0, size=8))],
+            )
+        ],
+        return_type="int",
+    )
+    caller.deferred_calls = {
+        placeholder: DeferredCallInfo(
+            placeholder_name=placeholder,
+            target_name="callee",
+            arguments=[
+                _param("param_1", 0, size=8),
+                _param("param_2", 1, size=4),
+                _param("param_3", 2, size=4),
+            ],
+        )
+    }
+
+    refiner = BoundedCallRefiner(
+        lambda function_name: callee if function_name == "callee" else None,
+        max_unroll=1,
+        max_cases=16,
+        debug=False,
+    )
+
+    changed = refiner.refine_analysis(caller)
+
+    assert changed is True
+    assert all(
+        not expression_contains_synthetic_location_reads(ret.value)
+        for ret in caller.returns
+    )

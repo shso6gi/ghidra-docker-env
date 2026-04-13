@@ -430,6 +430,8 @@ def normalize_analysis_semantic_width(
 ) -> FunctionReturnAnalysis:
     """Return a copy of the analysis with semantic-width rewrites applied."""
 
+    analysis = _synchronize_parameter_expression_metadata(analysis)
+
     if hints is None:
         hints = infer_parameter_semantics(analysis)
 
@@ -437,38 +439,257 @@ def normalize_analysis_semantic_width(
     fragment_infos_by_name = _build_fragment_info_map(fragment_infos)
 
     normalizer = SemanticWidthNormalizer(hints_by_name, fragment_infos_by_name)
+    return _rewrite_analysis_expressions(
+        analysis,
+        normalizer.rewrite_expression,
+        simplify_conditions=True,
+    )
+
+
+def _synchronize_parameter_expression_metadata(
+    analysis: FunctionReturnAnalysis,
+) -> FunctionReturnAnalysis:
+    parameters = list(analysis.parameters or [])
+    if not parameters:
+        return analysis
+
+    params_by_name: Dict[str, Dict[str, Any]] = {}
+    params_by_index: Dict[int, Dict[str, Any]] = {}
+    for fallback_index, param in enumerate(parameters):
+        descriptor = dict(param)
+        name = descriptor.get("name")
+        if isinstance(name, str) and name:
+            params_by_name[name] = descriptor
+        index = descriptor.get("index", fallback_index)
+        if isinstance(index, int) and index >= 0:
+            params_by_index[index] = descriptor
+
+    return _rewrite_analysis_expressions(
+        analysis,
+        lambda expr: _rewrite_parameter_expression_metadata(
+            expr,
+            params_by_name,
+            params_by_index,
+        ),
+        simplify_conditions=False,
+    )
+
+
+def _rewrite_analysis_expressions(
+    analysis: FunctionReturnAnalysis,
+    rewrite_expr,
+    *,
+    simplify_conditions: bool,
+) -> FunctionReturnAnalysis:
     changed = False
     rewritten_returns = []
-
     for ret in analysis.returns:
-        new_value = normalizer.rewrite_expression(ret.value)
-        new_conditions = [
-            Condition(normalizer.rewrite_expression(cond.expression), cond.negated)
-            for cond in ret.conditions
-        ]
-        simplified_conditions = ConditionSimplifier.simplify_conditions(new_conditions)
-        if new_value is not ret.value:
+        new_value = rewrite_expr(ret.value)
+        new_conditions, conditions_changed = _rewrite_conditions(
+            ret.conditions,
+            rewrite_expr,
+            simplify=simplify_conditions,
+        )
+        if new_value is not ret.value or conditions_changed:
             changed = True
-        if len(simplified_conditions) != len(ret.conditions):
-            changed = True
-        elif any(
-            new.expression is not old.expression or new.negated != old.negated
-            for new, old in zip(simplified_conditions, ret.conditions)
-        ):
-            changed = True
-
         rewritten_returns.append(
             replace(
                 ret,
                 value=new_value,
-                conditions=simplified_conditions,
+                conditions=new_conditions,
             )
         )
+
+    rewritten_effect_summary = _rewrite_effect_summary_expressions(
+        getattr(analysis, "effect_summary", None),
+        rewrite_expr,
+        simplify_conditions=simplify_conditions,
+    )
+    if rewritten_effect_summary is not getattr(analysis, "effect_summary", None):
+        changed = True
 
     if not changed:
         return analysis
 
-    return replace(analysis, returns=rewritten_returns)
+    return replace(
+        analysis,
+        returns=rewritten_returns,
+        effect_summary=rewritten_effect_summary,
+    )
+
+
+def _rewrite_conditions(
+    conditions,
+    rewrite_expr,
+    *,
+    simplify: bool,
+):
+    rewritten = [
+        Condition(rewrite_expr(cond.expression), cond.negated)
+        for cond in (conditions or [])
+    ]
+    if simplify:
+        rewritten = ConditionSimplifier.simplify_conditions(rewritten)
+
+    changed = False
+    original = list(conditions or [])
+    if len(rewritten) != len(original):
+        changed = True
+    else:
+        changed = any(
+            new.expression is not old.expression or new.negated != old.negated
+            for new, old in zip(rewritten, original)
+        )
+    return rewritten, changed
+
+
+def _rewrite_effect_summary_expressions(
+    effect_summary,
+    rewrite_expr,
+    *,
+    simplify_conditions: bool,
+):
+    if effect_summary is None:
+        return None
+
+    changed = False
+    rewritten_effects = []
+    for effect in getattr(effect_summary, "effects", []) or []:
+        new_value = rewrite_expr(effect.value)
+        new_conditions, conditions_changed = _rewrite_conditions(
+            effect.conditions,
+            rewrite_expr,
+            simplify=simplify_conditions,
+        )
+        if new_value is not effect.value or conditions_changed:
+            changed = True
+        rewritten_effects.append(
+            replace(
+                effect,
+                value=new_value,
+                conditions=new_conditions,
+            )
+        )
+
+    new_synthetic_expr = rewrite_expr(getattr(effect_summary, "synthetic_expr", None))
+    if new_synthetic_expr is not getattr(effect_summary, "synthetic_expr", None):
+        changed = True
+
+    if not changed:
+        return effect_summary
+
+    return replace(
+        effect_summary,
+        effects=rewritten_effects,
+        synthetic_expr=new_synthetic_expr,
+    )
+
+
+def _rewrite_parameter_expression_metadata(
+    expr: Optional[Expression],
+    params_by_name: Dict[str, Dict[str, Any]],
+    params_by_index: Dict[int, Dict[str, Any]],
+) -> Optional[Expression]:
+    if expr is None:
+        return expr
+
+    if expr.expr_type == ExpressionType.PARAMETER:
+        descriptor = None
+        if expr.name:
+            descriptor = params_by_name.get(expr.name)
+        if descriptor is None and isinstance(expr.value, int) and expr.value >= 0:
+            descriptor = params_by_index.get(expr.value)
+        if descriptor is None:
+            return expr
+
+        desired_size = int(descriptor.get("size", 0) or 0)
+        desired_type = descriptor.get("data_type") or expr.data_type
+        desired_index = descriptor.get("index", expr.value)
+        if (
+            desired_size <= 0 or
+            (
+                desired_size == expr.size and
+                desired_type == expr.data_type and
+                desired_index == expr.value
+            )
+        ):
+            return expr
+
+        return Expression(
+            expr_type=expr.expr_type,
+            value=desired_index,
+            operator=expr.operator,
+            operands=list(expr.operands or []),
+            size=desired_size,
+            name=expr.name,
+            data_type=desired_type,
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+        )
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            new_cond = None
+            if cond is not None:
+                new_cond_expr = _rewrite_parameter_expression_metadata(
+                    cond.expression,
+                    params_by_name,
+                    params_by_index,
+                )
+                new_cond = Condition(new_cond_expr, cond.negated)
+                changed = changed or (new_cond_expr is not cond.expression)
+            new_value = _rewrite_parameter_expression_metadata(
+                value,
+                params_by_name,
+                params_by_index,
+            )
+            changed = changed or (new_value is not value)
+            branches.append((new_cond, new_value))
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        rebuilt.data_type = expr.data_type
+        rebuilt.storage_info = expr.storage_info
+        rebuilt.read_order_key = expr.read_order_key
+        return rebuilt
+
+    operands = getattr(expr, "operands", None) or []
+    if not operands:
+        return expr
+
+    new_operands = [
+        _rewrite_parameter_expression_metadata(
+            operand,
+            params_by_name,
+            params_by_index,
+        )
+        for operand in operands
+    ]
+    if all(new is old for new, old in zip(new_operands, operands)):
+        return expr
+
+    return Expression(
+        expr_type=expr.expr_type,
+        value=expr.value,
+        operator=expr.operator,
+        operands=new_operands,
+        size=expr.size,
+        name=expr.name,
+        data_type=expr.data_type,
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+    )
+
+
+def _rewrite_effect_summary(effect_summary, normalizer: SemanticWidthNormalizer):
+    return _rewrite_effect_summary_expressions(
+        effect_summary,
+        normalizer.rewrite_expression,
+        simplify_conditions=True,
+    )
 
 
 def _build_hints_by_name(

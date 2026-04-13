@@ -12,6 +12,13 @@ from scripts.function_tracer_pcode.equivalence.formula.variable import (
 from scripts.function_tracer_pcode.equivalence.semantic_width import (
     normalize_analysis_semantic_width,
 )
+from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
+    lower_post_state_expression_for_smt_if_needed,
+    post_state_read_expression_for_location,
+)
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -67,6 +74,10 @@ def _wide_param(fragment_name: str, param_name: str) -> Expression:
         _param(param_name, 4),
         8,
     )
+
+
+def _mem_addr(addr: Expression, size: int = 4) -> Expression:
+    return Expression(ExpressionType.MEMORY, operands=[addr], size=size)
 
 
 def _fragment_info(fragment_name: str, parent_name: str, parent_index: int) -> ExtraVariableInfo:
@@ -282,3 +293,162 @@ def test_formula_builder_applies_semantic_width_normalization_before_lowering():
     assert "(bvsdiv param_1_2 param_2_2)" in formula
     assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1_2) ((_ sign_extend 32) param_2_2)))" not in formula
     assert "(distinct param_2_2 (_ bv0 32))" in formula
+
+
+def test_normalize_analysis_rewrites_effect_summary_for_fragment_backed_pointer_reads():
+    params = [
+        {"name": "param_1", "data_type": "int *", "size": 4, "index": 0, "is_signed": True},
+        {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": False},
+        {"name": "param_3", "data_type": "int", "size": 4, "index": 2, "is_signed": False},
+    ]
+    loc0 = CanonicalLocation("param_1", 0, 4)
+    loc4 = CanonicalLocation("param_1", 4, 4)
+    symbolic_sum = _binary(
+        "INT_ADD",
+        post_state_read_expression_for_location(loc0, params, symbolic=True),
+        post_state_read_expression_for_location(loc4, params, symbolic=True),
+        4,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="lr_loop_with_side_effect",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[ReturnInfo(address="0x1000", conditions=[], value=symbolic_sum)],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["param_1", "param_2", "param_3"],
+            effects=[
+                StoreEffect(
+                    location=loc0,
+                    value=_mem_addr(_wide_param("in_a0_hi", "param_1")),
+                    conditions=[],
+                    order_key=1,
+                ),
+                StoreEffect(
+                    location=loc4,
+                    value=_mem_addr(
+                        _binary(
+                            "INT_ADD",
+                            _wide_param("in_a0_hi", "param_1"),
+                            _const(4, 8),
+                            8,
+                        )
+                    ),
+                    conditions=[],
+                    order_key=2,
+                ),
+            ],
+        ),
+    )
+
+    normalized = normalize_analysis_semantic_width(
+        analysis,
+        fragment_infos=[_fragment_info("in_a0_hi", "param_1", 0)],
+    )
+    lowered = lower_post_state_expression_for_smt_if_needed(
+        normalized.returns[0].value,
+        normalized.returns[0].conditions,
+        normalized.effect_summary.effects,
+        normalized.parameters,
+    )
+
+    assert lowered is not None
+    lowered_smt = lowered.to_smt()
+    assert (
+        "((_ sign_extend 32) param_1)" in lowered_smt
+        or "((_ zero_extend 32) param_1)" in lowered_smt
+    )
+    assert "(bvadd (_ bv4 64) param_1)" not in lowered_smt
+    assert "in_a0_hi" not in lowered_smt
+
+
+def test_normalize_analysis_synchronizes_parameter_expr_widths_with_declared_metadata():
+    mismatched_ptr = _param("param_1", 8)
+    analysis = FunctionReturnAnalysis(
+        function_name="lr_loop_with_side_effect",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int *", "size": 4, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+            {"name": "param_3", "data_type": "uint", "size": 4, "index": 2, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    Condition(_binary("INT_NOTEQUAL", mismatched_ptr, _const(0, 8), 1))
+                ],
+                value=_binary(
+                    "INT_ADD",
+                    _mem_addr(mismatched_ptr),
+                    _mem_addr(_binary("INT_ADD", mismatched_ptr, _const(4, 8), 8)),
+                    4,
+                ),
+            )
+        ],
+        return_type="int",
+    )
+
+    normalized = normalize_analysis_semantic_width(analysis)
+    cond_smt = normalized.returns[0].conditions[0].to_smt()
+    value_smt = normalized.returns[0].value.to_smt()
+
+    assert "(distinct param_1 (_ bv0 32))" in cond_smt
+    assert "(select mem32 param_1)" not in value_smt
+    assert "(bvadd (_ bv4 64) param_1)" not in value_smt
+    assert "((_ zero_extend 32) param_1)" in value_smt
+
+
+def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs():
+    builder = FormulaBuilder(debug=False)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="lr_loop_with_side_effect",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int *", "size": 4, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+            {"name": "param_3", "data_type": "uint", "size": 4, "index": 2, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[Condition(_binary("INT_NOTEQUAL", _param("param_1", 4), _const(0, 4), 1))],
+                value=_binary(
+                    "INT_ADD",
+                    _mem_addr(_param("param_1", 4)),
+                    _mem_addr(_binary("INT_ADD", _param("param_1", 4), _const(4, 8), 8)),
+                    4,
+                ),
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="lr_loop_with_side_effect",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int *", "size": 4, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+            {"name": "param_3", "data_type": "uint", "size": 4, "index": 2, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                conditions=[Condition(_binary("INT_NOTEQUAL", _param("param_1", 8), _const(0, 8), 1))],
+                value=_binary(
+                    "INT_ADD",
+                    _mem_addr(_param("param_1", 8)),
+                    _mem_addr(_binary("INT_ADD", _param("param_1", 8), _const(4, 8), 8)),
+                    4,
+                ),
+            )
+        ],
+        return_type="int",
+    )
+
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+
+    assert "(declare-const param_1_2 (_ BitVec 32))" in formula
+    assert "(select mem32 param_1_2)" not in formula
+    assert "(bvadd (_ bv4 64) param_1_2)" not in formula
+    assert "((_ zero_extend 32) param_1_2)" in formula

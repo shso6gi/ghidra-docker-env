@@ -620,6 +620,58 @@ def test_structural_recurrence_summarizer_accepts_swapped_lessequal_base_case():
     )
 
 
+def test_structural_recurrence_summarizer_infers_loop_pair_from_negated_lessequal_progress_guard():
+    params = [
+        {"name": "trace", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "start", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "limit", "index": 2, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_expr = Expression.binary_op("INT_ADD", _mem("trace", 0), _mem("trace", 4))
+    analysis = create_mock_analysis(
+        "lr_loop_with_side_effect.part.0",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=base_expr,
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("limit"), _param("start")),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op("INT_ADD", _mem("trace", 4), _const(1)),
+                    Expression.binary_op("INT_ADD", _mem("trace", 0), _param("start")),
+                ),
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("limit"), _param("start"), negated=True),
+                    _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("start"), _const(1)), _const(0)),
+                    _cond("INT_EQUAL", Expression.binary_op("INT_ADD", _param("start"), _const(1)), _param("limit")),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op("INT_ADD", _mem("trace", 4), _const(1)),
+                    Expression.binary_op("INT_ADD", _mem("trace", 0), Expression.unary_op("INT_2COMP", _param("start"))),
+                ),
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("limit"), _param("start"), negated=True),
+                    _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("start"), _const(1)), _const(0), negated=True),
+                    _cond("INT_EQUAL", Expression.binary_op("INT_ADD", _param("start"), _const(1)), _param("limit")),
+                ],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    assert summarizer._infer_loop_parameter_pair(analysis) == ("start", "limit")
+
+
 def test_structural_recurrence_summarizer_synthesizes_effects_with_mul_wrapped_memory_offsets():
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
@@ -699,3 +751,287 @@ def test_structural_recurrence_summarizer_synthesizes_effects_with_mul_wrapped_m
     summarized_returns, note = summary
     assert note == "counted_loop_branch_accumulator_summary"
     assert len(summarized_returns) == 4
+
+
+def test_structural_recurrence_summarizer_accepts_wrapper_guarded_helper_without_local_nonnull_check():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_3", "index": 2, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_expr = Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4))
+    analysis = create_mock_analysis(
+        "lr_loop_with_side_effect.part.0",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=base_expr,
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("param_3"), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+    odd_conditions = [
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("param_2"), _const(1)), _const(0), negated=True),
+    ]
+    even_conditions = [
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("param_2"), _const(1)), _const(0)),
+    ]
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3"],
+        effects=[
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 0), Expression.unary_op("INT_2COMP", _param("param_2"))),
+                odd_conditions,
+                1,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 4), _const(1)),
+                odd_conditions,
+                2,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 0), _param("param_2")),
+                even_conditions,
+                3,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 4), _const(1)),
+                even_conditions,
+                4,
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("lr_loop_with_side_effect.part.0"),
+        _FakeHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_loop_branch_accumulator_summary"
+    assert len(summarized_returns) == 3
+    assert any(
+        any(cond.to_string() == "(param_2 < param_3)" for cond in ret.conditions)
+        for ret in summarized_returns
+    )
+
+
+def test_structural_recurrence_summarizer_accepts_direct_notequal_odd_parity_conditions():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_3", "index": 2, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_expr = Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4))
+    analysis = create_mock_analysis(
+        "lr_loop_with_side_effect.part.0",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=base_expr,
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("param_3"), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+    odd_conditions = [
+        Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                Expression.constant(0, size=8),
+            ),
+            True,
+        ),
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        Condition(
+            Expression.binary_op(
+                "INT_NOTEQUAL",
+                Expression.binary_op("INT_AND", _param("param_2"), _const(1)),
+                _const(0),
+            ),
+            False,
+        ),
+    ]
+    even_conditions = [
+        Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                Expression.constant(0, size=8),
+            ),
+            True,
+        ),
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("param_2"), _const(1)), _const(0)),
+    ]
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3"],
+        effects=[
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 0), Expression.unary_op("INT_2COMP", _param("param_2"))),
+                odd_conditions,
+                1,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem_mul_offset("param_1", 4), _const(1)),
+                odd_conditions,
+                2,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op("INT_ADD", _mem("param_1", 0), _param("param_2")),
+                even_conditions,
+                3,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem_mul_offset("param_1", 4), _const(1)),
+                even_conditions,
+                4,
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("lr_loop_with_side_effect.part.0"),
+        _FakeHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_loop_branch_accumulator_summary"
+    assert len(summarized_returns) == 3
+    assert any(
+        any(cond.to_string() == "((param_2 & 1) != 0)" for cond in ret.conditions)
+        or any(cond.to_string() == "(not ((param_2 & 1) == 0))" for cond in ret.conditions)
+        for ret in summarized_returns
+    )
+
+
+def test_structural_recurrence_summarizer_reduces_phi_wrapped_store_effects_before_delta_extraction():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_3", "index": 2, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_expr = Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4))
+    analysis = create_mock_analysis(
+        "lr_loop_with_side_effect.part.0",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=base_expr,
+                conditions=[
+                    _cond("INT_SLESSEQUAL", _param("param_3"), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+
+    odd_conditions = [
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        Condition(
+            Expression.binary_op(
+                "INT_NOTEQUAL",
+                Expression.binary_op("INT_AND", _param("param_2"), _const(1)),
+                _const(0),
+            ),
+            False,
+        ),
+    ]
+    even_conditions = [
+        _cond("INT_SLESS", _param("param_2"), _param("param_3")),
+        _cond("INT_EQUAL", Expression.binary_op("INT_AND", _param("param_2"), _const(1)), _const(0)),
+    ]
+    step_notequal = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_ADD", _param("param_2"), _const(1)),
+            _param("param_3"),
+        ),
+        False,
+    )
+
+    odd_phi_base = Expression.phi(
+        [
+            (_cond("INT_SLESS", _param("param_2"), _param("param_3")), _mem("param_1", 0)),
+            (step_notequal, Expression.unknown("phi_circular_odd")),
+        ]
+    )
+    odd_phi_base.size = 4
+    even_phi_base = Expression.phi(
+        [
+            (_cond("INT_SLESS", _param("param_2"), _param("param_3")), _mem("param_1", 0)),
+            (step_notequal, Expression.unknown("phi_circular_even")),
+        ]
+    )
+    even_phi_base.size = 4
+
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3"],
+        effects=[
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op(
+                    "INT_ADD",
+                    odd_phi_base,
+                    Expression.unary_op("INT_2COMP", _param("param_2")),
+                ),
+                odd_conditions,
+                1,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem_mul_offset("param_1", 4), _const(1)),
+                odd_conditions,
+                2,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 0, 4),
+                Expression.binary_op("INT_ADD", even_phi_base, _param("param_2")),
+                even_conditions,
+                3,
+            ),
+            StoreEffect(
+                CanonicalLocation("param_1", 4, 4),
+                Expression.binary_op("INT_ADD", _mem_mul_offset("param_1", 4), _const(1)),
+                even_conditions,
+                4,
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("lr_loop_with_side_effect.part.0"),
+        _FakeHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_loop_branch_accumulator_summary"
+    assert len(summarized_returns) == 3

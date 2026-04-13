@@ -202,7 +202,15 @@ class StructuralRecurrenceSummarizer:
             return None
 
         working_returns = list(analysis.returns)
-        base_case = self._find_no_loop_base_case(working_returns, pointer_param, start_name, limit_name)
+        null_case = self._find_pointer_null_case(working_returns, pointer_param)
+        require_pointer_nonnull = null_case is not None
+        base_case = self._find_no_loop_base_case(
+            working_returns,
+            pointer_param,
+            start_name,
+            limit_name,
+            require_pointer_nonnull=require_pointer_nonnull,
+        )
         if base_case is None:
             self._debug(
                 "Declined branch-accumulator summary: could not identify no-loop base case "
@@ -210,7 +218,13 @@ class StructuralRecurrenceSummarizer:
             )
             return None
 
-        step_cases = self._find_one_step_cases(working_returns, pointer_param, start_name, limit_name)
+        step_cases = self._find_one_step_cases(
+            working_returns,
+            pointer_param,
+            start_name,
+            limit_name,
+            require_pointer_nonnull=require_pointer_nonnull,
+        )
         if step_cases is None:
             synthesized = self._synthesize_one_step_cases_from_effects(
                 analysis,
@@ -218,12 +232,19 @@ class StructuralRecurrenceSummarizer:
                 pointer_param,
                 start_name,
                 limit_name,
+                require_pointer_nonnull=require_pointer_nonnull,
             )
             if not synthesized:
                 self._debug("Declined branch-accumulator summary: could not synthesize one-step cases from effects")
                 return None
             working_returns.extend(synthesized)
-            step_cases = self._find_one_step_cases(working_returns, pointer_param, start_name, limit_name)
+            step_cases = self._find_one_step_cases(
+                working_returns,
+                pointer_param,
+                start_name,
+                limit_name,
+                require_pointer_nonnull=require_pointer_nonnull,
+            )
             if step_cases is None:
                 self._debug("Declined branch-accumulator summary: synthesized one-step cases still did not match")
                 return None
@@ -242,7 +263,6 @@ class StructuralRecurrenceSummarizer:
             self._debug("Declined branch-accumulator summary: one-step deltas are not affine in the loop counter")
             return None
 
-        null_case = self._find_pointer_null_case(working_returns, pointer_param)
         loop_even_value = self._build_parity_split_loop_value(
             base_expr,
             start_name,
@@ -341,18 +361,15 @@ class StructuralRecurrenceSummarizer:
         return candidates.most_common(1)[0][0]
 
     def _match_less_parameter_pair(self, condition: Condition) -> Optional[Tuple[str, str]]:
-        expr = getattr(condition, "expression", None)
-        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        relation = self._parameter_comparison_relation(condition)
+        if relation is None:
             return None
-        if expr.operator not in {"INT_SLESS", "INT_LESS"}:
-            return None
-        left_name = self._parameter_name_from_expr(expr.operands[0])
-        right_name = self._parameter_name_from_expr(expr.operands[1])
-        if not left_name or not right_name or left_name == right_name:
-            return None
-        if condition.negated:
-            return None
-        return left_name, right_name
+        left_name, relation_name, right_name = relation
+        if relation_name == "<":
+            return left_name, right_name
+        if relation_name == ">":
+            return right_name, left_name
+        return None
 
     def _parameter_name_from_expr(self, expr: Optional[Expression]) -> Optional[str]:
         if expr is None:
@@ -394,13 +411,15 @@ class StructuralRecurrenceSummarizer:
         pointer_name: str,
         start_name: str,
         limit_name: str,
+        *,
+        require_pointer_nonnull: bool,
     ) -> Optional[ReturnInfo]:
         for ret in returns:
             if self._return_is_constant(ret):
                 continue
             has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in ret.conditions or [])
             has_not_less = any(self._condition_is_not_less(cond, start_name, limit_name) for cond in ret.conditions or [])
-            if has_nonnull and has_not_less:
+            if has_not_less and (has_nonnull or not require_pointer_nonnull):
                 return ret
         return None
 
@@ -410,6 +429,8 @@ class StructuralRecurrenceSummarizer:
         pointer_name: str,
         start_name: str,
         limit_name: str,
+        *,
+        require_pointer_nonnull: bool,
     ) -> Optional[Tuple[ReturnInfo, ReturnInfo]]:
         even_case = None
         odd_case = None
@@ -418,7 +439,7 @@ class StructuralRecurrenceSummarizer:
             has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conditions)
             has_loop = any(self._condition_is_less(cond, start_name, limit_name) for cond in conditions)
             has_one_step = any(self._condition_is_step_equality(cond, start_name, limit_name) for cond in conditions)
-            if not (has_nonnull and has_loop and has_one_step):
+            if not (has_loop and has_one_step and (has_nonnull or not require_pointer_nonnull)):
                 continue
             parity = self._extract_counter_parity(conditions, start_name)
             if parity is True:
@@ -436,6 +457,8 @@ class StructuralRecurrenceSummarizer:
         pointer_name: str,
         start_name: str,
         limit_name: str,
+        *,
+        require_pointer_nonnull: bool,
     ) -> List[ReturnInfo]:
         effect_summary = getattr(analysis, "effect_summary", None)
         if effect_summary is None:
@@ -453,34 +476,26 @@ class StructuralRecurrenceSummarizer:
         synthesized: List[ReturnInfo] = []
         for grouped_effects in grouped.values():
             conds = grouped_effects[0][0]
-            if not any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conds):
+            has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conds)
+            if require_pointer_nonnull and not has_nonnull:
+                self._debug(
+                    "Skipping effect-derived one-step candidate: missing local pointer-nonnull guard "
+                    f"for conditions {[cond.to_string() for cond in conds]}"
+                )
                 continue
             if not any(self._condition_is_less(cond, start_name, limit_name) for cond in conds):
+                self._debug(
+                    "Skipping effect-derived one-step candidate: missing loop-progress guard "
+                    f"for conditions {[cond.to_string() for cond in conds]}"
+                )
                 continue
             parity = self._extract_counter_parity(conds, start_name)
             if parity is None:
+                self._debug(
+                    "Skipping effect-derived one-step candidate: could not determine counter parity "
+                    f"for conditions {[cond.to_string() for cond in conds]}"
+                )
                 continue
-
-            delta_terms: List[Expression] = []
-            for _conds, effect in grouped_effects:
-                coeff = coeffs.get(effect.location)
-                if coeff in (None, 0):
-                    continue
-                delta_expr = self._extract_store_delta_expr(effect, analysis.parameters or [])
-                if delta_expr is None:
-                    return []
-                reduced_delta = _reduce_expression_under_conditions(delta_expr, conds)
-                scaled = self._scale_expression(reduced_delta, coeff)
-                if scaled is not None:
-                    delta_terms.append(scaled)
-            if not delta_terms:
-                continue
-
-            delta_sum = self._sum_expression_terms(delta_terms)
-            if delta_sum is None:
-                continue
-            value = Expression.binary_op("INT_ADD", base_case.value, delta_sum)
-            value.size = base_case.value.size
             step_eq = Condition(
                 Expression.binary_op(
                     "INT_EQUAL",
@@ -493,11 +508,52 @@ class StructuralRecurrenceSummarizer:
                 ),
                 False,
             )
+            step_context = ConditionSimplifier.simplify_conditions(list(conds) + [step_eq])
+            if ConditionSimplifier.is_contradiction(step_context):
+                self._debug(
+                    "Skipping effect-derived one-step candidate: one-step context is contradictory "
+                    f"for conditions {[cond.to_string() for cond in conds]}"
+                )
+                continue
+
+            delta_terms: List[Expression] = []
+            for _conds, effect in grouped_effects:
+                coeff = coeffs.get(effect.location)
+                if coeff in (None, 0):
+                    continue
+                delta_expr = self._extract_store_delta_expr(
+                    effect,
+                    analysis.parameters or [],
+                    step_context,
+                )
+                if delta_expr is None:
+                    self._debug(
+                        "Aborting effect-derived one-step synthesis: could not isolate store delta "
+                        f"for location={effect.location} value={effect.value.to_string()} "
+                        f"conditions={[cond.to_string() for cond in step_context]}"
+                    )
+                    return []
+                reduced_delta = _reduce_expression_under_conditions(delta_expr, step_context)
+                scaled = self._scale_expression(reduced_delta, coeff)
+                if scaled is not None:
+                    delta_terms.append(scaled)
+            if not delta_terms:
+                self._debug(
+                    "Skipping effect-derived one-step candidate: no additive delta terms matched "
+                    f"for conditions {[cond.to_string() for cond in conds]}"
+                )
+                continue
+
+            delta_sum = self._sum_expression_terms(delta_terms)
+            if delta_sum is None:
+                continue
+            value = Expression.binary_op("INT_ADD", base_case.value, delta_sum)
+            value.size = base_case.value.size
             synthesized.append(
                 ReturnInfo(
                     address=base_case.address,
                     value=value,
-                    conditions=ConditionSimplifier.simplify_conditions(list(conds) + [step_eq]),
+                    conditions=step_context,
                     branch_index=9_000 if parity else 9_001,
                 )
             )
@@ -524,15 +580,19 @@ class StructuralRecurrenceSummarizer:
         self,
         effect,
         parameters: Sequence[dict],
+        conditions: Optional[Sequence[Condition]] = None,
     ) -> Optional[Expression]:
+        active_conditions = list(conditions or [])
+        reduced_value = _reduce_expression_under_conditions(effect.value, active_conditions)
         current_read = Expression.memory(
             self._address_expr_for_location(effect.location, parameters),
             size=effect.location.size,
         )
-        delta = self._extract_additive_delta(effect.value, current_read, parameters)
+        reduced_current_read = _reduce_expression_under_conditions(current_read, active_conditions)
+        delta = self._extract_additive_delta(reduced_value, reduced_current_read, parameters)
         if delta is not None:
             return delta
-        if effect.value.equals(current_read):
+        if reduced_value.equals(reduced_current_read):
             return Expression.constant(0, size=effect.location.size)
         return None
 
@@ -809,17 +869,22 @@ class StructuralRecurrenceSummarizer:
     ) -> Optional[bool]:
         for condition in conditions or []:
             expr = getattr(condition, "expression", None)
-            if expr is None or expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_EQUAL" or len(expr.operands) != 2:
+            if (
+                expr is None
+                or expr.expr_type != ExpressionType.BINARY_OP
+                or expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL"}
+                or len(expr.operands) != 2
+            ):
                 continue
             bitand = None
-            zero_const = None
-            if self._constant_value(expr.operands[0]) == 0:
+            parity_const = None
+            if self._constant_value(expr.operands[0]) in {0, 1}:
                 bitand = expr.operands[1]
-                zero_const = expr.operands[0]
-            elif self._constant_value(expr.operands[1]) == 0:
+                parity_const = self._constant_value(expr.operands[0])
+            elif self._constant_value(expr.operands[1]) in {0, 1}:
                 bitand = expr.operands[0]
-                zero_const = expr.operands[1]
-            if bitand is None or zero_const is None:
+                parity_const = self._constant_value(expr.operands[1])
+            if bitand is None or parity_const is None:
                 continue
             if bitand.expr_type != ExpressionType.BINARY_OP or bitand.operator != "INT_AND" or len(bitand.operands) != 2:
                 continue
@@ -831,7 +896,10 @@ class StructuralRecurrenceSummarizer:
                 continue
             if self._parameter_name_from_expr(counter_expr) != counter_name:
                 continue
-            is_even = not condition.negated
+            is_equal = expr.operator == "INT_EQUAL"
+            if condition.negated:
+                is_equal = not is_equal
+            is_even = is_equal if parity_const == 0 else not is_equal
             return is_even
         return None
 

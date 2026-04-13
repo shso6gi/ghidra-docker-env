@@ -740,6 +740,163 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
     assert all(ev.conditions for ev in expanded)
 
 
+def test_expression_expander_records_recovered_args_for_deferred_call_fallback():
+    reg_a0 = {
+        "register_name": "a0",
+        "base_register_name": "a0",
+        "space_name": "register",
+        "size": 8,
+        "size_bits": 64,
+        "base_register_size": 8,
+        "base_register_size_bits": 64,
+        "bit_offset_in_base": 0,
+        "is_register": True,
+    }
+    reg_a1_lo = {
+        "register_name": "a1_lo",
+        "base_register_name": "a1",
+        "space_name": "register",
+        "size": 4,
+        "size_bits": 32,
+        "base_register_size": 8,
+        "base_register_size_bits": 64,
+        "bit_offset_in_base": 32,
+        "is_register": True,
+    }
+    reg_a2_lo = {
+        "register_name": "a2_lo",
+        "base_register_name": "a2",
+        "space_name": "register",
+        "size": 4,
+        "size_bits": 32,
+        "base_register_size": 8,
+        "base_register_size_bits": 64,
+        "bit_offset_in_base": 32,
+        "is_register": True,
+    }
+
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return "ram"
+
+    class _FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = _FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class _FakeVarnode:
+        def __init__(self, name, size=8):
+            self.name = name
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class _FakeOutput:
+        def getSize(self):
+            return 4
+
+    class _FakeCallOp:
+        def __init__(self, target):
+            self._inputs = [target]
+            self._output = _FakeOutput()
+            self._seqnum = _FakeSeqnum(0x1000, 0)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    target_varnode = _FakeVarnode("callee_addr", size=8)
+    call_op = _FakeCallOp(target_varnode)
+    recorded = {}
+
+    class _FakeTracer:
+        debug = False
+
+        def _get_function_name(self, _varnode):
+            return "callee"
+
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            if varnode is target_varnode:
+                return Expression.constant(0x401000, 8)
+            raise AssertionError(f"unexpected varnode: {varnode}")
+
+        def emit_unknown_event(self, **kwargs):
+            recorded["unknown_event"] = kwargs
+
+        def _trace_pcode_op(self, *_args, **_kwargs):
+            raise AssertionError("recursive tracing fallback should not run")
+
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    def _record_deferred_call(target_name, args):
+        recorded["call"] = (target_name, [arg.to_string() for arg in args])
+        return "call_out_of_scope:callee#0"
+
+    expander = ExpressionExpander(
+        _FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        call_resolver=lambda _name, _args: None,
+        parameters=[
+            {"name": "param_1", "index": 0, "size": 8, "storage": reg_a0},
+            {"name": "param_2", "index": 1, "size": 4, "storage": reg_a1_lo},
+            {"name": "param_3", "index": 2, "size": 4, "storage": reg_a2_lo},
+        ],
+        resolve_callee_parameters=lambda _name: [
+            {"name": "trace", "index": 0, "size": 8, "storage": reg_a0},
+            {"name": "start", "index": 1, "size": 4, "storage": reg_a1_lo},
+            {"name": "limit", "index": 2, "size": 4, "storage": reg_a2_lo},
+        ],
+        record_deferred_call=_record_deferred_call,
+    )
+
+    expanded = expander._expand_call_operation(
+        call_op,
+        [],
+        depth=0,
+        output_size=4,
+    )
+
+    assert len(expanded) == 1
+    assert recorded["call"][0] == "callee"
+    assert recorded["call"][1] == ["param_1", "param_2", "param_3"]
+    assert expanded[0].value.to_string() == "call_out_of_scope:callee#0"
+
+
 def test_expression_expander_resolves_guarded_indirect_dispatch_with_wrapped_pic_offsets():
     class _FakeFunction:
         def __init__(self, name):

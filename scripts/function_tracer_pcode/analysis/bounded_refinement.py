@@ -14,7 +14,12 @@ from ..model import (
     ReturnInfo,
 )
 from .condition import ConditionSimplifier
-from .effect_summary import substitute_condition, substitute_expression
+from .effect_summary import (
+    StoreEffect,
+    lower_post_state_expression_for_smt_if_needed,
+    substitute_condition,
+    substitute_expression,
+)
 
 
 ExpressionExpansion = Tuple[Expression, List[Condition]]
@@ -152,7 +157,12 @@ class BoundedCallRefiner:
         if deferred is not None:
             if fuel <= 0 or deferred.placeholder_name in trail:
                 return [(expr, [])]
-            unfolded = self._expand_deferred_call(deferred, fuel - 1, trail | {deferred.placeholder_name})
+            unfolded = self._expand_deferred_call(
+                deferred,
+                analysis,
+                fuel - 1,
+                trail | {deferred.placeholder_name},
+            )
             return unfolded or [(expr, [])]
 
         if expr is None:
@@ -204,6 +214,7 @@ class BoundedCallRefiner:
     def _expand_deferred_call(
         self,
         deferred: DeferredCallInfo,
+        caller_analysis: FunctionReturnAnalysis,
         fuel: int,
         trail: Set[str],
     ) -> List[ExpressionExpansion]:
@@ -226,12 +237,31 @@ class BoundedCallRefiner:
 
         replacements = dict(zip(param_names, deferred.arguments))
         results: List[ExpressionExpansion] = []
+        substituted_effects = self._substitute_effects_for_deferred_call(
+            callee_analysis,
+            replacements,
+        )
 
         for ret in callee_analysis.returns:
             substituted_value = substitute_expression(ret.value, replacements)
             substituted_conditions = [
                 substitute_condition(cond, replacements)
                 for cond in ret.conditions
+            ]
+            substituted_value = self._lower_symbolic_post_state_after_substitution(
+                substituted_value,
+                substituted_conditions,
+                substituted_effects,
+                caller_analysis.parameters,
+            )
+            substituted_conditions = [
+                self._lower_symbolic_post_state_in_condition_after_substitution(
+                    cond,
+                    substituted_conditions,
+                    substituted_effects,
+                    caller_analysis.parameters,
+                )
+                for cond in substituted_conditions
             ]
 
             condition_sets = self._expand_conditions(
@@ -259,6 +289,62 @@ class BoundedCallRefiner:
                         return results[: self.max_cases]
 
         return self._deduplicate_expression_expansions(results)
+
+    def _substitute_effects_for_deferred_call(
+        self,
+        callee_analysis: FunctionReturnAnalysis,
+        replacements: Dict[str, Expression],
+    ) -> List[StoreEffect]:
+        effect_summary = getattr(callee_analysis, "effect_summary", None)
+        if effect_summary is None or not getattr(effect_summary, "effects", None):
+            return []
+
+        substituted: List[StoreEffect] = []
+        for effect in effect_summary.effects:
+            substituted.append(
+                StoreEffect(
+                    location=effect.location,
+                    value=substitute_expression(effect.value, replacements),
+                    conditions=[
+                        substitute_condition(cond, replacements)
+                        for cond in (effect.conditions or [])
+                    ],
+                    order_key=effect.order_key,
+                )
+            )
+        return substituted
+
+    def _lower_symbolic_post_state_after_substitution(
+        self,
+        expr: Expression,
+        conditions: Sequence[Condition],
+        effects: Sequence[StoreEffect],
+        parameters: Sequence[Dict],
+    ) -> Expression:
+        lowered = lower_post_state_expression_for_smt_if_needed(
+            expr,
+            conditions,
+            effects,
+            parameters,
+        )
+        return lowered if lowered is not None else expr
+
+    def _lower_symbolic_post_state_in_condition_after_substitution(
+        self,
+        condition: Condition,
+        conditions: Sequence[Condition],
+        effects: Sequence[StoreEffect],
+        parameters: Sequence[Dict],
+    ) -> Condition:
+        lowered_expr = self._lower_symbolic_post_state_after_substitution(
+            condition.expression,
+            conditions,
+            effects,
+            parameters,
+        )
+        if lowered_expr is condition.expression:
+            return condition
+        return Condition(lowered_expr, condition.negated)
 
     def _lookup_deferred_call(
         self,
