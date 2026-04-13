@@ -70,6 +70,7 @@ def concretize_readonly_loads(
         read_memory_value,
         image_base,
         debug,
+        False,
     )
 
 
@@ -80,9 +81,20 @@ def _rewrite_expr(
     read_memory_value: Callable[[int, int], Optional[int]],
     image_base: Optional[int],
     debug: bool,
+    address_context: bool,
 ) -> Expression:
     if expr is None:
         return expr
+
+    direct_scalar = _try_resolve_direct_readonly_scalar(
+        expr,
+        read_memory_value,
+        image_base,
+        address_context,
+        debug,
+    )
+    if direct_scalar is not None:
+        return direct_scalar
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
         rewritten_addr = _rewrite_expr(
@@ -92,6 +104,7 @@ def _rewrite_expr(
             read_memory_value,
             image_base,
             debug,
+            True,
         )
         candidate = Expression.memory(rewritten_addr, expr.size)
         split_phi = _split_memory_address_phi(candidate)
@@ -103,6 +116,7 @@ def _rewrite_expr(
                 read_memory_value,
                 image_base,
                 debug,
+                address_context,
             )
         split_conditional = _split_conditional_offset_load(candidate)
         if split_conditional is not None:
@@ -113,6 +127,7 @@ def _rewrite_expr(
                 read_memory_value,
                 image_base,
                 debug,
+                address_context,
             )
         resolved = _try_resolve_readonly_load(
             candidate,
@@ -126,7 +141,15 @@ def _rewrite_expr(
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
         rewritten_operands = [
-            _rewrite_expr(op, conditions, parameters, read_memory_value, image_base, debug)
+            _rewrite_expr(
+                op,
+                conditions,
+                parameters,
+                read_memory_value,
+                image_base,
+                debug,
+                address_context,
+            )
             for op in expr.operands
         ]
         if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
@@ -154,6 +177,7 @@ def _rewrite_expr(
                 read_memory_value,
                 image_base,
                 debug,
+                address_context,
             )
             rewritten_branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -164,6 +188,37 @@ def _rewrite_expr(
         return rebuilt
 
     return expr
+
+
+def _try_resolve_direct_readonly_scalar(
+    expr: Expression,
+    read_memory_value: Callable[[int, int], Optional[int]],
+    image_base: Optional[int],
+    address_context: bool,
+    debug: bool,
+) -> Optional[Expression]:
+    if address_context or expr.expr_type != ExpressionType.VARIABLE or not expr.name:
+        return None
+
+    direct_addr = _resolve_direct_readonly_address(
+        expr,
+        expr.size if expr.size else 8,
+        read_memory_value,
+        image_base,
+    )
+    if direct_addr is None:
+        return None
+
+    load_size = expr.size if expr.size else 8
+    mem_value = read_memory_value(direct_addr, load_size)
+    if mem_value is None:
+        return None
+    if debug:
+        print(
+            "[MemoryResolver] concretized direct readonly scalar "
+            f"addr=0x{direct_addr:x} size={load_size} -> 0x{mem_value:x}"
+        )
+    return Expression.constant(mem_value, load_size)
 
 
 def _split_memory_address_phi(expr: Expression) -> Optional[Expression]:

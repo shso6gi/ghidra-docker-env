@@ -21,13 +21,99 @@ from scripts.function_tracer_pcode.equivalence.normalize.division import (
 from scripts.function_tracer_pcode.equivalence.normalize.division_signedness import (
     normalize_division_signedness,
 )
-from scripts.function_tracer_pcode.model import Expression, ExpressionType
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
 from normalization_helpers import (
     make_const,
     make_modulo_expansion,
     make_neg,
     make_param,
 )
+
+
+def _make_exact_triangular_phi(base: Expression) -> Expression:
+    one = make_const(1, size=base.size or 4)
+    zero = make_const(0, size=base.size or 4)
+    parity = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_AND",
+        operands=[base, one],
+        size=base.size or 4,
+    )
+    base_minus_one = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[base, one],
+        size=base.size or 4,
+    )
+    even_half = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[base, one],
+        size=base.size or 4,
+    )
+    odd_half = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[base_minus_one, one],
+        size=base.size or 4,
+    )
+    even_value = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[even_half, base_minus_one],
+        size=base.size or 4,
+    )
+    odd_value = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[base, odd_half],
+        size=base.size or 4,
+    )
+    condition_expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_EQUAL",
+        operands=[parity, zero],
+        size=1,
+    )
+    phi = Expression.phi(
+        [
+            (Condition(condition_expr, False), even_value),
+            (Condition(condition_expr, True), odd_value),
+        ]
+    )
+    phi.size = base.size or 4
+    return phi
+
+
+def _make_canonical_triangular(base: Expression) -> Expression:
+    incremented = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[base, make_const(1, size=base.size or 4)],
+        size=base.size or 4,
+    )
+    wide_left = Expression.unary_op("INT_ZEXT", base)
+    wide_left.size = 8
+    wide_right = Expression.unary_op("INT_ZEXT", incremented)
+    wide_right.size = 8
+    product = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[wide_left, wide_right],
+        size=8,
+    )
+    shifted = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[product, make_const(1, size=8)],
+        size=8,
+    )
+    return Expression(
+        ExpressionType.BINARY_OP,
+        operator="SUBPIECE",
+        operands=[shifted, make_const(0, size=4)],
+        size=4,
+    )
 
 
 def test_normalize_division_signs_uses_min_exclusion_safely():
@@ -333,7 +419,278 @@ def test_normalize_expression_canonicalizes_arithmetic_series_closed_form():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == "((_ extract 31 0) (bvlshr (bvmul ((_ zero_extend 32) param_1) (bvadd ((_ zero_extend 32) param_1) (_ bv1 64))) (_ bv1 64)))"
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+
+
+def test_normalize_expression_canonicalizes_triangular_prev_plus_affine_completion():
+    param = make_param("param_1", size=4)
+    nm1 = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(1, size=4)],
+        size=4,
+    )
+    nm2 = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(2, size=4)],
+        size=4,
+    )
+    wide_prod = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[
+            Expression.unary_op("INT_ZEXT", nm1),
+            Expression.unary_op("INT_ZEXT", nm2),
+        ],
+        size=8,
+    )
+    wide_prod.operands[0].size = 8
+    wide_prod.operands[1].size = 8
+    tri_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_AND",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_RIGHT",
+                operands=[wide_prod, make_const(1, size=8)],
+                size=8,
+            ),
+            make_const(0xFFFFFFFF, size=8),
+        ],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[tri_prev, Expression(
+                    ExpressionType.BINARY_OP,
+                    operator="INT_MULT",
+                    operands=[make_const(2, size=4), param],
+                    size=4,
+                )],
+                size=4,
+            ),
+            make_neg(make_const(1, size=4), size=4),
+        ],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+
+
+def test_normalize_expression_canonicalizes_exact_triangular_phi():
+    base = make_param("param_1", size=4)
+    phi = _make_exact_triangular_phi(base)
+
+    normalized = normalize_expression(phi, NormalizationContext())
+
+    expected_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[base, make_const(1, size=4)],
+        size=4,
+    )
+    expected = Expression(
+        ExpressionType.BINARY_OP,
+        operator="SUBPIECE",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_RIGHT",
+                operands=[
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="INT_MULT",
+                        operands=[
+                            Expression.unary_op("INT_ZEXT", base),
+                            Expression.unary_op("INT_ZEXT", expected_prev),
+                        ],
+                        size=8,
+                    ),
+                    make_const(1, size=8),
+                ],
+                size=8,
+            ),
+            make_const(0, size=4),
+        ],
+        size=4,
+    )
+    expected.operands[0].operands[0].operands[0].size = 8
+    expected.operands[0].operands[0].operands[1].size = 8
+
+    assert normalized.to_smt() == expected.to_smt()
+
+
+def test_normalize_expression_canonicalizes_exact_phi_prev_plus_affine_completion():
+    param = make_param("param_1", size=4)
+    prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(1, size=4)],
+        size=4,
+    )
+    phi_prev = _make_exact_triangular_phi(prev)
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[
+                    phi_prev,
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="INT_MULT",
+                        operands=[make_const(2, size=4), param],
+                        size=4,
+                    ),
+                ],
+                size=4,
+            ),
+            make_neg(make_const(1, size=4), size=4),
+        ],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+
+
+def test_normalize_expression_canonicalizes_logged_pair_2_5_shape():
+    param = make_param("param_2", size=4)
+    one = make_const(1, size=4)
+    neg_one = make_neg(one, size=4)
+    prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[param, neg_one],
+        size=4,
+    )
+    prev_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[prev, one],
+        size=4,
+    )
+    wide_prod = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[
+            Expression.unary_op("INT_ZEXT", prev),
+            Expression.unary_op("INT_ZEXT", prev_prev),
+        ],
+        size=8,
+    )
+    wide_prod.operands[0].size = 8
+    wide_prod.operands[1].size = 8
+    tri_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="SUBPIECE",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_RIGHT",
+                operands=[wide_prod, make_const(1, size=8)],
+                size=8,
+            ),
+            make_const(0, size=4),
+        ],
+        size=4,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="INT_ADD",
+                        operands=[
+                            Expression(
+                                ExpressionType.BINARY_OP,
+                                operator="INT_ADD",
+                                operands=[one, param],
+                                size=4,
+                            ),
+                            neg_one,
+                        ],
+                        size=4,
+                    ),
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="INT_MULT",
+                        operands=[one, prev],
+                        size=4,
+                    ),
+                ],
+                size=4,
+            ),
+            tri_prev,
+        ],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+
+
+def test_normalize_expression_canonicalizes_triangular_prev_plus_base():
+    param = make_param("param_1", size=4)
+    nm1 = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(1, size=4)],
+        size=4,
+    )
+    wide_prod = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_MULT",
+        operands=[
+            Expression.unary_op("INT_ZEXT", param),
+            Expression.unary_op("INT_ZEXT", nm1),
+        ],
+        size=8,
+    )
+    wide_prod.operands[0].size = 8
+    wide_prod.operands[1].size = 8
+    tri_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_AND",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_RIGHT",
+                operands=[wide_prod, make_const(1, size=8)],
+                size=8,
+            ),
+            make_const(0xFFFFFFFF, size=8),
+        ],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[tri_prev, param],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_modulo_expansion():

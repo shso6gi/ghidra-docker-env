@@ -7,7 +7,8 @@ import os
 import subprocess
 import shutil
 import re
-from typing import Optional, Dict, Any, Tuple
+import importlib
+from typing import Optional, Dict, Any, Tuple, cast
 
 from ..interface import SMTSolver, SolverResult, SolverStatus
 
@@ -21,7 +22,7 @@ class Yices2Solver(SMTSolver):
         self._model = None
         self._initialized = False
         self._use_subprocess = False
-        self._yices_smt2_path = None
+        self._yices_smt2_path: Optional[str] = None
         self.debug = debug
     
     @property
@@ -49,7 +50,13 @@ class Yices2Solver(SMTSolver):
     def _check_python_binding(self) -> Tuple[bool, str]:
         """Pythonバインディングの利用可能性をチェック"""
         try:
-            from yices import Config, Context, Status, Model, Terms, Yices
+            yices_module = cast(Any, importlib.import_module("yices"))
+            Config = yices_module.Config
+            Context = yices_module.Context
+            Status = yices_module.Status
+            Model = yices_module.Model
+            Terms = yices_module.Terms
+            Yices = yices_module.Yices
             self._yices_module = {
                 'Config': Config,
                 'Context': Context,
@@ -148,6 +155,9 @@ class Yices2Solver(SMTSolver):
                         error_message="Cancelled"
                     )
                 
+                if self._yices_smt2_path is None:
+                    return self._create_error_result("yices-smt2 command path is unavailable")
+
                 result = subprocess.run(
                     [self._yices_smt2_path, temp_path],
                     capture_output=True,

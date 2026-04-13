@@ -1219,7 +1219,7 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
     analyzer = ReturnAnalyzer(program=None, debug=False)
     captured = []
 
-    def _fake_local(address_value, active_functions, current_function):
+    def _fake_local(address_value, active_functions, current_function=None):
         captured.append((address_value, active_functions, current_function))
         return ["ok"]
 
@@ -2058,16 +2058,18 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     class _FakeOp:
         def __init__(self, mnemonic):
             self._mnemonic = mnemonic
+            self._seqnum = Mock(return_value=_Seq())
 
         def getMnemonic(self):
             return self._mnemonic
+
+        def getSeqnum(self):
+            return self._seqnum()
 
     call_then = _FakeOp("CALL")
     call_else = _FakeOp("CALL")
     branch = _FakeOp("BRANCH")
     return_op = _FakeOp("RETURN")
-    return_op.getSeqnum = Mock(return_value=_Seq())
-
     then_block = Mock(index=1, pcode_ops=[call_then, branch])
     else_block = Mock(index=2, pcode_ops=[call_else, branch])
     return_block = Mock(index=3, pcode_ops=[return_op])

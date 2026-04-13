@@ -7,7 +7,7 @@ import binascii
 from dataclasses import dataclass
 from itertools import product
 import re
-from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, overload
 
 from ..model import Condition, Expression, ExpressionType, StorageInfo
 from .condition import ConditionSimplifier
@@ -2741,6 +2741,26 @@ def build_void_effect_summary_expr(effects: Sequence[StoreEffect]) -> Optional[E
     return result
 
 
+@overload
+def collapse_post_state_expr_to_canonical_memory(
+    expr: Expression,
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    ...
+
+
+@overload
+def collapse_post_state_expr_to_canonical_memory(
+    expr: Optional[Expression],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    ...
+
+
 def collapse_post_state_expr_to_canonical_memory(
     expr: Optional[Expression],
     effects: Sequence[StoreEffect],
@@ -2813,6 +2833,26 @@ def collapse_post_state_expr_to_canonical_read(
             parameters,
         ):
             return candidate
+@overload
+def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+    expr: Expression,
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    ...
+
+
+@overload
+def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+    expr: Optional[Expression],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    return_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    ...
+
+
 def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     expr: Optional[Expression],
     effects: Sequence[StoreEffect],
@@ -2873,6 +2913,30 @@ def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
             return candidate
 
     return None
+
+
+@overload
+def canonicalize_post_state_subexpressions(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Expression:
+    ...
+
+
+@overload
+def canonicalize_post_state_subexpressions(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
+    ...
 
 
 def canonicalize_post_state_subexpressions(
@@ -2939,6 +3003,34 @@ def canonicalize_post_state_subexpressions(
     return expr
 
 
+@overload
+def normalize_post_state_expression(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    prefer_canonical_post_state: bool = True,
+    symbolic_post_state: bool = False,
+    preserve_composite_location_wrappers: bool = False,
+) -> Expression:
+    ...
+
+
+@overload
+def normalize_post_state_expression(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    prefer_canonical_post_state: bool = True,
+    symbolic_post_state: bool = False,
+    preserve_composite_location_wrappers: bool = False,
+) -> Optional[Expression]:
+    ...
+
+
 def normalize_post_state_expression(
     expr: Optional[Expression],
     return_conditions: Sequence[Condition],
@@ -3003,6 +3095,26 @@ def normalize_post_state_expression(
     return reduced if reduced is not None else normalized
 
 
+@overload
+def lower_post_state_expression_for_smt(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Expression:
+    ...
+
+
+@overload
+def lower_post_state_expression_for_smt(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    ...
+
+
 def lower_post_state_expression_for_smt(
     expr: Optional[Expression],
     return_conditions: Sequence[Condition],
@@ -3028,6 +3140,26 @@ def lower_post_state_expression_for_smt(
     )
     reduced = _reduce_expression_under_conditions(lowered, return_conditions)
     return reduced if reduced is not None else lowered
+
+
+@overload
+def lower_post_state_expression_for_smt_if_needed(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Expression:
+    ...
+
+
+@overload
+def lower_post_state_expression_for_smt_if_needed(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    ...
 
 
 def lower_post_state_expression_for_smt_if_needed(
@@ -3422,7 +3554,7 @@ def _location_sort_key(location: CanonicalLocation) -> Tuple[str, Tuple[Tuple[st
 def memory_expression_for_location(
     location: CanonicalLocation,
     parameters: Sequence[Dict],
-) -> Optional[Expression]:
+) -> Expression:
     location = _normalize_canonical_location(location)
     param = next((item for item in parameters if item.get("name") == location.base_param), None)
     if param is None:
@@ -3476,7 +3608,7 @@ def post_state_read_expression_for_location(
     parameters: Sequence[Dict],
     *,
     symbolic: bool = False,
-) -> Optional[Expression]:
+) -> Expression:
     location = _normalize_canonical_location(location)
     if symbolic:
         return Expression.variable(

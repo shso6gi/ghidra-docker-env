@@ -2,16 +2,17 @@
 """pytest共通設定・フィクスチャ"""
 
 import sys
+import importlib
 from pathlib import Path
+from typing import Any, Dict, List, Optional, cast
 
 # ★ [P3] sys.path操作を一元化：conftest.pyで一度だけ設定
 workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-import pytest
-import yaml
-from typing import Dict, Any, List, Optional
+pytest = cast(Any, importlib.import_module("pytest"))
+yaml = cast(Any, importlib.import_module("yaml"))
 from dataclasses import dataclass
 from unittest.mock import Mock
 

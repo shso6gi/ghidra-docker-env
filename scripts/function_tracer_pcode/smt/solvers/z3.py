@@ -2,7 +2,8 @@
 """Z3ソルバー実装（タイムアウト検出修正版）"""
 
 import time
-from typing import Optional, Dict, Any, Tuple, Callable
+import importlib
+from typing import Optional, Dict, Any, Tuple, Callable, cast
 
 from ..interface import SMTSolver, SolverResult, SolverStatus
 
@@ -36,9 +37,9 @@ class Z3Solver(SMTSolver):
     
     def check_availability(self) -> Tuple[bool, str]:
         try:
-            import z3
-            self._z3 = z3
-            version = z3.get_version_string()
+            z3_module = cast(Any, importlib.import_module("z3"))
+            self._z3 = z3_module
+            version = z3_module.get_version_string()
             return True, f"version {version}"
         except ImportError as e:
             return False, f"Import error: {e}"

@@ -482,3 +482,42 @@ class TestBooleanReturnNormalization:
 
         assert "(_ bv18446744073709551613 64)" in formula
         assert "(_ bv4294967293 64)" not in formula
+
+    def test_build_base_context_infers_fragment_constraints_from_piece_expression(self):
+        builder = FormulaBuilder(debug=False)
+
+        wide_param = Expression.binary_op(
+            "PIECE",
+            Expression(ExpressionType.VARIABLE, name="in_a1_hi", size=4),
+            Expression(ExpressionType.PARAMETER, name="param_2", size=4, data_type="int"),
+        )
+        wide_param.size = 8
+
+        analysis1 = FunctionReturnAnalysis(
+            function_name="fragment_backed_guard",
+            entry_point="0x00401000",
+            parameters=[{"name": "param_2", "size": 4, "index": 0, "is_signed": True, "data_type": "int"}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[
+                        Condition(
+                            Expression.binary_op(
+                                "INT_SLESS",
+                                wide_param,
+                                Expression(ExpressionType.CONSTANT, value=1, size=8),
+                            )
+                        )
+                    ],
+                    value=Expression(ExpressionType.CONSTANT, value=0, size=4),
+                )
+            ],
+            return_type="int",
+        )
+        analysis2 = _simple_analysis("simple", "param_2")
+
+        base_ctx = builder.build_base_context(analysis1, analysis2)
+        header_text = "\n".join(base_ctx["header_lines"])
+
+        assert "in_a1_hi_1" in base_ctx["constrained_fragments"]
+        assert "(assert (= in_a1_hi_1 ((_ extract 63 32) ((_ sign_extend 32) param_2_1))))" in header_text

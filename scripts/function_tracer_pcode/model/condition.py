@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 class Condition:
     """条件式を表現するクラス"""
 
-    def __init__(self, expression: "Expression", negated: bool = False):
+    def __init__(self, expression: Optional["Expression"], negated: bool = False):
+        if expression is None:
+            raise ValueError("Condition expression must not be None")
         self.expression = expression
         self.negated = negated
 
@@ -42,13 +44,15 @@ class Condition:
         return self.expression.to_string() == other.expression.to_string()
 
     @classmethod
-    def combine_and(cls, conditions: List["Condition"]) -> Optional["Condition"]:
+    def combine_and(cls, conditions: List[Optional["Condition"]]) -> Optional["Condition"]:
         """複数の条件を AND で結合する。"""
         if not conditions:
             return None
 
         unique: List[Condition] = []
         for cond in conditions:
+            if cond is None:
+                continue
             is_dup = False
             for existing in unique:
                 if cond.equals(existing):

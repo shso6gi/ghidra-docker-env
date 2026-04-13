@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from typing import Optional
+
 from scripts.function_tracer_pcode.analysis.memory_resolver import (
     collect_memory_bit_widths_from_analysis,
     concretize_readonly_loads,
@@ -42,6 +44,7 @@ from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.param_semantics import ParameterSemanticHint
 from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
@@ -60,7 +63,7 @@ def _param(
     return result
 
 
-def _reg_storage(base_name: str, size_bytes: int = 8, register_name: str = None):
+def _reg_storage(base_name: str, size_bytes: int = 8, register_name: Optional[str] = None):
     register_name = register_name or base_name
     return {
         "is_register": True,
@@ -140,7 +143,9 @@ def test_mips64_handler_detects_spurious_same_pattern_extension_violation():
         returns=[],
     )
 
-    handler._analyze_parameter_usage = lambda analysis: {"param_1": ("signed", 32)}
+    handler._analyze_parameter_usage = lambda analysis: {
+        "param_1": ParameterSemanticHint(narrow_bits=32, signedness="signed")
+    }
 
     constraints = handler.detect_spurious_counterexample(
         counterexample,
@@ -215,6 +220,32 @@ def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
 
     assert resolved.expr_type.name == "CONSTANT"
     assert resolved.value == 0x401120
+
+
+def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_position():
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("DAT_00113090", size=8),
+        Expression.constant(1, 8),
+    )
+
+    table = {
+        0x00113090: 0x401120,
+    }
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "BINARY_OP"
+    assert resolved.operands[0].expr_type.name == "CONSTANT"
+    assert resolved.operands[0].value == 0x401120
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 1
 
 
 def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_by_mul_one():
@@ -911,6 +942,8 @@ def test_effect_summary_rewrites_stack_local_post_state_reads_in_arithmetic_expr
     )
     sum_location = canonicalize_location(sum_slot, [_param("a", size=4), _param("b", size=4, index=1)], size=4)
     diff_location = canonicalize_location(diff_slot, [_param("a", size=4), _param("b", size=4, index=1)], size=4)
+    assert sum_location is not None
+    assert diff_location is not None
 
     expr = Expression.binary_op(
         "INT_ADD",
@@ -1064,6 +1097,7 @@ def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_
         storage_info=StorageInfo(**_stack_storage(8, size_bytes=8)),
     )
     location = canonicalize_location(slot_expr, params, size=8)
+    assert location is not None
     fallback = Expression.variable("guard_before_call", size=8)
 
     rewritten = rewrite_location_read_from_effects(
@@ -2387,7 +2421,7 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
             _param("bias", size=4, index=1, storage=_reg_storage("a1", size_bytes=4, register_name="a1")),
         ],
     )
-    expander._expand_input_varnode = lambda varnode, _conds, _depth: {
+    expander._expand_input_varnode = lambda varnode, conditions, depth: {
         copied_first_arg: [ExpandedValue(Expression.parameter("param_1", 0, size=4), [])],
         bias_varnode: [ExpandedValue(Expression.constant(0xFFFFFFFD, 4), [])],
     }[varnode]
@@ -2829,7 +2863,7 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
             _param("value", size=4, index=0, storage=_reg_storage("a0", size_bytes=4, register_name="a0")),
         ],
     )
-    expander._expand_input_varnode = lambda varnode, _conds, _depth: {
+    expander._expand_input_varnode = lambda varnode, conditions, depth: {
         unstable_source: [ExpandedValue(Expression.parameter("param_1", 0, size=4), [])],
     }[varnode]
 
@@ -5726,7 +5760,9 @@ def test_expression_expander_uses_multiequal_canonical_location_per_branch():
             _param("b", size=8, is_signed=False, index=1),
         ],
     )
-    expander._get_edge_condition = lambda block_info, _parent: no_swap if block_info.index == 3 else swap_taken
+    expander._get_edge_condition = lambda from_block_info, to_block: (
+        no_swap if from_block_info.index == 3 else swap_taken
+    )
 
     expanded = expander._expand_multiequal_internal(
         FakeMultiequalOp(),
@@ -6070,7 +6106,7 @@ def test_return_analyzer_falls_back_to_definite_replay_when_symbolic_roundtrip_i
     assert normalized.to_string() == "((MEM[param_1] - param_2) + (MEM[(param_1 + 4)] + 1))"
 
 
-def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
+def test_expression_expander_reduces_full_operation_trace_under_active_conditions_regression():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
     swap_taken = Condition(

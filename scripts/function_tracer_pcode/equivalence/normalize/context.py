@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """正規化コンテキスト"""
 
-from typing import Dict, Set, Optional, List
+from typing import Dict, Set, Optional, List, Union
 from dataclasses import dataclass, field
+
+from ...model import Expression
+
+
+ExpressionAuditValue = Optional[Union[str, Expression]]
 
 
 @dataclass
@@ -10,8 +15,8 @@ class RuleApplication:
     """正規化ルール適用記録"""
     rule_name: str
     reason: str
-    before_expr: Optional[str] = None
-    after_expr: Optional[str] = None
+    before_expr: ExpressionAuditValue = None
+    after_expr: ExpressionAuditValue = None
 
 
 @dataclass
@@ -106,8 +111,8 @@ class NormalizationContext:
         self,
         rule_name: str,
         reason: str,
-        before_expr: Optional[str] = None,
-        after_expr: Optional[str] = None
+        before_expr: ExpressionAuditValue = None,
+        after_expr: ExpressionAuditValue = None
     ):
         """ルール適用を記録"""
         self.applied_rules.append(RuleApplication(

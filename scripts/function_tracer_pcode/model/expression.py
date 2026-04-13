@@ -50,7 +50,7 @@ class Expression:
         expr_type: ExpressionType,
         value: Any = None,
         operator: Optional[str] = None,
-        operands: Optional[List['Expression']] = None,
+        operands: Optional[List[Optional['Expression']]] = None,
         size: int = 0,
         name: Optional[str] = None,
         data_type: Optional[str] = None,
@@ -60,7 +60,11 @@ class Expression:
         self.expr_type = expr_type
         self.value = value
         self.operator = operator
-        self.operands = operands or []
+        self.operands = []
+        for operand in operands or []:
+            if operand is None:
+                raise ValueError("Expression operands must not contain None")
+            self.operands.append(operand)
         self.size = size
         self.name = name
         self.data_type = data_type
@@ -112,8 +116,17 @@ class Expression:
         )
     
     @classmethod
-    def binary_op(cls, operator: str, left: 'Expression', right: 'Expression') -> 'Expression':
+    def binary_op(
+        cls,
+        operator: Optional[str],
+        left: Optional['Expression'],
+        right: Optional['Expression'],
+    ) -> 'Expression':
         """二項演算式を作成（サイズを適切に継承）"""
+        if operator is None:
+            raise ValueError("Binary operator must not be None")
+        if left is None or right is None:
+            raise ValueError("Binary operands must not be None")
         if operator == "PIECE":
             # PIECE: output.size = input0.size + input1.size
             size = (left.size if left.size else 0) + (right.size if right.size else 0)
@@ -139,8 +152,12 @@ class Expression:
         return cls(expr_type=ExpressionType.BINARY_OP, operator=operator, operands=[left, right], size=size)
     
     @classmethod
-    def unary_op(cls, operator: str, operand: 'Expression') -> 'Expression':
+    def unary_op(cls, operator: Optional[str], operand: Optional['Expression']) -> 'Expression':
         """単項演算式を作成"""
+        if operator is None:
+            raise ValueError("Unary operator must not be None")
+        if operand is None:
+            raise ValueError("Unary operand must not be None")
         # INT_ZEXT/INT_SEXTのサイズは呼び出し元で設定される（pcode_tracerで出力Varnodeから取得）
         return cls(expr_type=ExpressionType.UNARY_OP, operator=operator, operands=[operand], size=operand.size)
     

@@ -154,7 +154,7 @@ def validate_counterexample_across_cases(
         param_replace_fn1,
         param_replace_fn2,
         counterexample_raw,
-        decisive_pairs={sat_case_indices},
+        decisive_pairs=[sat_case_indices],
     )
 
 

@@ -11,6 +11,7 @@ sign/zero extension から導かれる値として拘束する。
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum, auto
+import re
 
 from ...model import Expression, ExpressionType, Condition, StorageInfo, FunctionReturnAnalysis
 
@@ -136,6 +137,10 @@ class VariableAnalyzer:
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[VariableAnalyzer] {msg}")
+
+    def _looks_like_fragment_temp_name(self, name: str) -> bool:
+        candidate = name or ""
+        return bool(re.fullmatch(r"(?:UNRECOVERED|extraout|unaff|in)_[A-Za-z0-9_]+", candidate))
     
     def classify_variable_by_storage(
         self,
@@ -279,7 +284,8 @@ class VariableAnalyzer:
         # 全変数とストレージ情報を収集
         all_vars_with_storage: Dict[str, Optional[StorageInfo]] = {}
         var_sizes: Dict[str, int] = {}
-        
+        inferred_fragments: Dict[str, ParameterFragmentInfo] = {}
+
         for ret in analysis.returns:
             if hasattr(ret.value, 'get_all_variables_with_storage'):
                 vars_in_expr = ret.value.get_all_variables_with_storage()
@@ -287,6 +293,7 @@ class VariableAnalyzer:
                     if name not in all_vars_with_storage:
                         all_vars_with_storage[name] = storage
                 self._collect_variable_sizes(ret.value, var_sizes)
+                self._collect_expression_fragment_bindings(ret.value, analysis.parameters, inferred_fragments)
             
             for cond in ret.conditions:
                 if hasattr(cond, 'get_all_variables_with_storage'):
@@ -296,6 +303,11 @@ class VariableAnalyzer:
                             all_vars_with_storage[name] = storage
                     if hasattr(cond, 'expression'):
                         self._collect_variable_sizes(cond.expression, var_sizes)
+                        self._collect_expression_fragment_bindings(
+                            cond.expression,
+                            analysis.parameters,
+                            inferred_fragments,
+                        )
         
         # パラメータ以外の変数を抽出
         extra_var_names = {
@@ -344,12 +356,149 @@ class VariableAnalyzer:
         for var_name in sorted(extra_var_names):
             var_storage = all_vars_with_storage.get(var_name)
             bit_width = var_sizes.get(var_name, 32)
-            
-            results[var_name] = self.classify_variable_by_storage(
+
+            storage_result = self.classify_variable_by_storage(
                 var_name, var_storage, bit_width, analysis.parameters
             )
+            inferred_fragment = inferred_fragments.get(var_name)
+            if (
+                inferred_fragment is not None
+                and storage_result.classification in {
+                    VariableClassification.UNKNOWN,
+                    VariableClassification.INDEPENDENT_INPUT,
+                }
+            ):
+                results[var_name] = ExtraVariableAnalysis(
+                    name=var_name,
+                    bit_width=bit_width,
+                    classification=VariableClassification.PARAMETER_FRAGMENT,
+                    fragment_info=inferred_fragment,
+                    reason=inferred_fragment.get_reason_string(),
+                )
+                continue
+            results[var_name] = storage_result
         
         return results
+
+    def _collect_expression_fragment_bindings(
+        self,
+        expr: Optional[Expression],
+        parameters: List[Dict],
+        inferred_fragments: Dict[str, ParameterFragmentInfo],
+    ) -> None:
+        if expr is None:
+            return
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None:
+                    self._collect_expression_fragment_bindings(
+                        cond.expression,
+                        parameters,
+                        inferred_fragments,
+                    )
+                self._collect_expression_fragment_bindings(
+                    value,
+                    parameters,
+                    inferred_fragments,
+                )
+            return
+
+        fragment_info = self._infer_fragment_from_expression(expr, parameters)
+        if fragment_info is not None:
+            inferred_fragments.setdefault(fragment_info.fragment_name, fragment_info)
+
+        for operand in expr.operands:
+            self._collect_expression_fragment_bindings(operand, parameters, inferred_fragments)
+
+    def _infer_fragment_from_expression(
+        self,
+        expr: Expression,
+        parameters: List[Dict],
+    ) -> Optional[ParameterFragmentInfo]:
+        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+
+        high_expr: Optional[Expression] = None
+        low_expr: Optional[Expression] = None
+        total_bits: Optional[int] = None
+
+        if expr.operator == "PIECE":
+            high_expr, low_expr = expr.operands
+            total_bits = high_expr.get_bit_width() + low_expr.get_bit_width()
+        elif expr.operator == "INT_OR":
+            high_expr, low_expr, total_bits = self._match_shift_or_fragment(expr)
+        else:
+            return None
+
+        if high_expr is None or low_expr is None or total_bits is None:
+            return None
+        if high_expr.expr_type != ExpressionType.VARIABLE or not high_expr.name:
+            return None
+        if low_expr.expr_type != ExpressionType.PARAMETER or not low_expr.name:
+            return None
+        if not self._looks_like_fragment_temp_name(high_expr.name):
+            return None
+
+        param = next((item for item in parameters if item.get("name") == low_expr.name), None)
+        if param is None:
+            return None
+
+        parent_bits = max(1, int(param.get("size", low_expr.size or 4) or 4) * 8)
+        fragment_bits = high_expr.get_bit_width()
+        if parent_bits <= 0 or fragment_bits <= 0 or total_bits != parent_bits + fragment_bits:
+            return None
+
+        is_signed = bool(param.get("is_signed", True))
+        return ParameterFragmentInfo(
+            fragment_name=high_expr.name,
+            fragment_bit_width=fragment_bits,
+            parent_param_name=low_expr.name,
+            parent_param_index=int(param.get("index", -1)),
+            parent_param_bit_width=parent_bits,
+            extension_type=ExtensionType.SIGN_EXTEND if is_signed else ExtensionType.ZERO_EXTEND,
+            bit_offset_in_base=parent_bits,
+            bit_length=fragment_bits,
+            base_register_name=high_expr.name,
+            base_register_size_bits=total_bits,
+        )
+
+    def _match_shift_or_fragment(
+        self,
+        expr: Expression,
+    ) -> Tuple[Optional[Expression], Optional[Expression], Optional[int]]:
+        left_expr, right_expr = expr.operands
+        matched = self._match_shift_or_operands(left_expr, right_expr, expr.get_bit_width())
+        if matched is not None:
+            return matched
+        matched = self._match_shift_or_operands(right_expr, left_expr, expr.get_bit_width())
+        if matched is not None:
+            return matched
+        return None, None, None
+
+    def _match_shift_or_operands(
+        self,
+        shifted_expr: Expression,
+        low_expr: Expression,
+        total_bits: int,
+    ) -> Optional[Tuple[Expression, Expression, int]]:
+        if (
+            shifted_expr.expr_type != ExpressionType.BINARY_OP
+            or shifted_expr.operator != "INT_LEFT"
+            or len(shifted_expr.operands) != 2
+        ):
+            return None
+        shift_amount = shifted_expr.operands[1]
+        if shift_amount.expr_type != ExpressionType.CONSTANT:
+            return None
+        if low_expr.expr_type != ExpressionType.PARAMETER or not low_expr.name:
+            return None
+        low_bits = low_expr.get_bit_width()
+        if int(shift_amount.value) != low_bits:
+            return None
+        high_expr = shifted_expr.operands[0]
+        if high_expr.expr_type != ExpressionType.VARIABLE or not high_expr.name:
+            return None
+        return high_expr, low_expr, total_bits
     
     def _collect_variable_sizes(
         self,

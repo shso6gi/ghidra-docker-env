@@ -12,7 +12,11 @@ def normalize_series_patterns(
     context: NormalizationContext,
 ) -> Expression:
     """Canonicalize equivalent quadratic closed forms for simple arithmetic series."""
-    canonical = _match_sum_to_triangular(expr)
+    canonical = _match_exact_triangular_phi(expr)
+    if canonical is expr:
+        canonical = _match_sum_to_triangular(expr)
+    if canonical is expr:
+        canonical = _match_triangular_with_affine_completion(expr)
     if canonical is expr:
         return expr
 
@@ -70,6 +74,50 @@ def _match_sum_to_triangular(expr: Expression) -> Expression:
     return _build_triangular(base_var, expr.size or base_var.size or 4)
 
 
+def _match_triangular_with_affine_completion(expr: Expression) -> Expression:
+    terms = _flatten_add_terms(expr)
+    if len(terms) < 2:
+        return expr
+
+    for index, (sign, term) in enumerate(terms):
+        if sign != 1:
+            continue
+        tri_operands = _match_half_product(term, target_size=expr.size or term.size or 0)
+        if tri_operands is None:
+            continue
+        left_tri, right_tri = tri_operands
+        left_origin = _match_var_plus_const(left_tri)
+        right_origin = _match_var_plus_const(right_tri)
+        if left_origin is None or right_origin is None:
+            continue
+
+        left_var, left_bias = left_origin
+        right_var, right_bias = right_origin
+        if not _same_nonconstant_expr(left_var, right_var):
+            continue
+
+        offsets = sorted([left_bias, right_bias])
+        remaining_expr = _sum_terms(
+            signed_term
+            for term_index, signed_term in enumerate(terms)
+            if term_index != index
+        )
+        if remaining_expr is None:
+            continue
+
+        coeff_bias = _match_affine_coeff_bias(remaining_expr, left_var)
+        if coeff_bias is None:
+            continue
+        coeff, bias = coeff_bias
+
+        if offsets == [-2, -1] and coeff == 2 and bias == -1:
+            return _build_triangular(left_var, expr.size or left_var.size or 4)
+        if offsets == [-1, 0] and coeff == 1 and bias == 0:
+            return _build_triangular(left_var, expr.size or left_var.size or 4)
+
+    return expr
+
+
 def _match_base_plus_square(expr: Expression) -> Tuple[Optional[Expression], Optional[Expression]]:
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_ADD" or len(expr.operands) != 2:
         return None, None
@@ -91,6 +139,10 @@ def _match_square(expr: Expression) -> Optional[Expression]:
 
 
 def _match_half_product(expr: Expression, target_size: int) -> Optional[Tuple[Expression, Expression]]:
+    phi_operands = _match_exact_triangular_phi_operands(expr)
+    if phi_operands is not None:
+        return phi_operands
+
     inner = expr
     if (
         inner.expr_type == ExpressionType.BINARY_OP
@@ -118,6 +170,44 @@ def _match_half_product(expr: Expression, target_size: int) -> Optional[Tuple[Ex
     return left, right
 
 
+def _match_exact_triangular_phi(expr: Expression) -> Expression:
+    phi_operands = _match_exact_triangular_phi_operands(expr)
+    if phi_operands is None:
+        return expr
+
+    left, right = phi_operands
+    return _build_half_product(left, right, expr.size or left.size or right.size or 4)
+
+
+def _match_exact_triangular_phi_operands(expr: Expression) -> Optional[Tuple[Expression, Expression]]:
+    if expr.expr_type != ExpressionType.PHI or not expr.value or len(expr.value) != 2:
+        return None
+
+    branches = expr.value
+    even_condition, even_value = branches[0]
+    odd_condition, odd_value = branches[1]
+    if not _same_condition_expression(even_condition.expression, odd_condition.expression):
+        return None
+    if even_condition.negated == odd_condition.negated:
+        return None
+    if even_condition.negated:
+        even_value, odd_value = odd_value, even_value
+
+    parity_base = _match_parity_zero_condition(even_condition.expression)
+    if parity_base is None:
+        return None
+
+    if not _matches_exact_triangular_even_value(even_value, parity_base):
+        return None
+    if not _matches_exact_triangular_odd_value(odd_value, parity_base):
+        return None
+
+    one = Expression.constant(1, parity_base.size or expr.size or 4)
+    base_minus_one = Expression.binary_op("INT_SUB", _clone_expression(parity_base), one)
+    base_minus_one.size = parity_base.size or expr.size or 4
+    return _clone_expression(parity_base), _clone_expression(base_minus_one)
+
+
 def _strip_zero_extend(expr: Expression, target_size: int) -> Optional[Expression]:
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and expr.operands:
         inner = expr.operands[0]
@@ -126,8 +216,26 @@ def _strip_zero_extend(expr: Expression, target_size: int) -> Optional[Expressio
     return expr
 
 
+def _build_half_product(left: Expression, right: Expression, target_size: int) -> Expression:
+    wide_size = max(8, target_size * 2)
+    wide_left = Expression.unary_op("INT_ZEXT", left)
+    wide_left.size = wide_size
+    wide_right = Expression.unary_op("INT_ZEXT", right)
+    wide_right.size = wide_size
+    product = Expression.binary_op("INT_MULT", wide_left, wide_right)
+    product.size = wide_size
+    shift_amount = Expression.constant(1, wide_size)
+    shifted = Expression.binary_op("INT_RIGHT", product, shift_amount)
+    shifted.size = wide_size
+    if wide_size == target_size:
+        return shifted
+    truncated = Expression.binary_op("SUBPIECE", shifted, Expression.constant(0, 4))
+    truncated.size = target_size
+    return truncated
+
+
 def _match_var_plus_const(expr: Expression) -> Optional[Tuple[Expression, int]]:
-    if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+    if expr.expr_type != ExpressionType.CONSTANT and expr.expr_type not in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
         return expr, 0
 
     if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
@@ -138,18 +246,25 @@ def _match_var_plus_const(expr: Expression) -> Optional[Tuple[Expression, int]]:
         left_const = _signed_const_value(left)
         right_const = _signed_const_value(right)
         if left_const is not None:
-            return _with_bias(right, left_const)
+            return _accumulate_bias(right, left_const)
         if right_const is not None:
-            return _with_bias(left, right_const)
+            return _accumulate_bias(left, right_const)
     if expr.operator == "INT_SUB" and right.expr_type == ExpressionType.CONSTANT:
-        return _with_bias(left, -int(right.value))
+        return _accumulate_bias(left, -int(right.value))
     return None
 
 
 def _with_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, int]]:
-    if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+    if expr.expr_type != ExpressionType.CONSTANT:
         return expr, bias
     return None
+
+
+def _accumulate_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, int]]:
+    nested = _match_var_plus_const(expr)
+    if nested is None:
+        return _with_bias(expr, bias)
+    return nested[0], nested[1] + bias
 
 
 def _same_nonconstant_expr(left: Expression, right: Expression) -> bool:
@@ -159,22 +274,213 @@ def _same_nonconstant_expr(left: Expression, right: Expression) -> bool:
         return left.to_string() == right.to_string()
 
 
+def _same_condition_expression(left: Expression, right: Expression) -> bool:
+    return _same_nonconstant_expr(left, right)
+
+
+def _clone_expression(expr: Expression) -> Expression:
+    return Expression(
+        expr_type=expr.expr_type,
+        value=expr.value,
+        operator=expr.operator,
+        operands=[_clone_expression(op) for op in expr.operands],
+        size=expr.size,
+        name=expr.name,
+        data_type=expr.data_type,
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+    )
+
+
+def _matches_commutative_product(expr: Expression, left: Expression, right: Expression) -> bool:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
+        return False
+    expr_left, expr_right = expr.operands
+    return (
+        (_same_nonconstant_expr(expr_left, left) and _same_nonconstant_expr(expr_right, right))
+        or (_same_nonconstant_expr(expr_left, right) and _same_nonconstant_expr(expr_right, left))
+    )
+
+
+def _matches_exact_triangular_even_value(expr: Expression, base_expr: Expression) -> bool:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
+        return False
+    left, right = expr.operands
+    return (
+        (_is_shift_right_by_one_of(left, base_expr) and _is_expr_minus_one(right, base_expr))
+        or (_is_shift_right_by_one_of(right, base_expr) and _is_expr_minus_one(left, base_expr))
+    )
+
+
+def _matches_exact_triangular_odd_value(expr: Expression, base_expr: Expression) -> bool:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
+        return False
+    left, right = expr.operands
+    return (
+        (_same_nonconstant_expr(left, base_expr) and _is_shift_right_by_one_of_minus_one(right, base_expr))
+        or (_same_nonconstant_expr(right, base_expr) and _is_shift_right_by_one_of_minus_one(left, base_expr))
+    )
+
+
+def _is_shift_right_by_one_of(expr: Expression, base_expr: Expression) -> bool:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_RIGHT" or len(expr.operands) != 2:
+        return False
+    shift = expr.operands[1]
+    return _same_nonconstant_expr(expr.operands[0], base_expr) and _is_one_constant(shift)
+
+
+def _is_shift_right_by_one_of_minus_one(expr: Expression, base_expr: Expression) -> bool:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_RIGHT" or len(expr.operands) != 2:
+        return False
+    shift = expr.operands[1]
+    return _is_expr_minus_one(expr.operands[0], base_expr) and _is_one_constant(shift)
+
+
+def _is_expr_minus_one(expr: Expression, base_expr: Expression) -> bool:
+    origin = _match_expr_plus_const(expr)
+    if origin is None:
+        return False
+    matched_base, bias = origin
+    return bias == -1 and _same_nonconstant_expr(matched_base, base_expr)
+
+
+def _match_expr_plus_const(expr: Expression) -> Optional[Tuple[Expression, int]]:
+    if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+        return expr, 0
+
+    if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        const_value = _signed_const_value(expr)
+        if const_value is None:
+            return expr, 0
+        return None
+
+    left, right = expr.operands
+    if expr.operator == "INT_ADD":
+        left_const = _signed_const_value(left)
+        right_const = _signed_const_value(right)
+        if left_const is not None:
+            return right, left_const
+        if right_const is not None:
+            return left, right_const
+    if expr.operator == "INT_SUB" and right.expr_type == ExpressionType.CONSTANT:
+        return left, -int(right.value)
+    return expr, 0
+
+
+def _match_parity_zero_condition(expr: Expression) -> Optional[Expression]:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_EQUAL" or len(expr.operands) != 2:
+        return None
+    left, right = expr.operands
+    if _is_zero_constant(left):
+        return _match_parity_expr(right)
+    if _is_zero_constant(right):
+        return _match_parity_expr(left)
+    return None
+
+
+def _match_parity_expr(expr: Expression) -> Optional[Expression]:
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_AND" or len(expr.operands) != 2:
+        return None
+    left, right = expr.operands
+    if _is_one_constant(left):
+        return right
+    if _is_one_constant(right):
+        return left
+    return None
+
+
+def _is_zero_constant(expr: Expression) -> bool:
+    return expr.expr_type == ExpressionType.CONSTANT and int(expr.value) == 0
+
+
+def _is_one_constant(expr: Expression) -> bool:
+    return expr.expr_type == ExpressionType.CONSTANT and int(expr.value) == 1
+
+
+def _flatten_add_terms(expr: Expression, sign: int = 1) -> list[tuple[int, Expression]]:
+    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
+        return _flatten_add_terms(expr.operands[0], sign) + _flatten_add_terms(expr.operands[1], sign)
+    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_SUB" and len(expr.operands) == 2:
+        return _flatten_add_terms(expr.operands[0], sign) + _flatten_add_terms(expr.operands[1], -sign)
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_2COMP", "INT_NEGATE"} and expr.operands:
+        return _flatten_add_terms(expr.operands[0], -sign)
+    return [(sign, expr)]
+
+
+def _sum_terms(terms: list[tuple[int, Expression]]) -> Optional[Expression]:
+    result: Optional[Expression] = None
+    for sign, expr in terms:
+        term_expr = _apply_sign(expr, sign)
+        if term_expr is None:
+            continue
+        if result is None:
+            result = term_expr
+            continue
+        combined = Expression.binary_op("INT_ADD", result, term_expr)
+        combined.size = max(result.size or 0, term_expr.size or 0, 4)
+        result = combined
+    return result
+
+
+def _apply_sign(expr: Expression, sign: int) -> Optional[Expression]:
+    if sign == 1:
+        return expr
+    if sign == -1:
+        negated = Expression.unary_op("INT_2COMP", expr)
+        negated.size = expr.size
+        return negated
+    return None
+
+
+def _match_affine_coeff_bias(expr: Expression, base_expr: Expression) -> Optional[Tuple[int, int]]:
+    if _same_nonconstant_expr(expr, base_expr):
+        return 1, 0
+
+    const_value = _signed_const_value(expr)
+    if const_value is not None:
+        return 0, const_value
+
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left, right = expr.operands
+        if expr.operator == "INT_ADD":
+            left_affine = _match_affine_coeff_bias(left, base_expr)
+            right_affine = _match_affine_coeff_bias(right, base_expr)
+            if left_affine is None or right_affine is None:
+                return None
+            return left_affine[0] + right_affine[0], left_affine[1] + right_affine[1]
+        if expr.operator == "INT_SUB":
+            left_affine = _match_affine_coeff_bias(left, base_expr)
+            right_affine = _match_affine_coeff_bias(right, base_expr)
+            if left_affine is None or right_affine is None:
+                return None
+            return left_affine[0] - right_affine[0], left_affine[1] - right_affine[1]
+        if expr.operator == "INT_MULT":
+            left_const = _signed_const_value(left)
+            right_const = _signed_const_value(right)
+            if left_const is not None:
+                right_affine = _match_affine_coeff_bias(right, base_expr)
+                if right_affine is None:
+                    return None
+                return left_const * right_affine[0], left_const * right_affine[1]
+            if right_const is not None:
+                left_affine = _match_affine_coeff_bias(left, base_expr)
+                if left_affine is None:
+                    return None
+                return right_const * left_affine[0], right_const * left_affine[1]
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_2COMP", "INT_NEGATE"} and expr.operands:
+        affine = _match_affine_coeff_bias(expr.operands[0], base_expr)
+        if affine is None:
+            return None
+        return -affine[0], -affine[1]
+
+    return None
+
+
 def _build_triangular(base_expr: Expression, target_size: int) -> Expression:
-    wide_size = max(8, target_size * 2)
-    wide_base = Expression.unary_op("INT_ZEXT", base_expr)
-    wide_base.size = wide_size
-    wide_one = Expression.constant(1, wide_size)
-    incremented = Expression.binary_op("INT_ADD", wide_base, wide_one)
-    incremented.size = wide_size
-    product = Expression.binary_op("INT_MULT", wide_base, incremented)
-    product.size = wide_size
-    shifted = Expression.binary_op("INT_RIGHT", product, wide_one)
-    shifted.size = wide_size
-    if wide_size == target_size:
-        return shifted
-    truncated = Expression.binary_op("SUBPIECE", shifted, Expression.constant(0, 4))
-    truncated.size = target_size
-    return truncated
+    incremented = Expression.binary_op("INT_ADD", _clone_expression(base_expr), Expression.constant(1, base_expr.size or target_size))
+    incremented.size = base_expr.size or target_size
+    return _build_half_product(base_expr, incremented, target_size)
 
 
 def _signed_const_value(expr: Expression) -> Optional[int]:

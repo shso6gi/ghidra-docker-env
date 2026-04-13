@@ -2,7 +2,7 @@
 """正規化のコアロジック"""
 
 from typing import Optional
-from ...model import Expression, ExpressionType
+from ...model import Condition, Expression, ExpressionType
 from .negation import normalize_double_negation
 from .modulo import normalize_modulo_patterns
 from .arithmetic import normalize_arithmetic
@@ -44,7 +44,21 @@ def normalize_expression(
         context = NormalizationContext()
     
     # 子要素を先に正規化（ボトムアップ処理）
-    if expr.operands:
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        original_size = expr.size
+        normalized_branches = []
+        for condition, branch_expr in expr.value:
+            normalized_condition_expr = normalize_expression(condition.expression, context)
+            normalized_branch_expr = normalize_expression(branch_expr, context)
+            normalized_branches.append(
+                (
+                    Condition(normalized_condition_expr, condition.negated),
+                    normalized_branch_expr,
+                )
+            )
+        expr = Expression.phi(normalized_branches)
+        expr.size = original_size
+    elif expr.operands:
         normalized_operands = [normalize_expression(op, context) for op in expr.operands]
         
         # 新しい Expression インスタンスを作成（元の式は変更しない）

@@ -63,6 +63,7 @@ def infer_parameter_semantics(
         )
         if signedness is None:
             continue
+        assert signedness_source is not None
 
         hints[meta["index"]] = ParameterSemanticHint(
             narrow_bits=narrow_bits,
