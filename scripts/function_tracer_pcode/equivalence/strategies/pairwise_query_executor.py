@@ -75,10 +75,19 @@ def solve_query_twostage(
         stage1_result.pair_stage = "conds-only"
         return stage1_result
 
-    if (
-        expression_has_unresolved_value(case1.value_expr)
-        or expression_has_unresolved_value(case2.value_expr)
-    ):
+    contextual_unresolved = getattr(strategy, "_case_value_contains_unresolved", None)
+    if contextual_unresolved is not None:
+        has_unresolved_value = (
+            contextual_unresolved(case1, case2.conditions)
+            or contextual_unresolved(case2, case1.conditions)
+        )
+    else:
+        has_unresolved_value = (
+            expression_has_unresolved_value(case1.value_expr)
+            or expression_has_unresolved_value(case2.value_expr)
+        )
+
+    if has_unresolved_value:
         strategy._debug_print(
             f"  Pair {pair_id} with-ineq skipped: unresolved value expression detected"
         )

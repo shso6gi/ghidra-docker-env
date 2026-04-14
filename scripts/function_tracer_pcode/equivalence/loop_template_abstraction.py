@@ -306,14 +306,59 @@ def _strip_width_adapter(expr: Expression, target_bits: int) -> Expression:
     if (
         expr.operator == "SUBPIECE"
         and right.expr_type == ExpressionType.CONSTANT
-        and int(right.value) == 0
     ):
-        return left
+        byte_offset = int(right.value)
+        if byte_offset == 0:
+            return left
+        if (
+            left.expr_type == ExpressionType.BINARY_OP
+            and left.operator == "PIECE"
+            and len(left.operands) == 2
+        ):
+            high, low = left.operands
+            if not high.size or not low.size:
+                return expr
+            low_size = low.size
+            if byte_offset >= low_size:
+                high_offset = byte_offset - low_size
+                if high_offset == 0:
+                    return high
+                if high_offset > 0 and high_offset < high.size:
+                    truncated = Expression.binary_op(
+                        "SUBPIECE",
+                        high,
+                        Expression.constant(high_offset, size=4),
+                    )
+                    truncated.size = expr.size or max(1, target_bits // 8)
+                    return truncated
 
     if expr.operator == "PIECE":
         low_bits = right.get_bit_width()
         if low_bits >= target_bits:
             return right
+
+    if expr.operator in {"INT_RIGHT", "INT_SRIGHT"} and right.expr_type == ExpressionType.CONSTANT:
+        shift_bits = int(right.value)
+        if (
+            left.expr_type == ExpressionType.BINARY_OP
+            and left.operator == "PIECE"
+            and len(left.operands) == 2
+        ):
+            high, low = left.operands
+            if not high.size or not low.size:
+                return expr
+            low_bits = low.size * 8
+            if shift_bits >= low_bits and shift_bits % 8 == 0:
+                remaining_bits = shift_bits - low_bits
+                if remaining_bits == 0:
+                    return high
+                shifted_high = Expression.binary_op(
+                    expr.operator,
+                    high,
+                    Expression.constant(remaining_bits, size=right.size or 4),
+                )
+                shifted_high.size = expr.size or high.size
+                return shifted_high
 
     return expr
 

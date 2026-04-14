@@ -197,7 +197,7 @@ class PairwiseStrategy(CheckStrategy):
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                         )
                     continue
-                if self._case_contains_unresolved_expression(case1) or self._case_contains_unresolved_expression(case2):
+                if self._case_contains_unresolved_expression(case1, case2.conditions) or self._case_contains_unresolved_expression(case2, case1.conditions):
                     unknown_count += 1
                     self._debug_print(
                         f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
@@ -576,13 +576,40 @@ class PairwiseStrategy(CheckStrategy):
             return False
         return ConditionSimplifier.is_contradiction(combined_conditions)
 
-    def _case_contains_unresolved_expression(self, case: ReturnCase) -> bool:
-        if self._expression_contains_unresolved(case.value_expr):
+    def _case_contains_unresolved_expression(
+        self,
+        case: ReturnCase,
+        extra_conditions: Optional[List[Condition]] = None,
+    ) -> bool:
+        if self._case_value_contains_unresolved(case, extra_conditions):
             return True
-        return any(
-            self._expression_contains_unresolved(cond.expression)
-            for cond in case.conditions
+        context_conditions = list(extra_conditions or [])
+        for index, cond in enumerate(case.conditions):
+            cond_context = ConditionSimplifier.simplify_conditions(
+                list(context_conditions)
+                + [other for offset, other in enumerate(case.conditions) if offset != index]
+            )
+            reduced_condition = ConditionSimplifier._reduce_expression_under_conditions(
+                cond.expression,
+                cond_context,
+            )
+            if self._expression_contains_unresolved(reduced_condition):
+                return True
+        return False
+
+    def _case_value_contains_unresolved(
+        self,
+        case: ReturnCase,
+        extra_conditions: Optional[List[Condition]] = None,
+    ) -> bool:
+        context_conditions = ConditionSimplifier.simplify_conditions(
+            list(case.conditions) + list(extra_conditions or [])
         )
+        reduced_value = ConditionSimplifier._reduce_expression_under_conditions(
+            case.value_expr,
+            context_conditions,
+        )
+        return self._expression_contains_unresolved(reduced_value)
 
     def _expression_contains_unresolved(self, expr) -> bool:
         if expr is None:

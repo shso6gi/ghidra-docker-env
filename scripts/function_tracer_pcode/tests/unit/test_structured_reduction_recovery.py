@@ -799,6 +799,102 @@ int lr_nested_multiply_accumulate(int param_1,int param_2)
     assert len(recovered) == 2
 
 
+def test_structured_reduction_recovery_joins_multiline_concat_assignments():
+    analyzer = _make_analyzer()
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analyzer._current_parameters = parameters
+    c_text = """
+int lr_nested_multiply_accumulate(int param_1,int param_2)
+{
+  undefined8 uVar8;
+  int iVar2;
+  if (param_1 < 1) {
+    return 0;
+  }
+  iVar2 = param_2;
+  uVar8 = CONCAT44(iVar2 + iVar2,
+                   iVar2 + 1);
+  return (int)uVar8;
+}
+""".strip()
+
+    normalized = analyzer._normalize_wrapper_c_lines(c_text)
+    assert "uVar8 = CONCAT44(iVar2 + iVar2, iVar2 + 1);" in normalized
+
+    recovered = analyzer._parse_counted_reduction_from_c_text(c_text, parameters, "0x1000")
+
+    assert recovered is not None
+    assert _select_return_value(recovered, {"param_1": 0, "param_2": 7}) == 0
+    assert _select_return_value(recovered, {"param_1": 3, "param_2": 7}) == 8
+
+
+def test_structured_reduction_parses_constant_stride_steps():
+    analyzer = _make_analyzer()
+
+    assert analyzer._structured_reduction_parse_unit_step("uVar3 = uVar3 - 8", "uVar3") == -8
+    assert analyzer._structured_reduction_parse_unit_step("uVar3 -= 8", "uVar3") == -8
+    assert analyzer._structured_reduction_parse_unit_step("uVar3 = uVar3 + 8", "uVar3") == 8
+
+
+def test_structured_reduction_recovery_handles_power_of_two_stride_countdown_loop():
+    analyzer = _make_analyzer()
+    parameters = [
+        {"name": "param_1", "index": 0, "data_type": "uint", "size": 4, "is_signed": False},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analyzer._current_parameters = parameters
+    c_text = """
+int lr_nested_multiply_accumulate(uint param_1,int param_2)
+{
+  uint uVar3;
+  int iVar1;
+  if (param_1 < 8) {
+    return 0;
+  }
+  uVar3 = param_1 & 0xfffffff8;
+  iVar1 = 0;
+  do {
+    iVar1 = iVar1 + param_2;
+    uVar3 = uVar3 - 8;
+  } while (uVar3 != 0);
+  return iVar1;
+}
+""".strip()
+
+    recovered = analyzer._parse_counted_reduction_from_c_text(c_text, parameters, "0x1000")
+
+    assert recovered is not None
+    for rows in [0, 7, 8, 9, 16, 24]:
+        env = {"param_1": rows, "param_2": 3}
+        expected = ((rows & 0xFFFFFFF8) // 8) * 3 if rows >= 8 else 0
+        assert _select_return_value_wrapped32(recovered, env) == (expected & 0xFFFFFFFF)
+
+
+def test_structured_do_while_alias_loop_condition_uses_negative_step_hint():
+    analyzer = _make_analyzer()
+    current_counter = Expression.variable("uVar3", size=4)
+    alias_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.variable("uVar3", size=4),
+        Expression.constant(0, 4),
+    )
+
+    reparsed = analyzer._derive_structured_do_while_alias_loop_condition(
+        "uVar3",
+        current_counter,
+        alias_expr,
+        counter_step_hint=-8,
+    )
+
+    assert reparsed is not None
+    limit_expr, positive_cond = reparsed
+    assert limit_expr.to_string() == "0"
+    assert positive_cond.to_string() == "(0 < uVar3)"
+
+
 def test_structured_reduction_recovery_handles_concat_guarded_countdown_loop_from_log():
     analyzer = _make_analyzer()
     parameters = [

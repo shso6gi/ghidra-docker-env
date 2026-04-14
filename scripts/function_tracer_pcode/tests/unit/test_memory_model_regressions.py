@@ -248,6 +248,32 @@ def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_posi
     assert resolved.operands[1].value == 1
 
 
+def test_memory_resolver_concretizes_direct_unknown_symbol_when_readable():
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("UNK_00113090", size=8),
+        Expression.constant(1, 8),
+    )
+
+    table = {
+        0x00113090: 0x401120,
+    }
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda addr, size: table.get(addr),
+        debug=False,
+    )
+
+    assert resolved.expr_type.name == "BINARY_OP"
+    assert resolved.operands[0].expr_type.name == "CONSTANT"
+    assert resolved.operands[0].value == 0x401120
+    assert resolved.operands[1].expr_type.name == "CONSTANT"
+    assert resolved.operands[1].value == 1
+
+
 def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_by_mul_one():
     param = Expression.parameter("param_1", 0, size=8)
     subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))

@@ -29,6 +29,7 @@ from ..analysis.effect_summary import (
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
 )
+from ..analysis.memory_resolver import concretize_readonly_loads
 
 
 class ExpandedValue:
@@ -62,6 +63,15 @@ class ExpressionExpander:
     
     # 展開の上限設定
     MAX_CASES_PER_MULTIEQUAL = 16  # 1つのMULTIEQUALから生成する最大ケース数
+    COMMUTATIVE_ASSOCIATIVE_OPS = frozenset(
+        [
+            "INT_ADD", "ADD", "+",
+            "INT_MULT", "MULT", "*",
+            "INT_AND", "AND", "&",
+            "INT_OR", "OR", "|",
+            "INT_XOR", "XOR", "^",
+        ]
+    )
     
     def __init__(
         self,
@@ -137,6 +147,64 @@ class ExpressionExpander:
             return []
         return ConditionSimplifier.simplify_conditions(list(conditions))
 
+    def _expansion_expression_signature(self, expr: Optional[Expression]) -> str:
+        """展開中の重複排除に使う、可換結合演算を吸収した式シグネチャ。"""
+        if expr is None:
+            return "<none>"
+
+        if (
+            expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator in self.COMMUTATIVE_ASSOCIATIVE_OPS
+            and len(expr.operands) == 2
+        ):
+            flattened: List[Expression] = []
+            self._collect_commutative_operands(expr, expr.operator, flattened)
+            operand_sigs = sorted(
+                self._expansion_expression_signature(operand) for operand in flattened
+            )
+            return (
+                f"{expr.operator}[{','.join(operand_sigs)}]"
+                f":{expr.size}:{expr.get_bit_width()}"
+            )
+
+        return ConditionNormalizer.expression_signature(expr)
+
+    def _collect_commutative_operands(
+        self,
+        expr: Expression,
+        operator: str,
+        out: List[Expression],
+    ) -> None:
+        if (
+            expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == operator
+            and len(expr.operands) == 2
+        ):
+            self._collect_commutative_operands(expr.operands[0], operator, out)
+            self._collect_commutative_operands(expr.operands[1], operator, out)
+            return
+        out.append(expr)
+
+    def _normalize_expanded_value(
+        self,
+        ev: ExpandedValue,
+    ) -> ExpandedValue:
+        normalized_conditions = ConditionSimplifier.simplify_conditions(list(ev.conditions))
+        reduced_value = _reduce_expression_under_conditions(ev.value, normalized_conditions)
+        normalized_value = reduced_value if reduced_value is not None else ev.value
+        return ExpandedValue(normalized_value, normalized_conditions)
+
+    def _prefer_expanded_value(
+        self,
+        candidate: ExpandedValue,
+        incumbent: ExpandedValue,
+    ) -> bool:
+        candidate_unknown = candidate.value.expr_type == ExpressionType.UNKNOWN
+        incumbent_unknown = incumbent.value.expr_type == ExpressionType.UNKNOWN
+        if candidate_unknown != incumbent_unknown:
+            return not candidate_unknown
+        return len(candidate.conditions) < len(incumbent.conditions)
+
     def _finalize_combined_results(
         self,
         mnemonic: str,
@@ -159,11 +227,11 @@ class ExpressionExpander:
                 list(base_conditions),
             )
             budget_key = (
-                ConditionNormalizer.expression_signature(budget_unknown.value),
+                self._expansion_expression_signature(budget_unknown.value),
                 budget_unknown.get_condition_signature(),
             )
             existing_keys = {
-                (ConditionNormalizer.expression_signature(ev.value), ev.get_condition_signature())
+                (self._expansion_expression_signature(ev.value), ev.get_condition_signature())
                 for ev in deduped
             }
             if budget_key not in existing_keys:
@@ -472,10 +540,14 @@ class ExpressionExpander:
         groups: Dict[Tuple[str, str], ExpandedValue] = {}
 
         for ev in values:
-            key = (ConditionNormalizer.expression_signature(ev.value), ev.get_condition_signature())
+            normalized = self._normalize_expanded_value(ev)
+            key = (
+                self._expansion_expression_signature(normalized.value),
+                normalized.get_condition_signature(),
+            )
             current = groups.get(key)
-            if current is None or len(ev.conditions) < len(current.conditions):
-                groups[key] = ev
+            if current is None or self._prefer_expanded_value(normalized, current):
+                groups[key] = normalized
         
         self._debug_print(f"  Grouped into {len(groups)} unique (value, condition) pairs", depth)
         
@@ -968,7 +1040,19 @@ class ExpressionExpander:
             rewritten_post_state if rewritten_post_state is not None else (canonicalized if canonicalized is not None else expr),
             conditions,
         )
-        return reduced if reduced is not None else expr
+        resolved = reduced if reduced is not None else expr
+        if self.read_memory_value is not None and self.parameters:
+            concretized = concretize_readonly_loads(
+                resolved,
+                conditions,
+                self.parameters,
+                self.read_memory_value,
+                self.image_base,
+                self.debug,
+            )
+            if concretized is not None:
+                resolved = concretized
+        return resolved
 
     def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
         if expr is None:
@@ -987,6 +1071,23 @@ class ExpressionExpander:
                 return True
         return False
 
+    def _expression_contains_call(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.CALL:
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_call(cond.expression):
+                    return True
+                if self._expression_contains_call(value):
+                    return True
+            return False
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_call(operand):
+                return True
+        return False
+
     def _expression_contains_phi(self, expr: Optional[Expression]) -> bool:
         if expr is None:
             return False
@@ -998,6 +1099,79 @@ class ExpressionExpander:
             if self._expression_contains_phi(operand):
                 return True
         return False
+
+    def _expression_contains_budget_unknown(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if (
+            expr.expr_type == ExpressionType.UNKNOWN
+            and isinstance(expr.name, str)
+            and expr.name.endswith("_budget_exceeded")
+        ):
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_contains_budget_unknown(cond.expression):
+                    return True
+                if self._expression_contains_budget_unknown(value):
+                    return True
+            return False
+        for operand in getattr(expr, "operands", []) or []:
+            if self._expression_contains_budget_unknown(operand):
+                return True
+        return False
+
+    def _results_contain_budget_unknown(
+        self,
+        values: List[ExpandedValue],
+    ) -> bool:
+        return any(self._expression_contains_budget_unknown(ev.value) for ev in values)
+
+    def _maybe_replace_budget_results_with_traced_fallback(
+        self,
+        pcode_op,
+        values: List[ExpandedValue],
+        base_conditions: List[Condition],
+        depth: int,
+        output_size: int = 0,
+    ) -> List[ExpandedValue]:
+        """
+        展開予算で UNKNOWN を混ぜた場合は、P-code 直トレース式へ安全にフォールバックする。
+
+        予算超過時の UNKNOWN は downstream で不可逆に汚染しやすい一方、トレーサが返す
+        PHI/ITE 付き式は分岐を内包した exact summary なので、こちらを優先して保持する。
+        """
+        if not values or not self._results_contain_budget_unknown(values):
+            return values
+
+        traced_value = self._trace_operation_expression(
+            pcode_op,
+            base_conditions,
+            depth,
+            output_size=output_size,
+        )
+        if traced_value is None or self._expression_contains_call(traced_value):
+            return values
+
+        simplified_conditions = ConditionSimplifier.simplify_conditions(list(base_conditions))
+        reduced_value = _reduce_expression_under_conditions(traced_value, simplified_conditions)
+        normalized_value = reduced_value if reduced_value is not None else traced_value
+        if self._expression_contains_call(normalized_value):
+            return values
+        if self._expression_contains_budget_unknown(normalized_value):
+            return values
+        fallback = ExpandedValue(normalized_value, simplified_conditions)
+        if self.debug:
+            self._debug_print(
+                "Replacing budget-exceeded expansion with traced fallback expression",
+                depth,
+            )
+            self._debug_expr("  fallback: ", normalized_value, depth + 1)
+        return self._deduplicate_expanded_values(
+            [fallback],
+            depth,
+            label=f"{pcode_op.getMnemonic()} traced budget fallback",
+        )
 
     def _expand_expression_cases(
         self,
@@ -1070,23 +1244,15 @@ class ExpressionExpander:
                 left_cases = [ExpandedValue(expr.operands[0], ConditionSimplifier.simplify_conditions(base_conditions))]
             if not right_cases:
                 right_cases = [ExpandedValue(expr.operands[1], ConditionSimplifier.simplify_conditions(base_conditions))]
-            expanded = []
-            for left_case in left_cases:
-                for right_case in right_cases:
-                    combined_conditions = ConditionSimplifier.simplify_conditions(
-                        list(left_case.conditions) + list(right_case.conditions)
-                    )
-                    if ConditionSimplifier.is_contradiction(combined_conditions):
-                        continue
-                    if expr.operator is None:
-                        continue
-                    rebuilt = Expression.binary_op(
-                        expr.operator,
-                        left_case.value,
-                        right_case.value,
-                    )
-                    rebuilt.size = expr.size
-                    expanded.append(ExpandedValue(rebuilt, combined_conditions))
+            if expr.operator is None:
+                return []
+            expanded = self._combine_input_expansions_with_conditions(
+                expr.operator,
+                [left_cases, right_cases],
+                [],
+                depth,
+                output_size=expr.size,
+            )
             return self._deduplicate_expanded_values(expanded, depth) if expanded else []
 
         return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
@@ -1188,7 +1354,7 @@ class ExpressionExpander:
         # 組み合わせを生成
         output = pcode_op.getOutput()
         output_size = output.getSize() if output else 0
-        return self._combine_input_expansions_with_conditions(
+        combined = self._combine_input_expansions_with_conditions(
             mnemonic,
             input_expansions,
             conditions,
@@ -1196,6 +1362,13 @@ class ExpressionExpander:
             output_size=output_size,
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
+        )
+        return self._maybe_replace_budget_results_with_traced_fallback(
+            pcode_op,
+            combined,
+            conditions,
+            depth,
+            output_size=output_size,
         )
     
     def _op_requires_recursive_expansion(self, pcode_op, depth: int = 0) -> bool:
@@ -1676,7 +1849,7 @@ class ExpressionExpander:
         
         output = pcode_op.getOutput()
         output_size = output.getSize() if output else 0
-        return self._combine_input_expansions_with_conditions(
+        combined = self._combine_input_expansions_with_conditions(
             mnemonic,
             input_expansions,
             base_conditions,
@@ -1684,6 +1857,13 @@ class ExpressionExpander:
             output_size=output_size,
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
+        )
+        return self._maybe_replace_budget_results_with_traced_fallback(
+            pcode_op,
+            combined,
+            base_conditions,
+            depth,
+            output_size=output_size,
         )
     
     def _combine_input_expansions_with_conditions(
@@ -1722,7 +1902,7 @@ class ExpressionExpander:
             for ev in input_expansions[0]:
                 combined_conds = base_conditions + ev.conditions
                 pre_key = (
-                    ConditionNormalizer.expression_signature(ev.value),
+                    self._expansion_expression_signature(ev.value),
                     ConditionNormalizer.conditions_signature(combined_conds),
                 )
                 if pre_key in seen_keys:
@@ -1742,21 +1922,23 @@ class ExpressionExpander:
             )
         
         if len(input_expansions) == 2:
-            result = []
+            result_map: Dict[Tuple[str, str], ExpandedValue] = {}
             seen_pairs: Set[Tuple[str, str, str, str, int, Optional[int]]] = set()
-            attempts = 0
+            raw_attempts = 0
+            novel_results = 0
+            raw_attempt_limit = max(self._max_combination_attempts * 8, self._max_combination_attempts)
             for left_ev in input_expansions[0]:
                 for right_ev in input_expansions[1]:
-                    attempts += 1
-                    if attempts > self._max_combination_attempts:
+                    raw_attempts += 1
+                    if raw_attempts > raw_attempt_limit:
                         self._debug_print(
-                            f"  Combination budget exceeded at {attempts} attempts; "
+                            f"  Combination raw-attempt budget exceeded at {raw_attempts} attempts; "
                             f"returning conservative summary",
                             depth,
                         )
                         return self._finalize_combined_results(
                             mnemonic,
-                            result,
+                            list(result_map.values()),
                             base_conditions,
                             depth,
                             over_budget=True,
@@ -1764,8 +1946,8 @@ class ExpressionExpander:
 
                     combined_conds = base_conditions + left_ev.conditions + right_ev.conditions
                     pre_key = (
-                        ConditionNormalizer.expression_signature(left_ev.value),
-                        ConditionNormalizer.expression_signature(right_ev.value),
+                        self._expansion_expression_signature(left_ev.value),
+                        self._expansion_expression_signature(right_ev.value),
                         ConditionNormalizer.conditions_signature(combined_conds),
                         mnemonic,
                         output_size,
@@ -1798,12 +1980,38 @@ class ExpressionExpander:
                         if output_size > 0 and new_value.size == 0:
                             new_value.size = output_size
                     simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
-                    result.append(ExpandedValue(new_value, simplified_conds))
-                    self._debug_expr("  Combined: ", new_value, depth)
+                    reduced_value = _reduce_expression_under_conditions(new_value, simplified_conds)
+                    normalized_value = reduced_value if reduced_value is not None else new_value
+                    normalized_ev = ExpandedValue(normalized_value, simplified_conds)
+                    result_key = (
+                        self._expansion_expression_signature(normalized_ev.value),
+                        normalized_ev.get_condition_signature(),
+                    )
+                    existing = result_map.get(result_key)
+                    if existing is not None:
+                        if self._prefer_expanded_value(normalized_ev, existing):
+                            result_map[result_key] = normalized_ev
+                        continue
+                    result_map[result_key] = normalized_ev
+                    novel_results += 1
+                    self._debug_expr("  Combined: ", normalized_ev.value, depth)
+                    if novel_results > self._max_combination_attempts:
+                        self._debug_print(
+                            f"  Combination novelty budget exceeded at {novel_results} unique results; "
+                            f"returning conservative summary",
+                            depth,
+                        )
+                        return self._finalize_combined_results(
+                            mnemonic,
+                            list(result_map.values()),
+                            base_conditions,
+                            depth,
+                            over_budget=True,
+                        )
 
             return self._finalize_combined_results(
                 mnemonic,
-                result,
+                list(result_map.values()),
                 base_conditions,
                 depth,
             )

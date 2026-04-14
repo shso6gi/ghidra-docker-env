@@ -545,7 +545,7 @@ def _extract_constant_address(expr: Expression) -> Optional[int]:
         return expr.value
 
     if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        return _extract_address_suffix(expr.name, ("DAT_", "LAB_"))
+        return _extract_address_suffix(expr.name, ("DAT_", "LAB_", "UNK_"))
     return None
 
 

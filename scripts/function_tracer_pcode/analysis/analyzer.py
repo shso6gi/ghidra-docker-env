@@ -85,6 +85,7 @@ class ReturnAnalyzer:
         body_lines: List[str],
         index: int,
         reason: str,
+        detail: Optional[str] = None,
     ) -> None:
         if self._last_structured_reduction_failure is not None:
             return
@@ -95,6 +96,7 @@ class ReturnAnalyzer:
             "index": index,
             "line": line,
             "reason": reason,
+            "detail": detail,
         }
 
     def _expression_contains_equivalent_subexpr(
@@ -3158,9 +3160,11 @@ class ReturnAnalyzer:
                     failure_line = body_lines[next_index]
                 failure_reason = None
                 failure_detail_line = None
+                failure_detail = None
                 if self._last_structured_reduction_failure is not None:
                     failure_reason = self._last_structured_reduction_failure.get("reason")
                     failure_detail_line = self._last_structured_reduction_failure.get("line")
+                    failure_detail = self._last_structured_reduction_failure.get("detail")
                 self._debug_print(
                     "Counted reduction recovery failed while executing structured body "
                     f"(ok={ok}, next_index={next_index}, live_states={len(live_states)}, "
@@ -3169,7 +3173,7 @@ class ReturnAnalyzer:
                 if failure_reason is not None:
                     self._debug_print(
                         "Structured reduction inner failure: "
-                        f"reason={failure_reason}, line={failure_detail_line!r}"
+                        f"reason={failure_reason}, line={failure_detail_line!r}, detail={failure_detail!r}"
                     )
             return None
 
@@ -3681,7 +3685,10 @@ class ReturnAnalyzer:
                 body_live_states[0][0].get(loop_spec["counter_name"]),
                 loop_spec["counter_name"],
             )
-            if counter_step is None or counter_step not in loop_spec["allowed_steps"]:
+            if counter_step is None or not self._structured_counter_step_matches_allowed(
+                counter_step,
+                loop_spec["allowed_steps"],
+            ):
                 return while_index, states, False
             if not all(
                 self._structured_loop_counter_step(
@@ -3846,10 +3853,15 @@ class ReturnAnalyzer:
                     reparsed = None
                     if loop_condition_alias_name:
                         alias_expr = symbolic_first_pass_live[index][0].get(loop_condition_alias_name)
+                        counter_step_hint = self._structured_concrete_counter_step_hint(
+                            initial_bindings.get(loop_spec["counter_name"]),
+                            concrete_start_expr,
+                        )
                         reparsed = self._derive_structured_do_while_alias_loop_condition(
                             loop_spec["counter_name"],
                             concrete_start_expr,
                             alias_expr,
+                            counter_step_hint=counter_step_hint,
                         )
                     if reparsed is None:
                         reparsed = self._parse_structured_reduction_loop_condition(
@@ -3920,7 +3932,10 @@ class ReturnAnalyzer:
                     body_live_states[0][0].get(loop_spec["counter_name"]),
                     loop_spec["counter_name"],
                 )
-                if counter_step is None or counter_step not in loop_spec["allowed_steps"]:
+                if counter_step is None or not self._structured_counter_step_matches_allowed(
+                    counter_step,
+                    loop_spec["allowed_steps"],
+                ):
                     self._record_structured_reduction_failure(body_lines, body_start, "do_while_counter_step_unsupported")
                     return do_index, states, False
                 if not all(
@@ -4003,6 +4018,7 @@ class ReturnAnalyzer:
         counter_name: str,
         current_start_expr: Expression,
         alias_expr: Optional[Expression],
+        counter_step_hint: Optional[int] = None,
     ) -> Optional[Tuple[Expression, Condition]]:
         if alias_expr is None or alias_expr.expr_type != ExpressionType.BINARY_OP or len(alias_expr.operands) != 2:
             return None
@@ -4010,6 +4026,18 @@ class ReturnAnalyzer:
         left_expr, right_expr = alias_expr.operands
         if left_expr.name == counter_name and left_expr.expr_type in {ExpressionType.VARIABLE, ExpressionType.PARAMETER}:
             if alias_expr.operator in {"INT_NOTEQUAL", "INT_SLESS", "INT_LESS"}:
+                if alias_expr.operator == "INT_NOTEQUAL" and counter_step_hint is not None and counter_step_hint < 0:
+                    return (
+                        self._clone_expression(right_expr),
+                        Condition(
+                            Expression.binary_op(
+                                "INT_SLESS",
+                                self._clone_expression(right_expr),
+                                self._clone_expression(current_start_expr),
+                            ),
+                            False,
+                        ),
+                    )
                 limit_plus_one = Expression.binary_op(
                     "INT_ADD",
                     self._clone_expression(right_expr),
@@ -4029,6 +4057,18 @@ class ReturnAnalyzer:
                 )
         if right_expr.name == counter_name and right_expr.expr_type in {ExpressionType.VARIABLE, ExpressionType.PARAMETER}:
             if alias_expr.operator in {"INT_NOTEQUAL", "INT_SLESS", "INT_LESS"}:
+                if alias_expr.operator == "INT_NOTEQUAL" and counter_step_hint is not None and counter_step_hint < 0:
+                    return (
+                        self._clone_expression(left_expr),
+                        Condition(
+                            Expression.binary_op(
+                                "INT_SLESS",
+                                self._clone_expression(left_expr),
+                                self._clone_expression(current_start_expr),
+                            ),
+                            False,
+                        ),
+                    )
                 limit_plus_one = Expression.binary_op(
                     "INT_ADD",
                     self._clone_expression(left_expr),
@@ -4047,6 +4087,32 @@ class ReturnAnalyzer:
                     ),
                 )
         return None
+
+    def _structured_concrete_counter_step_hint(
+        self,
+        before_expr: Optional[Expression],
+        after_expr: Optional[Expression],
+    ) -> Optional[int]:
+        if before_expr is None or after_expr is None:
+            return None
+        delta = self._structured_extract_additive_delta(after_expr, before_expr)
+        if delta is None:
+            normalized_after = self._structured_strip_counter_casts(after_expr)
+            normalized_before = self._structured_strip_counter_casts(before_expr)
+            if normalized_after is None or normalized_before is None:
+                return None
+            delta = self._structured_extract_additive_delta(normalized_after, normalized_before)
+        if delta is None:
+            return None
+        delta_value = self._evaluate_wrapper_constant(delta)
+        if delta_value is None:
+            return None
+        delta_size = max(
+            1,
+            getattr(delta, "size", 0) or getattr(after_expr, "size", 0) or getattr(before_expr, "size", 0) or 4,
+        )
+        signed_delta = self._to_signed_wrapper_value(int(delta_value), delta_size * 8)
+        return signed_delta if signed_delta != 0 else None
 
     def _set_structured_loop_condition_alias_exit_value(
         self,
@@ -4258,9 +4324,18 @@ class ReturnAnalyzer:
             return None
         delta_size = max(1, getattr(delta, "size", 0) or getattr(expr, "size", 0) or 4)
         signed_delta = self._to_signed_wrapper_value(int(delta_value), delta_size * 8)
-        if signed_delta in {1, -1}:
-            return signed_delta
-        return None
+        return signed_delta if signed_delta != 0 else None
+
+    def _structured_counter_step_matches_allowed(
+        self,
+        counter_step: int,
+        allowed_steps: Set[int],
+    ) -> bool:
+        if counter_step == 0:
+            return False
+        if counter_step > 0:
+            return any(step > 0 for step in allowed_steps)
+        return any(step < 0 for step in allowed_steps)
 
     def _structured_strip_counter_casts(
         self,
@@ -4326,7 +4401,10 @@ class ReturnAnalyzer:
         if parsed_cond is None:
             return None
         counter_step = self._structured_reduction_parse_unit_step(step_text, counter_name)
-        if counter_step is None or counter_step not in parsed_cond["allowed_steps"]:
+        if counter_step is None or not self._structured_counter_step_matches_allowed(
+            counter_step,
+            parsed_cond["allowed_steps"],
+        ):
             return None
 
         return {
@@ -4633,6 +4711,31 @@ class ReturnAnalyzer:
         }
         if normalized in negative:
             return -1
+        literal_pattern = r"(?:0x[0-9a-fA-F]+|\d+)"
+        plus_assign = re.fullmatch(rf"{re.escape(counter_name)}\+=({literal_pattern})", normalized)
+        if plus_assign is not None:
+            return int(plus_assign.group(1), 0)
+        minus_assign = re.fullmatch(rf"{re.escape(counter_name)}-=({literal_pattern})", normalized)
+        if minus_assign is not None:
+            return -int(minus_assign.group(1), 0)
+        plus_update = re.fullmatch(
+            rf"{re.escape(counter_name)}={re.escape(counter_name)}\+({literal_pattern})",
+            normalized,
+        )
+        if plus_update is not None:
+            return int(plus_update.group(1), 0)
+        plus_update_commuted = re.fullmatch(
+            rf"{re.escape(counter_name)}=({literal_pattern})\+{re.escape(counter_name)}",
+            normalized,
+        )
+        if plus_update_commuted is not None:
+            return int(plus_update_commuted.group(1), 0)
+        minus_update = re.fullmatch(
+            rf"{re.escape(counter_name)}={re.escape(counter_name)}-({literal_pattern})",
+            normalized,
+        )
+        if minus_update is not None:
+            return -int(minus_update.group(1), 0)
         return None
 
     def _summarize_structured_reduction_loop_cases(
@@ -4656,6 +4759,15 @@ class ReturnAnalyzer:
         recurrence_states = recurrence_body_states or body_states
         ignored_names = set(ignored_change_names or set())
         if len(recurrence_states) != len(body_states):
+            self._last_structured_reduction_failure = {
+                "index": -1,
+                "line": None,
+                "reason": "do_while_loop_summary_failed",
+                "detail": (
+                    "recurrence_state_length_mismatch:"
+                    f"{len(recurrence_states)}!={len(body_states)}"
+                ),
+            }
             return None
 
         for recurrence_bindings, _body_conditions, _body_nonnegative_vars in recurrence_states:
@@ -4671,6 +4783,12 @@ class ReturnAnalyzer:
             )
         if len(changed_union) > 1:
             if recurrence_body_states is None or recurrence_base_bindings is None:
+                self._last_structured_reduction_failure = {
+                    "index": -1,
+                    "line": None,
+                    "reason": "do_while_loop_summary_failed",
+                    "detail": f"multi_var_without_symbolic_recurrence:{sorted(changed_union)}",
+                }
                 return None
             return self._summarize_structured_reduction_multi_var_cases(
                 base_bindings,
@@ -4699,6 +4817,12 @@ class ReturnAnalyzer:
                 counter_replacement=start_expr,
             )
             if rewritten_conditions is None:
+                self._last_structured_reduction_failure = {
+                    "index": -1,
+                    "line": None,
+                    "reason": "do_while_loop_summary_failed",
+                    "detail": f"condition_rewrite_failed:{counter_name}",
+                }
                 return None
 
             new_bindings = dict(base_bindings)
@@ -4706,6 +4830,12 @@ class ReturnAnalyzer:
                 before_value = base_bindings.get(acc_name)
                 after_value = recurrence_bindings.get(acc_name, recurrence_base.get(acc_name))
                 if before_value is None or after_value is None:
+                    self._last_structured_reduction_failure = {
+                        "index": -1,
+                        "line": None,
+                        "reason": "do_while_loop_summary_failed",
+                        "detail": f"missing_acc_binding:{acc_name}",
+                    }
                     return None
 
                 delta_expr = self._structured_extract_additive_delta(
@@ -4713,6 +4843,12 @@ class ReturnAnalyzer:
                     recurrence_base[acc_name],
                 )
                 if delta_expr is None:
+                    self._last_structured_reduction_failure = {
+                        "index": -1,
+                        "line": None,
+                        "reason": "do_while_loop_summary_failed",
+                        "detail": f"delta_extraction_failed:{acc_name}",
+                    }
                     return None
                 if (
                     rewritten_conditions == []
@@ -4730,6 +4866,12 @@ class ReturnAnalyzer:
                     counter_step=counter_step,
                 )
                 if summed_delta is None:
+                    self._last_structured_reduction_failure = {
+                        "index": -1,
+                        "line": None,
+                        "reason": "do_while_loop_summary_failed",
+                        "detail": f"delta_summation_failed:{acc_name}",
+                    }
                     return None
 
                 updated_value = Expression.binary_op(
@@ -4805,6 +4947,12 @@ class ReturnAnalyzer:
                 counter_replacement=start_expr,
             )
             if rewritten_conditions is None:
+                self._last_structured_reduction_failure = {
+                    "index": -1,
+                    "line": None,
+                    "reason": "do_while_loop_summary_failed",
+                    "detail": f"multi_var_condition_rewrite_failed:{counter_name}",
+                }
                 return None
 
             changed_names = [
@@ -4835,6 +4983,12 @@ class ReturnAnalyzer:
                     after_symbolic = recurrence_bindings.get(name)
                     before_concrete = base_bindings.get(name)
                     if before_symbolic is None or after_symbolic is None or before_concrete is None:
+                        self._last_structured_reduction_failure = {
+                            "index": -1,
+                            "line": None,
+                            "reason": "do_while_loop_summary_failed",
+                            "detail": f"multi_var_missing_binding:{name}",
+                        }
                         return None
 
                     delta_expr = self._structured_extract_additive_delta(after_symbolic, before_symbolic)
@@ -4905,6 +5059,12 @@ class ReturnAnalyzer:
                     progress = True
 
                 if not progress:
+                    self._last_structured_reduction_failure = {
+                        "index": -1,
+                        "line": None,
+                        "reason": "do_while_loop_summary_failed",
+                        "detail": f"multi_var_stalled:{sorted(pending)}",
+                    }
                     return None
 
             new_bindings = dict(base_bindings)
@@ -5319,19 +5479,14 @@ class ReturnAnalyzer:
             getattr(limit_expr, "size", 0) or 0,
             4,
         )
-        if counter_step >= 0:
-            trip_count = Expression.binary_op(
-                "INT_SUB",
-                self._clone_expression(limit_expr),
-                self._clone_expression(start_expr),
-            )
-        else:
-            trip_count = Expression.binary_op(
-                "INT_SUB",
-                self._clone_expression(start_expr),
-                self._clone_expression(limit_expr),
-            )
-        trip_count.size = size
+        trip_count = self._structured_loop_trip_count_expr(
+            start_expr,
+            limit_expr,
+            counter_step,
+            size,
+        )
+        if trip_count is None:
+            return None
         triangular = self._structured_exact_triangular(trip_count, size)
 
         lead_term = Expression.binary_op(
@@ -5339,10 +5494,18 @@ class ReturnAnalyzer:
             self._clone_expression(trip_count),
             self._clone_expression(start_expr),
         )
-        if counter_step >= 0:
+        if counter_step == 1:
             sum_counter = Expression.binary_op("INT_ADD", lead_term, triangular)
-        else:
+        elif counter_step == -1:
             sum_counter = Expression.binary_op("INT_SUB", lead_term, triangular)
+        else:
+            step_term = Expression.binary_op(
+                "INT_MULT",
+                Expression.constant(counter_step, size),
+                triangular,
+            )
+            step_term.size = size
+            sum_counter = Expression.binary_op("INT_ADD", lead_term, step_term)
         sum_counter.size = size
 
         terms = []
@@ -5357,6 +5520,109 @@ class ReturnAnalyzer:
             bias_term.size = size
             terms.append(bias_term)
         return self._structured_sum_terms(terms)
+
+    def _structured_loop_trip_count_expr(
+        self,
+        start_expr: Expression,
+        limit_expr: Expression,
+        counter_step: int,
+        size: int,
+    ) -> Optional[Expression]:
+        if counter_step > 0:
+            distance = Expression.binary_op(
+                "INT_SUB",
+                self._clone_expression(limit_expr),
+                self._clone_expression(start_expr),
+            )
+        else:
+            distance = Expression.binary_op(
+                "INT_SUB",
+                self._clone_expression(start_expr),
+                self._clone_expression(limit_expr),
+            )
+        distance.size = size
+        step_magnitude = abs(int(counter_step))
+        if step_magnitude == 1:
+            return distance
+        return self._structured_exact_divide_by_constant(distance, step_magnitude, size)
+
+    def _structured_exact_divide_by_constant(
+        self,
+        expr: Expression,
+        divisor: int,
+        size: int,
+    ) -> Optional[Expression]:
+        if divisor <= 0:
+            return None
+        if divisor == 1:
+            cloned = self._clone_expression(expr)
+            cloned.size = size
+            return cloned
+        if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
+            value = int(expr.value)
+            if value % divisor != 0:
+                return None
+            return Expression.constant(value // divisor, size)
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            if expr.operator in {"COPY", "INT_SEXT", "INT_ZEXT"}:
+                return self._structured_exact_divide_by_constant(expr.operands[0], divisor, size)
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left_expr, right_expr = expr.operands
+            if expr.operator in {"INT_ADD", "INT_SUB"}:
+                left_div = self._structured_exact_divide_by_constant(left_expr, divisor, size)
+                right_div = self._structured_exact_divide_by_constant(right_expr, divisor, size)
+                if left_div is not None and right_div is not None:
+                    divided = Expression.binary_op(expr.operator, left_div, right_div)
+                    divided.size = size
+                    return divided
+            if expr.operator == "INT_MULT":
+                left_const = self._evaluate_wrapper_constant(left_expr)
+                right_const = self._evaluate_wrapper_constant(right_expr)
+                if left_const is not None and left_const % divisor == 0:
+                    divided = Expression.binary_op(
+                        "INT_MULT",
+                        Expression.constant(left_const // divisor, size),
+                        self._clone_expression(right_expr),
+                    )
+                    divided.size = size
+                    return divided
+                if right_const is not None and right_const % divisor == 0:
+                    divided = Expression.binary_op(
+                        "INT_MULT",
+                        self._clone_expression(left_expr),
+                        Expression.constant(right_const // divisor, size),
+                    )
+                    divided.size = size
+                    return divided
+            if expr.operator == "INT_LEFT":
+                shift_value = self._evaluate_wrapper_constant(right_expr)
+                if shift_value is not None and shift_value >= 0 and divisor & (divisor - 1) == 0:
+                    divisor_shift = divisor.bit_length() - 1
+                    if int(shift_value) >= divisor_shift:
+                        remaining_shift = int(shift_value) - divisor_shift
+                        if remaining_shift == 0:
+                            divided = self._clone_expression(left_expr)
+                            divided.size = size
+                            return divided
+                        divided = Expression.binary_op(
+                            "INT_LEFT",
+                            self._clone_expression(left_expr),
+                            Expression.constant(remaining_shift, max(1, right_expr.size or 4)),
+                        )
+                        divided.size = size
+                        return divided
+            if expr.operator == "INT_AND" and divisor & (divisor - 1) == 0:
+                mask_value = self._evaluate_wrapper_constant(right_expr)
+                if mask_value is not None and (int(mask_value) & (divisor - 1)) == 0:
+                    shift_bits = divisor.bit_length() - 1
+                    divided = Expression.binary_op(
+                        "INT_RIGHT",
+                        self._clone_expression(expr),
+                        Expression.constant(shift_bits, max(1, right_expr.size or 4)),
+                    )
+                    divided.size = size
+                    return divided
+        return None
 
     def _structured_exact_triangular(
         self,
@@ -5500,17 +5766,48 @@ class ReturnAnalyzer:
 
     def _normalize_wrapper_c_lines(self, c_text: str) -> List[str]:
         normalized: List[str] = []
+        pending: Optional[str] = None
         for raw_line in c_text.splitlines():
             line = re.sub(r"/\*.*?\*/", "", raw_line)
             line = line.split("//", 1)[0].strip()
             if not line:
                 continue
             split_transition = self._split_wrapper_control_transition_line(line)
-            if split_transition is not None:
-                normalized.extend(split_transition)
-                continue
-            normalized.append(line)
+            pieces = split_transition if split_transition is not None else [line]
+            for piece in pieces:
+                if pending:
+                    pending = f"{pending} {piece.strip()}".strip()
+                else:
+                    pending = piece.strip()
+                if self._is_complete_wrapper_c_statement(pending):
+                    normalized.append(pending)
+                    pending = None
+        if pending:
+            normalized.append(pending)
         return normalized
+
+    def _is_complete_wrapper_c_statement(self, line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if stripped in {"{", "}"}:
+            return True
+        if self._wrapper_c_delimiter_balance(stripped) != 0:
+            return False
+        if stripped.endswith((";", "{", "}")):
+            return True
+        if stripped in {"do", "else"}:
+            return False
+        return False
+
+    def _wrapper_c_delimiter_balance(self, text: str) -> int:
+        depth = 0
+        for char in text:
+            if char in "([":
+                depth += 1
+            elif char in ")]":
+                depth -= 1
+        return depth
 
     def _split_wrapper_control_transition_line(self, line: str) -> Optional[List[str]]:
         else_if_match = re.fullmatch(r"\}\s*else\s+if\s*\((.+)\)\s*\{", line)

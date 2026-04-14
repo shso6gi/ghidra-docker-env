@@ -207,6 +207,298 @@ def test_normalize_expression_removes_sign_extension_for_nonnegative_shift_count
     ]
 
 
+def test_normalize_expression_extracts_high_half_from_shifted_piece():
+    high = make_param("param_hi", size=4)
+    low = make_param("param_lo", size=4)
+    piece = Expression(
+        ExpressionType.BINARY_OP,
+        operator="PIECE",
+        operands=[high, low],
+        size=8,
+    )
+    shifted = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[piece, make_const(32, size=8)],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="SUBPIECE",
+        operands=[shifted, make_const(0, size=4)],
+        size=4,
+    )
+
+    context = NormalizationContext()
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.to_smt() == high.to_smt()
+    assert any(
+        rule.rule_name == "WIDTH_ADAPTER_SIMPLIFICATION"
+        for rule in context.applied_rules
+    )
+
+
+def test_normalize_expression_extracts_high_subpiece_from_piece() -> None:
+    high = make_param("param_hi", size=4)
+    low = make_param("param_lo", size=4)
+    piece = Expression(
+        ExpressionType.BINARY_OP,
+        operator="PIECE",
+        operands=[high, low],
+        size=8,
+    )
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="SUBPIECE",
+        operands=[piece, make_const(4, size=4)],
+        size=4,
+    )
+
+    context = NormalizationContext()
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.to_smt() == high.to_smt()
+    assert any(
+        rule.rule_name == "WIDTH_ADAPTER_SIMPLIFICATION"
+        for rule in context.applied_rules
+    )
+
+
+def test_normalize_expression_reconstructs_masked_bytes_when_positive_guard_proven():
+    param_2 = make_param("param_2")
+    value = make_param("param_1")
+
+    compare = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SLESS",
+        operands=[make_const(0), param_2],
+        size=1,
+    )
+    full_mask = Expression.unary_op("INT_2COMP", compare)
+    full_mask.size = 4
+
+    def _byte(expr: Expression, offset: int) -> Expression:
+        byte_expr = Expression(
+            ExpressionType.BINARY_OP,
+            operator="SUBPIECE",
+            operands=[expr, make_const(offset)],
+            size=1,
+        )
+        byte_expr.size = 1
+        return byte_expr
+
+    masked_bytes = []
+    for offset in range(3, -1, -1):
+        masked = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_AND",
+            operands=[_byte(value, offset), _byte(full_mask, offset)],
+            size=1,
+        )
+        masked.size = 1
+        masked_bytes.append(masked)
+
+    reconstructed = Expression(
+        ExpressionType.BINARY_OP,
+        operator="PIECE",
+        operands=[
+            masked_bytes[0],
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="PIECE",
+                operands=[
+                    masked_bytes[1],
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="PIECE",
+                        operands=[masked_bytes[2], masked_bytes[3]],
+                        size=2,
+                    ),
+                ],
+                size=3,
+            ),
+        ],
+        size=4,
+    )
+    reconstructed.size = 4
+
+    context = NormalizationContext(
+        pos_vars={"param_2"},
+        nonneg_vars={"param_2"},
+        nonzero_vars={"param_2"},
+    )
+
+    normalized = normalize_expression(reconstructed, context)
+
+    assert normalized.to_smt() in {
+        value.to_smt(),
+        f"((_ extract 31 0) {value.to_smt()})",
+    }
+    assert any(
+        rule.rule_name == "FACT_MASK_SIMPLIFICATION"
+        for rule in context.applied_rules
+    )
+    assert any(
+        rule.rule_name == "BYTE_RECONSTRUCTION"
+        for rule in context.applied_rules
+    )
+
+
+def test_normalize_expression_collapses_logical_shift_past_width_to_zero():
+    param = make_param("param_1", size=4)
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[param, make_const(32, size=4)],
+        size=4,
+    )
+
+    context = NormalizationContext()
+    normalized = normalize_expression(expr, context)
+
+    assert normalized.expr_type == ExpressionType.CONSTANT
+    assert int(normalized.value) == 0
+    assert any(
+        rule.rule_name == "SHIFT_BOUND_SIMPLIFICATION"
+        for rule in context.applied_rules
+    )
+
+
+def test_normalize_expression_reconstructs_bytes_with_commuted_masked_sources() -> None:
+    param = make_param("param_1")
+    all_ones = make_const(0xFFFFFFFF)
+
+    def _wrapped_byte(offset: int, reverse_mask_order: bool) -> Expression:
+        source = Expression(
+            ExpressionType.BINARY_OP,
+            operator="SUBPIECE",
+            operands=[param, make_const(offset)],
+            size=1,
+        )
+        source.size = 1
+        mask_byte = Expression(
+            ExpressionType.BINARY_OP,
+            operator="SUBPIECE",
+            operands=[all_ones, make_const(offset)],
+            size=1,
+        )
+        mask_byte.size = 1
+        left, right = (source, mask_byte)
+        if reverse_mask_order:
+            left, right = right, left
+        masked = Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_AND",
+            operands=[left, right],
+            size=1,
+        )
+        masked.size = 1
+        return masked
+
+    reconstructed = Expression(
+        ExpressionType.BINARY_OP,
+        operator="PIECE",
+        operands=[
+            _wrapped_byte(3, False),
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="PIECE",
+                operands=[
+                    _wrapped_byte(2, True),
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="PIECE",
+                        operands=[_wrapped_byte(1, False), _wrapped_byte(0, True)],
+                        size=2,
+                    ),
+                ],
+                size=3,
+            ),
+        ],
+        size=4,
+    )
+    reconstructed.size = 4
+
+    context = NormalizationContext()
+    normalized = normalize_expression(reconstructed, context)
+
+    assert normalized.to_smt() in {
+        param.to_smt(),
+        f"((_ extract 31 0) {param.to_smt()})",
+    }
+    assert any(
+        rule.rule_name == "BYTE_RECONSTRUCTION"
+        for rule in context.applied_rules
+    )
+
+
+def test_normalize_expression_reconstructs_shifted_piece_bytes_then_simplifies_high_half() -> None:
+    high = make_param("param_hi", size=4)
+    low = make_param("param_lo", size=4)
+    source = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_RIGHT",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="PIECE",
+                operands=[high, low],
+                size=8,
+            ),
+            make_const(32, size=8),
+        ],
+        size=8,
+    )
+
+    bytes_expr = []
+    for offset in range(3, -1, -1):
+        byte_expr = Expression(
+            ExpressionType.BINARY_OP,
+            operator="SUBPIECE",
+            operands=[source, make_const(offset, size=4)],
+            size=1,
+        )
+        byte_expr.size = 1
+        bytes_expr.append(byte_expr)
+
+    reconstructed = Expression(
+        ExpressionType.BINARY_OP,
+        operator="PIECE",
+        operands=[
+            bytes_expr[0],
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="PIECE",
+                operands=[
+                    bytes_expr[1],
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="PIECE",
+                        operands=[bytes_expr[2], bytes_expr[3]],
+                        size=2,
+                    ),
+                ],
+                size=3,
+            ),
+        ],
+        size=4,
+    )
+
+    context = NormalizationContext()
+    normalized = normalize_expression(reconstructed, context)
+
+    assert normalized.to_smt() == high.to_smt()
+    assert any(
+        rule.rule_name == "BYTE_RECONSTRUCTION"
+        for rule in context.applied_rules
+    )
+    assert any(
+        rule.rule_name == "WIDTH_ADAPTER_SIMPLIFICATION"
+        for rule in context.applied_rules
+    )
+
+
 def test_normalize_expression_canonicalizes_sub_and_add_neg_to_same_form():
     lhs = make_param("param_1")
     rhs = make_param("param_2")

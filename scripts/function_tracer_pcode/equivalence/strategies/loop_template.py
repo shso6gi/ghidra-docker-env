@@ -9,6 +9,7 @@ from copy import deepcopy
 from ..loop_template_abstraction import prove_template_equivalence
 from ..normalize.context import NormalizationContext
 from ..normalize.core import normalize_expression
+from ..normalize.facts import extract_sign_facts
 from ...model import Condition, Expression, ExpressionType
 from .pairwise import PairwiseStrategy
 from .pairwise_models import QueryResult, ReturnCase
@@ -81,55 +82,341 @@ def _normalize_values_under_exact_conditions(
     value2: Expression,
     conditions: Iterable[Condition],
 ) -> tuple[Expression, Expression]:
-    replacements = _extract_exact_constant_replacements(conditions)
-    if not replacements:
-        return value1, value2
+    replacements, expr_replacements = _extract_exact_constant_replacements(conditions)
+    sign_facts = extract_sign_facts(list(conditions), debug=False)
+    norm_context = NormalizationContext(
+        nonneg_vars=set(sign_facts.nonneg_vars),
+        pos_vars=set(sign_facts.pos_vars),
+        neg_vars=set(sign_facts.neg_vars),
+        nonzero_vars=set(sign_facts.nonzero_vars),
+        nonneg_exprs=set(sign_facts.nonneg_exprs),
+        pos_exprs=set(sign_facts.pos_exprs),
+        neg_exprs=set(sign_facts.neg_exprs),
+        nonzero_exprs=set(sign_facts.nonzero_exprs),
+        upper_bounds=dict(sign_facts.upper_bounds),
+    )
+    if not replacements and not expr_replacements:
+        return (
+            normalize_expression(value1, norm_context),
+            normalize_expression(value2, norm_context),
+        )
 
     normalized1 = normalize_expression(
-        _substitute_exact_replacements(value1, replacements),
-        NormalizationContext(),
+        _substitute_exact_replacements(value1, replacements, expr_replacements),
+        norm_context,
     )
     normalized2 = normalize_expression(
-        _substitute_exact_replacements(value2, replacements),
-        NormalizationContext(),
+        _substitute_exact_replacements(value2, replacements, expr_replacements),
+        norm_context,
     )
     return normalized1, normalized2
 
 
 def _extract_exact_constant_replacements(
     conditions: Iterable[Condition],
-) -> dict[str, Expression]:
+) -> tuple[dict[str, Expression], dict[str, Expression]]:
     replacements: dict[str, Expression] = {}
+    expr_replacements: dict[str, Expression] = {}
     conflicts: set[str] = set()
-    for condition in conditions:
-        if condition is None or condition.negated:
-            continue
-        expr = condition.expression
-        if (
-            expr.expr_type != ExpressionType.BINARY_OP
-            or expr.operator != "INT_EQUAL"
-            or len(expr.operands) != 2
-        ):
-            continue
+    expr_conflicts: set[str] = set()
+    expr_fact_exprs: dict[str, Expression] = {}
 
+    normalized_conditions = [
+        _normalize_exact_fact_condition(condition) for condition in conditions
+    ]
+
+    for condition in normalized_conditions:
+        if condition is None:
+            continue
+        for fact_expr, constant in _extract_expr_constant_facts(condition.expression):
+            expr_key = _expr_key(fact_expr)
+            if expr_key is None:
+                continue
+            existing = expr_replacements.get(expr_key)
+            if existing is not None and existing.to_smt() != constant.to_smt():
+                expr_conflicts.add(expr_key)
+                expr_replacements.pop(expr_key, None)
+                expr_fact_exprs.pop(expr_key, None)
+                continue
+            if expr_key not in expr_conflicts:
+                expr_replacements[expr_key] = constant
+                expr_fact_exprs[expr_key] = fact_expr
+
+    changed = True
+    while changed:
+        changed = False
+        for expr_key, constant in list(expr_replacements.items()):
+            fact_expr = expr_fact_exprs.get(expr_key)
+            if fact_expr is None:
+                continue
+            symbol = _extract_replacement_symbol(fact_expr)
+            if symbol is not None and symbol not in conflicts:
+                existing = replacements.get(symbol)
+                if existing is None:
+                    replacements[symbol] = constant
+                    changed = True
+                elif existing.to_smt() != constant.to_smt():
+                    conflicts.add(symbol)
+                    replacements.pop(symbol, None)
+                    changed = True
+
+        for condition in normalized_conditions:
+            if condition is None:
+                continue
+            derived = _derive_symbol_replacement_from_condition(
+                condition.expression,
+                replacements,
+                expr_replacements,
+            )
+            if derived is None:
+                continue
+            symbol, constant = derived
+            if symbol in conflicts:
+                continue
+            existing = replacements.get(symbol)
+            if existing is None:
+                replacements[symbol] = constant
+                changed = True
+                continue
+            if existing.to_smt() != constant.to_smt():
+                conflicts.add(symbol)
+                replacements.pop(symbol, None)
+                changed = True
+
+    for conflict in conflicts:
+        replacements.pop(conflict, None)
+
+    return replacements, expr_replacements
+
+
+def _normalize_exact_fact_condition(condition: Condition | None) -> Condition | None:
+    if condition is None:
+        return None
+    if not condition.negated:
+        return condition
+
+    expr = condition.expression
+    if (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and len(expr.operands) == 2
+    ):
+        if expr.operator == "INT_NOTEQUAL":
+            rewritten = Expression.binary_op("INT_EQUAL", expr.operands[0], expr.operands[1])
+            rewritten.size = expr.size
+            return Condition(rewritten, False)
+        if expr.operator == "INT_EQUAL":
+            rewritten = Expression.binary_op("INT_NOTEQUAL", expr.operands[0], expr.operands[1])
+            rewritten.size = expr.size
+            return Condition(rewritten, False)
+
+    return condition
+
+
+def _extract_expr_constant_facts(
+    expr: Expression,
+) -> list[tuple[Expression, Expression]]:
+    if (
+        expr.expr_type != ExpressionType.BINARY_OP
+        or expr.operator != "INT_EQUAL"
+        or len(expr.operands) != 2
+    ):
+        return []
+
+    left, right = expr.operands
+    facts: list[tuple[Expression, Expression]] = []
+    facts.extend(_extract_side_equals_constant(left, right))
+    facts.extend(_extract_side_equals_constant(right, left))
+    return facts
+
+
+def _extract_side_equals_constant(
+    side: Expression,
+    other: Expression,
+) -> list[tuple[Expression, Expression]]:
+    constant = _extract_replacement_constant(other)
+    if constant is None:
+        return []
+
+    facts: list[tuple[Expression, Expression]] = [(side, constant)]
+    if (
+        side.expr_type == ExpressionType.BINARY_OP
+        and len(side.operands) == 2
+        and side.operator in {"INT_ADD", "INT_SUB"}
+    ):
+        left, right = side.operands
+        right_const = _extract_replacement_constant(right)
+        left_const = _extract_replacement_constant(left)
+        if side.operator == "INT_ADD":
+            if right_const is not None:
+                facts.append((left, Expression.constant(int(constant.value) - int(right_const.value), size=constant.size)))
+            if left_const is not None:
+                facts.append((right, Expression.constant(int(constant.value) - int(left_const.value), size=constant.size)))
+        if side.operator == "INT_SUB":
+            if right_const is not None:
+                facts.append((left, Expression.constant(int(constant.value) + int(right_const.value), size=constant.size)))
+            if left_const is not None:
+                facts.append((right, Expression.constant(int(left_const.value) - int(constant.value), size=constant.size)))
+    return facts
+
+
+def _derive_symbol_replacement_from_condition(
+    expr: Expression,
+    replacements: dict[str, Expression],
+    expr_replacements: dict[str, Expression],
+) -> tuple[str, Expression] | None:
+    if (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator == "INT_EQUAL"
+        and len(expr.operands) == 2
+    ):
         left, right = expr.operands
-        symbol = _extract_replacement_symbol(left)
-        constant = _extract_replacement_constant(right)
-        if symbol is None or constant is None:
-            symbol = _extract_replacement_symbol(right)
-            constant = _extract_replacement_constant(left)
-        if symbol is None or constant is None:
-            continue
+        left_symbol = _extract_replacement_symbol(left)
+        right_symbol = _extract_replacement_symbol(right)
+        left_known = _lookup_known_constant(left, replacements, expr_replacements)
+        right_known = _lookup_known_constant(right, replacements, expr_replacements)
+        if left_symbol is not None and right_known is not None:
+            return left_symbol, right_known
+        if right_symbol is not None and left_known is not None:
+            return right_symbol, left_known
+    for fact_expr, constant in _extract_expr_constant_facts(expr):
+        derived = _derive_symbol_replacement_from_fact(
+            fact_expr,
+            constant,
+            replacements,
+            expr_replacements,
+        )
+        if derived is not None:
+            return derived
+    return None
 
-        existing = replacements.get(symbol)
-        if existing is not None and existing.to_smt() != constant.to_smt():
-            conflicts.add(symbol)
-            replacements.pop(symbol, None)
-            continue
-        if symbol not in conflicts:
-            replacements[symbol] = constant
 
-    return replacements
+def _derive_symbol_replacement_from_fact(
+    fact_expr: Expression,
+    constant: Expression,
+    replacements: dict[str, Expression],
+    expr_replacements: dict[str, Expression],
+) -> tuple[str, Expression] | None:
+    if (
+        fact_expr.expr_type != ExpressionType.BINARY_OP
+        or len(fact_expr.operands) != 2
+        or fact_expr.operator not in {"INT_ADD", "INT_SUB"}
+    ):
+        return None
+
+    left, right = fact_expr.operands
+    left_symbol = _extract_replacement_symbol(left)
+    right_symbol = _extract_replacement_symbol(right)
+    left_known = _lookup_known_constant(left, replacements, expr_replacements)
+    right_known = _lookup_known_constant(right, replacements, expr_replacements)
+
+    if fact_expr.operator == "INT_SUB":
+        if left_symbol is not None and right_known is not None:
+            return (
+                left_symbol,
+                Expression.constant(
+                    int(constant.value) + int(right_known.value),
+                    size=constant.size or right_known.size or 4,
+                ),
+            )
+        if right_symbol is not None and left_known is not None:
+            return (
+                right_symbol,
+                Expression.constant(
+                    int(left_known.value) - int(constant.value),
+                    size=left_known.size or constant.size or 4,
+                ),
+            )
+
+    if fact_expr.operator == "INT_ADD":
+        if left_symbol is not None and right_known is not None:
+            return (
+                left_symbol,
+                Expression.constant(
+                    int(constant.value) - int(right_known.value),
+                    size=constant.size or right_known.size or 4,
+                ),
+            )
+        if right_symbol is not None and left_known is not None:
+            return (
+                right_symbol,
+                Expression.constant(
+                    int(constant.value) - int(left_known.value),
+                    size=constant.size or left_known.size or 4,
+                ),
+            )
+    return None
+
+
+def _lookup_known_constant(
+    expr: Expression,
+    replacements: dict[str, Expression],
+    expr_replacements: dict[str, Expression],
+) -> Expression | None:
+    symbol = _extract_replacement_symbol(expr)
+    if symbol is not None:
+        replacement = replacements.get(symbol)
+        if replacement is not None:
+            return replacement
+    expr_key = _expr_key(expr)
+    if expr_key is None:
+        return None
+    return expr_replacements.get(expr_key)
+
+
+def _expr_key(expr: Expression) -> str | None:
+    def _canonical(expr: Expression) -> str:
+        if expr.expr_type == ExpressionType.CONSTANT:
+            return f"CONST:{int(expr.value)}:{expr.size or 0}"
+        if expr.expr_type in {
+            ExpressionType.PARAMETER,
+            ExpressionType.VARIABLE,
+            ExpressionType.LITERAL,
+        }:
+            return f"{expr.expr_type.name}:{expr.name}:{expr.size or 0}"
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            return f"UNARY:{expr.operator}:{_canonical(expr.operands[0])}:{expr.size or 0}"
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left_key = _canonical(expr.operands[0])
+            right_key = _canonical(expr.operands[1])
+            if expr.operator in {
+                "INT_ADD",
+                "INT_MULT",
+                "INT_AND",
+                "INT_OR",
+                "INT_XOR",
+                "INT_EQUAL",
+                "INT_NOTEQUAL",
+            }:
+                left_key, right_key = sorted((left_key, right_key))
+            return f"BINARY:{expr.operator}:{left_key}:{right_key}:{expr.size or 0}"
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branch_keys = []
+            for condition, value in expr.value:
+                cond_key = "None"
+                if condition is not None:
+                    cond_key = f"{_canonical(condition.expression)}:{int(bool(condition.negated))}"
+                branch_keys.append(f"{cond_key}->{_canonical(value)}")
+            return f"PHI:{'|'.join(branch_keys)}:{expr.size or 0}"
+        try:
+            return expr.to_smt()
+        except Exception:
+            return repr(expr)
+
+    try:
+        normalized = normalize_expression(expr, NormalizationContext())
+        return _canonical(normalized)
+    except Exception:
+        try:
+            normalized = normalize_expression(expr, NormalizationContext())
+            return _canonical(normalized)
+        except Exception:
+            try:
+                return _canonical(expr)
+            except Exception:
+                try:
+                    return expr.to_string()
+                except Exception:
+                    return None
 
 
 def _extract_replacement_symbol(expr: Expression) -> str | None:
@@ -167,7 +454,17 @@ def _extract_replacement_constant(expr: Expression) -> Expression | None:
 def _substitute_exact_replacements(
     expr: Expression,
     replacements: dict[str, Expression],
+    expr_replacements: dict[str, Expression],
 ) -> Expression:
+    expr_key = _expr_key(expr)
+    if expr_key is not None:
+        replacement = expr_replacements.get(expr_key)
+        if replacement is not None:
+            cloned = deepcopy(replacement)
+            if expr.size and cloned.size != expr.size:
+                cloned.size = expr.size
+            return cloned
+
     if expr.expr_type in {
         ExpressionType.PARAMETER,
         ExpressionType.VARIABLE,
@@ -187,10 +484,18 @@ def _substitute_exact_replacements(
             rebuilt_branches.append(
                 (
                     Condition(
-                        _substitute_exact_replacements(condition.expression, replacements),
+                        _substitute_exact_replacements(
+                            condition.expression,
+                            replacements,
+                            expr_replacements,
+                        ),
                         condition.negated,
                     ),
-                    _substitute_exact_replacements(value, replacements),
+                    _substitute_exact_replacements(
+                        value,
+                        replacements,
+                        expr_replacements,
+                    ),
                 )
             )
         rebuilt = Expression.phi(rebuilt_branches)
@@ -209,7 +514,11 @@ def _substitute_exact_replacements(
         value=expr.value,
         operator=expr.operator,
         operands=[
-            _substitute_exact_replacements(operand, replacements)
+            _substitute_exact_replacements(
+                operand,
+                replacements,
+                expr_replacements,
+            )
             for operand in expr.operands
         ],
         size=expr.size,
@@ -218,6 +527,14 @@ def _substitute_exact_replacements(
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
     )
+    rebuilt_key = _expr_key(rebuilt)
+    if rebuilt_key is not None:
+        replacement = expr_replacements.get(rebuilt_key)
+        if replacement is not None:
+            cloned = deepcopy(replacement)
+            if rebuilt.size and cloned.size != rebuilt.size:
+                cloned.size = rebuilt.size
+            return cloned
     return rebuilt
 
 

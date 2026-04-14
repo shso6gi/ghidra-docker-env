@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.transform.rewrite import (
     ExpressionRewriter,
     rewrite_analysis_returns,
 )
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 
 def _param(name: str) -> Expression:
@@ -244,3 +245,70 @@ def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
     assert result.total_pairs == 1
     assert result.unknown_pairs == 1
     solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
+    selector = Condition(_binary("INT_SLESS", _const(0), _param("param_1")))
+    other_selector = selector.negate()
+    phi_value = Expression.phi(
+        [
+            (selector, _const(1)),
+            (other_selector, Expression.unknown("phi_circular")),
+        ]
+    )
+    phi_value.size = 8
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="f1",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=phi_value,
+                conditions=[selector],
+            )
+        ],
+        return_type="long",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="f2",
+        entry_point="0x2000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x2001",
+                value=_const(1),
+                conditions=[selector],
+            )
+        ],
+        return_type="long",
+    )
+
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+    }
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+
+    def _run_sequential(query: str):
+        if "Single Case Reachability" in query:
+            return ParallelResult(results=[SolverResult("mock", SolverStatus.SAT, elapsed_time=0.01)])
+        if "; Value inequality" in query:
+            return ParallelResult(results=[SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.01)])
+        return ParallelResult(results=[SolverResult("mock", SolverStatus.SAT, elapsed_time=0.01)])
+
+    solver_runner.run_sequential.side_effect = _run_sequential
+
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0

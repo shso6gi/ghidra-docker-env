@@ -14,6 +14,8 @@ def normalize_width_adapters(
 
     if expr.expr_type == ExpressionType.UNARY_OP:
         simplified = _normalize_extension(expr)
+    elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator in {"INT_RIGHT", "INT_SRIGHT"}:
+        simplified = _normalize_shifted_piece(expr)
     elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_AND":
         simplified = _normalize_low_mask(expr)
     elif expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "SUBPIECE":
@@ -64,26 +66,107 @@ def _normalize_subpiece(expr: Expression) -> Expression:
         return expr
 
     source, offset = expr.operands
-    if offset.expr_type != ExpressionType.CONSTANT or int(offset.value) != 0:
+    if offset.expr_type != ExpressionType.CONSTANT:
         return expr
 
     target_size = expr.size or 0
-    if source.size and target_size and source.size == target_size:
+    byte_offset = int(offset.value)
+
+    if byte_offset == 0 and source.size and target_size and source.size == target_size:
         return source
 
-    if source.expr_type == ExpressionType.UNARY_OP and source.operator in {"INT_ZEXT", "INT_SEXT"} and source.operands:
+    if (
+        byte_offset == 0
+        and source.expr_type == ExpressionType.UNARY_OP
+        and source.operator in {"INT_ZEXT", "INT_SEXT"}
+        and source.operands
+    ):
         inner = source.operands[0]
         if inner.size and target_size and inner.size == target_size:
             return inner
 
-    if source.expr_type == ExpressionType.CONSTANT and target_size > 0:
+    if byte_offset == 0 and source.expr_type == ExpressionType.CONSTANT and target_size > 0:
         target_bits = target_size * 8
         value = int(source.value) & ((1 << target_bits) - 1)
         folded = Expression.constant(value, target_size)
         folded.size = target_size
         return folded
 
+    if (
+        source.expr_type == ExpressionType.BINARY_OP
+        and source.operator == "PIECE"
+        and len(source.operands) == 2
+        and source.operands[0].size
+        and source.operands[1].size
+        and target_size > 0
+    ):
+        high, low = source.operands
+        low_size = low.size
+        high_size = high.size
+
+        if byte_offset == 0 and target_size <= low_size:
+            if target_size == low_size:
+                return low
+            truncated = Expression.binary_op("SUBPIECE", low, Expression.constant(0, 4))
+            truncated.size = target_size
+            return truncated
+
+        if byte_offset >= low_size:
+            high_offset = byte_offset - low_size
+            if high_offset == 0 and target_size <= high_size:
+                if target_size == high_size:
+                    return high
+                truncated = Expression.binary_op("SUBPIECE", high, Expression.constant(0, 4))
+                truncated.size = target_size
+                return truncated
+            if high_offset > 0 and high_offset < high_size and high_offset + target_size <= high_size:
+                truncated = Expression.binary_op("SUBPIECE", high, Expression.constant(high_offset, 4))
+                truncated.size = target_size
+                return truncated
+
     return expr
+
+
+def _normalize_shifted_piece(expr: Expression) -> Expression:
+    if len(expr.operands) != 2:
+        return expr
+
+    source, amount = expr.operands
+    if (
+        amount.expr_type != ExpressionType.CONSTANT
+        or source.expr_type != ExpressionType.BINARY_OP
+        or source.operator != "PIECE"
+        or len(source.operands) != 2
+    ):
+        return expr
+
+    high, low = source.operands
+    if not high.size or not low.size:
+        return expr
+
+    shift_bits = int(amount.value)
+    low_bits = low.size * 8
+    if shift_bits < low_bits or shift_bits % 8 != 0:
+        return expr
+
+    remaining_bits = shift_bits - low_bits
+    if remaining_bits == 0:
+        if expr.size == high.size:
+            return high
+        widened = Expression.unary_op("INT_ZEXT", high)
+        widened.size = expr.size or source.size or high.size
+        return widened
+
+    if remaining_bits % 8 != 0:
+        return expr
+
+    shifted_high = Expression.binary_op(
+        expr.operator,
+        high,
+        Expression.constant(remaining_bits, size=amount.size or 4),
+    )
+    shifted_high.size = expr.size or high.size
+    return shifted_high
 
 
 def _normalize_low_mask(expr: Expression) -> Expression:

@@ -191,6 +191,36 @@ def test_prove_template_equivalence_matches_generic_atoms_after_width_normalizat
     assert proved, reason
 
 
+def test_prove_template_equivalence_extracts_high_half_from_shifted_piece() -> None:
+    high = _param("param_hi")
+    low = _param("param_lo")
+    piece = Expression.binary_op("PIECE", high, low)
+    piece.size = 8
+    shifted = Expression.binary_op("INT_RIGHT", piece, _const(32, size=8))
+    shifted.size = 8
+    lhs = Expression.binary_op("SUBPIECE", shifted, _const(0))
+    lhs.size = 4
+    rhs = high
+
+    proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
+
+    assert proved, reason
+
+
+def test_prove_template_equivalence_extracts_high_subpiece_from_piece() -> None:
+    high = _param("param_hi")
+    low = _param("param_lo")
+    piece = Expression.binary_op("PIECE", high, low)
+    piece.size = 8
+    lhs = Expression.binary_op("SUBPIECE", piece, _const(4))
+    lhs.size = 4
+    rhs = high
+
+    proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
+
+    assert proved, reason
+
+
 def test_prove_template_equivalence_recognizes_wrapped_exact_triangular_phi() -> None:
     p1 = _param("param_1")
     prev = _sub(p1, _const(1))
@@ -320,6 +350,171 @@ def test_loop_template_normalizes_additive_completion_under_exact_pair_condition
     )
 
     assert proved, reason
+
+
+def test_loop_template_uses_sign_facts_to_collapse_masked_byte_reconstruction() -> None:
+    p2 = _param("param_2")
+    tri_p2 = _exact_triangular(p2)
+
+    positive = Expression.binary_op("INT_SLESS", _const(0), p2)
+    positive.size = 1
+    full_mask = Expression.unary_op("INT_2COMP", positive)
+    full_mask.size = 4
+
+    def _byte(expr: Expression, offset: int) -> Expression:
+        byte_expr = Expression.binary_op("SUBPIECE", expr, _const(offset))
+        byte_expr.size = 1
+        return byte_expr
+
+    masked_bytes = []
+    for offset in range(3, -1, -1):
+        masked = Expression.binary_op("INT_AND", _byte(tri_p2, offset), _byte(full_mask, offset))
+        masked.size = 1
+        masked_bytes.append(masked)
+
+    rhs = Expression.binary_op(
+        "PIECE",
+        masked_bytes[0],
+        Expression.binary_op(
+            "PIECE",
+            masked_bytes[1],
+            Expression.binary_op("PIECE", masked_bytes[2], masked_bytes[3]),
+        ),
+    )
+    rhs.size = 4
+
+    norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
+        tri_p2,
+        rhs,
+        [Condition(positive, False)],
+    )
+    proved, reason = prove_template_equivalence(
+        norm_lhs,
+        norm_rhs,
+        target_bits=32,
+        debug=True,
+    )
+
+    assert proved, reason
+
+
+def test_loop_template_derives_exact_parameter_from_mask_and_residual_conditions() -> None:
+    p1 = _param("param_1")
+    mask_expr = Expression.binary_op("INT_AND", _const(0xFFFFFFF8), p1)
+    mask_expr.size = 4
+    residual_expr = Expression.binary_op("INT_SUB", p1, mask_expr)
+    residual_expr.size = 4
+
+    masked_equals_eight = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_SUB", mask_expr, _const(8)),
+        _const(0),
+    )
+    masked_equals_eight.operands[0].size = 4
+    masked_equals_eight.size = 1
+
+    residual_equals_one = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr),
+        _const(0),
+    )
+    residual_equals_one.operands[0].size = 4
+    residual_equals_one.size = 1
+
+    norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
+        p1,
+        _const(9),
+        [Condition(masked_equals_eight, False), Condition(residual_equals_one, False)],
+    )
+
+    assert norm_lhs.to_smt() == _const(9).to_smt()
+    assert norm_rhs.to_smt() == _const(9).to_smt()
+
+
+def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions() -> None:
+    p1 = _param("param_1")
+    p2 = _param("param_2")
+    mask_expr = Expression.binary_op("INT_AND", _const(0xFFFFFFF8), p1)
+    mask_expr.size = 4
+    residual_expr = Expression.binary_op("INT_SUB", p1, mask_expr)
+    residual_expr.size = 4
+
+    masked_equals_eight = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_SUB", mask_expr, _const(8)),
+            _const(0),
+        ),
+        True,
+    )
+    masked_equals_eight.expression.operands[0].size = 4
+    masked_equals_eight.expression.size = 1
+
+    residual_equals_one = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr),
+            _const(0),
+        ),
+        True,
+    )
+    residual_equals_one.expression.operands[0].size = 4
+    residual_equals_one.expression.size = 1
+
+    norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
+        _mul(_exact_triangular(p1), _exact_triangular(p2)),
+        _mul(_const(45), _exact_triangular(p2)),
+        [masked_equals_eight, residual_equals_one],
+    )
+
+    assert norm_lhs.to_smt() == norm_rhs.to_smt()
+
+
+def test_loop_template_derives_exact_parameter_from_mask_equality_chain() -> None:
+    p1 = _param("param_1")
+    mask_expr = Expression.binary_op("INT_AND", p1, _const(0xFFFFFFF8))
+    mask_expr.size = 4
+
+    masked_equals_eight = Expression.binary_op(
+        "INT_EQUAL",
+        mask_expr,
+        _const(8),
+    )
+    masked_equals_eight.size = 1
+
+    param_equals_mask = Expression.binary_op("INT_EQUAL", p1, mask_expr)
+    param_equals_mask.size = 1
+
+    norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
+        _exact_triangular(p1),
+        _const(36),
+        [Condition(masked_equals_eight, False), Condition(param_equals_mask, False)],
+    )
+
+    assert norm_lhs.to_smt() == _const(36).to_smt()
+    assert norm_rhs.to_smt() == _const(36).to_smt()
+
+
+def test_loop_template_uses_commutatively_normalized_mask_fact_keys() -> None:
+    p1 = _param("param_1")
+    value_expr = Expression.binary_op("INT_AND", _const(0xFFFFFFF8), p1)
+    value_expr.size = 4
+    cond_expr = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_AND", p1, _const(0xFFFFFFF8)),
+        _const(8),
+    )
+    cond_expr.operands[0].size = 4
+    cond_expr.size = 1
+
+    norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
+        value_expr,
+        _const(8),
+        [Condition(cond_expr, False)],
+    )
+
+    assert norm_lhs.to_smt() == _const(8).to_smt()
+    assert norm_rhs.to_smt() == _const(8).to_smt()
 
 
 def test_loop_template_strategy_proves_equivalence_after_normalization_unknown() -> None:
