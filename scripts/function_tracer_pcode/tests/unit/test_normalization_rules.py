@@ -529,6 +529,35 @@ def test_normalize_expression_canonicalizes_exact_triangular_phi():
     assert normalized.to_smt() == expected.to_smt()
 
 
+def test_normalize_expression_canonicalizes_wrapped_exact_triangular_phi() -> None:
+    param = make_param("param_1", size=4)
+    param_prev = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_SUB",
+        operands=[param, make_const(1, size=4)],
+        size=4,
+    )
+    wrapped_base = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression.unary_op("INT_ZEXT", make_neg(make_const(0, size=4), size=4)),
+            Expression.unary_op("INT_SEXT", param_prev),
+        ],
+        size=8,
+    )
+    wrapped_base.operands[0].size = 8
+    wrapped_base.operands[1].size = 8
+    phi = _make_exact_triangular_phi(wrapped_base)
+    phi.size = 8
+
+    normalized = normalize_expression(phi, NormalizationContext())
+    smt = normalized.to_smt()
+    assert "ite" not in smt
+    assert "bvlshr" in smt
+    assert "bvmul" in smt
+
+
 def test_normalize_expression_canonicalizes_exact_phi_prev_plus_affine_completion():
     param = make_param("param_1", size=4)
     prev = Expression(
@@ -557,6 +586,58 @@ def test_normalize_expression_canonicalizes_exact_phi_prev_plus_affine_completio
                 size=4,
             ),
             make_neg(make_const(1, size=4), size=4),
+        ],
+        size=4,
+    )
+
+    normalized = normalize_expression(expr, NormalizationContext())
+
+    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+
+
+def test_normalize_expression_canonicalizes_logged_affine_exact_phi_completion():
+    param = make_param("param_1", size=4)
+    one = make_const(1, size=4)
+    two = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[one, one],
+        size=4,
+    )
+    base = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[one, param],
+                size=4,
+            ),
+            make_neg(two, size=4),
+        ],
+        size=4,
+    )
+    phi_prev = _make_exact_triangular_phi(base)
+    expr = Expression(
+        ExpressionType.BINARY_OP,
+        operator="INT_ADD",
+        operands=[
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_ADD",
+                operands=[
+                    phi_prev,
+                    Expression(
+                        ExpressionType.BINARY_OP,
+                        operator="INT_MULT",
+                        operands=[make_const(2, size=4), param],
+                        size=4,
+                    ),
+                ],
+                size=4,
+            ),
+            make_neg(one, size=4),
         ],
         size=4,
     )

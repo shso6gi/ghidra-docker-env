@@ -17,6 +17,7 @@ from .phases.handler import PhaseHandler, PhaseContext, PhaseResult
 from .reanalysis import analyze_and_check_with_analysis, selective_reanalysis_and_check
 from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies.pairwise import PairwiseStrategy
+from .strategies.loop_template import LoopTemplatePairwiseStrategy
 from .strategies.monolithic import MonolithicStrategy
 from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
@@ -31,6 +32,7 @@ from .workflow import run_check_from_binaries
 class StageID(Enum):
     """Stage識別子"""
     S_PAIRWISE = "S_PAIRWISE"
+    S_LOOP_TEMPLATE_ABSTRACTION = "S_LOOP_TEMPLATE_ABSTRACTION"
     S_ABSTRACT_RECURSIVE_SUMMARY = "S_ABSTRACT_RECURSIVE_SUMMARY"
     S_MONOLITHIC_FALLBACK = "S_MONOLITHIC_FALLBACK"
 
@@ -46,6 +48,7 @@ class StageSpec:
 # デフォルトの Stage plan
 DEFAULT_STAGE_PLAN: List[StageSpec] = [
     StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+    StageSpec(StageID.S_LOOP_TEMPLATE_ABSTRACTION, "Exact loop-template abstraction fallback (UNKNOWN only)", strategy="loop_template_pairwise"),
     StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
     StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
 ]
@@ -96,11 +99,18 @@ class EquivalenceChecker:
         self.monolithic_strategy = MonolithicStrategy(
             self.formula_builder, self.solver_runner, debug=debug
         )
+        self.loop_template_strategy = LoopTemplatePairwiseStrategy(
+            self.formula_builder, self.solver_runner, debug=debug
+        )
+        self.loop_template_strategy.per_query_timeout = pairwise_timeout
+        self.loop_template_strategy.per_query_timeout_hard = pairwise_timeout_hard
+        self.loop_template_strategy.save_unknown_queries = pairwise_save_unknown
         
         # ★ strategy 引数に応じて stage_plan を切り替える
         if strategy == "pairwise":
             self.stage_plan = [
                 StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
+                StageSpec(StageID.S_LOOP_TEMPLATE_ABSTRACTION, "Exact loop-template abstraction fallback (UNKNOWN only)", strategy="loop_template_pairwise"),
                 StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
                 StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
             ]
@@ -550,6 +560,14 @@ class EquivalenceChecker:
         
         for stage_spec in self.stage_plan:
             stage_id = stage_spec.stage_id
+            if (
+                stage_id == StageID.S_LOOP_TEMPLATE_ABSTRACTION
+                and not self._should_try_loop_template_stage(last_result)
+            ):
+                self._debug_print(
+                    "Stage S_LOOP_TEMPLATE_ABSTRACTION: skipped because prior result was not a timeout-driven UNKNOWN"
+                )
+                continue
             stage_path.append(stage_id.value)
             
             self._debug_print("-" * 60)
@@ -559,6 +577,8 @@ class EquivalenceChecker:
             # Stage を実行
             if stage_spec.strategy == "pairwise":
                 strategy = self.pairwise_strategy
+            elif stage_spec.strategy == "loop_template_pairwise":
+                strategy = self.loop_template_strategy
             elif stage_spec.strategy == "abstract_pairwise":
                 strategy = None
             elif stage_spec.strategy == "monolithic":
@@ -621,7 +641,7 @@ class EquivalenceChecker:
             
             else:
                 # UNKNOWN/TIMEOUT
-                if stage_id == StageID.S_PAIRWISE:
+                if stage_id in {StageID.S_PAIRWISE, StageID.S_LOOP_TEMPLATE_ABSTRACTION}:
                     self._debug_print(f"Stage {stage_id.value}: UNKNOWN - proceeding to fallback")
                     continue
                 elif stage_id == StageID.S_ABSTRACT_RECURSIVE_SUMMARY:
@@ -654,6 +674,29 @@ class EquivalenceChecker:
             analysis1.should_skip_monolithic_fallback()
             or analysis2.should_skip_monolithic_fallback()
         )
+
+    def _should_try_loop_template_stage(
+        self,
+        last_result: Optional[EquivalenceResult],
+    ) -> bool:
+        """Layer 2 は solver timeout に起因する UNKNOWN にだけ適用する。"""
+        if last_result is None:
+            return False
+        if last_result.is_equivalent is not None or last_result.error_message is not None:
+            return False
+        if last_result.is_timeout():
+            return True
+
+        pairwise_stats = last_result.pairwise_debug_stats or {}
+        timeout_fallback_attempts = int(pairwise_stats.get("timeout_fallback_attempts", 0) or 0)
+        if timeout_fallback_attempts > 0:
+            self._debug_print(
+                "Stage S_LOOP_TEMPLATE_ABSTRACTION: enabling due to pairwise query timeouts "
+                f"(timeout_fallback_attempts={timeout_fallback_attempts})"
+            )
+            return True
+
+        return False
 
     def _run_recursive_abstraction_stage(
         self,

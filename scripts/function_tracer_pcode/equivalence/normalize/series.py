@@ -268,6 +268,8 @@ def _accumulate_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, 
 
 
 def _same_nonconstant_expr(left: Expression, right: Expression) -> bool:
+    left = _strip_series_wrapper(left)
+    right = _strip_series_wrapper(right)
     try:
         return left.to_smt() == right.to_smt()
     except Exception:
@@ -303,6 +305,8 @@ def _matches_commutative_product(expr: Expression, left: Expression, right: Expr
 
 
 def _matches_exact_triangular_even_value(expr: Expression, base_expr: Expression) -> bool:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
         return False
     left, right = expr.operands
@@ -313,6 +317,8 @@ def _matches_exact_triangular_even_value(expr: Expression, base_expr: Expression
 
 
 def _matches_exact_triangular_odd_value(expr: Expression, base_expr: Expression) -> bool:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_MULT" or len(expr.operands) != 2:
         return False
     left, right = expr.operands
@@ -323,6 +329,8 @@ def _matches_exact_triangular_odd_value(expr: Expression, base_expr: Expression)
 
 
 def _is_shift_right_by_one_of(expr: Expression, base_expr: Expression) -> bool:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_RIGHT" or len(expr.operands) != 2:
         return False
     shift = expr.operands[1]
@@ -330,6 +338,8 @@ def _is_shift_right_by_one_of(expr: Expression, base_expr: Expression) -> bool:
 
 
 def _is_shift_right_by_one_of_minus_one(expr: Expression, base_expr: Expression) -> bool:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_RIGHT" or len(expr.operands) != 2:
         return False
     shift = expr.operands[1]
@@ -337,14 +347,24 @@ def _is_shift_right_by_one_of_minus_one(expr: Expression, base_expr: Expression)
 
 
 def _is_expr_minus_one(expr: Expression, base_expr: Expression) -> bool:
-    origin = _match_expr_plus_const(expr)
-    if origin is None:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
+    bias = _match_relative_const(expr, base_expr)
+    if bias == -1:
+        return True
+
+    expr_origin = _match_expr_plus_const(expr)
+    base_origin = _match_expr_plus_const(base_expr)
+    if expr_origin is None or base_origin is None:
         return False
-    matched_base, bias = origin
-    return bias == -1 and _same_nonconstant_expr(matched_base, base_expr)
+
+    expr_base, expr_bias = expr_origin
+    base_base, base_bias = base_origin
+    return _same_nonconstant_expr(expr_base, base_base) and expr_bias == base_bias - 1
 
 
 def _match_expr_plus_const(expr: Expression) -> Optional[Tuple[Expression, int]]:
+    expr = _strip_series_wrapper(expr)
     if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
         return expr, 0
 
@@ -359,15 +379,55 @@ def _match_expr_plus_const(expr: Expression) -> Optional[Tuple[Expression, int]]
         left_const = _signed_const_value(left)
         right_const = _signed_const_value(right)
         if left_const is not None:
-            return right, left_const
+            return _accumulate_expr_bias(right, left_const)
         if right_const is not None:
-            return left, right_const
-    if expr.operator == "INT_SUB" and right.expr_type == ExpressionType.CONSTANT:
-        return left, -int(right.value)
+            return _accumulate_expr_bias(left, right_const)
+    if expr.operator == "INT_SUB":
+        right_const = _signed_const_value(right)
+        if right_const is not None:
+            return _accumulate_expr_bias(left, -right_const)
     return expr, 0
 
 
+def _accumulate_expr_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, int]]:
+    nested = _match_expr_plus_const(expr)
+    if nested is None:
+        return None
+    return nested[0], nested[1] + bias
+
+
+def _match_relative_const(expr: Expression, base_expr: Expression) -> Optional[int]:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
+    if _same_nonconstant_expr(expr, base_expr):
+        return 0
+
+    if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        return None
+
+    left, right = expr.operands
+    if expr.operator == "INT_ADD":
+        left_const = _signed_const_value(left)
+        if left_const is not None:
+            right_bias = _match_relative_const(right, base_expr)
+            if right_bias is not None:
+                return right_bias + left_const
+        right_const = _signed_const_value(right)
+        if right_const is not None:
+            left_bias = _match_relative_const(left, base_expr)
+            if left_bias is not None:
+                return left_bias + right_const
+    if expr.operator == "INT_SUB":
+        right_const = _signed_const_value(right)
+        if right_const is not None:
+            left_bias = _match_relative_const(left, base_expr)
+            if left_bias is not None:
+                return left_bias - right_const
+    return None
+
+
 def _match_parity_zero_condition(expr: Expression) -> Optional[Expression]:
+    expr = _strip_series_wrapper(expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_EQUAL" or len(expr.operands) != 2:
         return None
     left, right = expr.operands
@@ -379,6 +439,7 @@ def _match_parity_zero_condition(expr: Expression) -> Optional[Expression]:
 
 
 def _match_parity_expr(expr: Expression) -> Optional[Expression]:
+    expr = _strip_series_wrapper(expr)
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_AND" or len(expr.operands) != 2:
         return None
     left, right = expr.operands
@@ -390,11 +451,13 @@ def _match_parity_expr(expr: Expression) -> Optional[Expression]:
 
 
 def _is_zero_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and int(expr.value) == 0
+    value = _basic_const_value(expr)
+    return value == 0
 
 
 def _is_one_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and int(expr.value) == 1
+    value = _basic_const_value(expr)
+    return value == 1
 
 
 def _flatten_add_terms(expr: Expression, sign: int = 1) -> list[tuple[int, Expression]]:
@@ -433,6 +496,8 @@ def _apply_sign(expr: Expression, sign: int) -> Optional[Expression]:
 
 
 def _match_affine_coeff_bias(expr: Expression, base_expr: Expression) -> Optional[Tuple[int, int]]:
+    expr = _strip_series_wrapper(expr)
+    base_expr = _strip_series_wrapper(base_expr)
     if _same_nonconstant_expr(expr, base_expr):
         return 1, 0
 
@@ -484,10 +549,80 @@ def _build_triangular(base_expr: Expression, target_size: int) -> Expression:
 
 
 def _signed_const_value(expr: Expression) -> Optional[int]:
+    expr = _strip_series_wrapper(expr)
+    return _basic_const_value(expr)
+
+
+def _basic_const_value(expr: Expression) -> Optional[int]:
     if expr.expr_type == ExpressionType.CONSTANT:
-        return int(expr.value)
-    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "INT_2COMP" and expr.operands:
-        inner = expr.operands[0]
-        if inner.expr_type == ExpressionType.CONSTANT:
-            return -int(inner.value)
+        value = int(expr.value)
+        bit_width = expr.get_bit_width()
+        if bit_width > 0:
+            modulus = 1 << bit_width
+            sign_bit = 1 << (bit_width - 1)
+            value %= modulus
+            if value & sign_bit:
+                value -= modulus
+        return value
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        if expr.operator == "INT_2COMP":
+            inner = _basic_const_value(expr.operands[0])
+            if inner is not None:
+                return -inner
+        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+            return _basic_const_value(expr.operands[0])
+    if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+        left_value = _basic_const_value(expr.operands[0])
+        right_value = _basic_const_value(expr.operands[1])
+        if expr.operator == "INT_ADD" and left_value is not None and right_value is not None:
+            return left_value + right_value
+        if expr.operator == "INT_SUB" and left_value is not None and right_value is not None:
+            return left_value - right_value
+        if expr.operator == "INT_MULT" and left_value is not None and right_value is not None:
+            return left_value * right_value
+        if expr.operator in {"INT_RIGHT", "INT_SRIGHT"} and left_value is not None and right_value is not None:
+            if right_value < 0:
+                return None
+            return left_value >> right_value
+        if expr.operator == "INT_AND" and left_value is not None and right_value is not None:
+            return left_value & right_value
+    if (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator == "SUBPIECE"
+        and len(expr.operands) == 2
+        and expr.operands[1].expr_type == ExpressionType.CONSTANT
+        and int(expr.operands[1].value) == 0
+    ):
+        return _basic_const_value(expr.operands[0])
     return None
+
+
+def _strip_series_wrapper(expr: Expression) -> Expression:
+    current = expr
+    while True:
+        next_expr = _strip_series_wrapper_once(current)
+        if next_expr is current:
+            return current
+        current = next_expr
+
+
+def _strip_series_wrapper_once(expr: Expression) -> Expression:
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+            return expr.operands[0]
+        return expr
+
+    if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        return expr
+
+    left, right = expr.operands
+    if expr.operator == "SUBPIECE" and right.expr_type == ExpressionType.CONSTANT and int(right.value) == 0:
+        return left
+    if expr.operator == "INT_ADD":
+        if _is_zero_constant(left):
+            return right
+        if _is_zero_constant(right):
+            return left
+    if expr.operator == "INT_SUB" and _is_zero_constant(right):
+        return left
+    return expr

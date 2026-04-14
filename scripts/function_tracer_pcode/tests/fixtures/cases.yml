@@ -168,7 +168,7 @@ test_cases:
         - "P2_PATTERN_INT"
       required_stage_path:
         - "S_PAIRWISE"
-        - "S_MONOLITHIC_FALLBACK"
+        - "S_LOOP_TEMPLATE_ABSTRACTION"
 
   - id: "phase_sequence_unknown_to_signedness_equiv"
     description: "Pipeline recovers from UNKNOWN at phase0, then reaches EQUIVALENT in P1."
