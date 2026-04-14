@@ -20,6 +20,7 @@ from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
     EffectSummary,
+    _enumerate_constant_expression_branches,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _resolve_call_target_name,
@@ -403,6 +404,18 @@ class ReturnAnalyzer:
             if recovered_returns is not None:
                 result.returns = recovered_returns
                 result.analysis_notes.append("call_wrapper_return_recovery")
+
+            recovered_switch_returns = self._recover_switch_like_returns_from_pcode(
+                result,
+                tracer,
+                condition_tracker,
+                current_function=function,
+                active_functions=active_functions,
+            )
+            if recovered_switch_returns is not None:
+                result.returns = recovered_switch_returns
+                if "switch_return_recovery" not in result.analysis_notes:
+                    result.analysis_notes.append("switch_return_recovery")
 
             summary = self._apply_structural_recurrence_summary(
                 function,
@@ -885,6 +898,221 @@ class ReturnAnalyzer:
         if analysis is None or not analysis.returns:
             return False
         return analysis.has_unknown_return() or analysis.has_unresolved_return_value()
+
+    def _should_attempt_switch_recovery(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> bool:
+        if analysis is None or not analysis.returns:
+            return False
+        if analysis.recovered_from_decompiler:
+            return False
+        if analysis.has_unknown_return():
+            return True
+        if analysis.has_overlapping_unconditional_returns():
+            return True
+        if self._analysis_has_ambiguous_condition_region_returns(analysis):
+            return True
+        if analysis.has_unresolved_return_value():
+            return True
+        return any(
+            reason in {"callind_out_of_scope", "indirect_control_flow_unresolved"}
+            for reason in getattr(analysis, "unknown_event_reasons", [])
+        )
+
+    def _recover_switch_like_returns_from_pcode(
+        self,
+        analysis: FunctionReturnAnalysis,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        current_function=None,
+        active_functions: Optional[Set[str]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        from ..transform.expander import ExpandedValue
+
+        if not self._should_attempt_switch_recovery(analysis):
+            return None
+
+        block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
+        switch_blocks = [
+            block_info
+            for block_info in block_by_index.values()
+            if self._find_branchind_op_on_block(block_info) is not None
+        ]
+        if not switch_blocks:
+            return None
+
+        for switch_block in sorted(switch_blocks, key=lambda info: info.index):
+            branchind_op = self._find_branchind_op_on_block(switch_block)
+            if branchind_op is None:
+                continue
+
+            candidate_entries = self._enumerate_switch_branch_targets(
+                switch_block,
+                branchind_op,
+                tracer,
+                condition_tracker,
+            )
+            if not candidate_entries or len(candidate_entries) < 2:
+                continue
+
+            expanded_values: List[ExpandedValue] = []
+            candidate_failed = False
+            for address_value, branch_conditions in candidate_entries:
+                resolved = self._resolve_local_code_target_expansions(
+                    address_value,
+                    active_functions or set(),
+                    current_function=current_function,
+                )
+                if not resolved:
+                    if self.debug:
+                        cond_dump = [
+                            ConditionSimplifier.get_simplified_condition_string(cond)
+                            for cond in branch_conditions
+                        ]
+                        self._debug_print(
+                            "Switch recovery aborted: local target expansion failed for "
+                            f"0x{address_value:x} under {cond_dump}"
+                        )
+                    candidate_failed = True
+                    break
+
+                for ev in resolved:
+                    merged_conditions = ConditionSimplifier.simplify_conditions(
+                        list(branch_conditions) + list(getattr(ev, "conditions", []) or [])
+                    )
+                    if ConditionSimplifier.is_contradiction(merged_conditions):
+                        continue
+                    expanded_values.append(
+                        ExpandedValue(
+                            value=self._clone_expression(ev.value),
+                            conditions=merged_conditions,
+                        )
+                    )
+
+            if candidate_failed or not expanded_values:
+                continue
+
+            recovered = self._build_return_infos_from_expansions(
+                analysis.entry_point,
+                expanded_values,
+                0,
+            )
+            recovered = self._merge_equivalent_return_infos(
+                self._prune_less_precise_return_infos(recovered)
+            )
+            if not recovered:
+                continue
+            if not self._switch_recovery_improves_analysis(analysis, recovered):
+                continue
+            if self.debug:
+                self._debug_print(
+                    f"Recovered {len(recovered)} switch-like return case(s) from BRANCHIND/CFG structure"
+                )
+            return recovered
+
+        return None
+
+    def _find_branchind_op_on_block(self, block_info) -> Optional[Any]:
+        if block_info is None:
+            return None
+        for pcode_op in reversed(list(getattr(block_info, "pcode_ops", []) or [])):
+            try:
+                if pcode_op.getMnemonic() == "BRANCHIND":
+                    return pcode_op
+            except Exception:
+                continue
+        return None
+
+    def _enumerate_switch_branch_targets(
+        self,
+        switch_block,
+        branchind_op,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+    ) -> List[Tuple[int, List[Condition]]]:
+        if branchind_op is None or branchind_op.getNumInputs() < 1:
+            return []
+
+        base_paths = condition_tracker.get_all_valid_block_paths_to_block(switch_block)
+        if not base_paths:
+            base_paths = [([switch_block], [])]
+
+        resolved_targets: List[Tuple[int, List[Condition]]] = []
+        seen = set()
+        for _blocks, base_conditions in base_paths:
+            try:
+                target_varnode = branchind_op.getInput(0)
+            except Exception:
+                return []
+
+            target_expr = tracer.trace_varnode(target_varnode, use_cache=False)
+            target_expr = self._concretize_readonly_loads(
+                target_expr,
+                list(base_conditions),
+                self._current_parameters,
+            )
+            target_branches = _enumerate_constant_expression_branches(target_expr)
+            if not target_branches:
+                if self.debug:
+                    self._debug_print(
+                        f"Switch recovery skipped on block {switch_block.index}: BRANCHIND target was not finitely enumerable"
+                    )
+                return []
+
+            for branch_conditions, address_value in target_branches:
+                merged_conditions = ConditionSimplifier.simplify_conditions(
+                    list(base_conditions) + list(branch_conditions)
+                )
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                key = (
+                    int(address_value),
+                    tuple(
+                        ConditionSimplifier.get_simplified_condition_string(cond)
+                        for cond in merged_conditions
+                    ),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved_targets.append((int(address_value), merged_conditions))
+
+        if len(resolved_targets) > self._bounded_call_max_cases:
+            if self.debug:
+                self._debug_print(
+                    "Switch recovery skipped: branch target fanout exceeds configured safety limit "
+                    f"({len(resolved_targets)} > {self._bounded_call_max_cases})"
+                )
+            return []
+
+        return resolved_targets
+
+    def _switch_recovery_improves_analysis(
+        self,
+        analysis: FunctionReturnAnalysis,
+        recovered: List[ReturnInfo],
+    ) -> bool:
+        if not recovered:
+            return False
+        if any(self._expression_contains_unresolved_value(ret.value) for ret in recovered):
+            return False
+
+        original_unresolved = sum(
+            1
+            for ret in analysis.returns or []
+            if self._expression_contains_unresolved_value(ret.value)
+        )
+        recovered_unresolved = sum(
+            1 for ret in recovered if self._expression_contains_unresolved_value(ret.value)
+        )
+        if recovered_unresolved < original_unresolved:
+            return True
+        if analysis.has_overlapping_unconditional_returns():
+            return True
+        if self._analysis_has_ambiguous_condition_region_returns(analysis):
+            return True
+        return False
 
     def _find_terminal_call_on_block_path(
         self,

@@ -2121,6 +2121,208 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     assert mock_recover.call_args_list[1].args[0] is call_else
 
 
+def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer._current_parameters = [
+        {"name": "param_1", "index": 0, "size": 8, "data_type": "ulong", "is_signed": False}
+    ]
+    analyzer.program.getImageBase.return_value.getOffset.return_value = 0
+
+    analysis = FunctionReturnAnalysis(
+        function_name="branch_switch_dense",
+        entry_point="0x1000",
+        parameters=list(analyzer._current_parameters),
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    class _FakeBranchInd:
+        def getMnemonic(self):
+            return "BRANCHIND"
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return target_varnode
+
+    target_varnode = Mock()
+    branchind_op = _FakeBranchInd()
+    switch_block = Mock(index=7, pcode_ops=[branchind_op])
+    switch_block.index = 7
+
+    cond = Condition(
+        Expression.binary_op("INT_LESS", Expression.parameter("param_1", 0, size=8), Expression.constant(4, 8)),
+        False,
+    )
+
+    condition_tracker = Mock()
+    condition_tracker.block_by_index = {7: switch_block}
+    condition_tracker.get_all_valid_block_paths_to_block.return_value = [([switch_block], [cond])]
+
+    param = Expression.parameter("param_1", 0, size=8)
+    subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
+    subpiece.size = 4
+    index_expr = Expression.unary_op("INT_ZEXT", subpiece)
+    index_expr.size = 8
+    target_expr = Expression.memory(
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.variable("PTR_00002000", size=8),
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),
+                Expression.constant(0x100, 8),
+            ),
+        ),
+        size=8,
+    )
+    tracer = Mock()
+    tracer.trace_varnode.return_value = target_expr
+
+    table = {
+        0x2000 + 0x100 + 0x0: 0x401000,
+        0x2000 + 0x100 + 0x8: 0x401010,
+        0x2000 + 0x100 + 0x10: 0x401020,
+        0x2000 + 0x100 + 0x18: 0x401030,
+    }
+    target_returns = {
+        0x401000: [ExpandedValue(Expression.constant(1000, 4), [])],
+        0x401010: [ExpandedValue(Expression.constant(1001, 4), [])],
+        0x401020: [ExpandedValue(Expression.constant(1002, 4), [])],
+        0x401030: [ExpandedValue(Expression.constant(1003, 4), [])],
+    }
+
+    with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: table.get(addr)):
+        with patch.object(
+            analyzer,
+            "_resolve_local_code_target_expansions",
+            side_effect=lambda addr, _active_functions, current_function=None: target_returns.get(addr),
+        ):
+            recovered = analyzer._recover_switch_like_returns_from_pcode(
+                analysis,
+                tracer,
+                condition_tracker,
+                current_function=Mock(),
+                active_functions=set(),
+            )
+
+    assert recovered is not None
+    assert [ret.value.value for ret in recovered] == [1000, 1001, 1002, 1003]
+    assert all(any(cond.to_string() == "(param_1 < 4)" for cond in ret.conditions) for ret in recovered)
+    assert [
+        next(cond.to_string() for cond in ret.conditions if "==" in cond.to_string())
+        for ret in recovered
+    ] == [
+        "(int((param_1 & 4294967295)) == 0)",
+        "(int((param_1 & 4294967295)) == 1)",
+        "(int((param_1 & 4294967295)) == 2)",
+        "(int((param_1 & 4294967295)) == 3)",
+    ]
+
+
+def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_expandable():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer._current_parameters = [
+        {"name": "param_1", "index": 0, "size": 8, "data_type": "ulong", "is_signed": False}
+    ]
+    analyzer.program.getImageBase.return_value.getOffset.return_value = 0
+
+    analysis = FunctionReturnAnalysis(
+        function_name="branch_switch_dense",
+        entry_point="0x1000",
+        parameters=list(analyzer._current_parameters),
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    class _FakeBranchInd:
+        def getMnemonic(self):
+            return "BRANCHIND"
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return target_varnode
+
+    target_varnode = Mock()
+    branchind_op = _FakeBranchInd()
+    switch_block = Mock(index=7, pcode_ops=[branchind_op])
+    switch_block.index = 7
+
+    cond = Condition(
+        Expression.binary_op("INT_LESS", Expression.parameter("param_1", 0, size=8), Expression.constant(2, 8)),
+        False,
+    )
+
+    condition_tracker = Mock()
+    condition_tracker.block_by_index = {7: switch_block}
+    condition_tracker.get_all_valid_block_paths_to_block.return_value = [([switch_block], [cond])]
+
+    param = Expression.parameter("param_1", 0, size=8)
+    subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
+    subpiece.size = 4
+    index_expr = Expression.unary_op("INT_ZEXT", subpiece)
+    index_expr.size = 8
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.memory(
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.variable("PTR_00002000", size=8),
+            Expression.binary_op(
+                "INT_ADD",
+                Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),
+                Expression.constant(0x100, 8),
+            ),
+        ),
+        size=8,
+    )
+
+    table = {
+        0x2000 + 0x100 + 0x0: 0x401000,
+        0x2000 + 0x100 + 0x8: 0x401010,
+    }
+
+    with patch.object(analyzer, "_read_memory_value", side_effect=lambda addr, size: table.get(addr)):
+        with patch.object(
+            analyzer,
+            "_resolve_local_code_target_expansions",
+            side_effect=lambda addr, _active_functions, current_function=None: (
+                [ExpandedValue(Expression.constant(1000, 4), [])] if addr == 0x401000 else None
+            ),
+        ):
+            recovered = analyzer._recover_switch_like_returns_from_pcode(
+                analysis,
+                tracer,
+                condition_tracker,
+                current_function=Mock(),
+                active_functions=set(),
+            )
+
+    assert recovered is None
+
+
 def test_return_analyzer_detects_noreturn_stack_chk_fail_target_from_symbol_name():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()
@@ -2376,19 +2578,6 @@ def test_return_analyzer_declines_higher_order_call_summary_without_safe_pcode_m
         return_type="int",
     )
 
-    c_text = """undefined4 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
-{
-  undefined4 local_14;
-  if (param_1 == (code *)0x0) {
-    local_14 = 0xfffffda8;
-  }
-  else {
-    local_14 = (*param_1)(param_2,param_3);
-  }
-  return local_14;
-}
-"""
-
     def _analysis_side_effect(function_name, _active_functions):
         return {
             "ptr_apply_callback": ptr_apply_analysis,
@@ -2444,17 +2633,6 @@ def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe
         unknown_event_reasons=["call_out_of_scope"],
         unknown_event_count=1,
     )
-
-    c_text = """undefined8 ptr_apply_callback(code *param_1,undefined4 param_2,undefined4 param_3)
-{
-  undefined8 uVar1;
-  if (param_1 != (code *)0x0) {
-    uVar1 = (*param_1)(param_2,param_3);
-    return uVar1;
-  }
-  return 0xfffffda8;
-}
-"""
 
     selector = Expression.parameter("param_1", 0, size=4)
     phi_target = Expression.phi(
@@ -2733,6 +2911,10 @@ def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
     ), patch.object(
         analyzer,
         "_recover_call_wrapper_returns",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_recover_switch_like_returns_from_pcode",
         return_value=None,
     ), patch.object(
         analyzer,
