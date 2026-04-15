@@ -120,6 +120,12 @@ def run_check_from_binaries(
                     None,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     0.0,
                 )
                 attempt_id += 1

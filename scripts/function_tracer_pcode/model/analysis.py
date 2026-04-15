@@ -2,7 +2,7 @@
 """関数解析結果のデータモデル"""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .expression import Expression
     from ..analysis.signedness import SignednessEvidence
     from ..analysis.effect_summary import EffectSummary
+    from .signature import SignatureHypothesis, FunctionSignature
 
 @dataclass
 class ReturnInfo:
@@ -123,6 +124,7 @@ class FunctionReturnAnalysis:
     incomplete_control_flow: bool = False
     deferred_calls: Dict[str, DeferredCallInfo] = field(default_factory=dict)
     effect_summary: Optional["EffectSummary"] = None
+    signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         result = {
@@ -144,6 +146,8 @@ class FunctionReturnAnalysis:
         
         if self.signedness_result:
             result["signedness"] = self.signedness_result.to_dict()
+        if self.signature_hypotheses:
+            result["signature_hypotheses"] = list(self.signature_hypotheses)
         
         return result
     
@@ -261,8 +265,44 @@ class FunctionReturnAnalysis:
         if self.recovered_from_decompiler:
             return False
         if not self.incomplete_control_flow:
-            return "return_case_coverage_gap" in self.analysis_notes
+            return False
         return self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns()
+
+    def get_signature(self) -> "FunctionSignature":
+        """現在の解析結果から有効シグネチャを取得する。"""
+        from .signature import FunctionSignature
+
+        return FunctionSignature.from_analysis(self)
+
+    def with_signature_hypothesis(
+        self,
+        hypothesis: "SignatureHypothesis",
+    ) -> "FunctionReturnAnalysis":
+        """型仮説を重ねた新しい解析ビューを返す。"""
+        if not hypothesis.has_changes():
+            return self
+
+        updated_signature, return_changed, param_changed = self.get_signature().apply_hypothesis(
+            hypothesis
+        )
+        if not (return_changed or param_changed):
+            return self
+
+        updated_notes = list(self.analysis_notes)
+        description = hypothesis.describe()
+        if description not in updated_notes:
+            updated_notes.append(description)
+
+        updated_hypotheses = list(self.signature_hypotheses)
+        updated_hypotheses.append(hypothesis.to_dict())
+
+        return replace(
+            self,
+            return_type=updated_signature.return_type,
+            parameters=updated_signature.parameters or [],
+            analysis_notes=updated_notes,
+            signature_hypotheses=updated_hypotheses,
+        )
 
     def get_decisive_sat_unsafety_reasons(self) -> List[str]:
         """

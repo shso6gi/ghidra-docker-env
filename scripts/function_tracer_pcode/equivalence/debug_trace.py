@@ -95,6 +95,12 @@ class Attempt:
     # 詳細情報
     type_fix_result: Optional[Dict[str, Any]] = None
     rewrite_info: Optional[Dict[str, Any]] = None
+    original_function1_signature: Optional[Dict[str, Any]] = None
+    original_function2_signature: Optional[Dict[str, Any]] = None
+    effective_function1_signature: Optional[Dict[str, Any]] = None
+    effective_function2_signature: Optional[Dict[str, Any]] = None
+    function1_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    function2_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     solver_results: Optional[Dict[str, Any]] = None
     final_smt_excerpt: Optional[str] = None  # SMT式の先頭500文字（互換性のため残す）
     final_smt: Optional[str] = None  # ★ 新規: 完全なSMT式
@@ -115,6 +121,12 @@ class Attempt:
             "transition_reason": self.transition_reason,
             "type_fix_result": self.type_fix_result,
             "rewrite_info": self.rewrite_info,
+            "original_function1_signature": self.original_function1_signature,
+            "original_function2_signature": self.original_function2_signature,
+            "effective_function1_signature": self.effective_function1_signature,
+            "effective_function2_signature": self.effective_function2_signature,
+            "function1_signature_hypotheses": list(self.function1_signature_hypotheses),
+            "function2_signature_hypotheses": list(self.function2_signature_hypotheses),
             "solver_results": self.solver_results,
             "final_smt_excerpt": self.final_smt_excerpt,
             "final_smt": self.final_smt,  # ★ 追加

@@ -37,6 +37,10 @@ def create_error_result(
         retry_count=retry_count,
         function1_signature=original_signature1,
         function2_signature=original_signature2,
+        effective_function1_signature=FunctionSignature.from_analysis(analysis1),
+        effective_function2_signature=FunctionSignature.from_analysis(analysis2),
+        function1_signature_hypotheses=list(analysis1.signature_hypotheses),
+        function2_signature_hypotheses=list(analysis2.signature_hypotheses),
         constrained_fragments=[]
     )
 
@@ -66,6 +70,10 @@ def create_context_error_result(
         retry_count=retry_count,
         function1_signature=ctx.original_signature1,
         function2_signature=ctx.original_signature2,
+        effective_function1_signature=FunctionSignature.from_analysis(analysis1) if analysis1 is not None else ctx.original_signature1,
+        effective_function2_signature=FunctionSignature.from_analysis(analysis2) if analysis2 is not None else ctx.original_signature2,
+        function1_signature_hypotheses=list(analysis1.signature_hypotheses) if analysis1 is not None else [],
+        function2_signature_hypotheses=list(analysis2.signature_hypotheses) if analysis2 is not None else [],
         constrained_fragments=[]
     )
 

@@ -39,8 +39,8 @@ class PhaseResult:
     phase_id: PhaseID
     applied: bool  # Phase が適用されたか
     retry_name: str  # type_fix_result.retry_phase に設定する名前
-    changed_binary1: bool = False  # ★ NEW: binary1 に変更があったか
-    changed_binary2: bool = False  # ★ NEW: binary2 に変更があったか
+    changed_binary1: bool = False  # effective analysis1 に変更があったか
+    changed_binary2: bool = False  # effective analysis2 に変更があったか
 
 
 # デフォルトの Phase plan（主経路）
@@ -86,6 +86,55 @@ class PhaseHandler:
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[PhaseHandler] {msg}")
+
+    def _apply_analysis_fix(
+        self,
+        type_fixer: TypeFixer,
+        analysis: Optional[FunctionReturnAnalysis],
+        *,
+        fix_return_type: bool,
+        fix_param_types: bool,
+        override_return_type_name: Optional[str] = None,
+        override_param_type_names: Optional[Dict[int, str]] = None,
+        phase_name: str = "",
+        reason: str = "",
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[FunctionReturnAnalysis], bool, bool]:
+        """新旧 TypeFixer API 互換で解析ビュー更新を試みる。"""
+        if analysis is None:
+            return None, False, False
+
+        apply_method = getattr(type_fixer, "apply_analysis_signature_fix", None)
+        if callable(apply_method):
+            result = apply_method(
+                analysis,
+                fix_return_type=fix_return_type,
+                fix_param_types=fix_param_types,
+                override_return_type_name=override_return_type_name,
+                override_param_type_names=override_param_type_names,
+                phase_name=phase_name,
+                reason=reason,
+                evidence=evidence,
+            )
+            if (
+                isinstance(result, tuple)
+                and len(result) == 3
+            ):
+                return result
+
+        compat_method = getattr(type_fixer, "fix_function_signature_by_name", None)
+        if not callable(compat_method):
+            return analysis, False, False
+
+        return_fixed, param_fixed = compat_method(
+            analysis.function_name,
+            analysis.parameters or [],
+            fix_return_type=fix_return_type,
+            fix_param_types=fix_param_types,
+            override_return_type_name=override_return_type_name,
+            override_param_type_names=override_param_type_names,
+        )
+        return analysis, bool(return_fixed), bool(param_fixed)
     
     # ============================================================================
     # Phase 実行（新フロー骨格）
@@ -410,15 +459,22 @@ class PhaseHandler:
                 signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
                 
                 if signed_type:
-                    params1 = ctx.analysis1.parameters if ctx.analysis1 else []
-                    ret_fixed, _ = type_fixer1.fix_function_signature_by_name(
-                        ctx.function_name1,
-                        params1,
+                    updated_analysis1, ret_fixed, _ = self._apply_analysis_fix(
+                        type_fixer1,
+                        ctx.analysis1,
                         fix_return_type=False,
                         fix_param_types=False,
-                        override_return_type_name=signed_type
+                        override_return_type_name=signed_type,
+                        phase_name=PhaseID.P1_SIGNEDNESS.value,
+                        reason="signedness-based return type hypothesis",
+                        evidence={
+                            "original_type": original_type,
+                            "signed_type": signed_type,
+                            "opcode_counts": dict(ctx.analysis1.signedness_result.opcode_counts),
+                        },
                     )
                     if ret_fixed:
+                        ctx.analysis1 = updated_analysis1
                         ctx.type_fix_result.signedness_fixed_binary1 = True
                         ctx.type_fix_result.original_type_binary1 = original_type
                         ctx.type_fix_result.fixed_type_binary1 = signed_type
@@ -441,15 +497,22 @@ class PhaseHandler:
                 signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
                 
                 if signed_type:
-                    params2 = ctx.analysis2.parameters if ctx.analysis2 else []
-                    ret_fixed, _ = type_fixer2.fix_function_signature_by_name(
-                        ctx.function_name2,
-                        params2,
+                    updated_analysis2, ret_fixed, _ = self._apply_analysis_fix(
+                        type_fixer2,
+                        ctx.analysis2,
                         fix_return_type=False,
                         fix_param_types=False,
-                        override_return_type_name=signed_type
+                        override_return_type_name=signed_type,
+                        phase_name=PhaseID.P1_SIGNEDNESS.value,
+                        reason="signedness-based return type hypothesis",
+                        evidence={
+                            "original_type": original_type,
+                            "signed_type": signed_type,
+                            "opcode_counts": dict(ctx.analysis2.signedness_result.opcode_counts),
+                        },
                     )
                     if ret_fixed:
+                        ctx.analysis2 = updated_analysis2
                         ctx.type_fix_result.signedness_fixed_binary2 = True
                         ctx.type_fix_result.original_type_binary2 = original_type
                         ctx.type_fix_result.fixed_type_binary2 = signed_type
@@ -488,28 +551,27 @@ class PhaseHandler:
                 self._debug_print("Phase 1.5: Param signedness fix for Binary 1")
                 self._debug_print("=" * 60)
                 
-                # 最新のparam情報を取得
-                params1_updated = get_params_func(
-                    ctx.program1, ctx.function_name1, ctx.decompile_timeout
-                )
-                
-                # 型修正を適用
-                _, param_fixed = type_fixer1.fix_function_signature_by_name(
-                    ctx.function_name1,
-                    params1_updated,
+                params1_before = list(ctx.analysis1.parameters or [])
+                updated_analysis1, _, param_fixed = self._apply_analysis_fix(
+                    type_fixer1,
+                    ctx.analysis1,
                     fix_return_type=False,
                     fix_param_types=False,
-                    override_param_type_names=override_map1
+                    override_param_type_names=override_map1,
+                    phase_name=PhaseID.P1_SIGNEDNESS.value,
+                    reason="signedness-based parameter hypothesis",
+                    evidence={"override_map": dict(override_map1)},
                 )
                 
                 if param_fixed:
+                    ctx.analysis1 = updated_analysis1
                     ctx.type_fix_result.param_signedness_fixed_binary1 = True
                     ctx.type_fix_result.param_signedness_override_map_binary1 = override_map1
                     changed_binary1 = True
                     
                     # 修正内容をログ出力
                     for param_idx, new_type in override_map1.items():
-                        param_info = params1_updated[param_idx] if param_idx < len(params1_updated) else {}
+                        param_info = params1_before[param_idx] if param_idx < len(params1_before) else {}
                         param_name = param_info.get("name", f"param_{param_idx}")
                         
                         # 元の型を取得
@@ -535,28 +597,27 @@ class PhaseHandler:
                 self._debug_print("Phase 1.5: Param signedness fix for Binary 2")
                 self._debug_print("=" * 60)
                 
-                # 最新のparam情報を取得
-                params2_updated = get_params_func(
-                    ctx.program2, ctx.function_name2, ctx.decompile_timeout
-                )
-                
-                # 型修正を適用
-                _, param_fixed = type_fixer2.fix_function_signature_by_name(
-                    ctx.function_name2,
-                    params2_updated,
+                params2_before = list(ctx.analysis2.parameters or [])
+                updated_analysis2, _, param_fixed = self._apply_analysis_fix(
+                    type_fixer2,
+                    ctx.analysis2,
                     fix_return_type=False,
                     fix_param_types=False,
-                    override_param_type_names=override_map2
+                    override_param_type_names=override_map2,
+                    phase_name=PhaseID.P1_SIGNEDNESS.value,
+                    reason="signedness-based parameter hypothesis",
+                    evidence={"override_map": dict(override_map2)},
                 )
                 
                 if param_fixed:
+                    ctx.analysis2 = updated_analysis2
                     ctx.type_fix_result.param_signedness_fixed_binary2 = True
                     ctx.type_fix_result.param_signedness_override_map_binary2 = override_map2
                     changed_binary2 = True
                     
                     # 修正内容をログ出力
                     for param_idx, new_type in override_map2.items():
-                        param_info = params2_updated[param_idx] if param_idx < len(params2_updated) else {}
+                        param_info = params2_before[param_idx] if param_idx < len(params2_before) else {}
                         param_name = param_info.get("name", f"param_{param_idx}")
                         
                         # 元の型を取得
@@ -612,25 +673,35 @@ class PhaseHandler:
         changed_binary2 = False
         
         if ret_needs_fix1:
-            ret_fixed1, _ = type_fixer1.fix_function_signature_by_name(
-                ctx.function_name1,
-                params1,
+            updated_analysis1, ret_fixed1, _ = self._apply_analysis_fix(
+                type_fixer1,
+                ctx.analysis1,
                 fix_return_type=True,
                 fix_param_types=False,
                 override_return_type_name=override_return_type1,
+                phase_name=PhaseID.P2_PATTERN_INT.value,
+                reason="pattern/counterpart-based return type hypothesis",
+                evidence={"counterpart_return_type": ctx.analysis2.return_type if ctx.analysis2 else None},
             )
+            if ret_fixed1:
+                ctx.analysis1 = updated_analysis1
             ctx.type_fix_result.return_type_fixed_binary1 = ret_fixed1
             changed_binary1 = ret_fixed1
             self._debug_print(f"Binary 1 return type fixed: {ret_fixed1}")
         
         if ret_needs_fix2:
-            ret_fixed2, _ = type_fixer2.fix_function_signature_by_name(
-                ctx.function_name2,
-                params2,
+            updated_analysis2, ret_fixed2, _ = self._apply_analysis_fix(
+                type_fixer2,
+                ctx.analysis2,
                 fix_return_type=True,
                 fix_param_types=False,
                 override_return_type_name=override_return_type2,
+                phase_name=PhaseID.P2_PATTERN_INT.value,
+                reason="pattern/counterpart-based return type hypothesis",
+                evidence={"counterpart_return_type": ctx.analysis1.return_type if ctx.analysis1 else None},
             )
+            if ret_fixed2:
+                ctx.analysis2 = updated_analysis2
             ctx.type_fix_result.return_type_fixed_binary2 = ret_fixed2
             changed_binary2 = ret_fixed2
             self._debug_print(f"Binary 2 return type fixed: {ret_fixed2}")
@@ -665,29 +736,31 @@ class PhaseHandler:
         changed_binary2 = False
         
         if param_needs_fix1:
-            params1_updated = get_params_func(
-                ctx.program1, ctx.function_name1, ctx.decompile_timeout
-            )
-            _, param_fixed1 = type_fixer1.fix_function_signature_by_name(
-                ctx.function_name1,
-                params1_updated,
+            updated_analysis1, _, param_fixed1 = self._apply_analysis_fix(
+                type_fixer1,
+                ctx.analysis1,
                 fix_return_type=False,
-                fix_param_types=True
+                fix_param_types=True,
+                phase_name=PhaseID.P2_PATTERN_INT.value,
+                reason="pattern-based parameter type hypothesis",
             )
+            if param_fixed1:
+                ctx.analysis1 = updated_analysis1
             ctx.type_fix_result.param_types_fixed_binary1 = param_fixed1
             changed_binary1 = param_fixed1
             self._debug_print(f"Binary 1 param types fixed: {param_fixed1}")
         
         if param_needs_fix2:
-            params2_updated = get_params_func(
-                ctx.program2, ctx.function_name2, ctx.decompile_timeout
-            )
-            _, param_fixed2 = type_fixer2.fix_function_signature_by_name(
-                ctx.function_name2,
-                params2_updated,
+            updated_analysis2, _, param_fixed2 = self._apply_analysis_fix(
+                type_fixer2,
+                ctx.analysis2,
                 fix_return_type=False,
-                fix_param_types=True
+                fix_param_types=True,
+                phase_name=PhaseID.P2_PATTERN_INT.value,
+                reason="pattern-based parameter type hypothesis",
             )
+            if param_fixed2:
+                ctx.analysis2 = updated_analysis2
             ctx.type_fix_result.param_types_fixed_binary2 = param_fixed2
             changed_binary2 = param_fixed2
             self._debug_print(f"Binary 2 param types fixed: {param_fixed2}")
@@ -734,18 +807,19 @@ class PhaseHandler:
                 ctx.analysis1, ctx.analysis2
             )
             if override_map1:
-                params1_updated = get_params_func(
-                    ctx.program1, ctx.function_name1, ctx.decompile_timeout
-                )
-                _, param_fixed = type_fixer1.fix_function_signature_by_name(
-                    ctx.function_name1,
-                    params1_updated,
+                updated_analysis1, _, param_fixed = self._apply_analysis_fix(
+                    type_fixer1,
+                    ctx.analysis1,
                     fix_return_type=False,
                     fix_param_types=False,
-                    override_param_type_names=override_map1
+                    override_param_type_names=override_map1,
+                    phase_name=PhaseID.P4A_MIPS64_ABI.value,
+                    reason="MIPS64 ABI parameter-width hypothesis",
+                    evidence={"override_map": dict(override_map1)},
                 )
                 
                 if param_fixed:
+                    ctx.analysis1 = updated_analysis1
                     ctx.type_fix_result.mips64_abi_fixed_binary1 = True
                     ctx.type_fix_result.mips64_abi_override_map_binary1 = override_map1
                     changed_binary1 = True
@@ -758,18 +832,19 @@ class PhaseHandler:
                 ctx.analysis2, ctx.analysis1
             )
             if override_map2:
-                params2_updated = get_params_func(
-                    ctx.program2, ctx.function_name2, ctx.decompile_timeout
-                )
-                _, param_fixed = type_fixer2.fix_function_signature_by_name(
-                    ctx.function_name2,
-                    params2_updated,
+                updated_analysis2, _, param_fixed = self._apply_analysis_fix(
+                    type_fixer2,
+                    ctx.analysis2,
                     fix_return_type=False,
                     fix_param_types=False,
-                    override_param_type_names=override_map2
+                    override_param_type_names=override_map2,
+                    phase_name=PhaseID.P4A_MIPS64_ABI.value,
+                    reason="MIPS64 ABI parameter-width hypothesis",
+                    evidence={"override_map": dict(override_map2)},
                 )
                 
                 if param_fixed:
+                    ctx.analysis2 = updated_analysis2
                     ctx.type_fix_result.mips64_abi_fixed_binary2 = True
                     ctx.type_fix_result.mips64_abi_override_map_binary2 = override_map2
                     changed_binary2 = True

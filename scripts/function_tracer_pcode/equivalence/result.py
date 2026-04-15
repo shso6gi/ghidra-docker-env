@@ -73,6 +73,10 @@ class EquivalenceResult:
     retry_count: int = 0
     function1_signature: Optional[FunctionSignature] = None
     function2_signature: Optional[FunctionSignature] = None
+    effective_function1_signature: Optional[FunctionSignature] = None
+    effective_function2_signature: Optional[FunctionSignature] = None
+    function1_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    function2_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     constrained_fragments: List[str] = field(default_factory=list)
     rewrite_info: Optional[RewriteInfo] = None
     mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
@@ -106,6 +110,14 @@ class EquivalenceResult:
             return False
         critical_keywords = ["not found", "not available", "No SMT solvers"]
         return any(kw in self.error_message for kw in critical_keywords)
+
+    def get_effective_function1_signature(self) -> Optional[FunctionSignature]:
+        """判定時に有効だった binary1 側シグネチャを返す。"""
+        return self.effective_function1_signature or self.function1_signature
+
+    def get_effective_function2_signature(self) -> Optional[FunctionSignature]:
+        """判定時に有効だった binary2 側シグネチャを返す。"""
+        return self.effective_function2_signature or self.function2_signature
     
     def to_dict(self) -> Dict[str, Any]:
         """機械可読な辞書に変換（JSON シリアライズ可能）"""
@@ -117,6 +129,10 @@ class EquivalenceResult:
             "binary2_name": self.binary2_name,
             "function1_signature": self.function1_signature.to_dict() if self.function1_signature else None,
             "function2_signature": self.function2_signature.to_dict() if self.function2_signature else None,
+            "effective_function1_signature": self.get_effective_function1_signature().to_dict() if self.get_effective_function1_signature() else None,
+            "effective_function2_signature": self.get_effective_function2_signature().to_dict() if self.get_effective_function2_signature() else None,
+            "function1_signature_hypotheses": list(self.function1_signature_hypotheses),
+            "function2_signature_hypotheses": list(self.function2_signature_hypotheses),
             "solver_results": self.solver_results.to_dict() if self.solver_results else None,
             "counterexample": self.counterexample.to_dict() if self.counterexample else None,
             "total_time": self.total_time,
@@ -157,7 +173,18 @@ class EquivalenceResult:
         lines.append(f"Function 1: {self.function1_name}")
         if self.function1_signature:
             lines.append(f"  Original signature: {self.function1_signature.format_full(self.function1_name)}")
-        
+        effective_signature1 = self.get_effective_function1_signature()
+        if (
+            effective_signature1
+            and self.function1_signature
+            and effective_signature1.to_dict() != self.function1_signature.to_dict()
+        ):
+            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
+        elif effective_signature1 and self.function1_signature is None:
+            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
+        if self.function1_signature_hypotheses:
+            lines.append(f"  Hypotheses: {self.function1_signature_hypotheses}")
+
         lines.append("")
         
         # Binary 2 の情報
@@ -165,7 +192,18 @@ class EquivalenceResult:
         lines.append(f"Function 2: {self.function2_name}")
         if self.function2_signature:
             lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
-        
+        effective_signature2 = self.get_effective_function2_signature()
+        if (
+            effective_signature2
+            and self.function2_signature
+            and effective_signature2.to_dict() != self.function2_signature.to_dict()
+        ):
+            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
+        elif effective_signature2 and self.function2_signature is None:
+            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
+        if self.function2_signature_hypotheses:
+            lines.append(f"  Hypotheses: {self.function2_signature_hypotheses}")
+
         lines.append("")
 
         # Pairwise統計情報を追加

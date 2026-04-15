@@ -86,71 +86,30 @@ def selective_reanalysis_and_check(
     phase_result: PhaseResult,
     retry_count: int
 ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[FunctionReturnAnalysis], EquivalenceResult]:
-    """変更された側だけ再解析して stage plan を実行する"""
-    from ..analysis import ReturnAnalyzer
+    """現在の仮説オーバーレイ済み解析ビューで stage plan を再実行する。"""
 
     need_reanalyze1 = phase_result.changed_binary1
     need_reanalyze2 = phase_result.changed_binary2
 
     checker._debug_print(
-        f"Selective reanalysis: binary1={need_reanalyze1}, binary2={need_reanalyze2}"
+        f"Selective analysis reuse: binary1_changed={need_reanalyze1}, "
+        f"binary2_changed={need_reanalyze2}"
     )
 
-    if need_reanalyze1:
-        checker._debug_print(f"Re-analyzing binary1: {ctx.function_name1}")
-        analyzer1 = ReturnAnalyzer(ctx.program1, debug=checker.debug)
-        try:
-            analysis1 = analyzer1.analyze_function_by_name(
-                ctx.function_name1, ctx.decompile_timeout
-            )
-            if analysis1 is None:
-                error_message = analyzer1.get_last_function_lookup_error() or (
-                    f"Function '{ctx.function_name1}' not found after type fix"
-                )
-                return create_reanalysis_error(
-                    ctx,
-                    error_message,
-                    retry_count,
-                )
-        finally:
-            analyzer1.dispose()
-    else:
-        checker._debug_print("Reusing cached analysis for binary1")
-        analysis1 = ctx.analysis1
-        if analysis1 is None:
-            return create_reanalysis_error(
-                ctx,
-                "Cached analysis for binary1 is not available",
-                retry_count,
-            )
-
-    if need_reanalyze2:
-        checker._debug_print(f"Re-analyzing binary2: {ctx.function_name2}")
-        analyzer2 = ReturnAnalyzer(ctx.program2, debug=checker.debug)
-        try:
-            analysis2 = analyzer2.analyze_function_by_name(
-                ctx.function_name2, ctx.decompile_timeout
-            )
-            if analysis2 is None:
-                error_message = analyzer2.get_last_function_lookup_error() or (
-                    f"Function '{ctx.function_name2}' not found after type fix"
-                )
-                return create_reanalysis_error(
-                    ctx,
-                    error_message,
-                    retry_count,
-                )
-        finally:
-            analyzer2.dispose()
-    else:
-        checker._debug_print("Reusing cached analysis for binary2")
-        analysis2 = ctx.analysis2
-        if analysis2 is None:
-            return create_reanalysis_error(
-                ctx,
-                "Cached analysis for binary2 is not available",
-                retry_count,
-            )
+    analysis1 = ctx.analysis1
+    analysis2 = ctx.analysis2
+    if analysis1 is None:
+        return create_reanalysis_error(
+            ctx,
+            "Cached analysis for binary1 is not available",
+            retry_count,
+        )
+    if analysis2 is None:
+        return create_reanalysis_error(
+            ctx,
+            "Cached analysis for binary2 is not available",
+            retry_count,
+        )
 
     result = checker._run_stage_plan(
         analysis1,

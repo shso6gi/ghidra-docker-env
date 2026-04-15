@@ -50,16 +50,16 @@ flowchart TD
     AB --> AC["戻り値 signedness fix<br/>+ 引数 signedness fix"]
     AC --> AD{"変更が入った ?"}
     AD -->|No| AE["attempt 記録のみして次へ"]
-    AD -->|Yes| AF["変更があった側だけ selective reanalysis"]
-    AF --> AG["stage plan 再実行"]
+    AD -->|Yes| AF["仮説 overlay 済み analysis view を再利用"]
+    AF --> AG["再デコンパイルせず stage plan 再実行"]
     AG --> O
     AE --> AH["Phase P2_PATTERN_INT"]
 
     AH --> AI["戻り値 pattern fix<br/>+ 引数 type fix"]
     AI --> AJ{"変更が入った ?"}
     AJ -->|No| AK["P4-A tail 判定へ"]
-    AJ -->|Yes| AL["変更があった側だけ selective reanalysis"]
-    AL --> AM["stage plan 再実行"]
+    AJ -->|Yes| AL["仮説 overlay 済み analysis view を再利用"]
+    AL --> AM["再デコンパイルせず stage plan 再実行"]
     AM --> O
 
     AK --> AN{"P4-A MIPS64 ABI fix を<br/>保守的に適用できる ?"}
@@ -67,7 +67,7 @@ flowchart TD
     AN -->|Yes| AP["Phase 4-A 実行"]
     AP --> AQ{"変更が入った ?"}
     AQ -->|No| AO
-    AQ -->|Yes| AR["selective reanalysis + stage plan 再実行"]
+    AQ -->|Yes| AR["analysis overlay reuse + stage plan 再実行"]
     AR --> AS{"結果は SAT かつ<br/>Phase 4-B 候補あり ?"}
     AS -->|Yes| U
     AS -->|No| AT{"結果は EQUIVALENT ?"}
@@ -76,6 +76,13 @@ flowchart TD
 ```
 
 ## 2. pairwise 戦略の内部フロー（1つの判定サイクル内）
+
+補足:
+P1/P2/P4-A の型修正 phase は Ghidra `Program` を更新しません。
+各 phase は `FunctionReturnAnalysis` / `FunctionSignature` に仮説 overlay を重ね、
+その effective analysis view を使って次の stage plan を再実行します。
+そのため、retry 後に見ているのは「仮説を注入して永続変更した Program」ではなく、
+「元 Program から得た解析結果に仮説コンテキストを重ねた view」です。
 
 ```mermaid
 flowchart TD

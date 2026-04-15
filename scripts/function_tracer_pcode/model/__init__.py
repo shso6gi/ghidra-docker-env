@@ -9,7 +9,12 @@ from .storage import StorageInfo
 from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
-from .signature import FunctionSignature
+from .signature import (
+    FunctionSignature,
+    SignatureHypothesis,
+    ResolvedTypeSpec,
+    resolve_type_spec,
+)
 
 __all__ = [
     "StorageInfo",
@@ -21,4 +26,7 @@ __all__ = [
     "Condition",
     "SignednessResult",
     "FunctionSignature",
+    "SignatureHypothesis",
+    "ResolvedTypeSpec",
+    "resolve_type_spec",
 ]
