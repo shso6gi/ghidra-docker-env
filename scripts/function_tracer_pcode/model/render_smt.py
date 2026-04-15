@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """SMT-LIB rendering helpers for Expression."""
 
-from typing import Optional
+from typing import Mapping, Optional
 
 from .signature import get_declared_type_signedness
 
@@ -55,9 +55,13 @@ _SUPPORTED_UNARY_OPERATORS = {
 }
 
 
-def expression_to_smt(expr) -> str:
+def expression_to_smt(
+    expr,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+) -> str:
     """式を SMT-LIB 文字列へ変換する。"""
-    return _to_smt_internal(expr)
+    return _to_smt_internal(expr, symbol_name_mapping=symbol_name_mapping)
 
 
 def expression_returns_bool(expr) -> bool:
@@ -337,7 +341,11 @@ def _expr_prefers_signed_extension(expr) -> bool:
     return any(_expr_prefers_signed_extension(operand) for operand in operands)
 
 
-def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
+def _to_smt_internal(
+    expr,
+    prefer_signed_arithmetic: bool = False,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+) -> str:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
 
@@ -349,10 +357,16 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
         return f"(_ bv{value} {bits})"
 
     if expr_type == expr_kind.PARAMETER:
-        return expr.name if expr.name else f"param_{expr.value}"
+        name = expr.name if expr.name else f"param_{expr.value}"
+        if symbol_name_mapping is None:
+            return name
+        return symbol_name_mapping.get(name, name)
 
     if expr_type == expr_kind.VARIABLE:
-        return expr.name if expr.name else "var"
+        name = expr.name if expr.name else "var"
+        if symbol_name_mapping is None:
+            return name
+        return symbol_name_mapping.get(name, name)
 
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0]
@@ -361,12 +375,12 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
         if expr.operator == "PIECE":
             return (
                 f"(concat "
-                f"{_to_smt_internal(left, prefer_signed_arithmetic)} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic)})"
+                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)} "
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)})"
             )
 
         if expr.operator == "SUBPIECE":
-            source_smt = _to_smt_internal(left, prefer_signed_arithmetic)
+            source_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)
             right_kind = right.expr_type.__class__
             if right.expr_type == right_kind.CONSTANT:
                 byte_offset = right.value
@@ -374,12 +388,15 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
                 high_bit = (byte_offset + output_size) * 8 - 1
                 low_bit = byte_offset * 8
                 return f"((_ extract {high_bit} {low_bit}) {source_smt})"
-            return f"(subpiece {source_smt} {right._to_smt_internal()})"
+            return (
+                f"(subpiece {source_smt} "
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)})"
+            )
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)
-        left_smt = _to_smt_internal(left, prefer_signed_arithmetic)
-        right_smt = _to_smt_internal(right, prefer_signed_arithmetic)
+        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)
+        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
@@ -440,8 +457,8 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
             prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
             left_is_bool = expression_returns_bool(left)
             right_is_bool = expression_returns_bool(right)
-            left_smt = _to_smt_internal(left, False)
-            right_smt = _to_smt_internal(right, False)
+            left_smt = _to_smt_internal(left, False, symbol_name_mapping)
+            right_smt = _to_smt_internal(right, False, symbol_name_mapping)
 
             # Bool sort を含む比較は、そのまま zero/sign-extend すると
             # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
@@ -482,7 +499,11 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
 
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0]
-        operand_smt = _to_smt_internal(operand, prefer_signed_arithmetic)
+        operand_smt = _to_smt_internal(
+            operand,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+        )
         operand_bits = expression_smt_bit_width(operand)
 
         if expr.operator == "INT_ZEXT":
@@ -520,7 +541,10 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
         return f"({op} {operand_smt})"
 
     if expr_type == expr_kind.CALL:
-        args = " ".join(_to_smt_internal(operand, prefer_signed_arithmetic) for operand in expr.operands)
+        args = " ".join(
+            _to_smt_internal(operand, prefer_signed_arithmetic, symbol_name_mapping)
+            for operand in expr.operands
+        )
         if args:
             return f"({expr.name} {args})"
         return f"{expr.name}"
@@ -530,7 +554,11 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
         if mem_bits not in _MEMORY_ARRAY_WIDTHS:
             mem_bits = 32
         addr_expr = expr.operands[0]
-        addr_smt = _to_smt_internal(addr_expr, prefer_signed_arithmetic)
+        addr_smt = _to_smt_internal(
+            addr_expr,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+        )
         addr_smt = _coerce_expr_to_bitvec_width(
             addr_expr,
             addr_smt,
@@ -550,7 +578,11 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
 
         def render_branch_value(branch_expr):
             if hasattr(branch_expr, "_to_smt_internal"):
-                branch_smt = _to_smt_internal(branch_expr, prefer_sign_extension)
+                branch_smt = _to_smt_internal(
+                    branch_expr,
+                    prefer_sign_extension,
+                    symbol_name_mapping,
+                )
             else:
                 branch_smt = str(branch_expr)
 
@@ -570,9 +602,13 @@ def _to_smt_internal(expr, prefer_signed_arithmetic: bool = False) -> str:
         for index in range(len(branches) - 2, -1, -1):
             cond, val = branches[index]
             if cond is not None and hasattr(cond, "_to_smt_internal"):
-                cond_str = _to_smt_internal(cond, prefer_sign_extension)
+                cond_str = _to_smt_internal(
+                    cond,
+                    prefer_sign_extension,
+                    symbol_name_mapping,
+                )
             elif cond is not None and hasattr(cond, "to_smt"):
-                cond_str = cond.to_smt()
+                cond_str = cond.to_smt(symbol_name_mapping=symbol_name_mapping)
             else:
                 cond_str = "true"
 

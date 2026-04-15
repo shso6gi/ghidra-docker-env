@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SMTガード条件証明器"""
 
+import inspect
 from typing import List, Tuple
 
 
@@ -69,40 +70,56 @@ def prove_guard_condition(
         print(f"[GuardProver] Proving guard: {guard_expr_smt[:80]}...")
     
     # ソルバー実行
-    old_timeout = solver_runner.timeout
-    solver_runner.timeout = timeout
-    
-    try:
+    if _supports_runner_timeout(solver_runner):
+        result = solver_runner.run_sequential(query, timeout=timeout)
+    else:
         result = solver_runner.run_sequential(query)
-        
-        # エラーチェック
-        if result.results:
-            from ...smt import SolverStatus
-            for solver_result in result.results:
-                if solver_result.status == SolverStatus.ERROR:
-                    error_msg = solver_result.error_message or "Unknown error"
-                    
-                    # パースエラーの詳細を抽出
-                    if "unknown constant" in error_msg:
-                        import re
-                        match = re.search(r'unknown constant (\w+)', error_msg)
-                        if match:
-                            unknown_sym = match.group(1)
-                            error_msg = f"Parse error: unknown constant '{unknown_sym}' - symbol not replaced?"
-                    
-                    if debug:
-                        print(f"[GuardProver] ERROR: {error_msg}")
-                    
-                    return False, error_msg
-        
-        # UNSAT = guard が必ず成立
-        is_proven = result.is_equivalent is True
-        
-        if debug:
-            status_str = "PROVEN (UNSAT)" if is_proven else "NOT PROVEN (SAT/UNKNOWN)"
-            print(f"[GuardProver] Result: {status_str}")
-        
-        return is_proven, ""
     
-    finally:
-        solver_runner.timeout = old_timeout
+    # エラーチェック
+    if result.results:
+        from ...smt import SolverStatus
+        for solver_result in result.results:
+            if solver_result.status == SolverStatus.ERROR:
+                error_msg = solver_result.error_message or "Unknown error"
+                
+                # パースエラーの詳細を抽出
+                if "unknown constant" in error_msg:
+                    import re
+                    match = re.search(r'unknown constant (\w+)', error_msg)
+                    if match:
+                        unknown_sym = match.group(1)
+                        error_msg = f"Parse error: unknown constant '{unknown_sym}' - symbol not replaced?"
+                
+                if debug:
+                    print(f"[GuardProver] ERROR: {error_msg}")
+                
+                return False, error_msg
+    
+    # UNSAT = guard が必ず成立
+    is_proven = result.is_equivalent is True
+    
+    if debug:
+        status_str = "PROVEN (UNSAT)" if is_proven else "NOT PROVEN (SAT/UNKNOWN)"
+        print(f"[GuardProver] Result: {status_str}")
+    
+    return is_proven, ""
+
+
+def _supports_runner_timeout(solver_runner) -> bool:
+    """run_sequential が timeout を受ける実装か判定する。"""
+    run_sequential = getattr(solver_runner, "run_sequential", None)
+    if run_sequential is None:
+        return False
+
+    try:
+        signature = inspect.signature(run_sequential)
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        "timeout" in signature.parameters
+        or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+    )

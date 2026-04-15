@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """式の表現クラス"""
 from enum import Enum, auto
-from typing import List, Optional, Any, Dict, Set
+from typing import List, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
 
 from .storage import StorageInfo
@@ -346,12 +346,23 @@ class Expression:
             include_memory_read_order=include_memory_read_order,
         )
     
-    def to_smt(self) -> str:
+    def to_smt(
+        self,
+        *,
+        symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    ) -> str:
         """SMT ソルバー用の式に変換"""
-        return expression_to_smt(self)
+        return expression_to_smt(
+            self,
+            symbol_name_mapping=symbol_name_mapping,
+        )
     
-    def _to_smt_internal(self) -> str:
-        return expression_to_smt(self)
+    def _to_smt_internal(
+        self,
+        *,
+        symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        return expression_to_smt(self, symbol_name_mapping=symbol_name_mapping)
 
     def _get_smt_operator(self, operator: Optional[str] = None) -> str:
         return get_smt_operator(operator)

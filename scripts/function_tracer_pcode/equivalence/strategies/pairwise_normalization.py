@@ -148,10 +148,18 @@ def try_normalization_equivalence(
         normalize_expression_fn,
     )
 
-    value1_smt_orig = param_replace_fn1(value1_orig.to_smt())
-    value2_smt_orig = param_replace_fn2(value2_orig.to_smt())
-    value1_smt_norm = param_replace_fn1(value1_norm.to_smt())
-    value2_smt_norm = param_replace_fn2(value2_norm.to_smt())
+    def _render_with_replacer(expr, param_replace_fn):
+        if param_replace_fn is None:
+            return expr.to_smt()
+        try:
+            return param_replace_fn(expr)
+        except TypeError:
+            return param_replace_fn(expr.to_smt())
+
+    value1_smt_orig = _render_with_replacer(value1_orig, param_replace_fn1)
+    value2_smt_orig = _render_with_replacer(value2_orig, param_replace_fn2)
+    value1_smt_norm = _render_with_replacer(value1_norm, param_replace_fn1)
+    value2_smt_norm = _render_with_replacer(value2_norm, param_replace_fn2)
 
     strategy._debug_print(f"  Pair {pair_id} normalization attempt:")
     strategy._debug_print(f"    Original 1: {value1_smt_orig[:200]}")

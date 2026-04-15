@@ -127,7 +127,10 @@ class UbConstraintBuilder:
 
             right_smt = right.to_smt()
             if symbol_replace_fn is not None:
-                right_smt = symbol_replace_fn(right_smt)
+                try:
+                    right_smt = symbol_replace_fn(right)
+                except TypeError:
+                    right_smt = symbol_replace_fn(right_smt)
 
             key = (right_smt, left_bits, right_bits, operator)
             if key in seen:
@@ -187,7 +190,10 @@ class UbConstraintBuilder:
 
             right_smt = right.to_smt()
             if symbol_replace_fn is not None:
-                right_smt = symbol_replace_fn(right_smt)
+                try:
+                    right_smt = symbol_replace_fn(right)
+                except TypeError:
+                    right_smt = symbol_replace_fn(right_smt)
 
             right_bits = right.get_bit_width()
             key = (right_smt, right_bits, bound)

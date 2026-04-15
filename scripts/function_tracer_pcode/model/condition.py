@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Mapping
 
 from .storage import StorageInfo
 
@@ -29,11 +29,25 @@ class Condition:
             return f"(not {expr_str})"
         return expr_str
 
-    def to_smt(self) -> str:
-        expr_smt = self.expression.to_smt()
+    def to_smt(
+        self,
+        *,
+        symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        expr_smt = self.expression.to_smt(
+            symbol_name_mapping=symbol_name_mapping,
+        )
         if self.negated:
             return f"(not {expr_smt})"
         return expr_smt
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, Condition):
+            return False
+        return self.equals(other)
+
+    def __hash__(self) -> int:
+        return hash(self.structural_key())
 
     def equals(self, other: "Condition") -> bool:
         """条件が等価かどうかを判定"""

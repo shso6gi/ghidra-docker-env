@@ -136,17 +136,19 @@ class ParallelSolverRunner:
         self, 
         solver: SMTSolver, 
         smt_script: str,
-        cancellation_token: Optional[CancellationToken] = None
+        cancellation_token: Optional[CancellationToken] = None,
+        timeout: Optional[int] = None
     ) -> SolverResult:
         """単一ソルバーで実行"""
         import sys
         
         # タイムアウトを動的に設定（重要：ここで反映される）
-        solver.set_timeout(self.timeout)
+        runtime_timeout = self._resolve_timeout(timeout)
+        solver.set_timeout(runtime_timeout)
         
         # 即座にフラッシュして出力
         if self.debug:
-            print(f"[ParallelRunner] >>> Starting {solver.name} (timeout={self.timeout}s)...", flush=True)
+            print(f"[ParallelRunner] >>> Starting {solver.name} (timeout={runtime_timeout}s)...", flush=True)
             sys.stdout.flush()
         
         try:
@@ -167,7 +169,11 @@ class ParallelSolverRunner:
                 error_message=str(e)
             )
     
-    def run_parallel(self, smt_script: str) -> ParallelResult:
+    def run_parallel(
+        self,
+        smt_script: str,
+        timeout: Optional[int] = None,
+    ) -> ParallelResult:
         """
         複数ソルバーを並列実行し、最初に確定した結果で終了
         
@@ -183,6 +189,7 @@ class ParallelSolverRunner:
                 is_equivalent=None
             )
         
+        runtime_timeout = self._resolve_timeout(timeout)
         if self.debug:
             print(f"[ParallelRunner] Starting parallel execution with {len(self._solvers)} solvers")
         
@@ -199,7 +206,8 @@ class ParallelSolverRunner:
                     self.run_single, 
                     solver, 
                     smt_script,
-                    cancellation_token
+                    cancellation_token,
+                    runtime_timeout
                 ): solver
                 for solver in self._solvers
             }
@@ -208,7 +216,7 @@ class ParallelSolverRunner:
                 # 結果を収集（完了順）
                 for future in concurrent.futures.as_completed(
                     future_to_solver, 
-                    timeout=self.timeout + 10
+                    timeout=runtime_timeout + 10
                 ):
                     solver = future_to_solver[future]
                     
@@ -242,7 +250,7 @@ class ParallelSolverRunner:
                         results.append(SolverResult(
                             solver_name=solver.name,
                             status=SolverStatus.TIMEOUT,
-                            elapsed_time=self.timeout
+                            elapsed_time=runtime_timeout
                         ))
                     except concurrent.futures.CancelledError:
                         if self.debug:
@@ -271,7 +279,7 @@ class ParallelSolverRunner:
                         results.append(SolverResult(
                             solver_name=solver.name,
                             status=SolverStatus.TIMEOUT,
-                            elapsed_time=self.timeout
+                            elapsed_time=runtime_timeout
                         ))
         
         # 等価性を判定
@@ -288,11 +296,16 @@ class ParallelSolverRunner:
             is_equivalent=is_equivalent
         )
     
-    def run_sequential(self, smt_script: str) -> ParallelResult:
+    def run_sequential(
+        self,
+        smt_script: str,
+        timeout: Optional[int] = None,
+    ) -> ParallelResult:
         """
         複数ソルバーを順次実行（デバッグ用）
         最初に確定結果が出たら終了
         """
+        runtime_timeout = self._resolve_timeout(timeout)
         if self.debug:
             print(f"[ParallelRunner] Starting sequential execution with {len(self._solvers)} solvers")
         
@@ -306,7 +319,11 @@ class ParallelSolverRunner:
             if self.debug:
                 print(f"[ParallelRunner] Running {solver.name}...")
             
-            result = self.run_single(solver, smt_script)
+            result = self.run_single(
+                solver,
+                smt_script,
+                timeout=runtime_timeout,
+            )
             results.append(result)
             
             if self.debug:
@@ -314,13 +331,15 @@ class ParallelSolverRunner:
             
             if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
                 first_definitive = result
-        
-        is_equivalent: Optional[bool] = None
-        if first_definitive:
-            is_equivalent = first_definitive.status == SolverStatus.UNSAT
-        
+
         return ParallelResult(
             results=results,
             first_definitive=first_definitive,
-            is_equivalent=is_equivalent
+            is_equivalent=(first_definitive.status == SolverStatus.UNSAT)
+            if first_definitive is not None
+            else None
         )
+
+    def _resolve_timeout(self, timeout: Optional[int]) -> int:
+        """実行に使うタイムアウトを決定する。"""
+        return timeout if timeout is not None else self.timeout

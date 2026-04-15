@@ -42,8 +42,13 @@ class ReturnCase:
         if self.conditions_smt is None:
             self.conditions_smt = []
             for cond in self.conditions:
-                cond_str = cond.to_smt()
-                cond_str = param_replace_fn(cond_str)
+                if param_replace_fn is None:
+                    cond_str = cond.to_smt()
+                else:
+                    try:
+                        cond_str = param_replace_fn(cond)
+                    except TypeError:
+                        cond_str = param_replace_fn(cond.to_smt())
                 self.conditions_smt.append(cond_str)
         return self.conditions_smt
 
@@ -72,8 +77,13 @@ class ReturnCase:
             if lowered_expr is not None:
                 rendered_expr = lowered_expr
 
-        result = str(rendered_expr.to_smt())
-        result = param_replace_fn(result)
+        if param_replace_fn is None:
+            result = rendered_expr.to_smt()
+        else:
+            try:
+                result = param_replace_fn(rendered_expr)
+            except TypeError:
+                result = param_replace_fn(rendered_expr.to_smt())
         if target_bits is not None:
             result = coerce_value_to_bitvec_width(
                 rendered_expr,

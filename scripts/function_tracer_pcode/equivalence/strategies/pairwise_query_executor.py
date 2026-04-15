@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Query execution helpers for PairwiseStrategy."""
 
+import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...smt import SolverStatus
@@ -13,37 +14,31 @@ from .pairwise_models import QueryResult
 
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
-    old_timeout = strategy.solver_runner.timeout
     timeout = strategy.per_query_timeout_hard if use_hard_timeout else strategy.per_query_timeout
-    strategy.solver_runner.timeout = timeout
+    parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    counterexample_raw = None
+    if parallel_result.is_equivalent is False:
+        counterexample_raw = parallel_result.get_counterexample()
 
-    try:
-        parallel_result = strategy.solver_runner.run_sequential(query)
-        counterexample_raw = None
-        if parallel_result.is_equivalent is False:
-            counterexample_raw = parallel_result.get_counterexample()
+    if parallel_result.is_equivalent is True:
+        result_str = "UNSAT"
+    elif parallel_result.is_equivalent is False:
+        result_str = "SAT"
+    else:
+        result_str = "UNKNOWN/TIMEOUT"
 
-        if parallel_result.is_equivalent is True:
-            result_str = "UNSAT"
-        elif parallel_result.is_equivalent is False:
-            result_str = "SAT"
-        else:
-            result_str = "UNKNOWN/TIMEOUT"
+    elapsed = parallel_result.results[0].elapsed_time if parallel_result.results else 0.0
+    strategy._debug_print(f"  Pair {pair_id} {stage}: {result_str} (t={elapsed:.3f}s)")
 
-        elapsed = parallel_result.results[0].elapsed_time if parallel_result.results else 0.0
-        strategy._debug_print(f"  Pair {pair_id} {stage}: {result_str} (t={elapsed:.3f}s)")
+    _log_solver_errors(strategy, query, parallel_result.results)
 
-        _log_solver_errors(strategy, query, parallel_result.results)
+    if strategy.save_unknown_queries and parallel_result.is_equivalent is None:
+        strategy._save_unknown_query(query, pair_id, stage)
 
-        if strategy.save_unknown_queries and parallel_result.is_equivalent is None:
-            strategy._save_unknown_query(query, pair_id, stage)
-
-        return QueryResult(
-            is_equivalent=parallel_result.is_equivalent,
-            counterexample_raw=counterexample_raw,
-        )
-    finally:
-        strategy.solver_runner.timeout = old_timeout
+    return QueryResult(
+        is_equivalent=parallel_result.is_equivalent,
+        counterexample_raw=counterexample_raw,
+    )
 
 
 def solve_query_twostage(
@@ -326,13 +321,8 @@ def _check_pair_equality_under_model(
 
 
 def _run_validation_query(strategy, query: str, label: str) -> Optional[bool]:
-    old_timeout = strategy.solver_runner.timeout
     timeout = min(getattr(strategy, "per_query_timeout", 5), 5)
-    strategy.solver_runner.timeout = timeout
-    try:
-        parallel_result = strategy.solver_runner.run_sequential(query)
-    finally:
-        strategy.solver_runner.timeout = old_timeout
+    parallel_result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
 
     _log_solver_errors(strategy, query, parallel_result.results)
     if parallel_result.is_equivalent is True:
@@ -342,6 +332,38 @@ def _run_validation_query(strategy, query: str, label: str) -> Optional[bool]:
 
     strategy._debug_print(f"  Validation query {label} returned UNKNOWN/TIMEOUT")
     return None
+
+
+def _run_query_with_timeout(solver_runner, query: str, timeout: int):
+    """solver_runner.run_sequential(query, timeout=...) をサポートしていれば使う。"""
+    run_sequential = getattr(solver_runner, "run_sequential", None)
+    if run_sequential is None:
+        raise AttributeError("solver_runner has no run_sequential method")
+
+    try:
+        signature = inspect.signature(run_sequential)
+    except (TypeError, ValueError):
+        try:
+            return run_sequential(query, timeout=timeout)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc) and "timeout" in str(exc):
+                return run_sequential(query)
+            raise
+
+    has_timeout_parameter = "timeout" in signature.parameters
+    has_var_keyword = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+    if has_timeout_parameter or has_var_keyword:
+        try:
+            return run_sequential(query, timeout=timeout)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc) and "timeout" in str(exc):
+                return run_sequential(query)
+            raise
+
+    return run_sequential(query)
 
 
 def _build_model_validation_query(

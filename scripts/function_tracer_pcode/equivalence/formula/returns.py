@@ -20,7 +20,7 @@ from ...model.render_smt import (
     expression_returns_bool,
     expression_smt_bit_width,
 )
-from .params import replace_symbol_names
+from .params import build_symbol_name_mapping
 from .types import ParameterInfo
 
 
@@ -224,13 +224,14 @@ def build_return_definition(
     """return 値の定義式を構築する。"""
     lines: List[str] = []
     return_size = get_return_size(analysis)
+    symbol_name_mapping = build_symbol_name_mapping(param_infos)
 
     return_defs: List[Dict[str, str]] = []
     for ret in analysis.returns:
         if ret.conditions:
             cond_parts = []
             for condition in ret.conditions:
-                cond_smt = replace_symbol_names(condition.to_smt(), param_infos)
+                cond_smt = condition.to_smt(symbol_name_mapping=symbol_name_mapping)
                 cond_parts.append(cond_smt)
             cond_str = cond_parts[0] if len(cond_parts) == 1 else f"(and {' '.join(cond_parts)})"
         else:
@@ -251,7 +252,7 @@ def build_return_definition(
             if lowered_value is not None:
                 rendered_value = lowered_value
 
-        value_smt = replace_symbol_names(rendered_value.to_smt(), param_infos)
+        value_smt = rendered_value.to_smt(symbol_name_mapping=symbol_name_mapping)
         use_sign_extension = should_sign_extend_value(
             analysis.return_type,
             rendered_value,
