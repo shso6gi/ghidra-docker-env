@@ -5,7 +5,7 @@ SMTソルバーの負荷を軽減するため、構文的に異なるが意味�
 統一的な形式に変換する
 """
 
-from typing import List, TYPE_CHECKING
+from typing import Any, List, TYPE_CHECKING
 from .base import RewriteRule
 
 if TYPE_CHECKING:
@@ -90,18 +90,43 @@ class CommutativeNormalizationRule(RewriteRule):
             return result
     
     def _get_sort_key(self, expr: 'Expression'):
-        """ソート用のキーを安全に取得"""
+        """ソート用の structural key を取得する。"""
         if hasattr(expr, "structural_key") and callable(getattr(expr, "structural_key")):
             try:
-                return expr.structural_key(normalize_commutative=True)
+                return expr.structural_key(
+                    normalize_commutative=True,
+                    strip_width_adapters=True,
+                    collapse_full_masks=True,
+                    include_memory_read_order=False,
+                )
             except Exception:
                 pass
-        if hasattr(expr, 'to_smt') and callable(getattr(expr, 'to_smt')):
-            try:
-                return ("rendered", expr.to_smt())
-            except Exception:
-                pass
-        return ("rendered", expr.to_string())
+        return self._opaque_structural_sort_key(expr)
+
+    def _opaque_structural_sort_key(self, expr: 'Expression'):
+        expr_type = getattr(getattr(expr, "expr_type", None), "name", None)
+        operands = tuple(self._opaque_structural_sort_key(op) for op in (getattr(expr, "operands", None) or []))
+        return (
+            "opaque_expr",
+            expr_type,
+            getattr(expr, "operator", None),
+            int(getattr(expr, "size", 0) or 0),
+            self._opaque_atom_key(getattr(expr, "value", None)),
+            getattr(expr, "name", None),
+            operands,
+        )
+
+    @staticmethod
+    def _opaque_atom_key(value: Any):
+        if value is None:
+            return ("none",)
+        if isinstance(value, bool):
+            return ("bool", int(value))
+        if isinstance(value, int):
+            return ("int", value)
+        if isinstance(value, str):
+            return ("str", value)
+        return ("object_type", type(value).__name__)
     
     def _flatten(self, expr: 'Expression', target_op: str) -> List['Expression']:
         """同じ演算子のネストをフラット化"""

@@ -4,7 +4,7 @@
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
 
-from conftest import create_mock_analysis
+from conftest import MockDataType, create_mock_analysis
 
 
 def _param(name: str, size: int) -> Expression:
@@ -195,6 +195,38 @@ def test_width_mismatch_without_signed_branch_evidence_keeps_unsigned_fallback()
     )
 
     assert constraints == {}
+
+
+def test_width_mismatch_signedness_fallback_uses_datatype_metadata_not_type_name():
+    handler = MIPS64Handler(debug=True)
+    weird_unsigned = MockDataType("mystery_alias", 4, False, "/typedef/mystery_alias")
+
+    signedness = handler._resolve_width_mismatch_signedness(
+        "param_1",
+        "param_1",
+        {
+            "name": "param_1",
+            "data_type": "totally_custom_alias",
+            "data_type_obj": weird_unsigned,
+            "size": 4,
+        },
+        {
+            "name": "param_1",
+            "data_type": "another_alias",
+            "data_type_obj": weird_unsigned,
+            "size": 4,
+        },
+        {
+            "name": "param_1",
+            "data_type": "narrow_alias",
+            "data_type_obj": weird_unsigned,
+            "size": 4,
+        },
+        usage1={},
+        usage2={},
+    )
+
+    assert signedness == "unsigned"
 
 
 def test_width_mismatch_detects_spurious_upper_bits_even_when_non_mips_side_is_wide():

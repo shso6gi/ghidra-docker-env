@@ -7,6 +7,8 @@ from collections import Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, Expression, ExpressionType, ReturnInfo
+from ..model.signature import is_integral_data_type, is_pointer_data_type
+from ..model.runtime_refs import UnknownValueRef
 from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     CanonicalLocation,
@@ -71,10 +73,9 @@ class StructuralRecurrenceSummarizer:
 
     def _try_summarize_linear_self_recursion(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
         function_name = function.getName()
-        unknown_name = f"call_out_of_scope:{function_name}"
         recursive_returns = [
             ret for ret in (analysis.returns or [])
-            if self._expression_contains_unknown_name(ret.value, unknown_name)
+            if self._expression_contains_recursive_unknown(ret.value, function_name)
         ]
         if len(recursive_returns) != 1:
             self._debug(
@@ -116,7 +117,7 @@ class StructuralRecurrenceSummarizer:
             op for op in self._iter_pcode_ops(high_function)
             if op.getMnemonic() == "CALL"
             and op.getNumInputs() >= 2
-            and self.tracer._get_function_name(op.getInput(0)) == function_name
+            and self._is_direct_self_call(op, function_name)
         ]
         if len(self_call_ops) != 1:
             self._debug(
@@ -133,7 +134,7 @@ class StructuralRecurrenceSummarizer:
             )
             return None
 
-        addend_expr = self._extract_addend_expression(recursive_ret.value, unknown_name)
+        addend_expr = self._extract_addend_expression(recursive_ret.value, function_name)
         if addend_expr is None:
             self._debug(
                 f"Declined '{function_name}': could not isolate non-recursive addend from "
@@ -364,8 +365,13 @@ class StructuralRecurrenceSummarizer:
     def _infer_pointer_parameter_name(self, analysis) -> Optional[str]:
         for param in analysis.parameters or []:
             name = str(param.get("name") or "")
-            data_type = str(param.get("data_type") or "")
-            if name and "*" in data_type:
+            if not name:
+                continue
+            if is_pointer_data_type(
+                param.get("data_type_obj"),
+                param.get("data_type"),
+                program=getattr(self.tracer, "program", None),
+            ):
                 return name
         return None
 
@@ -416,6 +422,7 @@ class StructuralRecurrenceSummarizer:
                 name,
                 index=int(param.get("index", 0)),
                 data_type=param.get("data_type"),
+                data_type_obj=param.get("data_type_obj"),
                 size=int(param.get("size", 4) or 4),
             )
         return Expression.parameter(name, size=4)
@@ -633,13 +640,14 @@ class StructuralRecurrenceSummarizer:
     ) -> Expression:
         base_param = None
         for param in parameters:
-            if param.get("name") == location.base_param:
+            if location.base_ref.matches_parameter(param):
                 base_param = param
                 break
         base_expr = Expression.parameter(
-            location.base_param,
+            location.base_ref.parameter_name or location.base_param,
             index=int((base_param or {}).get("index", 0)),
             data_type=(base_param or {}).get("data_type"),
+            data_type_obj=(base_param or {}).get("data_type_obj"),
             size=int((base_param or {}).get("size", 8) or 8),
         )
         if location.offset == 0:
@@ -943,13 +951,17 @@ class StructuralRecurrenceSummarizer:
                 yield pcode_iter.next()
 
     def _parameter_can_be_counter(self, param_info: dict) -> bool:
-        data_type = str(param_info.get("data_type") or "").lower()
         size = int(param_info.get("size") or 0)
         if size not in {1, 2, 4, 8}:
             return False
-        if not data_type:
+        data_type_obj = param_info.get("data_type_obj")
+        if data_type_obj is None:
             return True
-        return any(token in data_type for token in ("int", "long", "short", "char"))
+        return is_integral_data_type(
+            data_type_obj,
+            param_info.get("data_type"),
+            program=getattr(self.tracer, "program", None),
+        )
 
     def _parameter_expression(self, param_info: dict) -> Expression:
         size = int(param_info.get("size") or 4)
@@ -957,23 +969,41 @@ class StructuralRecurrenceSummarizer:
             param_info.get("name", "param_1"),
             index=int(param_info.get("index", 0)),
             data_type=param_info.get("data_type"),
+            data_type_obj=param_info.get("data_type_obj"),
             size=size,
             storage_info=param_info.get("storage_info"),
         )
 
-    def _expression_contains_unknown_name(self, expr: Optional[Expression], unknown_name: str) -> bool:
+    def _is_direct_self_call(self, op, function_name: str) -> bool:
+        resolver = getattr(self.tracer, "resolve_call_target_ref", None)
+        if not callable(resolver):
+            return False
+        target_ref = resolver(
+            op.getInput(0),
+            allow_containing=True,
+            allow_code_address=False,
+        )
+        return bool(target_ref is not None and target_ref.function_name == function_name)
+
+    def _expression_contains_recursive_unknown(self, expr: Optional[Expression], function_name: str) -> bool:
         if expr is None:
             return False
         if expr.expr_type == ExpressionType.UNKNOWN:
-            expr_name = expr.name or ""
-            return expr_name == unknown_name or expr_name.startswith(f"{unknown_name}#")
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            if not isinstance(runtime_ref, UnknownValueRef):
+                return False
+            target_ref = runtime_ref.target_ref
+            return bool(
+                target_ref is not None
+                and target_ref.function_name == function_name
+            )
         if expr.expr_type == ExpressionType.PHI and expr.value:
             return any(
-                (cond is not None and self._expression_contains_unknown_name(cond.expression, unknown_name))
-                or self._expression_contains_unknown_name(value, unknown_name)
+                (cond is not None and self._expression_contains_recursive_unknown(cond.expression, function_name))
+                or self._expression_contains_recursive_unknown(value, function_name)
                 for cond, value in expr.value
             )
-        return any(self._expression_contains_unknown_name(operand, unknown_name) for operand in expr.operands or [])
+        return any(self._expression_contains_recursive_unknown(operand, function_name) for operand in expr.operands or [])
 
     def _is_constant_expression(self, expr: Optional[Expression]) -> bool:
         return expr is not None and expr.expr_type == ExpressionType.CONSTANT
@@ -1008,19 +1038,19 @@ class StructuralRecurrenceSummarizer:
             signed -= modulus
         return signed
 
-    def _extract_addend_expression(self, expr: Expression, unknown_name: str) -> Optional[Expression]:
+    def _extract_addend_expression(self, expr: Expression, function_name: str) -> Optional[Expression]:
         if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
             return None
         if expr.operator not in {"INT_ADD", "INT_SUB"}:
             return None
 
         left, right = expr.operands
-        if self._expression_contains_unknown_name(left, unknown_name) and not self._expression_contains_unknown_name(right, unknown_name):
+        if self._expression_contains_recursive_unknown(left, function_name) and not self._expression_contains_recursive_unknown(right, function_name):
             if expr.operator == "INT_ADD":
                 return right
             if expr.operator == "INT_SUB":
                 return Expression.unary_op("INT_2COMP", right)
-        if self._expression_contains_unknown_name(right, unknown_name) and not self._expression_contains_unknown_name(left, unknown_name):
+        if self._expression_contains_recursive_unknown(right, function_name) and not self._expression_contains_recursive_unknown(left, function_name):
             if expr.operator == "INT_ADD":
                 return left
         return None

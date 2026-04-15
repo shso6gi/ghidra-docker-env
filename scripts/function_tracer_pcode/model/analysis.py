@@ -17,6 +17,7 @@ from .signature import (
     parameters_without_runtime_objects,
 )
 from .call_target import CallTargetRef, coerce_call_target_ref
+from .runtime_refs import UnknownValueRef
 
 @dataclass
 class ReturnInfo:
@@ -56,17 +57,20 @@ class DeferredCallInfo:
     placeholder_name: str
     target_ref: CallTargetRef
     arguments: List["Expression"] = field(default_factory=list)
+    sequence: Optional[int]
 
     def __init__(
         self,
         placeholder_name: str,
         target_ref,
         arguments: Optional[List["Expression"]] = None,
+        sequence: Optional[int] = None,
     ) -> None:
         normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
         self.placeholder_name = placeholder_name
         self.target_ref = normalized
         self.arguments = list(arguments or [])
+        self.sequence = sequence
 
     @property
     def target_name(self) -> str:
@@ -76,11 +80,20 @@ class DeferredCallInfo:
     def target_key(self):
         return self.target_ref.analysis_key()
 
+    @property
+    def unknown_ref(self) -> UnknownValueRef:
+        return UnknownValueRef.deferred_call(
+            placeholder_name=self.placeholder_name,
+            target_ref=self.target_ref,
+            sequence=self.sequence,
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "placeholder_name": self.placeholder_name,
             "target_name": self.target_name,
             "target_ref": self.target_ref.to_dict(),
+            "unknown_ref": self.unknown_ref.to_dict(),
             "arguments": [arg.to_dict() for arg in self.arguments],
         }
 

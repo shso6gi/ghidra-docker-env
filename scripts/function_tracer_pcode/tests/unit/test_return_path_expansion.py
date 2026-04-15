@@ -5,12 +5,20 @@ from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.model import AddressValueRef, Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue
 
 
 def _param(name: str, size: int = 4) -> Expression:
     return Expression(ExpressionType.PARAMETER, name=name, size=size)
+
+
+def _addr_var(name: str, size: int = 8) -> Expression:
+    return Expression.variable(
+        name,
+        size=size,
+        runtime_ref=AddressValueRef.from_name(name),
+    )
 
 
 def _cond(operator: str, left: Expression, right: Expression, negated: bool = False) -> Condition:
@@ -303,7 +311,7 @@ def test_return_analyzer_collapses_same_value_under_complementary_conditions():
 def test_return_analyzer_collapses_same_value_under_stack_guard_like_conditions():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 
-    guard_ptr = Expression.variable("PTR___stack_chk_guard_120013160", size=8)
+    guard_ptr = _addr_var("PTR___stack_chk_guard_120013160", size=8)
     left = Expression.memory(
         Expression.binary_op(
             "INDIRECT",
@@ -390,7 +398,7 @@ def test_return_analyzer_drops_unresolved_case_when_precise_case_has_same_condit
 def test_return_analyzer_drops_stack_protector_condition_from_sole_return_case():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 
-    guard_ptr = Expression.variable("PTR___stack_chk_guard_00111fe8", size=8)
+    guard_ptr = _addr_var("PTR___stack_chk_guard_00111fe8", size=8)
     guard_expr = Expression.binary_op(
         "INT_NOTEQUAL",
         Expression.binary_op(

@@ -10,6 +10,7 @@ from ..model.call_target import CallTargetRef, coerce_call_target_ref
 from ..model.structural import StructuralKey
 from ..model.storage import StorageInfo
 from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from ..model.runtime_refs import UnknownValueRef
 from ..model.signature import (
     get_declared_type_signedness,
     is_void_data_type,
@@ -691,11 +692,7 @@ class ReturnAnalyzer:
                 self._collect_parameter_descriptors_from_expression(branch_value, discovered)
 
     def _parameter_descriptor_from_expression(self, expr: Expression) -> Dict:
-        index_value = expr.value if isinstance(expr.value, int) else -1
-        if index_value < 0 and expr.name:
-            match = re.fullmatch(r"param_(\d+)", expr.name)
-            if match:
-                index_value = int(match.group(1)) - 1
+        index_value = expr.value if isinstance(expr.value, int) and expr.value >= 0 else -1
 
         descriptor = {
             "name": expr.name or (f"param_{index_value + 1}" if index_value >= 0 else None),
@@ -943,24 +940,27 @@ class ReturnAnalyzer:
         analysis.incomplete_control_flow = bool(reasons)
 
     def _make_deferred_call_recorder(self, target_function_name: str):
-        def record_call(target, args: List[Expression]) -> str:
+        def record_call(target, args: List[Expression]) -> UnknownValueRef:
             target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
             target_label = target_ref.placeholder_name()
-            placeholder_name = f"call_out_of_scope:{target_label}#{self._deferred_call_counter}"
+            sequence = self._deferred_call_counter
+            placeholder_name = f"call_out_of_scope:{target_label}#{sequence}"
             self._deferred_call_counter += 1
             cloned_args = [self._clone_expression(arg) for arg in args]
-            self._current_deferred_calls[placeholder_name] = DeferredCallInfo(
+            info = DeferredCallInfo(
                 placeholder_name=placeholder_name,
                 target_ref=target_ref,
                 arguments=cloned_args,
+                sequence=sequence,
             )
+            self._current_deferred_calls[placeholder_name] = info
             if self.debug:
                 arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
                 self._debug_print(
                     f"Recorded deferred call in '{target_function_name}': "
                     f"{placeholder_name} -> {target_ref.display_name()}([{arg_dump}])"
                 )
-            return placeholder_name
+            return info.unknown_ref
 
         return record_call
 
@@ -1848,15 +1848,19 @@ class ReturnAnalyzer:
                 expr.name or "",
                 index=expr.value if isinstance(expr.value, int) else -1,
                 data_type=expr.data_type,
+                data_type_obj=getattr(expr, "data_type_obj", None),
                 size=expr.size or 4,
                 storage_info=expr.storage_info,
+                runtime_ref=getattr(expr, "runtime_ref", None),
             )
         if expr.expr_type == ExpressionType.VARIABLE:
             return Expression.variable(
                 expr.name or "",
                 data_type=expr.data_type,
+                data_type_obj=getattr(expr, "data_type_obj", None),
                 size=expr.size or 4,
                 storage_info=expr.storage_info,
+                runtime_ref=getattr(expr, "runtime_ref", None),
             )
         return Expression(
             expr.expr_type,
@@ -1866,7 +1870,9 @@ class ReturnAnalyzer:
             size=expr.size,
             name=expr.name,
             data_type=expr.data_type,
+            data_type_obj=getattr(expr, "data_type_obj", None),
             storage_info=expr.storage_info,
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
 
     def _build_effect_summary(

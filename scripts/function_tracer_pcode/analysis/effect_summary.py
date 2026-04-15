@@ -9,29 +9,21 @@ from itertools import product
 import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, overload
 
-from ..model import Condition, Expression, ExpressionType, StorageInfo, CallTargetRef
+from ..model import (
+    AddressValueRef,
+    CallTargetRef,
+    CanonicalLocation,
+    Condition,
+    Expression,
+    ExpressionType,
+    LocationBaseRef,
+    LocationStep,
+    StorageInfo,
+)
+from ..model.signature import is_pointer_data_type
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
-from .memory_resolver import concretize_readonly_loads, _extract_address_suffix
-
-
-@dataclass(frozen=True)
-class CanonicalLocation:
-    base_param: str
-    offset: int
-    size: int
-    steps: Tuple["LocationStep", ...] = ()
-
-
-@dataclass(frozen=True)
-class LocationStep:
-    kind: str
-    value: int
-
-    def __post_init__(self) -> None:
-        if self.kind not in {"offset", "deref"}:
-            raise ValueError(f"Unsupported location step kind: {self.kind}")
-
+from .memory_resolver import concretize_readonly_loads
 
 @dataclass
 class StoreEffect:
@@ -49,9 +41,6 @@ class EffectSummary:
     has_unsupported_call: bool = False
 
 
-_SYNTHETIC_LOCATION_BASE_PREFIX = "__locbase__"
-_SYNTHETIC_LOCATION_READ_PREFIX = "__locread__"
-_STACK_FRAME_LOCATION_BASE = f"{_SYNTHETIC_LOCATION_BASE_PREFIX}stackframe"
 _MAX_CALL_ARGUMENT_VARIANTS = 16
 
 
@@ -78,17 +67,6 @@ def _encode_signed_token(value: int) -> str:
     if numeric < 0:
         return f"n{abs(numeric)}"
     return f"p{numeric}"
-
-
-def _decode_signed_token(token: str) -> Optional[int]:
-    if not token:
-        return None
-    prefix = token[0]
-    digits = token[1:]
-    if prefix not in {"n", "p"} or not digits.isdigit():
-        return None
-    value = int(digits)
-    return -value if prefix == "n" else value
 
 
 def _collect_named_parameter_names(parameters: Sequence[Dict]) -> List[str]:
@@ -123,8 +101,10 @@ def _clone_expression_with_operands(
         size=expr.size,
         name=expr.name,
         data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
     )
 
 
@@ -142,53 +122,30 @@ def _rebuild_expression_from_optional_operands(
     return _clone_expression_with_operands(expr, new_operands)
 
 
-def _synthetic_storage_base_name(storage: Optional[StorageInfo]) -> Optional[str]:
+def _display_name_for_location_base(base_ref: LocationBaseRef) -> str:
+    return base_ref.display_name()
+
+
+def _storage_base_ref(storage: Optional[StorageInfo]) -> Optional[LocationBaseRef]:
     storage = _coerce_storage_info(storage)
     if storage is None or storage.is_register:
         return None
     space_name = re.sub(r"[^0-9A-Za-z_]", "_", str(storage.space_name or "mem"))
-    return (
-        f"{_SYNTHETIC_LOCATION_BASE_PREFIX}"
-        f"{space_name}_{_encode_signed_token(storage.offset)}_{max(1, int(storage.size or 0))}"
+    return LocationBaseRef.storage(
+        space_name=space_name,
+        offset=int(storage.offset),
+        size=max(1, int(storage.size or 0)),
+        display_hint=f"{space_name}@{int(storage.offset)}:{max(1, int(storage.size or 0))}",
     )
 
 
-def _synthetic_location_read_name(location: CanonicalLocation) -> str:
-    payload = _serialize_location(location)
-    encoded = binascii.hexlify(payload.encode("utf-8")).decode("ascii")
-    return f"{_SYNTHETIC_LOCATION_READ_PREFIX}{encoded}"
-
-
-def _parse_synthetic_location_read_name(name: Optional[str]) -> Optional[CanonicalLocation]:
-    if not name or not name.startswith(_SYNTHETIC_LOCATION_READ_PREFIX):
+def _expression_location_ref(expr: Optional[Expression]) -> Optional[CanonicalLocation]:
+    if expr is None:
         return None
-    try:
-        payload = binascii.unhexlify(
-            name[len(_SYNTHETIC_LOCATION_READ_PREFIX):].encode("ascii")
-        ).decode("utf-8")
-    except Exception:
-        payload = None
-
-    if payload:
-        parsed = _deserialize_location(payload)
-        if parsed is not None:
-            return parsed
-
-    payload = name[len(_SYNTHETIC_LOCATION_READ_PREFIX):]
-    parts = payload.rsplit("_", 2)
-    if len(parts) != 3:
-        return None
-
-    encoded_base, offset_token, size_token = parts
-    try:
-        base_name = binascii.unhexlify(encoded_base.encode("ascii")).decode("utf-8")
-        offset = _decode_signed_token(offset_token)
-        size = int(size_token)
-    except Exception:
-        return None
-    if offset is None:
-        return None
-    return CanonicalLocation(base_param=base_name, offset=offset, size=max(1, size))
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, CanonicalLocation):
+        return runtime_ref
+    return None
 
 
 def _serialize_location(location: CanonicalLocation) -> str:
@@ -208,51 +165,16 @@ def _serialize_location(location: CanonicalLocation) -> str:
     )
 
 
-def _deserialize_location(payload: str) -> Optional[CanonicalLocation]:
-    parts = payload.split("|")
-    if len(parts) != 4:
-        return None
-
-    base_name, steps_part, offset_token, size_token = parts
-    offset = _decode_signed_token(offset_token)
-    if offset is None:
-        return None
-
-    try:
-        size = max(1, int(size_token))
-    except Exception:
-        return None
-
-    steps: List[LocationStep] = []
-    if steps_part:
-        for token in steps_part.split(";"):
-            if ":" not in token:
-                return None
-            kind_token, value_token = token.split(":", 1)
-            if kind_token == "o":
-                value = _decode_signed_token(value_token)
-                if value is None:
-                    return None
-                steps.append(LocationStep("offset", value))
-                continue
-            if kind_token == "d":
-                try:
-                    value = int(value_token)
-                except Exception:
-                    return None
-                steps.append(LocationStep("deref", value))
-                continue
-            return None
-
-    return _normalize_canonical_location(
-        CanonicalLocation(base_param=base_name, offset=offset, size=size, steps=tuple(steps))
-    )
+def _synthetic_location_read_name(location: CanonicalLocation) -> str:
+    payload = _serialize_location(location)
+    encoded = binascii.hexlify(payload.encode("utf-8")).decode("ascii")
+    return f"__locread__{encoded}"
 
 
 def expression_contains_synthetic_location_reads(expr: Optional[Expression]) -> bool:
     if expr is None:
         return False
-    if _parse_synthetic_location_read_name(getattr(expr, "name", None)) is not None:
+    if _expression_location_ref(expr) is not None:
         return True
     if expr.expr_type == ExpressionType.PHI and expr.value:
         for cond, value in expr.value:
@@ -273,7 +195,7 @@ def expression_contains_complex_location_reads(
 ) -> bool:
     if expr is None:
         return False
-    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    synthetic_location = _expression_location_ref(expr)
     if synthetic_location is not None:
         return True
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
@@ -1011,9 +933,12 @@ def _should_prefer_explicit_call_argument(
 def _parameter_descriptor_looks_pointer(param: Optional[Dict]) -> bool:
     if not param:
         return False
-    data_type = str(param.get("data_type") or param.get("type") or "")
-    normalized = data_type.replace(" ", "").lower()
-    return "*" in normalized or normalized.endswith("ptr")
+    return bool(
+        is_pointer_data_type(
+            param.get("data_type_obj"),
+            None,
+        )
+    )
 
 
 def _call_argument_semantic_rank(
@@ -1045,9 +970,9 @@ def _call_argument_semantic_rank(
     location = canonicalize_location(expr, caller_parameters, size=effective_size)
     if callee_expects_pointer:
         if location is not None:
-            if location.base_param == _STACK_FRAME_LOCATION_BASE:
+            if location.base_ref.is_stack_frame():
                 return 8
-            if location.base_param.startswith(_SYNTHETIC_LOCATION_BASE_PREFIX):
+            if location.base_ref.is_storage():
                 return 7
             if caller_param_name is not None:
                 return 6 if caller_param_is_pointer else 1
@@ -1074,22 +999,25 @@ def _resolve_call_target_ref(tracer, op) -> Optional[CallTargetRef]:
     if target_varnode is None:
         return None
 
-    address = None
-    try:
-        address = target_varnode.getAddress()
-    except Exception:
+    resolver = getattr(tracer, "resolve_call_target_ref", None)
+    if callable(resolver):
+        resolved = resolver(
+            target_varnode,
+            allow_containing=True,
+            allow_code_address=True,
+        )
+        if resolved is not None:
+            return resolved
+    else:
         address = None
+        try:
+            address = target_varnode.getAddress()
+        except Exception:
+            address = None
 
-    resolved_from_address = _resolve_function_ref_from_address(tracer, address, allow_containing=True)
-    if resolved_from_address is not None:
-        return resolved_from_address
-
-    target_name = tracer._get_function_name(target_varnode)
-    if target_name != "UNKNOWN_FUNC" and not _is_synthetic_function_name(target_name):
-        resolved_from_name = _resolve_function_ref_by_name(tracer, target_name)
-        if resolved_from_name is not None:
-            return resolved_from_name
-        return CallTargetRef.from_name(target_name)
+        resolved_from_address = _resolve_function_ref_from_address(tracer, address, allow_containing=True)
+        if resolved_from_address is not None:
+            return resolved_from_address
 
     traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
     if traced_target.expr_type != ExpressionType.CONSTANT:
@@ -1245,8 +1173,10 @@ def _evaluate_constant_expression(expr: Optional[Expression]) -> Optional[int]:
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return int(expr.value)
 
-    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        return _extract_address_suffix(expr.name, ("PTR_", "DAT_", "LAB_", "FUN_"))
+    if expr.expr_type == ExpressionType.VARIABLE:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, AddressValueRef):
+            return int(runtime_ref.address_offset)
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         operand_value = _evaluate_constant_expression(expr.operands[0])
@@ -1339,29 +1269,6 @@ def _sign_extend_value(value: int, source_bits: int, target_bits: int) -> int:
 def _mask_to_expr_width(expr: Expression, value: int) -> int:
     bit_width = max(1, expr.get_bit_width())
     return value & ((1 << bit_width) - 1)
-
-
-def _is_synthetic_function_name(name: Optional[str]) -> bool:
-    if not name:
-        return False
-    return bool(re.fullmatch(r"(?:thunk_)?FUN_[0-9a-fA-F]+", name))
-
-
-def _resolve_function_ref_by_name(tracer, function_name: Optional[str]) -> Optional[CallTargetRef]:
-    if not function_name or function_name == "UNKNOWN_FUNC":
-        return None
-    try:
-        func_manager = tracer.program.getFunctionManager()
-        if func_manager is None:
-            return None
-        for func in func_manager.getFunctions(True):
-            if func.getName() == function_name:
-                return CallTargetRef.from_function(func)
-    except Exception:
-        return None
-    return None
-
-
 def _resolve_function_ref_from_address(
     tracer,
     address,
@@ -1710,6 +1617,7 @@ def _parameter_expression_from_descriptor(param: Dict, size: Optional[int] = Non
         name,
         param_index,
         param.get("data_type"),
+        param.get("data_type_obj"),
         param_size,
         storage_info=_coerce_storage_info(param.get("storage")),
     )
@@ -1820,6 +1728,7 @@ def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dic
                     symbol_name,
                     param_index,
                     param.get("data_type"),
+                    param.get("data_type_obj"),
                     varnode.getSize(),
                     storage_info=storage_info,
                 )
@@ -1845,6 +1754,7 @@ def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dic
         resolved_name,
         param_index,
         param.get("data_type"),
+        param.get("data_type_obj"),
         varnode.getSize(),
         storage_info=storage_info,
     )
@@ -1992,7 +1902,9 @@ def canonicalize_param_location(
     canonical = _canonicalize_address_expression(addr_expr, parameters, size=size)
     if canonical is None:
         return None
-    if not any(param.get("name") == canonical.base_param for param in parameters):
+    if not canonical.base_ref.is_parameter():
+        return None
+    if not any(canonical.base_ref.matches_parameter(param) for param in parameters):
         return None
     return canonical
 
@@ -2011,8 +1923,10 @@ def substitute_location(
     call_args: Sequence[Expression],
     caller_params: Sequence[Dict],
 ) -> Optional[CanonicalLocation]:
+    if not location.base_ref.is_parameter():
+        return None
     arg_map = dict(zip(callee_params, call_args))
-    actual_addr = arg_map.get(location.base_param)
+    actual_addr = arg_map.get(location.base_ref.parameter_name or location.base_param)
     if actual_addr is None:
         return None
     caller_location = canonicalize_location(actual_addr, caller_params, size=location.size)
@@ -2021,7 +1935,7 @@ def substitute_location(
     composed_steps = _location_step_sequence(caller_location) + list(location.steps)
     return _normalize_canonical_location(
         CanonicalLocation(
-            base_param=caller_location.base_param,
+            base_ref=caller_location.base_ref,
             offset=location.offset,
             size=location.size,
             steps=tuple(composed_steps),
@@ -2046,7 +1960,7 @@ def rewrite_loads_from_effects(
     if active_cycle_components is None:
         active_cycle_components = _compute_effect_cycle_components(effects, parameters)
 
-    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    synthetic_location = _expression_location_ref(expr)
     if expr.expr_type == ExpressionType.VARIABLE and synthetic_location is not None:
         fallback_expr = post_state_read_expression_for_location(
             synthetic_location,
@@ -2447,7 +2361,7 @@ def _expression_matches_value_under_conditions(
 def canonicalize_expr_read_location(expr: Expression, parameters: Sequence[Dict]) -> Optional[CanonicalLocation]:
     if expr is None:
         return None
-    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    synthetic_location = _expression_location_ref(expr)
     if synthetic_location is not None:
         return synthetic_location
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
@@ -2475,7 +2389,7 @@ def _expression_reads_location(
 ) -> bool:
     if expr is None:
         return False
-    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    synthetic_location = _expression_location_ref(expr)
     if synthetic_location is not None:
         return locations_match(synthetic_location, location, conditions)
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
@@ -3480,7 +3394,7 @@ def _rewrite_expression_with_replayed_state(
     if expr is None:
         return None
 
-    synthetic_location = _parse_synthetic_location_read_name(getattr(expr, "name", None))
+    synthetic_location = _expression_location_ref(expr)
     if expr.expr_type == ExpressionType.VARIABLE and synthetic_location is not None:
         representative = _resolve_alias_representative(
             synthetic_location,
@@ -3607,10 +3521,10 @@ def _resolve_alias_representative(
     return None
 
 
-def _location_sort_key(location: CanonicalLocation) -> Tuple[str, Tuple[Tuple[str, int], ...], int, int]:
+def _location_sort_key(location: CanonicalLocation) -> Tuple[Tuple[object, ...], Tuple[Tuple[str, int], ...], int, int]:
     normalized = _normalize_canonical_location(location)
     step_key = tuple((step.kind, int(step.value)) for step in normalized.steps)
-    return (normalized.base_param, step_key, normalized.offset, normalized.size)
+    return (normalized.base_ref.stable_key(), step_key, normalized.offset, normalized.size)
 
 
 def memory_expression_for_location(
@@ -3618,11 +3532,12 @@ def memory_expression_for_location(
     parameters: Sequence[Dict],
 ) -> Expression:
     location = _normalize_canonical_location(location)
-    param = next((item for item in parameters if item.get("name") == location.base_param), None)
+    param = next((item for item in parameters if location.base_ref.matches_parameter(item)), None)
     if param is None:
         return Expression.variable(
             _synthetic_location_read_name(location),
             size=max(1, location.size),
+            runtime_ref=location,
         )
 
     try:
@@ -3637,9 +3552,10 @@ def memory_expression_for_location(
     param_size = max(1, param_size)
 
     base = Expression.parameter(
-        location.base_param,
+        location.base_ref.parameter_name or location.base_param,
         param_index,
         param.get("data_type"),
+        param.get("data_type_obj"),
         param_size,
         storage_info=_coerce_storage_info(param.get("storage")),
     )
@@ -3676,6 +3592,7 @@ def post_state_read_expression_for_location(
         return Expression.variable(
             _synthetic_location_read_name(location),
             size=max(1, location.size),
+            runtime_ref=location,
         )
     return memory_expression_for_location(location, parameters)
 
@@ -3736,10 +3653,12 @@ def locations_match(
         return False
     if left.steps != right.steps:
         return False
-    if left.base_param == right.base_param:
+    if left.base_ref == right.base_ref:
         return True
+    if not left.base_ref.is_parameter() or not right.base_ref.is_parameter():
+        return False
     equalities = _collect_param_equalities(conditions)
-    return frozenset((left.base_param, right.base_param)) in equalities
+    return frozenset((left.base_ref.parameter_name, right.base_ref.parameter_name)) in equalities
 
 
 def subtract_implied_conditions(
@@ -4004,7 +3923,7 @@ def _is_known_nonnull_stack_address(
     location = canonicalize_location(expr, parameters, size=size)
     if location is None:
         return False
-    return location.base_param == _STACK_FRAME_LOCATION_BASE
+    return location.base_ref.is_stack_frame()
 
 
 def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]:
@@ -4097,7 +4016,7 @@ def _normalize_canonical_location(location: CanonicalLocation) -> CanonicalLocat
     if normalized_steps and normalized_steps[-1].kind == "offset":
         final_offset = int(normalized_steps.pop().value)
     return CanonicalLocation(
-        base_param=location.base_param,
+        base_ref=location.base_ref,
         offset=final_offset,
         size=max(1, int(location.size or 0)),
         steps=tuple(normalized_steps),
@@ -4112,10 +4031,10 @@ def _canonicalize_address_expression(
     parsed = _extract_location_root_and_steps(expr, parameters)
     if parsed is None:
         return None
-    base_name, steps = parsed
+    base_ref, steps = parsed
     return _normalize_canonical_location(
         CanonicalLocation(
-            base_param=base_name,
+            base_ref=base_ref,
             offset=0,
             size=max(1, int(size or 0)),
             steps=tuple(steps),
@@ -4126,7 +4045,7 @@ def _canonicalize_address_expression(
 def _extract_location_root_and_steps(
     expr: Expression,
     parameters: Sequence[Dict],
-) -> Optional[Tuple[str, List[LocationStep]]]:
+) -> Optional[Tuple[LocationBaseRef, List[LocationStep]]]:
     if expr is None:
         return None
 
@@ -4134,11 +4053,11 @@ def _extract_location_root_and_steps(
         resolved_base = _resolve_location_base_with_offset(expr, parameters)
         if resolved_base is None:
             return None
-        base_name, base_offset = resolved_base
+        base_ref, base_offset = resolved_base
         steps: List[LocationStep] = []
         if int(base_offset) != 0:
             steps.append(LocationStep("offset", int(base_offset)))
-        return base_name, steps
+        return base_ref, steps
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and expr.operands:
         return _extract_location_root_and_steps(expr.operands[0], parameters)
@@ -4156,10 +4075,10 @@ def _extract_location_root_and_steps(
         parsed = _extract_location_root_and_steps(expr.operands[0], parameters)
         if parsed is None:
             return None
-        base_name, steps = parsed
+        base_ref, steps = parsed
         steps = list(steps)
         steps.append(LocationStep("deref", max(1, int(expr.size or 0))))
-        return base_name, steps
+        return base_ref, steps
 
     if (
         expr.expr_type == ExpressionType.BINARY_OP
@@ -4172,18 +4091,18 @@ def _extract_location_root_and_steps(
             parsed = _extract_location_root_and_steps(expr.operands[1], parameters)
             if parsed is None:
                 return None
-            base_name, steps = parsed
+            base_ref, steps = parsed
             steps = list(steps)
             steps.append(LocationStep("offset", int(left_const)))
-            return base_name, steps
+            return base_ref, steps
         if right_const is not None:
             parsed = _extract_location_root_and_steps(expr.operands[0], parameters)
             if parsed is None:
                 return None
-            base_name, steps = parsed
+            base_ref, steps = parsed
             steps = list(steps)
             steps.append(LocationStep("offset", int(right_const)))
-            return base_name, steps
+            return base_ref, steps
         return None
 
     if (
@@ -4204,11 +4123,11 @@ def _extract_location_root_and_steps(
 def _flatten_param_addition(
     expr: Expression,
     parameters: Sequence[Dict],
-) -> Tuple[Optional[int], List[str]]:
+) -> Tuple[Optional[int], List[LocationBaseRef]]:
     const_total, bases = _flatten_location_addition(expr, parameters)
     if const_total is None:
         return None, []
-    if not all(any(param.get("name") == base for param in parameters) for base in bases):
+    if not all(base.is_parameter() and any(base.matches_parameter(param) for param in parameters) for base in bases):
         return None, []
     return const_total, bases
 
@@ -4216,12 +4135,12 @@ def _flatten_param_addition(
 def _flatten_location_addition(
     expr: Expression,
     parameters: Sequence[Dict],
-) -> Tuple[Optional[int], List[str]]:
+) -> Tuple[Optional[int], List[LocationBaseRef]]:
     if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
         resolved_base = _resolve_location_base_with_offset(expr, parameters)
         if resolved_base is not None:
-            base_name, base_offset = resolved_base
-            return base_offset, [base_name]
+            base_ref, base_offset = resolved_base
+            return base_offset, [base_ref]
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and expr.operands:
         return _flatten_location_addition(expr.operands[0], parameters)
@@ -4267,23 +4186,31 @@ def _flatten_location_addition(
 def _resolve_location_base_with_offset(
     expr: Expression,
     parameters: Sequence[Dict],
-) -> Optional[Tuple[str, int]]:
+) -> Optional[Tuple[LocationBaseRef, int]]:
     param_name = _resolve_parameter_name(expr, parameters)
     if param_name is not None:
-        return param_name, 0
+        param_index = None
+        for param in parameters:
+            if param.get("name") == param_name:
+                try:
+                    param_index = int(param.get("index"))
+                except Exception:
+                    param_index = None
+                break
+        return LocationBaseRef.parameter(param_name, index=param_index), 0
 
     if _is_stack_frame_base_expression(expr):
-        return _STACK_FRAME_LOCATION_BASE, 0
+        return LocationBaseRef.stack_frame(), 0
 
     expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
     if expr_storage is None:
         return None
     if not expr_storage.is_register and expr_storage.space_name == "stack":
-        return _STACK_FRAME_LOCATION_BASE, int(expr_storage.offset)
-    base_name = _synthetic_storage_base_name(expr_storage)
-    if base_name is None:
+        return LocationBaseRef.stack_frame(), int(expr_storage.offset)
+    base_ref = _storage_base_ref(expr_storage)
+    if base_ref is None:
         return None
-    return base_name, 0
+    return base_ref, 0
 
 
 def _is_stack_frame_base_expression(expr: Optional[Expression]) -> bool:

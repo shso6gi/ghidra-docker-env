@@ -4,6 +4,7 @@
 from typing import Optional, Set
 
 from ...model import Expression, ExpressionType, StructuralKey
+from ...model.signature import is_floating_data_type
 from .fact_types import SignFacts, expr_key
 
 
@@ -26,8 +27,7 @@ def get_integral_var_name(expr: Expression) -> Optional[str]:
     if not var_name:
         return None
 
-    data_type = (expr.data_type or "").lower()
-    if "float" in data_type or "double" in data_type:
+    if is_floating_data_type(getattr(expr, "data_type_obj", None)):
         return None
     return var_name
 
@@ -54,8 +54,7 @@ def record_expr_fact(
 
 
 def is_integral_expression(expr: Expression) -> bool:
-    data_type = (expr.data_type or "").lower()
-    return "float" not in data_type and "double" not in data_type
+    return not is_floating_data_type(getattr(expr, "data_type_obj", None))
 
 
 def record_integral_expr_fact(

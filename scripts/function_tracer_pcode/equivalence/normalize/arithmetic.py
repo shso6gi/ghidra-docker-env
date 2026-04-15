@@ -79,6 +79,7 @@ def _canonicalize_add(expr: Expression) -> Expression:
             size=only.size or expr.size,
             name=only.name,
             data_type=only.data_type,
+            data_type_obj=getattr(only, "data_type_obj", None),
             storage_info=only.storage_info,
         )
 

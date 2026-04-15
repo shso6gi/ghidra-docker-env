@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """式の表現クラス"""
-
 from enum import Enum, auto
 from typing import List, Optional, Any, Dict, Set
+from dataclasses import is_dataclass, fields
 
 from .storage import StorageInfo
 from .render_python import (
@@ -54,8 +54,10 @@ class Expression:
         size: int = 0,
         name: Optional[str] = None,
         data_type: Optional[str] = None,
+        data_type_obj: Any = None,
         storage_info: Optional[StorageInfo] = None,
         read_order_key: Optional[int] = None,
+        runtime_ref: Any = None,
     ):
         self.expr_type = expr_type
         self.value = value
@@ -68,8 +70,10 @@ class Expression:
         self.size = size
         self.name = name
         self.data_type = data_type
+        self.data_type_obj = data_type_obj
         self.storage_info = storage_info
         self.read_order_key = read_order_key
+        self.runtime_ref = runtime_ref
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
@@ -87,16 +91,20 @@ class Expression:
         name: str,
         index: int = -1,
         data_type: Optional[str] = None,
+        data_type_obj: Any = None,
         size: int = 4,
-        storage_info: Optional[StorageInfo] = None
+        storage_info: Optional[StorageInfo] = None,
+        runtime_ref: Any = None,
     ) -> 'Expression':
         return cls(
             expr_type=ExpressionType.PARAMETER,
             name=name,
             value=index,
             data_type=data_type,
+            data_type_obj=data_type_obj,
             size=size,
-            storage_info=storage_info
+            storage_info=storage_info,
+            runtime_ref=runtime_ref,
         )
     
     @classmethod
@@ -104,15 +112,19 @@ class Expression:
         cls,
         name: str,
         data_type: Optional[str] = None,
+        data_type_obj: Any = None,
         size: int = 4,
-        storage_info: Optional[StorageInfo] = None
+        storage_info: Optional[StorageInfo] = None,
+        runtime_ref: Any = None,
     ) -> 'Expression':
         return cls(
             expr_type=ExpressionType.VARIABLE,
             name=name,
             data_type=data_type,
+            data_type_obj=data_type_obj,
             size=size,
-            storage_info=storage_info
+            storage_info=storage_info,
+            runtime_ref=runtime_ref,
         )
     
     @classmethod
@@ -171,12 +183,14 @@ class Expression:
         address: 'Expression',
         size: int = 4,
         read_order_key: Optional[int] = None,
+        runtime_ref: Any = None,
     ) -> 'Expression':
         return cls(
             expr_type=ExpressionType.MEMORY,
             operands=[address],
             size=size,
             read_order_key=read_order_key,
+            runtime_ref=runtime_ref,
         )
     
     @classmethod
@@ -185,8 +199,8 @@ class Expression:
         return cls(expr_type=ExpressionType.PHI, value=branches)
     
     @classmethod
-    def unknown(cls, description: str = "unknown") -> 'Expression':
-        return cls(expr_type=ExpressionType.UNKNOWN, name=description)
+    def unknown(cls, description: str = "unknown", runtime_ref: Any = None) -> 'Expression':
+        return cls(expr_type=ExpressionType.UNKNOWN, name=description, runtime_ref=runtime_ref)
     
     def get_bit_width(self) -> int:
         """
@@ -302,6 +316,8 @@ class Expression:
             return False
         if self.name != other.name:
             return False
+        if self.runtime_ref != other.runtime_ref:
+            return False
         if len(self.operands) != len(other.operands):
             return False
         for a, b in zip(self.operands, other.operands):
@@ -358,7 +374,37 @@ class Expression:
             result["storage_info"] = self.storage_info.to_dict()
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
+        if self.runtime_ref is not None:
+            result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
         return result
+
+    def _serialize_runtime_ref(self, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, tuple):
+            return [self._serialize_runtime_ref(item) for item in value]
+        if isinstance(value, list):
+            return [self._serialize_runtime_ref(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): self._serialize_runtime_ref(item)
+                for key, item in value.items()
+            }
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                return to_dict()
+            except Exception:
+                pass
+        if is_dataclass(value):
+            return {
+                field.name: self._serialize_runtime_ref(getattr(value, field.name))
+                for field in fields(value)
+            }
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "object_id": id(value),
+        }
     
     def get_all_variables(self) -> Set[str]:
         """式に含まれる全ての変数名（パラメータ・変数）を取得"""

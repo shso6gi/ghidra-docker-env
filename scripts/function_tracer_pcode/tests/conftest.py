@@ -117,6 +117,22 @@ class MockVoidDataType(MockDataType):
         super().__init__("void", 0, False, "/builtin/void")
 
 
+class MockPointerDataType(MockDataType):
+    def __init__(self, name: str, length: int, referenced_data_type=None, path: Optional[str] = None):
+        super().__init__(name, length, False, path or f"/builtin/{name}")
+        self._referenced_data_type = referenced_data_type
+
+    def getDataType(self):
+        return self._referenced_data_type
+
+    def isPointer(self):
+        return True
+
+
+class MockFloatDataType(MockDataType):
+    pass
+
+
 class MockDataTypeManager:
     def __init__(self, architecture: str = "x86:LE:64:default"):
         pointer_size = 8 if ":64:" in architecture else 4
@@ -148,6 +164,8 @@ class MockDataTypeManager:
         self._add_signed_pair("int16_t", "uint16_t", 2)
         self._add_signed_pair("int32_t", "uint32_t", 4)
         self._add_signed_pair("int64_t", "uint64_t", 8)
+        self._add(MockFloatDataType("float", 4, True, "/builtin/float"))
+        self._add(MockFloatDataType("double", 8, True, "/builtin/double"))
         self._add(MockDataType("undefined1", 1, False, "/builtin/undefined1"))
         self._add(MockDataType("undefined2", 2, False, "/builtin/undefined2"))
         self._add(MockDataType("undefined4", 4, False, "/builtin/undefined4"))
@@ -167,14 +185,52 @@ class MockDataTypeManager:
         self._data_types[alias_name] = target
         self._data_types[f"/{alias_name}"] = target
 
+    def _pointer_name(self, base_name: str) -> str:
+        return f"{base_name.strip()} *"
+
+    def _get_or_create_pointer(self, base_name: str):
+        pointer_name = self._pointer_name(base_name)
+        existing = self._data_types.get(pointer_name) or self._data_types.get(f"/{pointer_name}")
+        if existing is not None:
+            return existing
+        referenced = self._data_types.get(base_name) or self._data_types.get(f"/{base_name}")
+        pointer_dt = MockPointerDataType(
+            pointer_name,
+            self._data_organization.getPointerSize(),
+            referenced_data_type=referenced,
+            path=f"/builtin/{pointer_name}",
+        )
+        return self._add(pointer_dt)
+
     def getDataType(self, name):
-        return self._data_types.get(name)
+        data_type = self._data_types.get(name)
+        if data_type is not None:
+            return data_type
+        normalized = (name or "").strip()
+        if normalized.endswith("*"):
+            base_name = normalized[:-1].strip()
+            if base_name:
+                return self._get_or_create_pointer(base_name)
+        return None
 
     def findDataType(self, name):
-        return self._data_types.get(name)
+        return self.getDataType(name)
 
     def getDataOrganization(self):
         return self._data_organization
+
+    def getPointer(self, datatype):
+        if datatype is None:
+            return None
+        base_name = datatype.getName() if hasattr(datatype, "getName") else str(datatype)
+        return self._get_or_create_pointer(base_name)
+
+    def getFloatDataTypes(self):
+        return tuple(
+            data_type
+            for data_type in set(self._data_types.values())
+            if isinstance(data_type, MockFloatDataType)
+        )
 
 
 def create_mock_data_type_manager(architecture: str = "x86:LE:64:default") -> MockDataTypeManager:

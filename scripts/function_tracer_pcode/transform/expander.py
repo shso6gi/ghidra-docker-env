@@ -2,7 +2,7 @@
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any, Hashable
-from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef
+from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
 from ..config.settings import (
@@ -84,7 +84,7 @@ class ExpressionExpander:
         resolve_callee_parameters: Optional[Callable[[CallTargetRef], List[Dict[str, Any]]]] = None,
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
-        record_deferred_call: Optional[Callable[[CallTargetRef, List[Expression]], str]] = None,
+        record_deferred_call: Optional[Callable[[CallTargetRef, List[Expression]], Any]] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -226,7 +226,10 @@ class ExpressionExpander:
 
         if over_budget:
             budget_unknown = ExpandedValue(
-                Expression.unknown(f"{mnemonic}_budget_exceeded"),
+                Expression.unknown(
+                    f"{mnemonic}_budget_exceeded",
+                    runtime_ref=UnknownValueRef.budget_exceeded(operation=mnemonic),
+                ),
                 list(base_conditions),
             )
             budget_key = (
@@ -246,7 +249,10 @@ class ExpressionExpander:
         if over_budget:
             return [
                 ExpandedValue(
-                    Expression.unknown(f"{mnemonic}_budget_exceeded"),
+                    Expression.unknown(
+                        f"{mnemonic}_budget_exceeded",
+                        runtime_ref=UnknownValueRef.budget_exceeded(operation=mnemonic),
+                    ),
                     list(base_conditions),
                 )
             ]
@@ -1106,12 +1112,10 @@ class ExpressionExpander:
     def _expression_contains_budget_unknown(self, expr: Optional[Expression]) -> bool:
         if expr is None:
             return False
-        if (
-            expr.expr_type == ExpressionType.UNKNOWN
-            and isinstance(expr.name, str)
-            and expr.name.endswith("_budget_exceeded")
-        ):
-            return True
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            if getattr(runtime_ref, "kind", None) == "budget_exceeded":
+                return True
         if expr.expr_type == ExpressionType.PHI and expr.value:
             for cond, value in expr.value:
                 if cond is not None and self._expression_contains_budget_unknown(cond.expression):
@@ -1431,7 +1435,8 @@ class ExpressionExpander:
                 )
                 for index in range(1, pcode_op.getNumInputs())
             ]
-            placeholder_name = None
+            deferred_unknown_ref = None
+            deferred_unknown_label = None
             if self.record_deferred_call is not None and target_ref is not None:
                 deferred_args = self._recover_deferred_call_arguments(
                     pcode_op,
@@ -1439,9 +1444,16 @@ class ExpressionExpander:
                     explicit_args,
                 )
                 try:
-                    placeholder_name = self.record_deferred_call(target_ref, deferred_args)
+                    deferred_unknown = self.record_deferred_call(target_ref, deferred_args)
+                    if isinstance(deferred_unknown, str):
+                        deferred_unknown_label = deferred_unknown
+                    else:
+                        deferred_unknown_ref = deferred_unknown
+                        if hasattr(deferred_unknown, "display_name"):
+                            deferred_unknown_label = deferred_unknown.display_name()
                 except Exception:
-                    placeholder_name = None
+                    deferred_unknown_ref = None
+                    deferred_unknown_label = None
             self.tracer.emit_unknown_event(
                 reason="call_out_of_scope",
                 varnode=pcode_op.getOutput(),
@@ -1453,7 +1465,12 @@ class ExpressionExpander:
             return [
                 ExpandedValue(
                     Expression.unknown(
-                        placeholder_name or f"call_out_of_scope:{target_label}"
+                        (
+                            deferred_unknown_label
+                            if deferred_unknown_label is not None
+                            else f"call_out_of_scope:{target_label}"
+                        ),
+                        runtime_ref=deferred_unknown_ref,
                     ),
                     base_conditions,
                 )
@@ -1590,7 +1607,8 @@ class ExpressionExpander:
 
         fallback_target = self._select_deferred_call_target(resolved_targets, pcode_op)
         fallback_label = fallback_target.display_name()
-        placeholder_name = None
+        deferred_unknown_ref = None
+        deferred_unknown_label = None
         if self.record_deferred_call is not None:
             deferred_args = fallback_args_by_target.get(fallback_target)
             if deferred_args is None:
@@ -1601,9 +1619,16 @@ class ExpressionExpander:
                     recovered_seed_args,
                 )
             try:
-                placeholder_name = self.record_deferred_call(fallback_target, deferred_args)
+                deferred_unknown = self.record_deferred_call(fallback_target, deferred_args)
+                if isinstance(deferred_unknown, str):
+                    deferred_unknown_label = deferred_unknown
+                else:
+                    deferred_unknown_ref = deferred_unknown
+                    if hasattr(deferred_unknown, "display_name"):
+                        deferred_unknown_label = deferred_unknown.display_name()
             except Exception:
-                placeholder_name = None
+                deferred_unknown_ref = None
+                deferred_unknown_label = None
         self.tracer.emit_unknown_event(
             reason="call_out_of_scope",
             varnode=pcode_op.getOutput(),
@@ -1615,7 +1640,12 @@ class ExpressionExpander:
         return [
             ExpandedValue(
                 Expression.unknown(
-                    placeholder_name or f"call_out_of_scope:{fallback_label}"
+                    (
+                        deferred_unknown_label
+                        if deferred_unknown_label is not None
+                        else f"call_out_of_scope:{fallback_label}"
+                    ),
+                    runtime_ref=deferred_unknown_ref,
                 ),
                 base_conditions,
             )

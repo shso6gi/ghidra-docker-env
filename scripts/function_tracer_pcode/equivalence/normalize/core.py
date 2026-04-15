@@ -71,7 +71,9 @@ def normalize_expression(
             size=expr.size,
             name=expr.name,
             data_type=expr.data_type,
-            storage_info=expr.storage_info
+            data_type_obj=getattr(expr, "data_type_obj", None),
+            storage_info=expr.storage_info,
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
     
     # トップレベルの正規化（順序重要）

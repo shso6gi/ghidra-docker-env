@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from ..model import Expression, ExpressionType, FunctionReturnAnalysis
-from .typing.helpers import get_type_name_from_param, is_unsigned_type
+from ..model.signature import get_declared_type_signedness
 
 
 SIGNED_COMPARE_OPS = {"INT_SLESS", "INT_SLESSEQUAL"}
@@ -400,7 +400,12 @@ def _get_declared_signedness(param: Dict[str, Any]) -> Optional[str]:
     if "is_signed" in param:
         return "signed" if param.get("is_signed", True) else "unsigned"
 
-    type_name = get_type_name_from_param(param)
-    if not type_name:
+    raw_dt = param.get("data_type_obj")
+    if raw_dt is None:
         return None
-    return "unsigned" if is_unsigned_type(type_name) else "signed"
+    signed = get_declared_type_signedness(
+        raw_dt,
+        fallback_name=None,
+        fallback_signed=True,
+    )
+    return "signed" if signed else "unsigned"

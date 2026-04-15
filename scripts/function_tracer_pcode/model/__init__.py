@@ -7,6 +7,7 @@
 
 from .storage import StorageInfo
 from .call_target import CallTargetRef, coerce_call_target_ref
+from .runtime_refs import AddressValueRef, CanonicalLocation, LocationBaseRef, LocationStep, UnknownValueRef
 from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
@@ -25,6 +26,11 @@ __all__ = [
     "StorageInfo",
     "CallTargetRef",
     "coerce_call_target_ref",
+    "AddressValueRef",
+    "CanonicalLocation",
+    "LocationBaseRef",
+    "LocationStep",
+    "UnknownValueRef",
     "DeferredCallInfo",
     "ReturnInfo",
     "FunctionReturnAnalysis",

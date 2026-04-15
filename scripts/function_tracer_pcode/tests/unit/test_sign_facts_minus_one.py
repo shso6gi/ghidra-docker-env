@@ -12,6 +12,7 @@ if str(workspace_root) not in sys.path:
 
 from scripts.function_tracer_pcode.equivalence.normalize.facts import extract_sign_facts
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
+from conftest import resolve_mock_data_type
 from normalization_helpers import (
     make_const as _const,
     make_modulo_expansion,
@@ -55,12 +56,19 @@ def test_minus_one_less_than_unknown_type_param_still_implies_nonneg():
 
 
 def test_minus_one_less_than_float_like_param_is_ignored():
+    float_param = Expression(
+        ExpressionType.PARAMETER,
+        name="param_2",
+        size=8,
+        data_type="double",
+        data_type_obj=resolve_mock_data_type("double"),
+    )
     conditions = [
         Condition(
             Expression(
                 ExpressionType.BINARY_OP,
                 operator="INT_SLESS",
-                operands=[_const(-1), _param("param_2", data_type="double")],
+                operands=[_const(-1), float_param],
                 size=1,
             )
         )

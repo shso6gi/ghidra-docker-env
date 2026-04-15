@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from enum import Enum, auto
 import re
 
-from ...model import Expression, ExpressionType, Condition, StorageInfo, FunctionReturnAnalysis
+from ...model import (
+    Expression,
+    ExpressionType,
+    Condition,
+    StorageInfo,
+    FunctionReturnAnalysis,
+    CanonicalLocation,
+)
 
 
 class VariableClassification(Enum):
@@ -138,10 +145,29 @@ class VariableAnalyzer:
         if self.debug:
             print(f"[VariableAnalyzer] {msg}")
 
-    def _looks_like_fragment_temp_name(self, name: str) -> bool:
-        candidate = name or ""
-        return bool(re.fullmatch(r"(?:UNRECOVERED|extraout|unaff|in)_[A-Za-z0-9_]+", candidate))
-    
+    def _is_symbolic_location_read_expr(self, expr: Optional[Expression]) -> bool:
+        return isinstance(getattr(expr, "runtime_ref", None), CanonicalLocation)
+
+    def _collect_variable_exprs(
+        self,
+        expr: Optional[Expression],
+        collected: Dict[str, Expression],
+    ) -> None:
+        if expr is None:
+            return
+        if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+            if expr.name and expr.name not in collected:
+                collected[expr.name] = expr
+            return
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None:
+                    self._collect_variable_exprs(cond.expression, collected)
+                self._collect_variable_exprs(value, collected)
+            return
+        for operand in getattr(expr, "operands", []) or []:
+            self._collect_variable_exprs(operand, collected)
+
     def classify_variable_by_storage(
         self,
         var_name: str,
@@ -283,37 +309,35 @@ class VariableAnalyzer:
         """
         # 全変数とストレージ情報を収集
         all_vars_with_storage: Dict[str, Optional[StorageInfo]] = {}
+        all_var_exprs: Dict[str, Expression] = {}
         var_sizes: Dict[str, int] = {}
         inferred_fragments: Dict[str, ParameterFragmentInfo] = {}
 
         for ret in analysis.returns:
-            if hasattr(ret.value, 'get_all_variables_with_storage'):
-                vars_in_expr = ret.value.get_all_variables_with_storage()
-                for name, storage in vars_in_expr.items():
-                    if name not in all_vars_with_storage:
-                        all_vars_with_storage[name] = storage
+            if ret.value is not None:
+                self._collect_variable_exprs(ret.value, all_var_exprs)
                 self._collect_variable_sizes(ret.value, var_sizes)
                 self._collect_expression_fragment_bindings(ret.value, analysis.parameters, inferred_fragments)
             
             for cond in ret.conditions:
-                if hasattr(cond, 'get_all_variables_with_storage'):
-                    vars_in_cond = cond.get_all_variables_with_storage()
-                    for name, storage in vars_in_cond.items():
-                        if name not in all_vars_with_storage:
-                            all_vars_with_storage[name] = storage
-                    if hasattr(cond, 'expression'):
-                        self._collect_variable_sizes(cond.expression, var_sizes)
-                        self._collect_expression_fragment_bindings(
-                            cond.expression,
-                            analysis.parameters,
-                            inferred_fragments,
-                        )
-        
+                if hasattr(cond, 'expression'):
+                    self._collect_variable_exprs(cond.expression, all_var_exprs)
+                    self._collect_variable_sizes(cond.expression, var_sizes)
+                    self._collect_expression_fragment_bindings(
+                        cond.expression,
+                        analysis.parameters,
+                        inferred_fragments,
+                    )
+
+        for name, expr in all_var_exprs.items():
+            if name not in all_vars_with_storage:
+                all_vars_with_storage[name] = expr.storage_info
+
         # パラメータ以外の変数を抽出
         extra_var_names = {
             name
-            for name in (set(all_vars_with_storage.keys()) - param_names)
-            if not str(name).startswith("__locread__")
+            for name, expr in all_var_exprs.items()
+            if name not in param_names and not self._is_symbolic_location_read_expr(expr)
         }
         
         self._debug_print(f"Found {len(extra_var_names)} extra variables: {extra_var_names}")
@@ -436,8 +460,6 @@ class VariableAnalyzer:
             return None
         if low_expr.expr_type != ExpressionType.PARAMETER or not low_expr.name:
             return None
-        if not self._looks_like_fragment_temp_name(high_expr.name):
-            return None
 
         param = next((item for item in parameters if item.get("name") == low_expr.name), None)
         if param is None:
@@ -448,6 +470,33 @@ class VariableAnalyzer:
         if parent_bits <= 0 or fragment_bits <= 0 or total_bits != parent_bits + fragment_bits:
             return None
 
+        high_storage = high_expr.storage_info
+        low_storage = self._dict_to_storage_info(param.get("storage")) or low_expr.storage_info
+        if high_storage is not None and low_storage is not None:
+            try:
+                if not (
+                    high_storage.is_register
+                    and low_storage.is_register
+                    and high_storage.shares_base_register_with(low_storage)
+                    and high_storage.is_upper_bits_of(low_storage)
+                ):
+                    return None
+            except Exception:
+                return None
+            bit_offset_in_base = int(high_storage.bit_offset_in_base)
+            bit_length = int(high_storage.size_bits or fragment_bits)
+            base_register_name = (
+                high_storage.base_register_name
+                or high_storage.register_name
+                or high_expr.name
+            )
+            base_register_size_bits = int(high_storage.base_register_size_bits or total_bits)
+        else:
+            bit_offset_in_base = parent_bits
+            bit_length = fragment_bits
+            base_register_name = high_expr.name
+            base_register_size_bits = total_bits
+
         is_signed = bool(param.get("is_signed", True))
         return ParameterFragmentInfo(
             fragment_name=high_expr.name,
@@ -456,10 +505,10 @@ class VariableAnalyzer:
             parent_param_index=int(param.get("index", -1)),
             parent_param_bit_width=parent_bits,
             extension_type=ExtensionType.SIGN_EXTEND if is_signed else ExtensionType.ZERO_EXTEND,
-            bit_offset_in_base=parent_bits,
-            bit_length=fragment_bits,
-            base_register_name=high_expr.name,
-            base_register_size_bits=total_bits,
+            bit_offset_in_base=bit_offset_in_base,
+            bit_length=bit_length,
+            base_register_name=base_register_name,
+            base_register_size_bits=base_register_size_bits,
         )
 
     def _match_shift_or_fragment(

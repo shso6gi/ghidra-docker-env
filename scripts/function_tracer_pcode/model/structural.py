@@ -7,6 +7,7 @@ side instead of round-tripping through rendered strings.
 
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
 from typing import Any, Optional, Tuple
 
 from .condition import Condition
@@ -40,7 +41,46 @@ def _atom_key(value: Any) -> StructuralKey:
         return ("int", value)
     if isinstance(value, str):
         return ("str", value)
-    return ("repr", repr(value))
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_atom_key(item) for item in value))
+    if isinstance(value, list):
+        return ("list", tuple(_atom_key(item) for item in value))
+    if isinstance(value, dict):
+        items = [(_atom_key(key), _atom_key(item)) for key, item in value.items()]
+        items.sort()
+        return ("dict", tuple(items))
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            return ("stable", _atom_key(stable_key()))
+        except Exception:
+            pass
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return ("object_dict", _atom_key(to_dict()))
+        except Exception:
+            pass
+    if is_dataclass(value):
+        return (
+            "dataclass",
+            type(value).__module__,
+            type(value).__qualname__,
+            tuple((field.name, _atom_key(getattr(value, field.name))) for field in fields(value)),
+        )
+    obj_dict = getattr(value, "__dict__", None)
+    if isinstance(obj_dict, dict) and obj_dict:
+        items = [(_atom_key(key), _atom_key(item)) for key, item in obj_dict.items() if not str(key).startswith("_")]
+        items.sort()
+        return (
+            "object_attrs",
+            type(value).__module__,
+            type(value).__qualname__,
+            tuple(items),
+        )
+    return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
@@ -137,6 +177,7 @@ def expression_key(
                 return (
                     (
                         expr_type.name.lower(),
+                        _atom_key(getattr(current, "runtime_ref", None)),
                         current.name or "",
                         int(current.size or 0),
                     ),

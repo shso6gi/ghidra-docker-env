@@ -5,8 +5,10 @@ from typing import Dict, List, Optional, Tuple, Any
 from ...model import FunctionReturnAnalysis, Expression, ExpressionType
 from ...model.signature import (
     ResolvedTypeSpec,
+    get_declared_type_signedness,
     get_data_type_display_name,
     get_declared_type_size_bytes,
+    is_integral_data_type,
     is_unsigned_data_type,
     resolve_integer_type_spec,
 )
@@ -126,8 +128,11 @@ class MIPS64Handler:
         if hint.narrow_bits >= mips_bits:
             return None
 
-        mips_type = self._get_param_type_string(mips_param)
-        if not any(kw in mips_type for kw in ["long", "int8", "qword"]):
+        if not is_integral_data_type(
+            mips_param.get("data_type_obj"),
+            mips_param.get("data_type"),
+            program=program,
+        ):
             return None
 
         return self._type_spec_for_semantic_hint(
@@ -538,13 +543,16 @@ class MIPS64Handler:
         return None
     
     def _infer_signedness(self, param: Dict[str, Any]) -> str:
-        """パラメータの符号性を推定"""
-        type_str = self._get_param_type_string(param)
-        
-        if "unsigned" in type_str or "uint" in type_str:
-            return "unsigned"
-        
-        return "signed"
+        """パラメータの符号性を object metadata から推定する。"""
+        if "is_signed" in param and param.get("is_signed") is not None:
+            return "signed" if bool(param.get("is_signed")) else "unsigned"
+
+        signed = get_declared_type_signedness(
+            param.get("data_type_obj"),
+            fallback_name=None,
+            fallback_signed=True,
+        )
+        return "signed" if signed else "unsigned"
 
     def _resolve_width_mismatch_signedness(
         self,

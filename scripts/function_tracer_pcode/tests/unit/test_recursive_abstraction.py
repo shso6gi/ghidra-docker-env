@@ -7,7 +7,14 @@ from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.recursive_abstraction import abstract_recursive_calls
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
-from scripts.function_tracer_pcode.model import DeferredCallInfo, Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    DeferredCallInfo,
+    Expression,
+    ExpressionType,
+    ReturnInfo,
+    UnknownValueRef,
+)
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis, create_mock_result
 
@@ -18,6 +25,18 @@ def _param(name: str = "n", index: int = 0, size: int = 4):
 
 def _const(value: int, size: int = 4):
     return Expression.constant(value, size=size)
+
+
+def _deferred_unknown(placeholder: str, target_name: str):
+    sequence = int(placeholder.rsplit("#", 1)[1]) if "#" in placeholder else 0
+    return Expression.unknown(
+        placeholder,
+        runtime_ref=UnknownValueRef.deferred_call(
+            placeholder_name=placeholder,
+            target_ref=CallTargetRef.from_name(target_name),
+            sequence=sequence,
+        ),
+    )
 
 
 def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_shared_params():
@@ -32,7 +51,7 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
         returns=[
             ReturnInfo(
                 address="0x1000",
-                value=Expression.binary_op("INT_ADD", Expression.unknown(placeholder1), _const(1)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(placeholder1, "left"), _const(1)),
                 conditions=[],
             )
         ],
@@ -43,7 +62,7 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
         returns=[
             ReturnInfo(
                 address="0x2000",
-                value=Expression.binary_op("INT_ADD", Expression.unknown(placeholder2), _const(1)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(placeholder2, "right"), _const(1)),
                 conditions=[],
             )
         ],
@@ -65,6 +84,60 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     assert left_expr == right_expr
     assert any(param.get("synthetic_recursive_summary") for param in result.analysis1.parameters)
     assert any(param.get("synthetic_recursive_summary") for param in result.analysis2.parameters)
+
+
+def test_recursive_abstraction_matches_structurally_equivalent_arguments_without_string_keys():
+    n1 = _param("n", 0)
+    n2 = _param("m", 0)
+    placeholder1 = "call_out_of_scope:left#0"
+    placeholder2 = "call_out_of_scope:right#0"
+
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_deferred_unknown(placeholder1, "left"),
+                conditions=[],
+            )
+        ],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[{"name": "m", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_deferred_unknown(placeholder2, "right"),
+                conditions=[],
+            )
+        ],
+    )
+    analysis1.deferred_calls = {
+        placeholder1: DeferredCallInfo(
+            placeholder1,
+            "left",
+            [Expression.binary_op("INT_ADD", n1, _const(1))],
+        )
+    }
+    analysis2.deferred_calls = {
+        placeholder2: DeferredCallInfo(
+            placeholder2,
+            "right",
+            [Expression.binary_op("INT_ADD", _const(1), n2)],
+        )
+    }
+
+    result = abstract_recursive_calls(analysis1, analysis2, debug=False)
+
+    assert result.applied is True
+    assert len(result.matches) == 1
+    left_value = result.analysis1.returns[0].value
+    right_value = result.analysis2.returns[0].value
+    assert left_value.expr_type == ExpressionType.PARAMETER
+    assert right_value.expr_type == ExpressionType.PARAMETER
+    assert left_value.name == right_value.name
 
 
 def test_checker_uses_recursive_abstraction_stage_after_pairwise_unknown():

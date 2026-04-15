@@ -8,7 +8,14 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     expression_contains_synthetic_location_reads,
     post_state_read_expression_for_location,
 )
-from scripts.function_tracer_pcode.model import CallTargetRef, Condition, DeferredCallInfo, Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    Condition,
+    DeferredCallInfo,
+    Expression,
+    ReturnInfo,
+    UnknownValueRef,
+)
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -22,6 +29,18 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _cond(operator: str, left: Expression, right: Expression) -> Condition:
     return Condition(Expression.binary_op(operator, left, right), negated=False)
+
+
+def _deferred_unknown(placeholder: str, target_name: str) -> Expression:
+    sequence = int(placeholder.rsplit("#", 1)[1]) if "#" in placeholder else 0
+    return Expression.unknown(
+        placeholder,
+        runtime_ref=UnknownValueRef.deferred_call(
+            placeholder_name=placeholder,
+            target_ref=CallTargetRef.from_name(target_name),
+            sequence=sequence,
+        ),
+    )
 
 
 def test_bounded_call_refiner_runtime_dedup_does_not_require_to_string(monkeypatch):
@@ -55,7 +74,7 @@ def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():
     recursive_placeholder = "call_out_of_scope:sum#0"
     recursive_value = Expression.binary_op(
         "INT_ADD",
-        Expression.unknown(recursive_placeholder),
+        _deferred_unknown(recursive_placeholder, "sum"),
         n,
     )
 
@@ -103,7 +122,7 @@ def test_bounded_call_refiner_handles_mutual_recursion_with_fuel_cap():
             ReturnInfo(address="0x2000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", n, _const(0))]),
             ReturnInfo(
                 address="0x2004",
-                value=Expression.binary_op("INT_ADD", Expression.unknown(b_placeholder), _const(1)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(b_placeholder, "B"), _const(1)),
                 conditions=[_cond("INT_SLESS", _const(0), n)],
             ),
         ],
@@ -115,7 +134,7 @@ def test_bounded_call_refiner_handles_mutual_recursion_with_fuel_cap():
             ReturnInfo(address="0x3000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", n, _const(0))]),
             ReturnInfo(
                 address="0x3004",
-                value=Expression.binary_op("INT_ADD", Expression.unknown(a_placeholder), _const(2)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(a_placeholder, "A"), _const(2)),
                 conditions=[_cond("INT_SLESS", _const(0), n)],
             ),
         ],
@@ -163,7 +182,7 @@ def test_bounded_call_refiner_respects_case_cap():
         returns=[
             ReturnInfo(
                 address="0x4000",
-                value=Expression.unknown(placeholder),
+                value=_deferred_unknown(placeholder, "callee"),
                 conditions=[_cond("INT_SLESS", _const(0), n)],
             )
         ],
@@ -275,7 +294,7 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
         returns=[
             ReturnInfo(
                 address="0x4000",
-                value=Expression.unknown(placeholder),
+                value=_deferred_unknown(placeholder, "callee"),
                 conditions=[_cond("INT_NOTEQUAL", _param("param_1", 0, size=8), Expression.constant(0, size=8))],
             )
         ],

@@ -68,71 +68,257 @@ def has_runtime_data_type_info(
     ) is not None
 
 
+def _resolve_runtime_data_type_obj(
+    data_type_obj: Any = None,
+    fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
+) -> Any:
+    """解析時に使う DataType object を解決する。"""
+    if data_type_obj is not None:
+        return data_type_obj
+    if program is None or not fallback_name:
+        return None
+    resolved = resolve_type_spec(
+        fallback_name,
+        program=program,
+    )
+    if resolved is None:
+        return None
+    return resolved.data_type_obj
+
+
+def _get_base_data_type(data_type_obj: Any = None) -> Any:
+    """typedef を剥がした基底 DataType を返す。"""
+    current = data_type_obj
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        base = _call_zero_arg(current, "getBaseDataType")
+        if base is None or base is current:
+            break
+        current = base
+    return current
+
+
+def _iter_float_data_types(data_type_manager: Any = None) -> Tuple[Any, ...]:
+    """DTM から利用可能な floating-point DataType 候補を列挙する。"""
+    if data_type_manager is None:
+        return ()
+    try:
+        from ghidra.program.model.data import AbstractFloatDataType  # type: ignore[import]
+
+        candidates = AbstractFloatDataType.getFloatDataTypes(data_type_manager)
+        if candidates is not None:
+            return tuple(candidates)
+    except Exception:
+        pass
+
+    candidates = _call_zero_arg(data_type_manager, "getFloatDataTypes")
+    if candidates is None:
+        return ()
+    try:
+        return tuple(candidates)
+    except Exception:
+        return ()
+
+
 def is_void_data_type(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
 ) -> bool:
     """void 型かどうかを判定する。"""
-    if data_type_obj is not None:
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if resolved is not None:
+        base = _get_base_data_type(resolved) or resolved
         try:
             from ghidra.program.model.data import VoidDataType  # type: ignore[import]
 
-            return bool(VoidDataType.isVoidDataType(data_type_obj))
+            return bool(VoidDataType.isVoidDataType(base))
         except Exception:
             pass
-    return normalize_type_name(fallback_name) == "void"
+        length = _call_zero_arg(base, "getLength")
+        if length is not None:
+            try:
+                return int(length) == 0
+            except Exception:
+                pass
+    return False
 
 
 def is_undefined_data_type(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
 ) -> bool:
     """undefined 型かどうかを判定する。"""
-    if data_type_obj is not None:
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if resolved is not None:
+        base = _get_base_data_type(resolved) or resolved
         try:
             from ghidra.program.model.data import Undefined  # type: ignore[import]
 
-            return bool(Undefined.isUndefined(data_type_obj))
+            return bool(Undefined.isUndefined(base))
         except Exception:
             pass
-        is_undefined = _call_zero_arg(data_type_obj, "isUndefined")
+        is_undefined = _call_zero_arg(base, "isUndefined")
         if is_undefined is not None:
             return bool(is_undefined)
-    normalized = normalize_type_name(fallback_name)
-    return normalized.startswith("undefined")
+    return False
 
 
 def is_pointer_data_type(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
 ) -> bool:
     """pointer 型かどうかを判定する。"""
-    if data_type_obj is not None:
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if resolved is not None:
+        base = _get_base_data_type(resolved) or resolved
         try:
-            from ghidra.program.model.data import Pointer, PointerType, PointerTypedef  # type: ignore[import]
+            from ghidra.program.model.data import Pointer  # type: ignore[import]
 
-            if isinstance(data_type_obj, (Pointer, PointerType, PointerTypedef)):
+            if isinstance(base, Pointer):
                 return True
         except Exception:
             pass
-        class_name = getattr(getattr(data_type_obj, "__class__", None), "__name__", "")
-        if "Pointer" in class_name:
+        is_pointer = _call_zero_arg(base, "isPointer")
+        if is_pointer is not None:
+            return bool(is_pointer)
+        data_type_manager = get_data_type_manager_for_reference(
+            base,
+            program=program,
+        )
+        referenced = _call_zero_arg(base, "getDataType")
+        if data_type_manager is not None and referenced is not None:
+            pointer_candidate = _call_one_arg(data_type_manager, "getPointer", referenced)
+            if pointer_candidate is not None:
+                equivalent = _call_one_arg(pointer_candidate, "isEquivalent", base)
+                if equivalent is not None:
+                    return bool(equivalent)
+                equivalent = _call_one_arg(base, "isEquivalent", pointer_candidate)
+                if equivalent is not None:
+                    return bool(equivalent)
+    return False
+
+
+def is_floating_data_type(
+    data_type_obj: Any = None,
+    fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
+) -> bool:
+    """floating-point 型かどうかを判定する。"""
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if resolved is None:
+        return False
+    base = _get_base_data_type(resolved) or resolved
+    try:
+        from ghidra.program.model.data import AbstractFloatDataType  # type: ignore[import]
+
+        if isinstance(base, AbstractFloatDataType):
             return True
-    normalized = normalize_type_name(fallback_name)
-    return "*" in normalized or "ptr" in normalized or "pointer" in normalized
+    except Exception:
+        pass
+
+    data_type_manager = get_data_type_manager_for_reference(
+        base,
+        program=program,
+    )
+    for candidate in _iter_float_data_types(data_type_manager):
+        equivalent = _call_one_arg(base, "isEquivalent", candidate)
+        if equivalent is not None:
+            if bool(equivalent):
+                return True
+            continue
+        equivalent = _call_one_arg(candidate, "isEquivalent", base)
+        if equivalent is not None and bool(equivalent):
+            return True
+    return False
+
+
+def is_integral_data_type(
+    data_type_obj: Any = None,
+    fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
+) -> bool:
+    """整数スカラ型かどうかを判定する。"""
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if resolved is None:
+        return False
+    if is_void_data_type(resolved):
+        return False
+    if is_pointer_data_type(resolved):
+        return False
+    if is_undefined_data_type(resolved):
+        return False
+    if is_floating_data_type(resolved):
+        return False
+
+    base = _get_base_data_type(resolved) or resolved
+    try:
+        from ghidra.program.model.data import AbstractIntegerDataType  # type: ignore[import]
+
+        if isinstance(base, AbstractIntegerDataType):
+            return True
+    except Exception:
+        pass
+
+    signed_value = _call_zero_arg(base, "isSigned")
+    length = _call_zero_arg(base, "getLength")
+    if signed_value is None or length is None:
+        return False
+    try:
+        return int(length) > 0
+    except Exception:
+        return False
 
 
 def is_unsigned_data_type(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
+    *,
+    program: Any = None,
 ) -> bool:
     """unsigned 型かどうかを判定する。"""
-    if is_void_data_type(data_type_obj, fallback_name):
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if is_void_data_type(resolved):
         return False
-    if is_pointer_data_type(data_type_obj, fallback_name):
+    if is_pointer_data_type(resolved):
         return False
-    if data_type_obj is not None:
-        signed_value = _call_zero_arg(data_type_obj, "isSigned")
+    if resolved is not None:
+        base = _get_base_data_type(resolved) or resolved
+        signed_value = _call_zero_arg(base, "isSigned")
         if signed_value is not None:
             return not bool(signed_value)
     return False
@@ -146,21 +332,19 @@ def get_declared_type_signedness(
     program: Any = None,
 ) -> bool:
     """宣言型の signedness を返す。"""
-    if is_void_data_type(data_type_obj, fallback_name):
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if is_void_data_type(resolved):
         return False
-    if is_pointer_data_type(data_type_obj, fallback_name):
+    if is_pointer_data_type(resolved):
         return False
-    signed_value = _call_zero_arg(data_type_obj, "isSigned")
+    base = _get_base_data_type(resolved) or resolved
+    signed_value = _call_zero_arg(base, "isSigned")
     if signed_value is not None:
         return bool(signed_value)
-    if program is not None and fallback_name:
-        resolved = resolve_type_spec(
-            fallback_name,
-            program=program,
-            fallback_signed=fallback_signed,
-        )
-        if resolved is not None and resolved.is_signed is not None:
-            return resolved.is_signed
     return fallback_signed
 
 
@@ -172,10 +356,16 @@ def get_declared_type_size_bytes(
     program: Any = None,
 ) -> Optional[int]:
     """宣言型のサイズを返す。"""
-    if is_void_data_type(data_type_obj, fallback_name):
+    resolved = _resolve_runtime_data_type_obj(
+        data_type_obj,
+        fallback_name,
+        program=program,
+    )
+    if is_void_data_type(resolved):
         return 0
 
-    length = _call_zero_arg(data_type_obj, "getLength")
+    base = _get_base_data_type(resolved) or resolved
+    length = _call_zero_arg(base, "getLength")
     if length is not None:
         try:
             length = int(length)
@@ -183,15 +373,6 @@ def get_declared_type_size_bytes(
                 return length
         except Exception:
             pass
-
-    if program is not None and fallback_name:
-        resolved = resolve_type_spec(
-            fallback_name,
-            program=program,
-            fallback_size=fallback_size,
-        )
-        if resolved is not None and resolved.size_bytes is not None:
-            return resolved.size_bytes
 
     return fallback_size
 
@@ -219,6 +400,8 @@ def type_matches_patterns(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
     patterns: Optional[List[str]] = None,
+    *,
+    program: Any = None,
 ) -> bool:
     """型が対象パターンに一致するか判定する。"""
     patterns = list(patterns or [])
@@ -226,7 +409,7 @@ def type_matches_patterns(
         return False
     if data_type_obj is None:
         return False
-    if is_undefined_data_type(data_type_obj, fallback_name):
+    if is_undefined_data_type(data_type_obj, fallback_name, program=program):
         if any(pattern.startswith("undefined") for pattern in patterns):
             return True
     return False

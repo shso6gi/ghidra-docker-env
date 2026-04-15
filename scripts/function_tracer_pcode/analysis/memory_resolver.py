@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .condition.normalizer import ConditionNormalizer
-from ..model import Condition, Expression, ExpressionType
+from ..model import AddressValueRef, Condition, Expression, ExpressionType
 
 
 MAX_ENUMERATED_INDEX_VALUES = 16
@@ -162,7 +162,9 @@ def _rewrite_expr(
             size=expr.size,
             name=expr.name,
             data_type=expr.data_type,
+            data_type_obj=getattr(expr, "data_type_obj", None),
             storage_info=expr.storage_info,
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
         return rebuilt
 
@@ -535,8 +537,10 @@ def _flatten_additive_terms(
 
 
 def _extract_symbolic_base_address(expr: Expression) -> Optional[int]:
-    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        return _extract_address_suffix(expr.name, ("PTR_",))
+    if expr.expr_type == ExpressionType.VARIABLE:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, AddressValueRef):
+            return int(runtime_ref.address_offset)
     return None
 
 
@@ -544,24 +548,10 @@ def _extract_constant_address(expr: Expression) -> Optional[int]:
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return expr.value
 
-    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        return _extract_address_suffix(expr.name, ("DAT_", "LAB_", "UNK_"))
-    return None
-
-
-def _extract_address_suffix(name: str, prefixes: Tuple[str, ...]) -> Optional[int]:
-    for prefix in prefixes:
-        if not name.startswith(prefix):
-            continue
-
-        direct_suffix = name[len(prefix):]
-        if re.fullmatch(r"[0-9A-Fa-f]{4,}", direct_suffix):
-            return int(direct_suffix, 16)
-
-        tail_match = re.search(r"_([0-9A-Fa-f]{4,})$", name)
-        if tail_match:
-            return int(tail_match.group(1), 16)
-
+    if expr.expr_type == ExpressionType.VARIABLE:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, AddressValueRef):
+            return int(runtime_ref.address_offset)
     return None
 
 

@@ -371,7 +371,11 @@ class BoundedCallRefiner:
     ) -> Optional[DeferredCallInfo]:
         if expr is None or expr.expr_type != ExpressionType.UNKNOWN:
             return None
-        return analysis.deferred_calls.get(expr.name or "")
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        placeholder_name = getattr(runtime_ref, "placeholder_name", None)
+        if placeholder_name:
+            return analysis.deferred_calls.get(placeholder_name)
+        return None
 
     def _clone_expression_with_operands(
         self,
@@ -386,8 +390,10 @@ class BoundedCallRefiner:
             size=expr.size,
             name=expr.name,
             data_type=expr.data_type,
+            data_type_obj=getattr(expr, "data_type_obj", None),
             storage_info=expr.storage_info,
             read_order_key=getattr(expr, "read_order_key", None),
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
         return cloned
 
@@ -456,8 +462,12 @@ class BoundedCallRefiner:
         def visit_expression(expr: Optional[Expression]) -> None:
             if expr is None:
                 return
-            if expr.expr_type == ExpressionType.UNKNOWN and expr.name in analysis.deferred_calls:
-                used.add(expr.name)
+            if expr.expr_type == ExpressionType.UNKNOWN:
+                runtime_ref = getattr(expr, "runtime_ref", None)
+                placeholder_name = getattr(runtime_ref, "placeholder_name", None)
+                if placeholder_name in analysis.deferred_calls:
+                    used.add(placeholder_name)
+                    return
                 return
             if expr.expr_type == ExpressionType.PHI and expr.value:
                 for cond, value in expr.value:

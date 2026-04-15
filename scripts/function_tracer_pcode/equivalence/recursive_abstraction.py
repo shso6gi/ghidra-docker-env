@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, DeferredCallInfo, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
+from ..model.runtime_refs import UnknownValueRef
 
 
 @dataclass(frozen=True)
@@ -88,8 +89,8 @@ def abstract_recursive_calls(
 def _group_deferred_calls(
     analysis: FunctionReturnAnalysis,
     deferred_calls: Sequence[DeferredCallInfo],
-) -> Dict[Tuple[str, Tuple[str, ...]], List[DeferredCallInfo]]:
-    grouped: Dict[Tuple[str, Tuple[str, ...]], List[DeferredCallInfo]] = {}
+) -> Dict[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]], List[DeferredCallInfo]]:
+    grouped: Dict[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]], List[DeferredCallInfo]] = {}
     for info in deferred_calls:
         key = _deferred_call_key(analysis, info)
         if key is None:
@@ -101,39 +102,83 @@ def _group_deferred_calls(
 def _deferred_call_key(
     analysis: FunctionReturnAnalysis,
     info: DeferredCallInfo,
-) -> Optional[Tuple[str, Tuple[str, ...]]]:
+) -> Optional[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]]]:
     if info is None or info.target_ref is None:
         return None
 
     if info.target_ref.function_name == analysis.function_name:
-        target_key = "__self__"
+        target_key = ("self_recursive",)
     else:
-        target_key = repr(info.target_ref.stable_key())
+        target_key = info.target_ref.stable_key()
 
-    arg_key = tuple(_canonicalize_expression(arg) for arg in (info.arguments or []))
+    arg_key = tuple(_recursive_argument_key(arg) for arg in (info.arguments or []))
     return target_key, arg_key
 
 
-def _canonicalize_expression(expr: Optional[Expression]) -> str:
+def _recursive_argument_key(expr: Optional[Expression]) -> Tuple[object, ...]:
     if expr is None:
-        return "<none>"
+        return ("none",)
     if expr.expr_type == ExpressionType.PARAMETER:
         index = expr.value if isinstance(expr.value, int) else -1
-        return f"param@{index}:{expr.size or 0}"
-    if expr.expr_type == ExpressionType.VARIABLE:
-        return f"var:{expr.name}:{expr.size or 0}"
+        return ("parameter", index, int(expr.size or 0))
     if expr.expr_type == ExpressionType.CONSTANT:
-        return f"const:{expr.value}:{expr.size or 0}"
+        return ("const", int(expr.value), int(expr.size or 0))
     if expr.expr_type == ExpressionType.UNKNOWN:
-        return f"unknown:{expr.name}"
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        return (
+            "unknown",
+            runtime_ref.stable_key() if hasattr(runtime_ref, "stable_key") else None,
+            int(expr.size or 0),
+        )
+    if expr.expr_type == ExpressionType.VARIABLE:
+        return ("variable", expr.name or "", int(expr.size or 0))
+    if expr.expr_type == ExpressionType.UNARY_OP:
+        operand = expr.operands[0] if expr.operands else None
+        return (
+            "unary",
+            expr.operator or "",
+            int(expr.size or 0),
+            _recursive_argument_key(operand),
+        )
+    if expr.expr_type == ExpressionType.BINARY_OP:
+        left = expr.operands[0] if expr.operands else None
+        right = expr.operands[1] if len(expr.operands) > 1 else None
+        left_key = _recursive_argument_key(left)
+        right_key = _recursive_argument_key(right)
+        if (expr.operator or "") in {"INT_ADD", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR", "INT_EQUAL", "INT_NOTEQUAL"}:
+            if right_key < left_key:
+                left_key, right_key = right_key, left_key
+        return (
+            "binary",
+            expr.operator or "",
+            int(expr.size or 0),
+            left_key,
+            right_key,
+        )
+    if expr.expr_type == ExpressionType.MEMORY:
+        address = expr.operands[0] if expr.operands else None
+        return ("memory", int(expr.size or 0), _recursive_argument_key(address))
     if expr.expr_type == ExpressionType.PHI and expr.value:
-        parts = []
+        branches = []
         for cond, value in expr.value:
-            cond_key = _canonicalize_expression(cond.expression) if cond is not None else "<none>"
-            parts.append(f"{cond_key}->{_canonicalize_expression(value)}")
-        return "phi(" + ",".join(parts) + ")"
-    operands = ",".join(_canonicalize_expression(op) for op in expr.operands or [])
-    return f"{expr.expr_type.name}:{expr.operator}:{operands}:{expr.size or 0}"
+            if cond is None:
+                cond_key = ("none",)
+            else:
+                cond_key = (
+                    "condition",
+                    _recursive_argument_key(cond.expression),
+                    bool(cond.negated),
+                )
+            branches.append((cond_key, _recursive_argument_key(value)))
+        return ("phi", int(expr.size or 0), tuple(branches))
+    return (
+        "expr",
+        expr.expr_type.name,
+        expr.operator or "",
+        expr.name or "",
+        int(expr.size or 0),
+        tuple(_recursive_argument_key(op) for op in (expr.operands or [])),
+    )
 
 
 def _rewrite_analysis_with_abstract_calls(
@@ -218,15 +263,18 @@ def _rewrite_expression(
     if expr is None:
         return None
 
-    if expr.expr_type == ExpressionType.UNKNOWN and expr.name in placeholder_mapping:
-        match = placeholder_mapping[expr.name]
-        size = expr.size or 4
-        return Expression.parameter(
-            match.summary_name,
-            index=match.summary_index,
-            data_type="int",
-            size=size,
-        )
+    if expr.expr_type == ExpressionType.UNKNOWN:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        placeholder_name = getattr(runtime_ref, "placeholder_name", None)
+        if placeholder_name in placeholder_mapping:
+            match = placeholder_mapping[placeholder_name]
+            size = expr.size or 4
+            return Expression.parameter(
+                match.summary_name,
+                index=match.summary_index,
+                data_type="int",
+                size=size,
+            )
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         rebuilt_branches = []
@@ -253,7 +301,9 @@ def _rewrite_expression(
         size=expr.size,
         name=expr.name,
         data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
         storage_info=expr.storage_info,
         read_order_key=getattr(expr, "read_order_key", None),
+        runtime_ref=getattr(expr, "runtime_ref", None),
     )
     return rebuilt

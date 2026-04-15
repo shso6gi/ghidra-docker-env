@@ -746,8 +746,10 @@ class PairwiseStrategy(CheckStrategy):
                 size=expr.size,
                 name=expr.name,
                 data_type=expr.data_type,
+                data_type_obj=getattr(expr, "data_type_obj", None),
                 storage_info=expr.storage_info,
                 read_order_key=expr.read_order_key,
+                runtime_ref=getattr(expr, "runtime_ref", None),
             )
 
         collapsed = self._collapse_parameter_fragment_extension(candidate, fragment_map)

@@ -2,12 +2,18 @@
 
 from typing import Optional
 
+from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.model import Condition, Expression
 from scripts.function_tracer_pcode.model.render_smt import expression_to_smt
 
 
 def _param(name: str, size: int = 4, data_type: Optional[str] = None) -> Expression:
-    return Expression.parameter(name, size=size, data_type=data_type)
+    return Expression.parameter(
+        name,
+        size=size,
+        data_type=data_type,
+        data_type_obj=resolve_mock_data_type(data_type) if data_type else None,
+    )
 
 
 def _const(value: int, size: int = 4) -> Expression:
@@ -137,3 +143,20 @@ def test_expression_to_smt_preserves_32bit_wrap_before_signed_compare_extension(
     assert "(bvmul (_ bv3 32) param_2)" in smt
     assert "(bvadd (_ bv1 32) (bvmul (_ bv3 32) param_2))" in smt
     assert "(bvmul (_ bv3 64) ((_ sign_extend 32) param_2))" not in smt
+
+
+def test_expression_to_smt_prefers_signed_extension_from_datatype_object_not_name():
+    expr = _binary(
+        "INT_SLESS",
+        Expression.parameter(
+            "param_1",
+            size=4,
+            data_type="custom_alias",
+            data_type_obj=resolve_mock_data_type("int"),
+        ),
+        _const(0, size=8),
+    )
+
+    smt = expression_to_smt(expr)
+
+    assert "((_ sign_extend 32) param_1)" in smt

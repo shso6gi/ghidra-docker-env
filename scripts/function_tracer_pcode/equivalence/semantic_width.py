@@ -73,6 +73,7 @@ class SemanticWidthNormalizer:
             rebuilt = Expression.phi(branches)
             rebuilt.size = expr.size
             rebuilt.data_type = expr.data_type
+            rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
             rebuilt.storage_info = expr.storage_info
             rebuilt.read_order_key = expr.read_order_key
             return rebuilt
@@ -91,8 +92,10 @@ class SemanticWidthNormalizer:
                 size=expr.size,
                 name=expr.name,
                 data_type=expr.data_type,
+                data_type_obj=getattr(expr, "data_type_obj", None),
                 storage_info=expr.storage_info,
                 read_order_key=expr.read_order_key,
+                runtime_ref=getattr(expr, "runtime_ref", None),
             )
 
         normalized = self._apply_rules(candidate)
@@ -625,6 +628,7 @@ def _rewrite_parameter_expression_metadata(
             data_type=desired_type,
             storage_info=expr.storage_info,
             read_order_key=expr.read_order_key,
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -652,6 +656,7 @@ def _rewrite_parameter_expression_metadata(
         rebuilt = Expression.phi(branches)
         rebuilt.size = expr.size
         rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
         rebuilt.storage_info = expr.storage_info
         rebuilt.read_order_key = expr.read_order_key
         return rebuilt
@@ -679,8 +684,10 @@ def _rewrite_parameter_expression_metadata(
         size=expr.size,
         name=expr.name,
         data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
     )
 
 

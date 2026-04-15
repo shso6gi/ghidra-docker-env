@@ -465,6 +465,7 @@ def _substitute_exact_replacements(
         rebuilt.size = expr.size
         rebuilt.name = expr.name
         rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
         rebuilt.storage_info = expr.storage_info
         rebuilt.read_order_key = expr.read_order_key
         return rebuilt
@@ -487,8 +488,10 @@ def _substitute_exact_replacements(
         size=expr.size,
         name=expr.name,
         data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
     )
     rebuilt_key = _expr_key(rebuilt)
     if rebuilt_key is not None:

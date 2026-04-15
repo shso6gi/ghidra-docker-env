@@ -7,7 +7,13 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     EffectSummary,
     StoreEffect,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    Condition,
+    Expression,
+    ReturnInfo,
+    UnknownValueRef,
+)
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -171,13 +177,20 @@ class _FakeTracer:
     def trace_varnode(self, varnode, use_cache=True):
         return getattr(varnode, "expr", self._arg_expr)
 
-    def _get_function_name(self, _addr_varnode):
-        return self._function_name
+    def resolve_call_target_ref(self, _addr_varnode, **_kwargs):
+        return CallTargetRef.from_name(self._function_name)
 
 
 def test_structural_recurrence_summarizer_recovers_linear_self_recursion():
     param = _param()
-    unknown = Expression.unknown("call_out_of_scope:fc_recursive_sum")
+    unknown = Expression.unknown(
+        "call_out_of_scope:fc_recursive_sum",
+        runtime_ref=UnknownValueRef.out_of_scope_call(
+            reason="call_out_of_scope",
+            target_ref=CallTargetRef.from_name("fc_recursive_sum"),
+            display_hint="fc_recursive_sum",
+        ),
+    )
     recursive_value = Expression.binary_op("INT_ADD", unknown, param)
     analysis = create_mock_analysis(
         "fc_recursive_sum",
@@ -220,7 +233,14 @@ def test_structural_recurrence_summarizer_recovers_linear_self_recursion():
 
 def test_structural_recurrence_summarizer_rejects_non_affine_recursion():
     param = _param()
-    unknown = Expression.unknown("call_out_of_scope:fc_recursive_sum")
+    unknown = Expression.unknown(
+        "call_out_of_scope:fc_recursive_sum",
+        runtime_ref=UnknownValueRef.out_of_scope_call(
+            reason="call_out_of_scope",
+            target_ref=CallTargetRef.from_name("fc_recursive_sum"),
+            display_hint="fc_recursive_sum",
+        ),
+    )
     recursive_value = Expression.binary_op(
         "INT_ADD",
         unknown,
@@ -261,7 +281,14 @@ def test_structural_recurrence_summarizer_rejects_non_affine_recursion():
 def test_structural_recurrence_summarizer_accepts_masked_counter_recursion():
     param = _param(size=8)
     masked_param = Expression.binary_op("INT_AND", param, _const(0xFFFFFFFF, size=8))
-    unknown = Expression.unknown("call_out_of_scope:fc_recursive_sum")
+    unknown = Expression.unknown(
+        "call_out_of_scope:fc_recursive_sum",
+        runtime_ref=UnknownValueRef.out_of_scope_call(
+            reason="call_out_of_scope",
+            target_ref=CallTargetRef.from_name("fc_recursive_sum"),
+            display_hint="fc_recursive_sum",
+        ),
+    )
     recursive_value = Expression.binary_op("INT_ADD", unknown, masked_param)
     analysis = create_mock_analysis(
         "fc_recursive_sum",
@@ -311,7 +338,14 @@ def test_structural_recurrence_summarizer_accepts_reconstructed_guard_counter():
         Expression.binary_op("INT_LEFT", high_fragment, _const(32)),
         param,
     )
-    unknown = Expression.unknown("call_out_of_scope:fc_recursive_sum")
+    unknown = Expression.unknown(
+        "call_out_of_scope:fc_recursive_sum",
+        runtime_ref=UnknownValueRef.out_of_scope_call(
+            reason="call_out_of_scope",
+            target_ref=CallTargetRef.from_name("fc_recursive_sum"),
+            display_hint="fc_recursive_sum",
+        ),
+    )
     recursive_value = Expression.binary_op("INT_ADD", unknown, param)
     analysis = create_mock_analysis(
         "fc_recursive_sum",
@@ -356,7 +390,14 @@ def test_structural_recurrence_summarizer_accepts_reconstructed_guard_counter():
 
 def test_structural_recurrence_summary_uses_widened_closed_form():
     param = _param()
-    unknown = Expression.unknown("call_out_of_scope:fc_recursive_sum")
+    unknown = Expression.unknown(
+        "call_out_of_scope:fc_recursive_sum",
+        runtime_ref=UnknownValueRef.out_of_scope_call(
+            reason="call_out_of_scope",
+            target_ref=CallTargetRef.from_name("fc_recursive_sum"),
+            display_hint="fc_recursive_sum",
+        ),
+    )
     recursive_value = Expression.binary_op("INT_ADD", unknown, param)
     analysis = create_mock_analysis(
         "fc_recursive_sum",

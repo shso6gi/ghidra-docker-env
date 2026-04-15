@@ -51,7 +51,9 @@ def normalize_udiv_with_guard(
             size=expr.size,
             name=expr.name,
             data_type=expr.data_type,
-            storage_info=expr.storage_info
+            data_type_obj=getattr(expr, "data_type_obj", None),
+            storage_info=expr.storage_info,
+            runtime_ref=getattr(expr, "runtime_ref", None),
         )
     
     # トップレベルの変換を試行

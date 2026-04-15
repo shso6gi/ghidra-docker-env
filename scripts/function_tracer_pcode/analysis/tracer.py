@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
-from ..model import Expression, ExpressionType, Condition, StorageInfo
+from ..model import Expression, ExpressionType, Condition, StorageInfo, CallTargetRef, UnknownValueRef, AddressValueRef
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
     UnknownTracker, UnknownEvent, UnknownReason,
@@ -90,6 +90,43 @@ class PcodeTracer:
 
     def _debug_available(self) -> bool:
         return self.debug and self._debug_message_count < self._debug_message_limit
+
+    def _make_address_runtime_ref(
+        self,
+        *,
+        display_name: Optional[str] = None,
+        symbol: Any = None,
+        high_var: Any = None,
+    ) -> Optional[AddressValueRef]:
+        probes = (
+            (symbol, "getAddress", "symbol_address"),
+            (high_var, "getAddress", "high_var_address"),
+            (high_var, "getPCAddress", "high_var_pc_address"),
+        )
+        for owner, method_name, source in probes:
+            if owner is None:
+                continue
+            getter = getattr(owner, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                address = getter()
+            except Exception:
+                continue
+            if address is None:
+                continue
+            try:
+                offset = int(address.getOffset())
+            except Exception:
+                continue
+            if offset < 0:
+                continue
+            return AddressValueRef(
+                address_offset=offset,
+                source=source,
+                display_hint=display_name,
+            )
+        return None
     
     def _get_op_key(self, pcode_op) -> str:
         """PcodeOpの一意なキーを生成（同一seqnumの異なるopを区別）"""
@@ -354,33 +391,46 @@ class PcodeTracer:
                         param_idx = symbol.getCategoryIndex()
                     except:
                         pass
-                    dtype = str(symbol.getDataType()) if symbol.getDataType() else None
+                    dtype_obj = symbol.getDataType() if symbol.getDataType() else None
+                    dtype = str(dtype_obj) if dtype_obj else None
                     
                     if self._debug_available():
                         self._debug_print(f"  -> Parameter: {sym_name} (index={param_idx})")
                     
                     return Expression.parameter(
-                        sym_name, param_idx, dtype, varnode.getSize(),
+                        sym_name, param_idx, dtype, dtype_obj, varnode.getSize(),
                         storage_info=storage_info
                     )
                 else:
-                    dtype = str(symbol.getDataType()) if symbol.getDataType() else None
+                    dtype_obj = symbol.getDataType() if symbol.getDataType() else None
+                    dtype = str(dtype_obj) if dtype_obj else None
+                    runtime_ref = self._make_address_runtime_ref(
+                        display_name=sym_name,
+                        symbol=symbol,
+                        high_var=high_var,
+                    )
                     
                     if self._debug_available():
                         self._debug_print(f"  -> Variable (from symbol): {sym_name}")
                     
                     return Expression.variable(
-                        sym_name, dtype, varnode.getSize(),
-                        storage_info=storage_info
+                        sym_name, dtype, dtype_obj, varnode.getSize(),
+                        storage_info=storage_info,
+                        runtime_ref=runtime_ref,
                     )
             
             name = high_var.getName()
             if name and name != "UNNAMED":
+                runtime_ref = self._make_address_runtime_ref(
+                    display_name=name,
+                    high_var=high_var,
+                )
                 if self._debug_available():
                     self._debug_print(f"  -> Variable (from high name): {name}")
                 return Expression.variable(
                     name, size=varnode.getSize(),
-                    storage_info=storage_info
+                    storage_info=storage_info,
+                    runtime_ref=runtime_ref,
                 )
         
         # 4. レジスタの場合（入力変数として扱う）
@@ -515,7 +565,12 @@ class PcodeTracer:
         if mnemonic == "CALL":
             if inputs:
                 func_addr = inputs[0]
-                func_name = self._get_function_name(func_addr)
+                target_ref = self.resolve_call_target_ref(
+                    func_addr,
+                    allow_containing=True,
+                    allow_code_address=True,
+                ) or CallTargetRef.unknown()
+                func_name = target_ref.display_name()
                 self.emit_unknown_event(
                     reason="call_out_of_scope",
                     varnode=pcode_op.getOutput(),
@@ -523,13 +578,25 @@ class PcodeTracer:
                     depth=depth,
                     note=f"CALL target={func_name}",
                 )
-                return Expression.unknown(f"call_out_of_scope:{func_name}")
+                return Expression.unknown(
+                    f"call_out_of_scope:{func_name}",
+                    runtime_ref=UnknownValueRef.out_of_scope_call(
+                        reason="call_out_of_scope",
+                        target_ref=target_ref,
+                        display_hint=func_name,
+                    ),
+                )
             return Expression.unknown("call_no_target")
 
         # CALLIND
         if mnemonic == "CALLIND":
             if inputs:
-                target_name = self._get_function_name(inputs[0])
+                target_ref = self.resolve_call_target_ref(
+                    inputs[0],
+                    allow_containing=True,
+                    allow_code_address=True,
+                ) or CallTargetRef.unknown()
+                target_name = target_ref.display_name()
                 self.emit_unknown_event(
                     reason="callind_out_of_scope",
                     varnode=pcode_op.getOutput(),
@@ -537,7 +604,14 @@ class PcodeTracer:
                     depth=depth,
                     note=f"CALLIND target={target_name}",
                 )
-                return Expression.unknown(f"callind_out_of_scope:{target_name}")
+                return Expression.unknown(
+                    f"callind_out_of_scope:{target_name}",
+                    runtime_ref=UnknownValueRef.out_of_scope_call(
+                        reason="callind_out_of_scope",
+                        target_ref=target_ref,
+                        display_hint=target_name,
+                    ),
+                )
             return Expression.unknown("callind_no_target")
         
         # LOAD
@@ -674,18 +748,24 @@ class PcodeTracer:
                 return Expression.binary_op(mnemonic, traced_inputs[0], traced_inputs[1])
             else:
                 return Expression.call(mnemonic, traced_inputs)
-        
-        return Expression.unknown(f"unhandled_{mnemonic}")
-    
-    def _get_function_name(self, addr_varnode) -> str:
-        """関数アドレスから関数名を取得"""
-        if addr_varnode is None:
-            return "UNKNOWN_FUNC"
 
-        addr = None
+        return Expression.unknown(f"unhandled_{mnemonic}")
+
+    def resolve_call_target_ref(
+        self,
+        addr_varnode,
+        *,
+        allow_containing: bool = True,
+        allow_code_address: bool = True,
+    ) -> Optional[CallTargetRef]:
+        """CALL/CALLIND の target を object ベースで解決する。"""
+        if addr_varnode is None or self.program is None:
+            return None
+
+        address = None
         try:
             if addr_varnode.isConstant():
-                addr = addr_varnode.getAddress()
+                address = addr_varnode.getAddress()
             else:
                 candidate = addr_varnode.getAddress()
                 space = candidate.getAddressSpace() if candidate else None
@@ -694,22 +774,53 @@ class PcodeTracer:
                     or space.isUniqueSpace()
                     or space.isConstantSpace()
                 ):
-                    addr = candidate
+                    address = candidate
         except Exception:
-            addr = None
+            address = None
 
-        if addr is not None:
+        if address is None:
+            return None
+
+        try:
             function_manager = self.program.getFunctionManager()
-            func = function_manager.getFunctionAt(addr)
-            if func is None:
-                func = function_manager.getFunctionContaining(addr)
-            if func:
-                return func.getName()
-            try:
-                return f"FUN_{addr.getOffset():x}"
-            except Exception:
-                return "UNKNOWN_FUNC"
-        return "UNKNOWN_FUNC"
+            if function_manager is not None:
+                get_function_at = getattr(function_manager, "getFunctionAt", None)
+                if callable(get_function_at):
+                    func = get_function_at(address)
+                    if func is not None:
+                        return CallTargetRef.from_function(func)
+                get_referenced_function = getattr(function_manager, "getReferencedFunction", None)
+                if callable(get_referenced_function):
+                    func = get_referenced_function(address)
+                    if func is not None:
+                        return CallTargetRef.from_function(func)
+                if allow_containing:
+                    get_function_containing = getattr(function_manager, "getFunctionContaining", None)
+                    if callable(get_function_containing):
+                        func = get_function_containing(address)
+                        if func is not None:
+                            return CallTargetRef.from_function(func)
+        except Exception:
+            pass
+
+        if not allow_code_address:
+            return None
+
+        try:
+            return CallTargetRef.from_code_address(int(address.getOffset()))
+        except Exception:
+            return None
+
+    def _get_function_name(self, addr_varnode) -> str:
+        """関数アドレスから関数名を取得"""
+        target_ref = self.resolve_call_target_ref(
+            addr_varnode,
+            allow_containing=True,
+            allow_code_address=True,
+        )
+        if target_ref is None:
+            return "UNKNOWN_FUNC"
+        return target_ref.display_name()
     
     def get_all_pcode_ops(self) -> List[Any]:
         """全てのPcodeOpをリストで取得"""

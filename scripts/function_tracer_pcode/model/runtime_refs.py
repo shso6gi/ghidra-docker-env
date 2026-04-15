@@ -1,0 +1,357 @@
+# -*- coding: utf-8 -*-
+"""Runtime object references carried through expression analysis."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Any, Dict, Optional, Tuple
+
+from .call_target import CallTargetRef, coerce_call_target_ref
+
+_ADDRESS_NAME_PATTERNS = (
+    re.compile(r"^(PTR|DAT|LAB|FUN|UNK)_([0-9A-Fa-f]{4,})$"),
+    re.compile(r"^(?:PTR|DAT|LAB|FUN|UNK)_.+_([0-9A-Fa-f]{4,})$"),
+)
+
+
+@dataclass(frozen=True)
+class AddressValueRef:
+    """Structured constant-address identity for runtime analysis."""
+
+    address_offset: int
+    source: str = "symbolic_name"
+    display_hint: Optional[str] = None
+
+    @classmethod
+    def from_name(cls, name: Optional[str]) -> Optional["AddressValueRef"]:
+        if not name:
+            return None
+        for pattern in _ADDRESS_NAME_PATTERNS:
+            match = pattern.fullmatch(name)
+            if match is None:
+                continue
+            hex_text = match.group(match.lastindex or 1)
+            try:
+                return cls(
+                    address_offset=int(hex_text, 16),
+                    source="symbolic_name",
+                    display_hint=name,
+                )
+            except Exception:
+                return None
+        return None
+
+    def stable_key(self) -> Tuple[str, int]:
+        return ("address", int(self.address_offset))
+
+    def display_name(self) -> str:
+        return self.display_hint or f"ADDR_{int(self.address_offset):x}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "address",
+            "address_offset": int(self.address_offset),
+            "source": self.source,
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
+class LocationBaseRef:
+    """Structured identity for the root of a canonical memory location."""
+
+    kind: str
+    parameter_name: Optional[str] = None
+    parameter_index: Optional[int] = None
+    storage_space: Optional[str] = None
+    storage_offset: Optional[int] = None
+    storage_size: Optional[int] = None
+    display_hint: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"parameter", "stack_frame", "storage"}:
+            raise ValueError(f"Unsupported location base kind: {self.kind}")
+
+    @classmethod
+    def parameter(
+        cls,
+        name: str,
+        *,
+        index: Optional[int] = None,
+    ) -> "LocationBaseRef":
+        return cls(
+            kind="parameter",
+            parameter_name=name or None,
+            parameter_index=index,
+            display_hint=name or None,
+        )
+
+    @classmethod
+    def stack_frame(cls) -> "LocationBaseRef":
+        return cls(kind="stack_frame", display_hint="stackframe")
+
+    @classmethod
+    def storage(
+        cls,
+        *,
+        space_name: Optional[str],
+        offset: int,
+        size: int,
+        display_hint: Optional[str] = None,
+    ) -> "LocationBaseRef":
+        return cls(
+            kind="storage",
+            storage_space=space_name or None,
+            storage_offset=int(offset),
+            storage_size=max(1, int(size or 0)),
+            display_hint=display_hint,
+        )
+
+    def is_parameter(self) -> bool:
+        return self.kind == "parameter"
+
+    def is_stack_frame(self) -> bool:
+        return self.kind == "stack_frame"
+
+    def is_storage(self) -> bool:
+        return self.kind == "storage"
+
+    def __hash__(self) -> int:
+        return hash(self.stable_key())
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LocationBaseRef):
+            return False
+        if self.kind != other.kind:
+            return False
+        if self.is_parameter():
+            if self.parameter_name is not None and other.parameter_name is not None:
+                return self.parameter_name == other.parameter_name
+            if self.parameter_index is not None and other.parameter_index is not None:
+                return int(self.parameter_index) == int(other.parameter_index)
+            return (
+                self.parameter_name == other.parameter_name
+                and self.parameter_index == other.parameter_index
+            )
+        if self.is_stack_frame():
+            return True
+        return (
+            self.storage_space == other.storage_space
+            and int(self.storage_offset or 0) == int(other.storage_offset or 0)
+            and int(self.storage_size or 0) == int(other.storage_size or 0)
+        )
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        if self.is_parameter():
+            if self.parameter_name is not None:
+                return ("parameter_name", self.parameter_name)
+            if self.parameter_index is not None:
+                return ("parameter", int(self.parameter_index))
+            return ("parameter_name", None)
+        if self.is_stack_frame():
+            return ("stack_frame",)
+        return (
+            "storage",
+            self.storage_space,
+            int(self.storage_offset or 0),
+            int(self.storage_size or 0),
+        )
+
+    def display_name(self) -> str:
+        if self.display_hint:
+            return self.display_hint
+        if self.is_parameter():
+            return self.parameter_name or "param"
+        if self.is_stack_frame():
+            return "stackframe"
+        space = self.storage_space or "mem"
+        return f"{space}@{int(self.storage_offset or 0)}:{int(self.storage_size or 0)}"
+
+    def matches_parameter(self, param: Dict[str, Any]) -> bool:
+        if not self.is_parameter():
+            return False
+        try:
+            param_index = param.get("index")
+            if self.parameter_index is not None and param_index is not None:
+                return int(param_index) == int(self.parameter_index)
+        except Exception:
+            pass
+        return param.get("name") == self.parameter_name
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "kind": self.kind,
+            "display_name": self.display_name(),
+        }
+        if self.parameter_name is not None:
+            result["parameter_name"] = self.parameter_name
+        if self.parameter_index is not None:
+            result["parameter_index"] = self.parameter_index
+        if self.storage_space is not None:
+            result["storage_space"] = self.storage_space
+        if self.storage_offset is not None:
+            result["storage_offset"] = self.storage_offset
+        if self.storage_size is not None:
+            result["storage_size"] = self.storage_size
+        return result
+
+
+@dataclass(frozen=True)
+class LocationStep:
+    kind: str
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"offset", "deref"}:
+            raise ValueError(f"Unsupported location step kind: {self.kind}")
+
+    def stable_key(self) -> Tuple[str, int]:
+        return (self.kind, int(self.value))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "value": int(self.value)}
+
+
+@dataclass(frozen=True, init=False)
+class CanonicalLocation:
+    base_ref: LocationBaseRef
+    offset: int
+    size: int
+    steps: Tuple[LocationStep, ...] = ()
+
+    def __init__(
+        self,
+        base_param: Optional[str] = None,
+        offset: int = 0,
+        size: int = 0,
+        steps: Tuple[LocationStep, ...] = (),
+        base_ref: Optional[LocationBaseRef] = None,
+    ) -> None:
+        normalized_base = base_ref
+        if normalized_base is None:
+            if base_param in {"stackframe", "__locbase__stackframe"}:
+                normalized_base = LocationBaseRef.stack_frame()
+            else:
+                normalized_base = LocationBaseRef.parameter(base_param or "param")
+        object.__setattr__(self, "base_ref", normalized_base)
+        object.__setattr__(self, "offset", int(offset))
+        object.__setattr__(self, "size", int(size))
+        object.__setattr__(self, "steps", tuple(steps))
+
+    @property
+    def base_param(self) -> str:
+        return self.base_ref.display_name()
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            self.base_ref.stable_key(),
+            tuple(step.stable_key() for step in self.steps),
+            int(self.offset),
+            int(self.size),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "base_ref": self.base_ref.to_dict(),
+            "offset": int(self.offset),
+            "size": int(self.size),
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+@dataclass(frozen=True)
+class UnknownValueRef:
+    """Structured identity for UNKNOWN expressions used at runtime."""
+
+    kind: str
+    reason: Optional[str] = None
+    target_ref: Optional[CallTargetRef] = None
+    placeholder_name: Optional[str] = None
+    sequence: Optional[int] = None
+    display_hint: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        normalized_target = coerce_call_target_ref(self.target_ref)
+        object.__setattr__(self, "target_ref", normalized_target)
+
+    @classmethod
+    def deferred_call(
+        cls,
+        *,
+        placeholder_name: str,
+        target_ref,
+        sequence: Optional[int] = None,
+    ) -> "UnknownValueRef":
+        normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
+        return cls(
+            kind="deferred_call",
+            reason="call_out_of_scope",
+            target_ref=normalized,
+            placeholder_name=placeholder_name,
+            sequence=sequence,
+            display_hint=placeholder_name,
+        )
+
+    @classmethod
+    def out_of_scope_call(
+        cls,
+        *,
+        reason: str,
+        target_ref=None,
+        display_hint: Optional[str] = None,
+    ) -> "UnknownValueRef":
+        normalized = coerce_call_target_ref(target_ref)
+        return cls(
+            kind="call_target",
+            reason=reason,
+            target_ref=normalized,
+            display_hint=display_hint,
+        )
+
+    @classmethod
+    def budget_exceeded(
+        cls,
+        *,
+        operation: Optional[str] = None,
+    ) -> "UnknownValueRef":
+        reason = f"{operation}_budget_exceeded" if operation else "budget_exceeded"
+        return cls(
+            kind="budget_exceeded",
+            reason=reason,
+            display_hint=reason,
+        )
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        target_key = self.target_ref.stable_key() if self.target_ref is not None else None
+        return (
+            self.kind,
+            self.reason,
+            target_key,
+            self.placeholder_name,
+            self.sequence,
+        )
+
+    def display_name(self) -> str:
+        if self.display_hint:
+            return self.display_hint
+        if self.placeholder_name:
+            return self.placeholder_name
+        if self.target_ref is not None:
+            return self.target_ref.display_name()
+        return self.reason or "unknown"
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "kind": self.kind,
+            "display_name": self.display_name(),
+        }
+        if self.reason is not None:
+            result["reason"] = self.reason
+        if self.placeholder_name is not None:
+            result["placeholder_name"] = self.placeholder_name
+        if self.sequence is not None:
+            result["sequence"] = self.sequence
+        if self.target_ref is not None:
+            result["target_ref"] = self.target_ref.to_dict()
+        return result

@@ -409,6 +409,7 @@ def _normalize_expression_for_width(expr: Expression, width_bits: int) -> Expres
         rebuilt.value = expr.value
         rebuilt.name = expr.name
         rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
         rebuilt.storage_info = expr.storage_info
         rebuilt.read_order_key = expr.read_order_key
         return rebuilt
@@ -428,6 +429,7 @@ def _normalize_expression_for_width(expr: Expression, width_bits: int) -> Expres
         rebuilt.value = expr.value
         rebuilt.name = expr.name
         rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
         rebuilt.storage_info = expr.storage_info
         rebuilt.read_order_key = expr.read_order_key
         second_strip = _strip_width_adapter(rebuilt, width_bits)

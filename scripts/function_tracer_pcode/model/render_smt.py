@@ -3,6 +3,8 @@
 
 from typing import Optional
 
+from .signature import get_declared_type_signedness
+
 
 _BOOLEAN_BINARY_OPERATORS = {
     "INT_EQUAL",
@@ -298,11 +300,15 @@ def _expr_prefers_signed_extension(expr) -> bool:
     expr_kind = expr_type.__class__
 
     if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-        data_type = str(getattr(expr, "data_type", "") or "").lower()
-        if "unsigned" in data_type or data_type.startswith("u"):
-            return False
-        if any(token in data_type for token in ("int", "long", "short", "char")):
-            return True
+        data_type_obj = getattr(expr, "data_type_obj", None)
+        if data_type_obj is not None:
+            return bool(
+                get_declared_type_signedness(
+                    data_type_obj,
+                    fallback_name=None,
+                    fallback_signed=False,
+                )
+            )
         return False
 
     if expr_type == expr_kind.CONSTANT:

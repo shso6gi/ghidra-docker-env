@@ -40,9 +40,10 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     _recover_call_argument_from_storage,
     _resolve_call_argument_expression,
     _normalize_call_argument_expression,
+    _call_argument_semantic_rank,
     EffectSummary,
 )
-from scripts.function_tracer_pcode.model import CallTargetRef
+from scripts.function_tracer_pcode.model import AddressValueRef, CallTargetRef
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
@@ -95,6 +96,14 @@ def _stack_storage(offset: int, size_bytes: int = 4):
     }
 
 
+def _addr_var(name: str, size: int = 8) -> Expression:
+    return Expression.variable(
+        name,
+        size=size,
+        runtime_ref=AddressValueRef.from_name(name),
+    )
+
+
 def test_enumerate_call_argument_variants_dedup_does_not_require_to_string(monkeypatch):
     shared = Expression.parameter("param_1", index=0, size=4)
     phi_expr = Expression.phi(
@@ -138,6 +147,25 @@ def test_additive_signature_does_not_require_to_string(monkeypatch):
     assert constant == 4
     assert len(terms) == 1
     assert width == 4
+
+
+def test_call_argument_semantic_rank_uses_pointer_datatype_object_not_name():
+    class MockPointerType:
+        def isPointer(self):
+            return True
+
+    rank = _call_argument_semantic_rank(
+        Expression.constant(0, size=8),
+        caller_parameters=[],
+        callee_param={
+            "name": "param_1",
+            "size": 8,
+            "data_type": "opaque_alias",
+            "data_type_obj": MockPointerType(),
+        },
+    )
+
+    assert rank == 3
 
 
 def test_formula_builder_declares_memory_arrays_for_memory_returns():
@@ -217,7 +245,7 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", size=8),
         Expression.binary_op(
             "INT_ADD",
             Expression.binary_op("INT_MULT", index_expr, Expression.constant(4, 8)),
@@ -252,7 +280,7 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
 
 def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
     load_expr = Expression.memory(
-        Expression.variable("PTR_ptr_op_add_00113090", size=8),
+        _addr_var("PTR_ptr_op_add_00113090", size=8),
         size=8,
     )
 
@@ -275,7 +303,7 @@ def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
 def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_position():
     expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("DAT_00113090", size=8),
+        _addr_var("DAT_00113090", size=8),
         Expression.constant(1, 8),
     )
 
@@ -301,7 +329,7 @@ def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_posi
 def test_memory_resolver_concretizes_direct_unknown_symbol_when_readable():
     expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("UNK_00113090", size=8),
+        _addr_var("UNK_00113090", size=8),
         Expression.constant(1, 8),
     )
 
@@ -332,7 +360,7 @@ def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_b
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.constant(1, 8),
@@ -377,7 +405,7 @@ def test_memory_resolver_concretizes_mips_pic_jump_table_using_image_base_fallba
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -623,7 +651,7 @@ def test_memory_resolver_concretizes_mips_got_base_symbol_with_address_suffix():
     param = Expression.parameter("param_1", 0, size=8)
     address_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR___DT_MIPS_BASE_ADDRESS_120011050", size=8),
+        _addr_var("PTR___DT_MIPS_BASE_ADDRESS_120011050", size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -1405,6 +1433,10 @@ def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate
         def trace_varnode(self, varnode, use_cache=False, depth=0):
             return self._traced_values[varnode]
 
+    class MockPointerType:
+        def isPointer(self):
+            return True
+
     pointer_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
     scalar_output = FakeVarnode(StorageInfo(**_reg_storage("a2")), size=8)
     local_addr = Expression.binary_op(
@@ -1442,7 +1474,12 @@ def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate
         call_op,
         tracer,
         [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0_lo", size_bytes=4, register_name="a0_lo"))],
-        {"storage": _reg_storage("a2"), "size": 8, "data_type": "int *"},
+        {
+            "storage": _reg_storage("a2"),
+            "size": 8,
+            "data_type": "int *",
+            "data_type_obj": MockPointerType(),
+        },
     )
 
     assert recovered is not None
@@ -2136,6 +2173,9 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
         def __init__(self, op):
             self._op = op
 
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
+
         def _get_function_name(self, _varnode):
             return "callee"
 
@@ -2144,6 +2184,9 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
 
         def _get_storage_info_from_varnode(self, _varnode):
             return None
+
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.constant(0x401100, 8)
 
     call_op = FakeCallOp()
     captured_args = {}
@@ -2443,6 +2486,9 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
 
     class FakeTracer:
         debug = False
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("fc_bias")
 
         def _get_function_name(self, _varnode):
             return "fc_bias"
@@ -2897,6 +2943,9 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
 
     class FakeTracer:
         debug = False
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("fc_scale")
 
         def _get_function_name(self, _varnode):
             return "fc_scale"

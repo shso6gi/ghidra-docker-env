@@ -4,7 +4,7 @@
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
-from scripts.function_tracer_pcode.model import Expression
+from scripts.function_tracer_pcode.model import Expression, UnknownValueRef
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
 
@@ -209,7 +209,13 @@ def test_budget_results_use_traced_fallback_when_available(monkeypatch):
             return "INT_ADD"
 
     original = [
-        ExpandedValue(Expression.unknown("INT_ADD_budget_exceeded"), []),
+        ExpandedValue(
+            Expression.unknown(
+                "INT_ADD_budget_exceeded",
+                runtime_ref=UnknownValueRef.budget_exceeded(operation="INT_ADD"),
+            ),
+            [],
+        ),
         ExpandedValue(Expression.constant(7, 4), []),
     ]
 
@@ -248,7 +254,15 @@ def test_budget_results_use_traced_fallback_when_only_non_budget_unknown_remains
         def getMnemonic(self):
             return "INT_ADD"
 
-    original = [ExpandedValue(Expression.unknown("INT_ADD_budget_exceeded"), [])]
+    original = [
+        ExpandedValue(
+            Expression.unknown(
+                "INT_ADD_budget_exceeded",
+                runtime_ref=UnknownValueRef.budget_exceeded(operation="INT_ADD"),
+            ),
+            [],
+        )
+    ]
 
     result = expander._maybe_replace_budget_results_with_traced_fallback(
         _FakeOp(),
@@ -278,7 +292,15 @@ def test_budget_results_remain_when_traced_fallback_contains_call(monkeypatch):
         def getMnemonic(self):
             return "INT_ADD"
 
-    original = [ExpandedValue(Expression.unknown("INT_ADD_budget_exceeded"), [])]
+    original = [
+        ExpandedValue(
+            Expression.unknown(
+                "INT_ADD_budget_exceeded",
+                runtime_ref=UnknownValueRef.budget_exceeded(operation="INT_ADD"),
+            ),
+            [],
+        )
+    ]
 
     result = expander._maybe_replace_budget_results_with_traced_fallback(
         _FakeOp(),

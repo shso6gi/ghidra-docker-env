@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executo
     validate_counterexample_across_cases,
 )
 from scripts.function_tracer_pcode.model import (
+    AddressValueRef,
     CallTargetRef,
     Condition,
     Expression,
@@ -24,6 +25,14 @@ from scripts.function_tracer_pcode.transform.expander import ExpandedValue, Expr
 
 def _param_expr(name: str, index: int = 0, size: int = 4) -> Expression:
     return Expression.parameter(name, index=index, size=size)
+
+
+def _addr_var(name: str, size: int = 8) -> Expression:
+    return Expression.variable(
+        name,
+        size=size,
+        runtime_ref=AddressValueRef.from_name(name),
+    )
 
 
 def _cond_eq(left: Expression, right: Expression) -> Condition:
@@ -228,6 +237,9 @@ def test_expression_expander_inlines_direct_call_results():
     class _FakeTracer:
         debug = False
 
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
+
         def _get_function_name(self, _varnode):
             return "callee"
 
@@ -315,6 +327,9 @@ def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
 
     class _FakeTracer:
         debug = False
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
 
         def _get_function_name(self, _varnode):
             return "callee"
@@ -435,6 +450,9 @@ def test_expression_expander_recovers_callee_aligned_call_arguments_before_resol
 
     class _FakeTracer:
         debug = False
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
 
         def _get_function_name(self, _varnode):
             return "callee"
@@ -665,7 +683,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
     index.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", size=8),
         Expression.binary_op(
             "INT_ADD",
             Expression.binary_op("INT_MULT", index, Expression.constant(8, 8)),
@@ -849,6 +867,9 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
     class _FakeTracer:
         debug = False
 
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
+
         def _get_function_name(self, _varnode):
             return "callee"
 
@@ -978,7 +999,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_with_wrapped_pic
     widened.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -1141,7 +1162,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_to_raw_code_targ
     widened.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -2219,7 +2240,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
     target_expr = Expression.memory(
         Expression.binary_op(
             "INT_ADD",
-            Expression.variable("PTR_00002000", size=8),
+            _addr_var("PTR_00002000", size=8),
             Expression.binary_op(
                 "INT_ADD",
                 Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),
@@ -2366,7 +2387,7 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
     tracer.trace_varnode.return_value = Expression.memory(
         Expression.binary_op(
             "INT_ADD",
-            Expression.variable("PTR_00002000", size=8),
+            _addr_var("PTR_00002000", size=8),
             Expression.binary_op(
                 "INT_ADD",
                 Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),
@@ -3219,6 +3240,11 @@ def test_return_analyzer_augments_current_parameters_with_implicit_passthrough_r
         def get_all_pcode_ops(self):
             return [call_op]
 
+        def resolve_call_target_ref(self, target_varnode, **_kwargs):
+            if target_varnode is call_op.getInput(0):
+                return CallTargetRef.from_name("ptr_apply_callback")
+            return None
+
         def _get_function_name(self, target_varnode):
             if target_varnode is call_op.getInput(0):
                 return "ptr_apply_callback"
@@ -3331,6 +3357,11 @@ def test_return_analyzer_does_not_duplicate_fragment_backed_passthrough_paramete
     class _FakeTracer:
         def get_all_pcode_ops(self):
             return [call_op]
+
+        def resolve_call_target_ref(self, target_varnode, **_kwargs):
+            if target_varnode is call_op.getInput(0):
+                return CallTargetRef.from_name("ptr_apply_callback")
+            return None
 
         def _get_function_name(self, target_varnode):
             if target_varnode is call_op.getInput(0):
@@ -3509,6 +3540,11 @@ def test_return_analyzer_augments_hidden_passthrough_even_when_live_in_check_is_
         def get_all_pcode_ops(self):
             return [prior_write, call_op]
 
+        def resolve_call_target_ref(self, target_varnode, **_kwargs):
+            if target_varnode is call_op.getInput(0):
+                return CallTargetRef.from_name("ptr_apply_callback")
+            return None
+
         def _get_function_name(self, target_varnode):
             if target_varnode is call_op.getInput(0):
                 return "ptr_apply_callback"
@@ -3679,6 +3715,11 @@ def test_return_analyzer_does_not_synthesize_hidden_param_when_register_has_loca
 
         def get_all_pcode_ops(self):
             return [call_op]
+
+        def resolve_call_target_ref(self, target_varnode, **_kwargs):
+            if target_varnode is call_op.getInput(0):
+                return CallTargetRef.from_name("ptr_apply_callback")
+            return None
 
         def _get_function_name(self, target_varnode):
             if target_varnode is call_op.getInput(0):
