@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple
 
@@ -55,6 +54,18 @@ def get_data_type_manager_for_reference(
     if program is not None:
         return _call_zero_arg(program, "getDataTypeManager")
     return None
+
+
+def has_runtime_data_type_info(
+    data_type_obj: Any = None,
+    *,
+    program: Any = None,
+) -> bool:
+    """解析に使える DataType/DTM 情報があるか。"""
+    return data_type_obj is not None or get_data_type_manager_for_reference(
+        data_type_obj,
+        program=program,
+    ) is not None
 
 
 def is_void_data_type(
@@ -124,13 +135,15 @@ def is_unsigned_data_type(
         signed_value = _call_zero_arg(data_type_obj, "isSigned")
         if signed_value is not None:
             return not bool(signed_value)
-    return not infer_type_signedness(fallback_name, fallback_signed=True)
+    return False
 
 
 def get_declared_type_signedness(
     data_type_obj: Any = None,
     fallback_name: Optional[str] = None,
     fallback_signed: bool = True,
+    *,
+    program: Any = None,
 ) -> bool:
     """宣言型の signedness を返す。"""
     if is_void_data_type(data_type_obj, fallback_name):
@@ -140,7 +153,15 @@ def get_declared_type_signedness(
     signed_value = _call_zero_arg(data_type_obj, "isSigned")
     if signed_value is not None:
         return bool(signed_value)
-    return infer_type_signedness(fallback_name, fallback_signed=fallback_signed)
+    if program is not None and fallback_name:
+        resolved = resolve_type_spec(
+            fallback_name,
+            program=program,
+            fallback_signed=fallback_signed,
+        )
+        if resolved is not None and resolved.is_signed is not None:
+            return resolved.is_signed
+    return fallback_signed
 
 
 def get_declared_type_size_bytes(
@@ -163,23 +184,16 @@ def get_declared_type_size_bytes(
         except Exception:
             pass
 
-    data_organization = None
-    if data_type_obj is not None:
-        dtm = _call_zero_arg(data_type_obj, "getDataTypeManager")
-        if dtm is not None:
-            data_organization = _call_zero_arg(dtm, "getDataOrganization")
-    if data_organization is None and program is not None:
-        dtm = _call_zero_arg(program, "getDataTypeManager")
-        if dtm is not None:
-            data_organization = _call_zero_arg(dtm, "getDataOrganization")
-    if data_organization is not None:
-        return _resolve_size_from_data_organization(
-            get_data_type_display_name(data_type_obj, fallback_name),
-            data_organization,
+    if program is not None and fallback_name:
+        resolved = resolve_type_spec(
+            fallback_name,
+            program=program,
             fallback_size=fallback_size,
         )
+        if resolved is not None and resolved.size_bytes is not None:
+            return resolved.size_bytes
 
-    return infer_type_size_bytes(fallback_name, fallback_size=fallback_size)
+    return fallback_size
 
 
 def get_declared_type_size_bits(
@@ -210,12 +224,12 @@ def type_matches_patterns(
     patterns = list(patterns or [])
     if not patterns:
         return False
+    if data_type_obj is None:
+        return False
     if is_undefined_data_type(data_type_obj, fallback_name):
         if any(pattern.startswith("undefined") for pattern in patterns):
             return True
-
-    normalized = normalize_type_name(get_data_type_display_name(data_type_obj, fallback_name))
-    return any(pattern in normalized for pattern in patterns)
+    return False
 
 
 def are_types_equivalent(
@@ -234,6 +248,8 @@ def are_types_equivalent(
         if left_path and right_path:
             return left_path == right_path
 
+    if left_obj is None or right_obj is None:
+        return False
     left_display = normalize_type_name(get_data_type_display_name(left_obj, left_name))
     right_display = normalize_type_name(get_data_type_display_name(right_obj, right_name))
     return bool(left_display) and left_display == right_display
@@ -280,106 +296,18 @@ def _call_one_arg(obj: Any, method_name: str, arg: Any) -> Any:
         return None
 
 
-def infer_type_size_bytes(
-    type_name: Optional[str],
-    fallback_size: Optional[int] = None,
-) -> Optional[int]:
-    """C整数型名からサイズを推定する。"""
-    normalized = normalize_type_name(type_name)
-    if not normalized:
-        return fallback_size
-    if normalized == "void":
-        return 0
-
-    undefined_match = re.fullmatch(r"undefined(\d+)", normalized)
-    if undefined_match:
-        return int(undefined_match.group(1))
-
-    if "bool" in normalized:
-        return 1
-    if any(token in normalized for token in ("char", "byte")):
-        return 1
-    if "short" in normalized or "int2" in normalized:
-        return 2
-    if (
-        "long long" in normalized
-        or "longlong" in normalized
-        or "int8" in normalized
-        or "qword" in normalized
-    ):
-        return 8
-    if "long" in normalized:
-        return 8
-    if "int" in normalized or "int4" in normalized or "dword" in normalized:
-        return 4
-    if "word" in normalized:
-        return 2
-    return fallback_size
-
-
-def infer_type_signedness(
-    type_name: Optional[str],
-    fallback_signed: bool = True,
+def is_suspicious_undefined_data_type(
+    data_type_obj: Any = None,
+    *,
+    expected_sizes: Optional[List[int]] = None,
 ) -> bool:
-    """型名から signed/unsigned を推定する。"""
-    normalized = normalize_type_name(type_name)
-    if not normalized:
-        return fallback_signed
-    if "unsigned" in normalized:
+    """Ghidra の Undefined 系で、修正候補とみなす型か。"""
+    if data_type_obj is None or not is_undefined_data_type(data_type_obj):
         return False
-    if normalized.startswith("u") and not normalized.startswith("undefined"):
-        return False
-    if "*" in normalized or "ptr" in normalized:
-        return False
-    return True
-
-
-def _resolve_size_from_data_organization(
-    type_name: Optional[str],
-    data_organization: Any,
-    fallback_size: Optional[int] = None,
-) -> Optional[int]:
-    """DataOrganization から C 基本型のサイズを引く。"""
-    normalized = normalize_type_name(type_name)
-    if not normalized:
-        return fallback_size
-    if normalized == "void":
-        return 0
-
-    undefined_match = re.fullmatch(r"undefined(\d+)", normalized)
-    if undefined_match:
-        return int(undefined_match.group(1))
-
-    if "*" in normalized or "ptr" in normalized:
-        pointer_size = _call_zero_arg(data_organization, "getPointerSize")
-        return int(pointer_size) if pointer_size is not None else fallback_size
-
-    if "bool" in normalized:
-        return 1
-    if any(token in normalized for token in ("char", "byte")):
-        char_size = _call_zero_arg(data_organization, "getCharSize")
-        return int(char_size) if char_size is not None else 1
-    if "short" in normalized or "int2" in normalized:
-        short_size = _call_zero_arg(data_organization, "getShortSize")
-        return int(short_size) if short_size is not None else 2
-    if (
-        "long long" in normalized
-        or "longlong" in normalized
-        or "int8" in normalized
-        or "qword" in normalized
-    ):
-        long_long_size = _call_zero_arg(data_organization, "getLongLongSize")
-        return int(long_long_size) if long_long_size is not None else 8
-    if "long" in normalized:
-        long_size = _call_zero_arg(data_organization, "getLongSize")
-        return int(long_size) if long_size is not None else 8
-    if "int" in normalized or "int4" in normalized or "dword" in normalized:
-        int_size = _call_zero_arg(data_organization, "getIntegerSize")
-        return int(int_size) if int_size is not None else 4
-    if "word" in normalized:
-        short_size = _call_zero_arg(data_organization, "getShortSize")
-        return int(short_size) if short_size is not None else 2
-    return fallback_size
+    if not expected_sizes:
+        return True
+    size = get_declared_type_size_bytes(data_type_obj)
+    return size in set(expected_sizes)
 
 
 @dataclass(frozen=True)
@@ -431,6 +359,57 @@ def _resolved_type_spec_from_data_type(
         is_signed=is_signed,
         source=source,
         data_type_path=data_type_path,
+    )
+
+
+def resolve_integer_type_spec(
+    *,
+    size_bytes: int,
+    signed: bool,
+    program: Any = None,
+    data_type_manager: Any = None,
+    source: Optional[str] = None,
+) -> Optional[ResolvedTypeSpec]:
+    """ビット幅と signedness から整数 DataType を解決する。"""
+    dtm = data_type_manager or get_data_type_manager_for_reference(program=program)
+    if dtm is None or size_bytes <= 0:
+        return None
+
+    try:
+        from ghidra.program.model.data import AbstractIntegerDataType  # type: ignore[import]
+
+        factory = (
+            AbstractIntegerDataType.getSignedDataType
+            if signed else
+            AbstractIntegerDataType.getUnsignedDataType
+        )
+        data_type = factory(int(size_bytes), dtm)
+    except Exception:
+        data_type = None
+
+    if data_type is None:
+        canonical_names = {
+            (True, 1): ["char", "int8_t"],
+            (False, 1): ["unsigned char", "uint8_t"],
+            (True, 2): ["short", "int16_t"],
+            (False, 2): ["unsigned short", "uint16_t"],
+            (True, 4): ["int", "int32_t"],
+            (False, 4): ["unsigned int", "uint32_t"],
+            (True, 8): ["long", "long long", "int64_t"],
+            (False, 8): ["unsigned long", "unsigned long long", "uint64_t"],
+        }.get((signed, int(size_bytes)), [])
+        for type_name in canonical_names:
+            data_type = _lookup_data_type_directly(dtm, type_name)
+            if data_type is not None:
+                break
+        if data_type is None:
+            return None
+
+    return _resolved_type_spec_from_data_type(
+        get_data_type_display_name(data_type) or "",
+        data_type,
+        fallback_signed=signed,
+        source=source or "ghidra_integer_factory",
     )
 
 
@@ -508,30 +487,7 @@ def resolve_type_spec(
                 data_type,
                 fallback_signed=fallback_signed,
             )
-
-        data_organization = _call_zero_arg(data_type_manager, "getDataOrganization")
-        if data_organization is not None:
-            size = _resolve_size_from_data_organization(
-                type_name,
-                data_organization,
-                fallback_size=fallback_size,
-            )
-            return ResolvedTypeSpec(
-                type_name=type_name or normalized,
-                size_bytes=size,
-                is_signed=infer_type_signedness(
-                    type_name,
-                    fallback_signed=fallback_signed,
-                ),
-                source="data_organization",
-            )
-
-    return ResolvedTypeSpec(
-        type_name=type_name or normalized,
-        size_bytes=infer_type_size_bytes(type_name, fallback_size=fallback_size),
-        is_signed=infer_type_signedness(type_name, fallback_signed=fallback_signed),
-        source="heuristic",
-    )
+    return None
 
 
 def resolve_signed_counterpart_spec(
@@ -594,21 +550,14 @@ def resolve_signed_counterpart_spec(
         return None
 
     try:
-        from ghidra.program.model.data import AbstractIntegerDataType  # type: ignore[import]
-
-        signed_type = AbstractIntegerDataType.getSignedDataType(size_bytes, data_type_manager)
+        return resolve_integer_type_spec(
+            size_bytes=int(size_bytes),
+            signed=True,
+            data_type_manager=data_type_manager,
+            source="ghidra_integer_factory",
+        )
     except Exception:
-        signed_type = None
-
-    if signed_type is None:
         return None
-
-    return _resolved_type_spec_from_data_type(
-        display_name or type_name or "",
-        signed_type,
-        True,
-        source="ghidra_integer_factory",
-    )
 
 
 def apply_type_name_to_parameter(
@@ -618,6 +567,8 @@ def apply_type_name_to_parameter(
 ) -> Dict[str, Any]:
     """パラメータ記述子へ型オーバーライドを適用する。"""
     updated = clone_parameter_descriptor(param, include_data_type_obj=True)
+    if resolved_spec is None:
+        return updated
     updated["data_type"] = (
         resolved_spec.type_name
         if resolved_spec is not None and resolved_spec.type_name
@@ -633,7 +584,7 @@ def apply_type_name_to_parameter(
     inferred_size = (
         resolved_spec.size_bytes
         if resolved_spec is not None and resolved_spec.size_bytes is not None
-        else infer_type_size_bytes(type_name, fallback_size=fallback_size)
+        else fallback_size
     )
     if inferred_size is not None and inferred_size >= 0:
         updated["size"] = inferred_size
@@ -646,11 +597,6 @@ def apply_type_name_to_parameter(
 
     if resolved_spec is not None and resolved_spec.is_signed is not None:
         updated["is_signed"] = resolved_spec.is_signed
-    else:
-        updated["is_signed"] = infer_type_signedness(
-            type_name,
-            fallback_signed=bool(updated.get("is_signed", True)),
-        )
     return updated
 
 

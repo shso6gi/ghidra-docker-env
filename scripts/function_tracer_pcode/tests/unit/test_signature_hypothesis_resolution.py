@@ -157,9 +157,12 @@ def test_resolve_type_spec_prefers_program_datatype():
     assert resolved.data_type_path == "/builtin/unsigned int"
 
 
-def test_type_fixer_uses_data_organization_for_overlay_widths():
+def test_type_fixer_requires_resolved_datatype_for_overlay_widths():
     dtm = MockDataTypeManager(
-        data_organization=MockDataOrganization(int_size=4, long_size=4, long_long_size=8)
+        data_types={
+            "long": MockDataType("long", 4, True, "/builtin/long"),
+        },
+        data_organization=MockDataOrganization(int_size=4, long_size=4, long_long_size=8),
     )
     program = MockProgram(dtm)
     fixer = TypeFixer(program)
@@ -182,7 +185,7 @@ def test_type_fixer_uses_data_organization_for_overlay_widths():
     assert updated.parameters[0]["storage"]["size"] == 4
     assert updated.parameters[0]["storage"]["size_bits"] == 32
     assert updated.parameters[0]["is_signed"] is True
-    assert updated.signature_hypotheses[0]["resolved_parameter_overrides"][0]["source"] == "data_organization"
+    assert updated.signature_hypotheses[0]["resolved_parameter_overrides"][0]["source"] == "ghidra_datatype"
 
 
 def test_resolve_signed_counterpart_prefers_ghidra_opposite_signedness():

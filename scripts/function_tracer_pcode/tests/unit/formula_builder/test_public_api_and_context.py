@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from conftest import resolve_mock_data_type
 
 
 def _simple_analysis(func_name: str, param_name: str, size: int = 4) -> FunctionReturnAnalysis:
@@ -311,6 +312,7 @@ class TestBooleanReturnNormalization:
                 ),
             ],
             return_type="ulong",
+            return_type_obj=resolve_mock_data_type("ulong"),
         )
 
         formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
@@ -346,6 +348,7 @@ class TestBooleanReturnNormalization:
                 ),
             ],
             return_type="ulong",
+            return_type_obj=resolve_mock_data_type("ulong"),
         )
 
         base_ctx = builder.build_base_context(analysis, analysis)
@@ -371,6 +374,7 @@ class TestBooleanReturnNormalization:
                 )
             ],
             return_type="undefined8",
+            return_type_obj=resolve_mock_data_type("undefined8"),
         )
 
         base_ctx = builder.build_base_context(analysis, analysis)

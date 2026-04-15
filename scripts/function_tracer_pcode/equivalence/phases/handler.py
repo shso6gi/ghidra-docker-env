@@ -11,9 +11,12 @@ from ...model.signature import (
     ResolvedTypeSpec,
     get_data_type_display_name,
     get_declared_type_size_bytes,
+    is_suspicious_undefined_data_type,
+    is_unsigned_data_type,
     is_undefined_data_type,
     is_void_data_type,
-    type_matches_patterns,
+    resolve_integer_type_spec,
+    resolve_type_spec,
 )
 from ..result import EquivalenceResult
 from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
@@ -289,6 +292,7 @@ class PhaseHandler:
         self,
         analysis: Optional[FunctionReturnAnalysis],
         counterpart_analysis: Optional[FunctionReturnAnalysis] = None,
+        program: Any = None,
     ) -> bool:
         """戻り値の型が修正対象かチェック（パターンマッチ）"""
         if analysis is None:
@@ -302,34 +306,34 @@ class PhaseHandler:
             getattr(analysis, "return_type_obj", None),
             analysis.return_type,
         )
-        if type_matches_patterns(
-            getattr(analysis, "return_type_obj", None),
-            type_str,
-            patterns=list(self.type_fixer_config.target_patterns),
+        if self.type_fixer_config.is_suspicious_data_type(
+            getattr(analysis, "return_type_obj", None)
         ):
             self._debug_print(
-                f"Return type '{type_str}' matches suspicious target patterns"
+                f"Return type '{type_str}' is suspicious undefined data"
             )
             return True
 
-        suspicious_override = self._get_suspicious_void_return_override(
+        suspicious_override = self._get_suspicious_void_return_override_spec(
             analysis,
+            program,
             counterpart_analysis,
         )
         if suspicious_override is not None:
             self._debug_print(
                 f"Return type '{type_str}' looks suspicious; "
-                f"will force '{suspicious_override}'"
+                f"will force '{suspicious_override.type_name}'"
             )
             return True
         
         return False
 
-    def _get_suspicious_void_return_override(
+    def _get_suspicious_void_return_override_spec(
         self,
         analysis: Optional[FunctionReturnAnalysis],
+        program: Any,
         counterpart_analysis: Optional[FunctionReturnAnalysis],
-    ) -> Optional[str]:
+    ) -> Optional[ResolvedTypeSpec]:
         if analysis is None:
             return None
 
@@ -368,9 +372,10 @@ class PhaseHandler:
         if counterpart_analysis.has_unresolved_return_value():
             return None
 
-        explicit_counterpart_type = self._infer_explicit_integral_return_type_name(
+        explicit_counterpart_type = self._infer_explicit_integral_return_type_spec(
             counterpart_analysis.return_type,
             getattr(counterpart_analysis, "return_type_obj", None),
+            program=program,
         )
         if explicit_counterpart_type is not None:
             return explicit_counterpart_type
@@ -383,22 +388,26 @@ class PhaseHandler:
         }
         if len(value_sizes) == 1:
             size = next(iter(value_sizes))
-            if size == 1:
-                return "char"
-            if size == 2:
-                return "short"
-            if size == 4:
-                return "int"
-            if size == 8:
-                return "long long"
+            return resolve_integer_type_spec(
+                size_bytes=int(size),
+                signed=True,
+                program=program,
+                source="counterpart_value_width",
+            )
 
-        return self.type_fixer_config.replacement_type_name
+        return self.type_fixer_config.resolve_default_integral_type_spec(
+            program=program,
+            fallback_size=self.type_fixer_config.default_integral_size_bytes,
+            signed=True,
+        )
 
-    def _infer_explicit_integral_return_type_name(
+    def _infer_explicit_integral_return_type_spec(
         self,
         type_name: Optional[str],
         type_obj: Any = None,
-    ) -> Optional[str]:
+        *,
+        program: Any = None,
+    ) -> Optional[ResolvedTypeSpec]:
         display_name = get_data_type_display_name(type_obj, type_name)
         if not display_name:
             return None
@@ -407,24 +416,28 @@ class PhaseHandler:
         if not normalized or is_void_data_type(type_obj, display_name):
             return None
 
-        if type_matches_patterns(
-            type_obj,
-            display_name,
-            patterns=list(self.type_fixer_config.target_patterns),
-        ):
+        if self.type_fixer_config.is_suspicious_data_type(type_obj):
             return None
 
-        size = get_declared_type_size_bytes(type_obj, display_name)
-        if size == 8:
-            return "long long"
-        if size == 4:
-            return "int"
-        if size == 2:
-            return "short"
-        if size == 1:
-            return "char"
+        if type_obj is not None:
+            resolved = resolve_type_spec(
+                display_name,
+                data_type_obj=type_obj,
+                program=program,
+            )
+            if resolved is not None and resolved.data_type_obj is not None:
+                return resolved
 
-        return None
+        size = get_declared_type_size_bytes(type_obj, display_name, program=program)
+        if size not in {1, 2, 4, 8}:
+            return None
+        signed = not is_unsigned_data_type(type_obj, display_name)
+        return resolve_integer_type_spec(
+            size_bytes=int(size),
+            signed=signed,
+            program=program,
+            source="counterpart_declared_type",
+        )
     
     def should_fix_params(
         self,
@@ -437,15 +450,8 @@ class PhaseHandler:
         for param in analysis.parameters:
             raw_dt = param.get("data_type_obj")
             type_str = get_data_type_display_name(raw_dt, param.get("data_type"))
-            type_lower = (type_str or "").lower().strip()
-            if "*" in type_lower or "ptr" in type_lower:
-                continue
-            if type_matches_patterns(
-                raw_dt,
-                type_str,
-                patterns=list(self.type_fixer_config.target_patterns),
-            ):
-                self._debug_print(f"Param type '{type_str}' matches suspicious patterns")
+            if self.type_fixer_config.is_suspicious_data_type(raw_dt):
+                self._debug_print(f"Param type '{type_str}' is suspicious undefined data")
                 return True
         
         return False
@@ -711,17 +717,19 @@ class PhaseHandler:
         Returns:
             (applied, changed_binary1, changed_binary2)
         """
-        override_return_type1 = self._get_suspicious_void_return_override(
+        override_return_type1 = self._get_suspicious_void_return_override_spec(
             ctx.analysis1,
+            ctx.program1,
             ctx.analysis2,
         )
-        override_return_type2 = self._get_suspicious_void_return_override(
+        override_return_type2 = self._get_suspicious_void_return_override_spec(
             ctx.analysis2,
+            ctx.program2,
             ctx.analysis1,
         )
 
-        ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1, ctx.analysis2)
-        ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2, ctx.analysis1)
+        ret_needs_fix1 = self.should_fix_return_type(ctx.analysis1, ctx.analysis2, program=ctx.program1)
+        ret_needs_fix2 = self.should_fix_return_type(ctx.analysis2, ctx.analysis1, program=ctx.program2)
         
         if not (ret_needs_fix1 or ret_needs_fix2):
             return (False, False, False)
@@ -742,7 +750,8 @@ class PhaseHandler:
                 ctx.analysis1,
                 fix_return_type=True,
                 fix_param_types=False,
-                override_return_type_name=override_return_type1,
+                override_return_type_name=override_return_type1.type_name if override_return_type1 else None,
+                override_return_type_spec=override_return_type1,
                 phase_name=PhaseID.P2_PATTERN_INT.value,
                 reason="pattern/counterpart-based return type hypothesis",
                 evidence={"counterpart_return_type": ctx.analysis2.return_type if ctx.analysis2 else None},
@@ -759,7 +768,8 @@ class PhaseHandler:
                 ctx.analysis2,
                 fix_return_type=True,
                 fix_param_types=False,
-                override_return_type_name=override_return_type2,
+                override_return_type_name=override_return_type2.type_name if override_return_type2 else None,
+                override_return_type_spec=override_return_type2,
                 phase_name=PhaseID.P2_PATTERN_INT.value,
                 reason="pattern/counterpart-based return type hypothesis",
                 evidence={"counterpart_return_type": ctx.analysis1.return_type if ctx.analysis1 else None},
@@ -867,9 +877,15 @@ class PhaseHandler:
         changed_binary2 = False
         
         if is_mips64_1 and ctx.analysis1 and ctx.analysis2:
-            override_map1 = self.mips64_handler.detect_param_type_mismatch(
-                ctx.analysis1, ctx.analysis2
+            override_specs1 = self.mips64_handler.detect_param_type_mismatch(
+                ctx.analysis1,
+                ctx.analysis2,
+                program=ctx.program1,
             )
+            override_map1 = {
+                index: spec.type_name
+                for index, spec in override_specs1.items()
+            }
             if override_map1:
                 updated_analysis1, _, param_fixed = self._apply_analysis_fix(
                     type_fixer1,
@@ -877,9 +893,16 @@ class PhaseHandler:
                     fix_return_type=False,
                     fix_param_types=False,
                     override_param_type_names=override_map1,
+                    override_param_type_specs=override_specs1,
                     phase_name=PhaseID.P4A_MIPS64_ABI.value,
                     reason="MIPS64 ABI parameter-width hypothesis",
-                    evidence={"override_map": dict(override_map1)},
+                    evidence={
+                        "override_map": dict(override_map1),
+                        "resolved_override_map": {
+                            index: spec.to_dict()
+                            for index, spec in override_specs1.items()
+                        },
+                    },
                 )
                 
                 if param_fixed:
@@ -892,9 +915,15 @@ class PhaseHandler:
                     )
         
         if is_mips64_2 and ctx.analysis1 and ctx.analysis2:
-            override_map2 = self.mips64_handler.detect_param_type_mismatch(
-                ctx.analysis2, ctx.analysis1
+            override_specs2 = self.mips64_handler.detect_param_type_mismatch(
+                ctx.analysis2,
+                ctx.analysis1,
+                program=ctx.program2,
             )
+            override_map2 = {
+                index: spec.type_name
+                for index, spec in override_specs2.items()
+            }
             if override_map2:
                 updated_analysis2, _, param_fixed = self._apply_analysis_fix(
                     type_fixer2,
@@ -902,9 +931,16 @@ class PhaseHandler:
                     fix_return_type=False,
                     fix_param_types=False,
                     override_param_type_names=override_map2,
+                    override_param_type_specs=override_specs2,
                     phase_name=PhaseID.P4A_MIPS64_ABI.value,
                     reason="MIPS64 ABI parameter-width hypothesis",
-                    evidence={"override_map": dict(override_map2)},
+                    evidence={
+                        "override_map": dict(override_map2),
+                        "resolved_override_map": {
+                            index: spec.to_dict()
+                            for index, spec in override_specs2.items()
+                        },
+                    },
                 )
                 
                 if param_fixed:

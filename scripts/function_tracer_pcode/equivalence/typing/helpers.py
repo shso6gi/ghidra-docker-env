@@ -18,8 +18,7 @@ def is_long_type(type_ref) -> bool:
         type_name = type_ref
 
     size = get_declared_type_size_bytes(data_type_obj, type_name)
-    display_name = (get_data_type_display_name(data_type_obj, type_name) or "").lower().strip()
-    return bool(size == 8 and "long long" not in display_name and "longlong" not in display_name)
+    return bool(size == 8)
 
 
 def is_int_type(type_ref) -> bool:
@@ -32,9 +31,6 @@ def is_int_type(type_ref) -> bool:
         type_name = type_ref
 
     size = get_declared_type_size_bytes(data_type_obj, type_name)
-    display_name = (get_data_type_display_name(data_type_obj, type_name) or "").lower().strip()
-    if "*" in display_name or "pointer" in display_name:
-        return False
     return bool(size == 4)
 
 

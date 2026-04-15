@@ -184,4 +184,5 @@ def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_bot
 
     override_map = handler.detect_param_type_mismatch(mips_analysis, hinted_peer)
 
-    assert override_map == {0: "int"}
+    assert 0 in override_map
+    assert override_map[0].type_name == "int"

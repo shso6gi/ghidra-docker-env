@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from typing import Optional
+from conftest import resolve_mock_data_type
 
 from scripts.function_tracer_pcode.analysis.memory_resolver import (
     collect_memory_bit_widths_from_analysis,
@@ -7448,7 +7449,7 @@ def test_type_fixer_does_not_pattern_fix_pointer_types():
     fixer.config = TypeFixerConfig()
     fixer.debug = False
 
-    assert fixer._should_fix_type("undefined4")
+    assert fixer._should_fix_type(resolve_mock_data_type("undefined4"))
     assert not fixer._should_fix_type("undefined4 *")
 
 

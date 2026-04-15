@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Dict, List, Optional
 
 from ...analysis.effect_summary import (
@@ -21,7 +20,6 @@ from ...model.render_smt import (
     expression_returns_bool,
     expression_smt_bit_width,
 )
-from ..typing.helpers import is_unsigned_type
 from .params import replace_symbol_names
 from .types import ParameterInfo
 
@@ -258,6 +256,7 @@ def build_return_definition(
             analysis.return_type,
             rendered_value,
             ret.conditions,
+            return_type_obj=getattr(analysis, "return_type_obj", None),
         )
         value_smt = coerce_value_to_bitvec_width(
             rendered_value,

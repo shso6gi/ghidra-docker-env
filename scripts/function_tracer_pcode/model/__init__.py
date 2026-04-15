@@ -13,6 +13,8 @@ from .signature import (
     FunctionSignature,
     SignatureHypothesis,
     ResolvedTypeSpec,
+    is_suspicious_undefined_data_type,
+    resolve_integer_type_spec,
     resolve_type_spec,
     resolve_signed_counterpart_spec,
 )
@@ -29,6 +31,8 @@ __all__ = [
     "FunctionSignature",
     "SignatureHypothesis",
     "ResolvedTypeSpec",
+    "is_suspicious_undefined_data_type",
+    "resolve_integer_type_spec",
     "resolve_type_spec",
     "resolve_signed_counterpart_spec",
 ]

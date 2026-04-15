@@ -15,11 +15,12 @@ from ...model.signature import (
     ResolvedTypeSpec,
     are_types_equivalent,
     get_data_type_display_name,
+    get_declared_type_size_bytes,
+    is_suspicious_undefined_data_type,
     is_unsigned_data_type,
-    normalize_type_name,
+    resolve_integer_type_spec,
     resolve_type_spec,
     resolve_signed_counterpart_spec,
-    type_matches_patterns,
 )
 
 if TYPE_CHECKING:
@@ -32,20 +33,14 @@ class TypeFixerConfig:
     型修正ヒューリスティクスの設定。
 
     Attributes:
-        target_patterns: 修正対象とする型名のパターン（小文字で比較）
-        replacement_type_name: 置換先の型名
-        unsigned_to_signed_map: unsigned型からsigned型へのレガシーfallbackマッピング
+        suspicious_undefined_sizes: 修正候補とみなす Undefined 型のサイズ集合
+        default_integral_size_bytes: Undefined を置換する既定の整数幅
+        debug_unsigned_to_signed_map: デバッグ表示用の旧マッピング
     """
 
-    target_patterns: Set[str] = field(default_factory=lambda: {
-        "undefined",
-        "undefined1",
-        "undefined2",
-        "undefined4",
-        "undefined8",
-    })
-    replacement_type_name: str = "int"
-    unsigned_to_signed_map: Dict[str, str] = field(default_factory=lambda: {
+    suspicious_undefined_sizes: Set[int] = field(default_factory=lambda: {1, 2, 4, 8})
+    default_integral_size_bytes: int = 4
+    debug_unsigned_to_signed_map: Dict[str, str] = field(default_factory=lambda: {
         "ulong": "long",
         "ulonglong": "longlong",
         "unsigned long": "long",
@@ -59,13 +54,55 @@ class TypeFixerConfig:
     })
 
     def add_pattern(self, pattern: str) -> None:
-        self.target_patterns.add(pattern.lower())
+        size = self._legacy_pattern_to_size(pattern)
+        if size is not None:
+            self.suspicious_undefined_sizes.add(size)
 
     def remove_pattern(self, pattern: str) -> None:
-        self.target_patterns.discard(pattern.lower())
+        size = self._legacy_pattern_to_size(pattern)
+        if size is not None:
+            self.suspicious_undefined_sizes.discard(size)
 
     def set_patterns(self, patterns: Set[str]) -> None:
-        self.target_patterns = {p.lower() for p in patterns}
+        resolved_sizes = {
+            size
+            for pattern in patterns
+            for size in [self._legacy_pattern_to_size(pattern)]
+            if size is not None
+        }
+        if resolved_sizes:
+            self.suspicious_undefined_sizes = resolved_sizes
+
+    def _legacy_pattern_to_size(self, pattern: Optional[str]) -> Optional[int]:
+        normalized = (pattern or "").strip().lower()
+        if normalized == "undefined":
+            return self.default_integral_size_bytes
+        if normalized.startswith("undefined"):
+            suffix = normalized[len("undefined"):]
+            if suffix.isdigit():
+                return int(suffix)
+        return None
+
+    def is_suspicious_data_type(self, data_type_obj: Any = None) -> bool:
+        return is_suspicious_undefined_data_type(
+            data_type_obj,
+            expected_sizes=sorted(self.suspicious_undefined_sizes),
+        )
+
+    def resolve_default_integral_type_spec(
+        self,
+        *,
+        program: Any = None,
+        fallback_size: Optional[int] = None,
+        signed: bool = True,
+    ) -> Optional[ResolvedTypeSpec]:
+        size_bytes = int(fallback_size or self.default_integral_size_bytes)
+        return resolve_integer_type_spec(
+            size_bytes=size_bytes,
+            signed=signed,
+            program=program,
+            source="default_integral_replacement",
+        )
 
     def resolve_signed_type_spec(
         self,
@@ -75,68 +112,12 @@ class TypeFixerConfig:
         program: Any = None,
         fallback_size: Optional[int] = None,
     ) -> Optional[ResolvedTypeSpec]:
-        ghidra_spec = resolve_signed_counterpart_spec(
+        return resolve_signed_counterpart_spec(
             unsigned_type,
             data_type_obj=data_type_obj,
             program=program,
             fallback_size=fallback_size,
         )
-        if ghidra_spec is not None:
-            return ghidra_spec
-
-        if unsigned_type is None:
-            return None
-
-        normalized = normalize_type_name(unsigned_type)
-        if normalized in self.unsigned_to_signed_map:
-            signed_name = self.unsigned_to_signed_map[normalized]
-            resolved = resolve_type_spec(
-                signed_name,
-                program=program,
-                fallback_size=fallback_size,
-                fallback_signed=True,
-            )
-            if resolved is not None:
-                return ResolvedTypeSpec(
-                    type_name=resolved.type_name,
-                    data_type_obj=resolved.data_type_obj,
-                    size_bytes=resolved.size_bytes,
-                    is_signed=resolved.is_signed,
-                    source="legacy_string_map",
-                    data_type_path=resolved.data_type_path,
-                )
-            return ResolvedTypeSpec(
-                type_name=signed_name,
-                size_bytes=fallback_size,
-                is_signed=True,
-                source="legacy_string_map",
-            )
-
-        for unsigned_pattern, signed_type in self.unsigned_to_signed_map.items():
-            if unsigned_pattern in normalized:
-                resolved = resolve_type_spec(
-                    signed_type,
-                    program=program,
-                    fallback_size=fallback_size,
-                    fallback_signed=True,
-                )
-                if resolved is not None:
-                    return ResolvedTypeSpec(
-                        type_name=resolved.type_name,
-                        data_type_obj=resolved.data_type_obj,
-                        size_bytes=resolved.size_bytes,
-                        is_signed=resolved.is_signed,
-                        source="legacy_string_map",
-                        data_type_path=resolved.data_type_path,
-                    )
-                return ResolvedTypeSpec(
-                    type_name=signed_type,
-                    size_bytes=fallback_size,
-                    is_signed=True,
-                    source="legacy_string_map",
-                )
-
-        return None
 
     def get_signed_type_for(
         self,
@@ -185,19 +166,17 @@ class TypeFixer:
         return None
 
     def _should_fix_type(self, type_obj: Any = None, type_str: Optional[str] = None) -> bool:
-        if type_str is None and type_obj is None:
-            return False
-        display_name = get_data_type_display_name(type_obj, type_str)
-        type_lower = normalize_type_name(display_name)
-        if "*" in type_lower or "ptr" in type_lower:
-            return False
-        return type_matches_patterns(
-            type_obj,
-            display_name,
-            patterns=list(self.config.target_patterns),
-        )
+        if isinstance(type_obj, str) and type_str is None:
+            type_str = type_obj
+            resolved = resolve_type_spec(type_str, program=getattr(self, "program", None))
+            type_obj = resolved.data_type_obj if resolved is not None else None
+        return self.config.is_suspicious_data_type(type_obj)
         
     def _is_unsigned_type(self, type_obj: Any = None, type_str: Optional[str] = None) -> bool:
+        if isinstance(type_obj, str) and type_str is None:
+            type_str = type_obj
+            resolved = resolve_type_spec(type_str, program=getattr(self, "program", None))
+            type_obj = resolved.data_type_obj if resolved is not None else None
         return is_unsigned_data_type(type_obj, type_str)
 
     def check_return_type_needs_fix(self, function) -> bool:
@@ -315,27 +294,38 @@ class TypeFixer:
                 program=self.program,
                 fallback_signed=True,
             )
+            if resolved_override is None or resolved_override.data_type_obj is None:
+                resolved_override = None
             if not are_types_equivalent(
                 current_return_obj,
                 current_return,
                 resolved_override.data_type_obj if resolved_override else None,
                 override_return_type_name,
             ):
-                return_override = override_return_type_name
+                if resolved_override is not None:
+                    return_override = resolved_override.type_name
+                    resolved_return_override = resolved_override
         elif fix_return_type and self._should_fix_type(current_return_obj, current_return):
-            replacement = self.config.replacement_type_name
-            replacement_spec = resolve_type_spec(
-                replacement,
+            replacement_spec = self.config.resolve_default_integral_type_spec(
                 program=self.program,
-                fallback_signed=True,
+                fallback_size=get_declared_type_size_bytes(
+                    current_return_obj,
+                    current_return,
+                    fallback_size=self.config.default_integral_size_bytes,
+                    program=self.program,
+                ),
+                signed=True,
             )
+            replacement = replacement_spec.type_name if replacement_spec is not None else None
             if not are_types_equivalent(
                 current_return_obj,
                 current_return,
                 replacement_spec.data_type_obj if replacement_spec else None,
                 replacement,
             ):
-                return_override = replacement
+                if replacement is not None:
+                    return_override = replacement
+                    resolved_return_override = replacement_spec
 
         parameters = signature.parameters or []
         override_param_type_specs = dict(override_param_type_specs or {})
@@ -361,6 +351,8 @@ class TypeFixer:
                         fallback_size=parameters[index].get("size"),
                         fallback_signed=bool(parameters[index].get("is_signed", True)),
                     )
+                if override_spec is None or override_spec.data_type_obj is None:
+                    continue
                 if are_types_equivalent(
                     current_obj,
                     current_name,
@@ -368,7 +360,7 @@ class TypeFixer:
                     override_name,
                 ):
                     continue
-                param_overrides[index] = override_name
+                param_overrides[index] = override_spec.type_name
                 if override_spec is not None:
                     resolved_param_overrides[index] = override_spec
         elif fix_param_types:
@@ -377,13 +369,14 @@ class TypeFixer:
                 type_obj = param.get("data_type_obj")
                 if not self._should_fix_type(type_obj, type_name):
                     continue
-                replacement = self.config.replacement_type_name
-                replacement_spec = resolve_type_spec(
-                    replacement,
+                replacement_spec = self.config.resolve_default_integral_type_spec(
                     program=self.program,
                     fallback_size=param.get("size"),
-                    fallback_signed=bool(param.get("is_signed", True)),
+                    signed=bool(param.get("is_signed", True)),
                 )
+                if replacement_spec is None:
+                    continue
+                replacement = replacement_spec.type_name
                 if are_types_equivalent(
                     type_obj,
                     type_name,
@@ -392,6 +385,7 @@ class TypeFixer:
                 ):
                     continue
                 param_overrides[index] = replacement
+                resolved_param_overrides[index] = replacement_spec
 
         if return_override is not None and resolved_return_override is None:
             resolved_return_override = resolve_type_spec(
@@ -399,8 +393,11 @@ class TypeFixer:
                 program=self.program,
                 fallback_signed=True,
             )
+            if resolved_return_override is None or resolved_return_override.data_type_obj is None:
+                return_override = None
+                resolved_return_override = None
 
-        for index, override_name in param_overrides.items():
+        for index, override_name in list(param_overrides.items()):
             if index in resolved_param_overrides:
                 continue
             param = parameters[index]
@@ -410,8 +407,11 @@ class TypeFixer:
                 fallback_size=param.get("size"),
                 fallback_signed=bool(param.get("is_signed", True)),
             )
-            if resolved_spec is not None:
+            if resolved_spec is not None and resolved_spec.data_type_obj is not None:
                 resolved_param_overrides[index] = resolved_spec
+                param_overrides[index] = resolved_spec.type_name
+            else:
+                param_overrides.pop(index, None)
 
         hypothesis = SignatureHypothesis(
             return_type_override=return_override,

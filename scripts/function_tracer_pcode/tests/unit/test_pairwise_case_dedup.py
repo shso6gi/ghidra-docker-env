@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from conftest import resolve_mock_data_type
 
 
 def _param(name: str) -> Expression:
@@ -418,6 +419,7 @@ def test_build_pair_query_coerces_case_values_to_return_width():
         value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
         return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
         return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
     )
     case2 = ReturnCase(
         index=1,
@@ -425,6 +427,7 @@ def test_build_pair_query_coerces_case_values_to_return_width():
         value_expr=Expression(ExpressionType.CONSTANT, value=2, size=4),
         return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=2, size=4)),
         return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
     )
 
     query = build_pair_query(
@@ -446,6 +449,7 @@ def test_build_normalized_inequality_query_coerces_normalized_values_to_return_w
         value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
         return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
         return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
     )
     case2 = ReturnCase(
         index=1,
@@ -453,6 +457,7 @@ def test_build_normalized_inequality_query_coerces_normalized_values_to_return_w
         value_expr=Expression(ExpressionType.CONSTANT, value=2, size=4),
         return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.CONSTANT, value=2, size=4)),
         return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
     )
 
     norm_expr = Expression(ExpressionType.CONSTANT, value=2, size=4)

@@ -3,7 +3,13 @@
 
 from typing import Dict, List, Optional, Tuple, Any
 from ...model import FunctionReturnAnalysis, Expression, ExpressionType
-from ...model.signature import get_data_type_display_name, get_declared_type_size_bytes
+from ...model.signature import (
+    ResolvedTypeSpec,
+    get_data_type_display_name,
+    get_declared_type_size_bytes,
+    is_unsigned_data_type,
+    resolve_integer_type_spec,
+)
 from ..param_semantics import ParameterSemanticHint, hint_objects_by_name
 
 
@@ -36,8 +42,10 @@ class MIPS64Handler:
     def detect_param_type_mismatch(
         self,
         mips64_analysis: FunctionReturnAnalysis,
-        other_analysis: FunctionReturnAnalysis
-    ) -> Dict[int, str]:
+        other_analysis: FunctionReturnAnalysis,
+        *,
+        program: Any = None,
+    ) -> Dict[int, ResolvedTypeSpec]:
         """
         MIPS64側とother側でパラメータ型/意味幅が不一致の場合、
         MIPS64側を narrower な C 整数型に上書きするマップを返す（Phase 4-A用）
@@ -47,7 +55,7 @@ class MIPS64Handler:
         - または other 側に explicit な semantic-width 証拠があり、
           MIPS64側だけが 64bit のまま残っている場合に修正
         """
-        override_map: Dict[int, str] = {}
+        override_map: Dict[int, ResolvedTypeSpec] = {}
         other_hints = hint_objects_by_name(other_analysis)
         
         for i, (mips_param, other_param) in enumerate(
@@ -55,17 +63,28 @@ class MIPS64Handler:
         ):
             mips_type = self._get_param_type_string(mips_param)
             other_type = self._get_param_type_string(other_param)
-            
-            if self._is_long_vs_int(mips_type, other_type):
-                # other側がintならintに、uintならuintに
-                if "unsigned" in other_type or "uint" in other_type:
-                    override_map[i] = "unsigned int"
-                else:
-                    override_map[i] = "int"
+            mips_size = self._get_param_size(mips_param)
+            other_size = self._get_param_size(other_param)
+
+            if mips_size > 4 and other_size == 4:
+                signed = not is_unsigned_data_type(
+                    other_param.get("data_type_obj"),
+                    other_param.get("data_type"),
+                )
+                override_spec = resolve_integer_type_spec(
+                    size_bytes=4,
+                    signed=signed,
+                    program=program,
+                    data_type_manager=getattr(mips_param.get("data_type_obj"), "getDataTypeManager", lambda: None)(),
+                    source="mips64_width_alignment",
+                )
+                if override_spec is None:
+                    continue
+                override_map[i] = override_spec
                 
                 self._debug_print(
                     f"Param {i}: {mips_type} (MIPS64) vs {other_type} (other) "
-                    f"-> override to {override_map[i]}"
+                    f"-> override to {override_spec.type_name}"
                 )
                 continue
 
@@ -74,13 +93,14 @@ class MIPS64Handler:
                 mips_param=mips_param,
                 other_param=other_param,
                 other_hints=other_hints,
+                program=program,
             )
             if semantic_override is not None:
                 override_map[i] = semantic_override
                 self._debug_print(
                     f"Param {i}: {mips_type} (MIPS64) vs semantic hint "
                     f"{other_hints.get(other_param.get('name', f'param_{i}'))} (other) "
-                    f"-> override to {semantic_override}"
+                    f"-> override to {semantic_override.type_name}"
                 )
         
         return override_map
@@ -91,7 +111,9 @@ class MIPS64Handler:
         mips_param: Dict[str, Any],
         other_param: Dict[str, Any],
         other_hints: Dict[str, ParameterSemanticHint],
-    ) -> Optional[str]:
+        *,
+        program: Any = None,
+    ) -> Optional[ResolvedTypeSpec]:
         """Use explicit cross-binary semantic-width evidence to narrow a MIPS64 param."""
         mips_bits = self._get_param_size(mips_param) * 8
         if mips_bits <= 32:
@@ -108,24 +130,28 @@ class MIPS64Handler:
         if not any(kw in mips_type for kw in ["long", "int8", "qword"]):
             return None
 
-        override = self._type_name_for_semantic_hint(hint)
-        if override is None:
-            return None
+        return self._type_spec_for_semantic_hint(
+            hint,
+            program=program,
+            data_type_manager=getattr(mips_param.get("data_type_obj"), "getDataTypeManager", lambda: None)(),
+        )
 
-        return override
-
-    def _type_name_for_semantic_hint(
+    def _type_spec_for_semantic_hint(
         self,
         hint: ParameterSemanticHint,
-    ) -> Optional[str]:
-        signed_prefix = "" if hint.signedness == "signed" else "unsigned "
-        if hint.narrow_bits == 32:
-            return f"{signed_prefix}int"
-        if hint.narrow_bits == 16:
-            return f"{signed_prefix}short"
-        if hint.narrow_bits == 8:
-            return f"{signed_prefix}char"
-        return None
+        *,
+        program: Any = None,
+        data_type_manager: Any = None,
+    ) -> Optional[ResolvedTypeSpec]:
+        if hint.narrow_bits not in {8, 16, 32}:
+            return None
+        return resolve_integer_type_spec(
+            size_bytes=hint.narrow_bits // 8,
+            signed=(hint.signedness == "signed"),
+            program=program,
+            data_type_manager=data_type_manager,
+            source="mips64_semantic_hint",
+        )
     
     def _get_param_type_string(self, param: Dict[str, Any]) -> str:
         """パラメータの型文字列を取得"""
@@ -133,19 +159,6 @@ class MIPS64Handler:
             param.get("data_type_obj"),
             param.get("data_type", ""),
         ) or "").lower().strip()
-    
-    def _is_long_vs_int(self, type1: str, type2: str) -> bool:
-        """片方がlong、もう片方がintかを判定"""
-        long_keywords = ["long", "int8", "qword"]
-        int_keywords = ["int", "int4", "dword"]
-        
-        is_long_1 = any(kw in type1 for kw in long_keywords)
-        is_int_1 = any(kw in type1 for kw in int_keywords) and not is_long_1
-        
-        is_long_2 = any(kw in type2 for kw in long_keywords)
-        is_int_2 = any(kw in type2 for kw in int_keywords) and not is_long_2
-        
-        return (is_long_1 and is_int_2) or (is_int_1 and is_long_2)
     
     def _get_param_size(self, param: Dict[str, Any]) -> int:
         """パラメータのサイズ（バイト数）を取得"""
