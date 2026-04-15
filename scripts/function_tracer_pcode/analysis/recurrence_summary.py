@@ -163,12 +163,18 @@ class StructuralRecurrenceSummarizer:
                 value=Expression.constant(base_value, recursive_value.size or param_expr.size or 4),
                 conditions=base_conditions,
                 branch_index=base_ret.branch_index,
+                pcode_identity=base_ret.pcode_identity,
+                pcode_order=base_ret.pcode_order,
+                pcode_time=base_ret.pcode_time,
             ),
             ReturnInfo(
                 address=recursive_ret.address,
                 value=recursive_value,
                 conditions=recursive_conditions,
                 branch_index=recursive_ret.branch_index,
+                pcode_identity=recursive_ret.pcode_identity,
+                pcode_order=recursive_ret.pcode_order,
+                pcode_time=recursive_ret.pcode_time,
             ),
         ]
 
@@ -318,6 +324,9 @@ class StructuralRecurrenceSummarizer:
                 value=loop_even_value,
                 conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [even_start_cond]),
                 branch_index=10_100,
+                pcode_identity=base_case.pcode_identity,
+                pcode_order=base_case.pcode_order,
+                pcode_time=base_case.pcode_time,
             )
         )
         summarized.append(
@@ -326,6 +335,9 @@ class StructuralRecurrenceSummarizer:
                 value=loop_odd_value,
                 conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [odd_start_cond]),
                 branch_index=10_101,
+                pcode_identity=base_case.pcode_identity,
+                pcode_order=base_case.pcode_order,
+                pcode_time=base_case.pcode_time,
             )
         )
         self._debug(
@@ -555,6 +567,9 @@ class StructuralRecurrenceSummarizer:
                     value=value,
                     conditions=step_context,
                     branch_index=9_000 if parity else 9_001,
+                    pcode_identity=base_case.pcode_identity,
+                    pcode_order=base_case.pcode_order,
+                    pcode_time=base_case.pcode_time,
                 )
             )
         return synthesized

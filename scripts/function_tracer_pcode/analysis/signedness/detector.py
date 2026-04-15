@@ -55,8 +55,11 @@ class SignednessDetector:
         seq = pcode_op.getSeqnum()
         if seq:
             target = seq.getTarget()
+            time = getattr(seq, "getTime", lambda: None)()
             order = seq.getOrder()
-            return f"{target}:{order}"
+            if time is not None:
+                return f"{target}:t{time}"
+            return f"{target}:o{order}"
         return f"{pcode_op.hashCode()}:{pcode_op.getMnemonic()}"
     
     def _get_op_address(self, pcode_op) -> Optional[str]:

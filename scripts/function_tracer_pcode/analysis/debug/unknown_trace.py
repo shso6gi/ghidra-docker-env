@@ -130,11 +130,16 @@ class PcodeOpInfo:
     mnemonic: str
     seqnum_addr: Optional[str]
     seqnum_order: Optional[int]
+    seqnum_time: Optional[int]
     num_inputs: int
     
     def __str__(self):
-        if self.seqnum_addr and self.seqnum_order is not None:
-            return f"{self.mnemonic} @{self.seqnum_addr}:{self.seqnum_order}"
+        if self.seqnum_addr and (self.seqnum_time is not None or self.seqnum_order is not None):
+            return (
+                f"{self.mnemonic} @{self.seqnum_addr}"
+                f":t{self.seqnum_time if self.seqnum_time is not None else '?'}"
+                f":o{self.seqnum_order if self.seqnum_order is not None else '?'}"
+            )
         return f"{self.mnemonic} (inputs={self.num_inputs})"
     
     @classmethod
@@ -147,11 +152,13 @@ class PcodeOpInfo:
             seq = pcode_op.getSeqnum()
             seq_addr = str(seq.getTarget()) if seq else None
             seq_order = seq.getOrder() if seq else None
+            seq_time = getattr(seq, "getTime", lambda: None)() if seq else None
             
             return cls(
                 mnemonic=pcode_op.getMnemonic(),
                 seqnum_addr=seq_addr,
                 seqnum_order=seq_order,
+                seqnum_time=seq_time,
                 num_inputs=pcode_op.getNumInputs()
             )
         except Exception:

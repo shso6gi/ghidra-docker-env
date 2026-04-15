@@ -18,14 +18,28 @@ class ReturnInfo:
     value: Expression
     conditions: List[Condition] = field(default_factory=list)
     branch_index: Optional[int] = None
+    pcode_identity: Optional[str] = None
+    pcode_order: Optional[int] = None
+    pcode_time: Optional[int] = None
+
+    def site_key(self) -> str:
+        """return site の安定識別子を返す。"""
+        return self.pcode_identity or self.address
     
     def to_dict(self) -> Dict:
-        return {
+        result = {
             "address": self.address,
             "value": self.value.to_dict(),
             "conditions": [c.to_dict() for c in self.conditions],
-            "branch_index": self.branch_index
+            "branch_index": self.branch_index,
         }
+        if self.pcode_identity is not None:
+            result["pcode_identity"] = self.pcode_identity
+        if self.pcode_order is not None:
+            result["pcode_order"] = self.pcode_order
+        if self.pcode_time is not None:
+            result["pcode_time"] = self.pcode_time
+        return result
 
 
 @dataclass

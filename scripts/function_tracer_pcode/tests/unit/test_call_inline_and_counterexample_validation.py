@@ -2128,24 +2128,25 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
     ]
     analyzer.program.getImageBase.return_value.getOffset.return_value = 0
 
-    analysis = FunctionReturnAnalysis(
-        function_name="branch_switch_dense",
-        entry_point="0x1000",
-        parameters=list(analyzer._current_parameters),
-        returns=[
-            ReturnInfo(
-                address="0x1000",
-                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
-                conditions=[],
-                branch_index=0,
-            )
-        ],
-        return_type="int",
-        unknown_event_reasons=["callind_out_of_scope"],
-        unknown_event_count=1,
-    )
+    class _FakeSeq:
+        def __init__(self, target, time, order=0):
+            self._target = target
+            self._time = time
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getTime(self):
+            return self._time
+
+        def getOrder(self):
+            return self._order
 
     class _FakeBranchInd:
+        def __init__(self):
+            self._seq = _FakeSeq("0x401080", 17, 3)
+
         def getMnemonic(self):
             return "BRANCHIND"
 
@@ -2156,10 +2157,42 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
             assert index == 0
             return target_varnode
 
+        def getSeqnum(self):
+            return self._seq
+
+    class _FakeReturn:
+        def __init__(self):
+            self._seq = _FakeSeq("0x1000", 5, 1)
+
+        def getSeqnum(self):
+            return self._seq
+
     target_varnode = Mock()
     branchind_op = _FakeBranchInd()
+    return_op = _FakeReturn()
+    return_site = analyzer._describe_pcode_site(return_op, "0x1000")
     switch_block = Mock(index=7, pcode_ops=[branchind_op])
     switch_block.index = 7
+
+    analysis = FunctionReturnAnalysis(
+        function_name="branch_switch_dense",
+        entry_point="0x1000",
+        parameters=list(analyzer._current_parameters),
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
+                conditions=[],
+                branch_index=0,
+                pcode_identity=return_site["pcode_identity"],
+                pcode_order=return_site["pcode_order"],
+                pcode_time=return_site["pcode_time"],
+            )
+        ],
+        return_type="int",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
 
     cond = Condition(
         Expression.binary_op("INT_LESS", Expression.parameter("param_1", 0, size=8), Expression.constant(4, 8)),
@@ -2169,6 +2202,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
     condition_tracker = Mock()
     condition_tracker.block_by_index = {7: switch_block}
     condition_tracker.get_all_valid_block_paths_to_block.return_value = [([switch_block], [cond])]
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [([switch_block], [cond])]
 
     param = Expression.parameter("param_1", 0, size=8)
     subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
@@ -2213,12 +2247,14 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
                 analysis,
                 tracer,
                 condition_tracker,
+                return_ops=[return_op],
                 current_function=Mock(),
                 active_functions=set(),
             )
 
     assert recovered is not None
     assert [ret.value.value for ret in recovered] == [1000, 1001, 1002, 1003]
+    assert all(ret.pcode_identity == "0x401080:t17" for ret in recovered)
     assert all(any(cond.to_string() == "(param_1 < 4)" for cond in ret.conditions) for ret in recovered)
     assert [
         next(cond.to_string() for cond in ret.conditions if "==" in cond.to_string())
@@ -2238,24 +2274,25 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
     ]
     analyzer.program.getImageBase.return_value.getOffset.return_value = 0
 
-    analysis = FunctionReturnAnalysis(
-        function_name="branch_switch_dense",
-        entry_point="0x1000",
-        parameters=list(analyzer._current_parameters),
-        returns=[
-            ReturnInfo(
-                address="0x1000",
-                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
-                conditions=[],
-                branch_index=0,
-            )
-        ],
-        return_type="int",
-        unknown_event_reasons=["callind_out_of_scope"],
-        unknown_event_count=1,
-    )
+    class _FakeSeq:
+        def __init__(self, target, time, order=0):
+            self._target = target
+            self._time = time
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getTime(self):
+            return self._time
+
+        def getOrder(self):
+            return self._order
 
     class _FakeBranchInd:
+        def __init__(self):
+            self._seq = _FakeSeq("0x401080", 17, 3)
+
         def getMnemonic(self):
             return "BRANCHIND"
 
@@ -2266,10 +2303,42 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
             assert index == 0
             return target_varnode
 
+        def getSeqnum(self):
+            return self._seq
+
+    class _FakeReturn:
+        def __init__(self):
+            self._seq = _FakeSeq("0x1000", 5, 1)
+
+        def getSeqnum(self):
+            return self._seq
+
     target_varnode = Mock()
     branchind_op = _FakeBranchInd()
+    return_op = _FakeReturn()
+    return_site = analyzer._describe_pcode_site(return_op, "0x1000")
     switch_block = Mock(index=7, pcode_ops=[branchind_op])
     switch_block.index = 7
+
+    analysis = FunctionReturnAnalysis(
+        function_name="branch_switch_dense",
+        entry_point="0x1000",
+        parameters=list(analyzer._current_parameters),
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
+                conditions=[],
+                branch_index=0,
+                pcode_identity=return_site["pcode_identity"],
+                pcode_order=return_site["pcode_order"],
+                pcode_time=return_site["pcode_time"],
+            )
+        ],
+        return_type="int",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
 
     cond = Condition(
         Expression.binary_op("INT_LESS", Expression.parameter("param_1", 0, size=8), Expression.constant(2, 8)),
@@ -2279,6 +2348,7 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
     condition_tracker = Mock()
     condition_tracker.block_by_index = {7: switch_block}
     condition_tracker.get_all_valid_block_paths_to_block.return_value = [([switch_block], [cond])]
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [([switch_block], [cond])]
 
     param = Expression.parameter("param_1", 0, size=8)
     subpiece = Expression.binary_op("SUBPIECE", param, Expression.constant(0, 4))
@@ -2316,11 +2386,128 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
                 analysis,
                 tracer,
                 condition_tracker,
+                return_ops=[return_op],
                 current_function=Mock(),
                 active_functions=set(),
             )
 
     assert recovered is None
+
+
+def test_return_analyzer_declines_switch_recovery_when_switch_only_covers_subset_of_return_paths():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    class _FakeSeq:
+        def __init__(self, target, time, order=0):
+            self._target = target
+            self._time = time
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getTime(self):
+            return self._time
+
+        def getOrder(self):
+            return self._order
+
+    class _FakeBranchInd:
+        def __init__(self):
+            self._seq = _FakeSeq("0x401080", 17, 3)
+
+        def getMnemonic(self):
+            return "BRANCHIND"
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            raise AssertionError("target enumeration should not be reached")
+
+        def getSeqnum(self):
+            return self._seq
+
+    class _FakeReturn:
+        def __init__(self):
+            self._seq = _FakeSeq("0x1000", 5, 1)
+
+        def getSeqnum(self):
+            return self._seq
+
+    branchind_op = _FakeBranchInd()
+    return_op = _FakeReturn()
+    return_site = analyzer._describe_pcode_site(return_op, "0x1000")
+    switch_block = Mock(index=7, pcode_ops=[branchind_op])
+    switch_block.index = 7
+    bypass_block = Mock(index=8, pcode_ops=[])
+
+    analysis = FunctionReturnAnalysis(
+        function_name="branch_switch_dense",
+        entry_point="0x1000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("callind_out_of_scope:BRANCHIND"),
+                conditions=[],
+                branch_index=0,
+                pcode_identity=return_site["pcode_identity"],
+                pcode_order=return_site["pcode_order"],
+                pcode_time=return_site["pcode_time"],
+            )
+        ],
+        return_type="int",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    condition_tracker = Mock()
+    condition_tracker.block_by_index = {7: switch_block, 8: bypass_block}
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([switch_block], []),
+        ([bypass_block], []),
+    ]
+
+    recovered = analyzer._recover_switch_like_returns_from_pcode(
+        analysis,
+        tracer=Mock(),
+        condition_tracker=condition_tracker,
+        return_ops=[return_op],
+        current_function=Mock(),
+        active_functions=set(),
+    )
+
+    assert recovered is None
+
+
+def test_return_analyzer_preserves_distinct_return_sites_with_same_instruction_address():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    merged = analyzer._merge_equivalent_return_infos(
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(7, 4),
+                conditions=[],
+                branch_index=0,
+                pcode_identity="0x1000:t1",
+                pcode_order=0,
+                pcode_time=1,
+            ),
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(7, 4),
+                conditions=[],
+                branch_index=1,
+                pcode_identity="0x1000:t2",
+                pcode_order=0,
+                pcode_time=2,
+            ),
+        ]
+    )
+
+    assert len(merged) == 2
 
 
 def test_return_analyzer_detects_noreturn_stack_chk_fail_target_from_symbol_name():

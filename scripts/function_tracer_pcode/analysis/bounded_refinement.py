@@ -111,6 +111,9 @@ class BoundedCallRefiner:
                         value=value_expr,
                         conditions=merged_conditions,
                         branch_index=ret.branch_index,
+                        pcode_identity=ret.pcode_identity,
+                        pcode_order=ret.pcode_order,
+                        pcode_time=ret.pcode_time,
                     )
                 )
                 if len(results) >= self.max_cases:
@@ -416,7 +419,7 @@ class BoundedCallRefiner:
         result: List[ReturnInfo] = []
         for ret in return_infos:
             key = (
-                ret.address,
+                ret.pcode_identity or ret.address,
                 ret.branch_index,
                 ret.value.to_string(),
                 tuple(sorted(cond.to_string() for cond in ret.conditions)),

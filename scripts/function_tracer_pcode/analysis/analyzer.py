@@ -79,6 +79,78 @@ class ReturnAnalyzer:
     def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
         return summarize_expression(expr, max_depth=max_depth)
 
+    def _coerce_optional_int(self, value: object) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            return int(cast(Any, value))
+        except Exception:
+            return None
+
+    def _describe_pcode_site(
+        self,
+        pcode_op,
+        fallback_address: Optional[str] = None,
+        *,
+        identity_prefix: Optional[str] = None,
+    ) -> Dict[str, Optional[object]]:
+        address = fallback_address or "unknown"
+        pcode_identity: Optional[str] = None
+        pcode_order: Optional[int] = None
+        pcode_time: Optional[int] = None
+
+        seq = getattr(pcode_op, "getSeqnum", lambda: None)() if pcode_op is not None else None
+        if seq is not None:
+            try:
+                target = seq.getTarget()
+                if target is not None:
+                    address = str(target)
+            except Exception:
+                target = None
+            pcode_order = self._coerce_optional_int(getattr(seq, "getOrder", lambda: None)())
+            pcode_time = self._coerce_optional_int(getattr(seq, "getTime", lambda: None)())
+
+            if pcode_time is not None:
+                pcode_identity = f"{address}:t{pcode_time}"
+            elif pcode_order is not None:
+                pcode_identity = f"{address}:o{pcode_order}"
+            elif address:
+                pcode_identity = address
+        elif identity_prefix:
+            pcode_identity = f"{identity_prefix}:{address}"
+
+        return {
+            "address": address,
+            "pcode_identity": pcode_identity,
+            "pcode_order": pcode_order,
+            "pcode_time": pcode_time,
+        }
+
+    def _return_site_key(self, ret_info: ReturnInfo) -> str:
+        return ret_info.site_key()
+
+    def _make_return_info(
+        self,
+        *,
+        address: str,
+        value: Expression,
+        conditions: List[Condition],
+        branch_index: Optional[int] = None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> ReturnInfo:
+        site_metadata = site_metadata or {}
+        return ReturnInfo(
+            address=address,
+            value=value,
+            conditions=list(conditions or []),
+            branch_index=branch_index,
+            pcode_identity=cast(Optional[str], site_metadata.get("pcode_identity")),
+            pcode_order=self._coerce_optional_int(site_metadata.get("pcode_order")),
+            pcode_time=self._coerce_optional_int(site_metadata.get("pcode_time")),
+        )
+
     def _expression_contains_equivalent_subexpr(
         self,
         expr: Optional[Expression],
@@ -170,6 +242,13 @@ class ReturnAnalyzer:
         for i, ret_info in enumerate(analysis.returns):
             self._debug_print(f"[{i}] branch_index={ret_info.branch_index}")
             self._debug_print(f"    address: {ret_info.address}", 1)
+            if ret_info.pcode_identity is not None:
+                self._debug_print(f"    pcode_identity: {ret_info.pcode_identity}", 1)
+            if ret_info.pcode_time is not None or ret_info.pcode_order is not None:
+                self._debug_print(
+                    f"    seq(time={ret_info.pcode_time}, order={ret_info.pcode_order})",
+                    1,
+                )
             
             # 値の文字列表現
             try:
@@ -384,7 +463,7 @@ class ReturnAnalyzer:
                 and not effect_summary.has_unsupported_call
             ):
                 result.returns = [
-                    ReturnInfo(
+                    self._make_return_info(
                         address=str(function.getEntryPoint()),
                         conditions=[],
                         branch_index=0,
@@ -409,6 +488,7 @@ class ReturnAnalyzer:
                 result,
                 tracer,
                 condition_tracker,
+                return_ops=return_ops,
                 current_function=function,
                 active_functions=active_functions,
             )
@@ -515,11 +595,16 @@ class ReturnAnalyzer:
             )
 
         return [
-            ReturnInfo(
+            self._make_return_info(
                 address=only_return.address,
                 value=only_return.value,
                 conditions=[],
                 branch_index=only_return.branch_index,
+                site_metadata={
+                    "pcode_identity": only_return.pcode_identity,
+                    "pcode_order": only_return.pcode_order,
+                    "pcode_time": only_return.pcode_time,
+                },
             )
         ]
 
@@ -849,8 +934,8 @@ class ReturnAnalyzer:
                     )
                 return None
 
-            seq = getattr(return_op, "getSeqnum", lambda: None)()
-            address = str(seq.getTarget()) if seq else analysis.entry_point
+            site_metadata = self._describe_pcode_site(return_op, analysis.entry_point)
+            address = cast(str, site_metadata.get("address") or analysis.entry_point)
             return_results: List[ReturnInfo] = []
 
             for path_index, (block_path, path_conditions) in enumerate(path_entries):
@@ -875,6 +960,7 @@ class ReturnAnalyzer:
                     all_path_conditions=[path_conditions],
                     active_functions=active_functions,
                     current_function=current_function,
+                    site_metadata=site_metadata,
                 )
                 if not path_recovered:
                     if self.debug:
@@ -925,6 +1011,7 @@ class ReturnAnalyzer:
         analysis: FunctionReturnAnalysis,
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
+        return_ops: Optional[List[Any]] = None,
         current_function=None,
         active_functions: Optional[Set[str]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -945,6 +1032,26 @@ class ReturnAnalyzer:
         for switch_block in sorted(switch_blocks, key=lambda info: info.index):
             branchind_op = self._find_branchind_op_on_block(switch_block)
             if branchind_op is None:
+                continue
+
+            impacted_site_keys = self._collect_switch_impacted_return_sites(
+                switch_block,
+                return_ops or [],
+                condition_tracker,
+                analysis.entry_point,
+            )
+            if impacted_site_keys is None or not impacted_site_keys:
+                continue
+
+            affected_returns = [
+                ret for ret in (analysis.returns or []) if self._return_site_key(ret) in impacted_site_keys
+            ]
+            unaffected_returns = [
+                ret for ret in (analysis.returns or []) if self._return_site_key(ret) not in impacted_site_keys
+            ]
+            if not affected_returns:
+                continue
+            if not self._switch_recovery_targets_problematic_region(analysis, affected_returns):
                 continue
 
             candidate_entries = self._enumerate_switch_branch_targets(
@@ -993,23 +1100,37 @@ class ReturnAnalyzer:
             if candidate_failed or not expanded_values:
                 continue
 
-            recovered = self._build_return_infos_from_expansions(
+            site_metadata = self._describe_pcode_site(
+                branchind_op,
                 analysis.entry_point,
+                identity_prefix="branchind",
+            )
+            recovered = self._build_return_infos_from_expansions(
+                cast(str, site_metadata.get("address") or analysis.entry_point),
                 expanded_values,
                 0,
+                site_metadata=site_metadata,
             )
             recovered = self._merge_equivalent_return_infos(
                 self._prune_less_precise_return_infos(recovered)
             )
             if not recovered:
                 continue
-            if not self._switch_recovery_improves_analysis(analysis, recovered):
+            if not self._switch_recovery_improves_returns(analysis, affected_returns, recovered):
+                continue
+            if self._switch_recovery_conflicts_with_unaffected_returns(unaffected_returns, recovered):
+                continue
+            combined = self._merge_equivalent_return_infos(
+                self._prune_less_precise_return_infos(list(unaffected_returns) + recovered)
+            )
+            if not combined:
                 continue
             if self.debug:
                 self._debug_print(
-                    f"Recovered {len(recovered)} switch-like return case(s) from BRANCHIND/CFG structure"
+                    "Recovered switch-like return cases from BRANCHIND/CFG structure "
+                    f"(affected_sites={sorted(impacted_site_keys)}, recovered={len(recovered)})"
                 )
-            return recovered
+            return combined
 
         return None
 
@@ -1088,9 +1209,70 @@ class ReturnAnalyzer:
 
         return resolved_targets
 
-    def _switch_recovery_improves_analysis(
+    def _collect_switch_impacted_return_sites(
+        self,
+        switch_block,
+        return_ops: List[Any],
+        condition_tracker: ConditionTracker,
+        fallback_address: str,
+    ) -> Optional[Set[str]]:
+        impacted: Set[str] = set()
+        switch_index = getattr(switch_block, "index", None)
+
+        for return_index, return_op in enumerate(return_ops or []):
+            raw_entries = condition_tracker.get_all_valid_block_paths_to_return(return_op)
+            path_entries = self._coerce_block_path_entries(raw_entries)
+            if not path_entries:
+                continue
+
+            path_hits = [
+                any(getattr(block_info, "index", None) == switch_index for block_info in (block_path or []))
+                for block_path, _conditions in path_entries
+            ]
+            if not any(path_hits):
+                continue
+            if not all(path_hits):
+                if self.debug:
+                    self._debug_print(
+                        "Switch recovery skipped: candidate BRANCHIND only influences a subset of "
+                        f"paths to RETURN #{return_index}"
+                    )
+                return None
+
+            site_metadata = self._describe_pcode_site(return_op, fallback_address)
+            impacted.add(cast(str, site_metadata.get("pcode_identity") or site_metadata.get("address")))
+
+        return impacted
+
+    def _switch_recovery_targets_problematic_region(
         self,
         analysis: FunctionReturnAnalysis,
+        affected_returns: List[ReturnInfo],
+    ) -> bool:
+        if not affected_returns:
+            return False
+
+        affected_analysis = FunctionReturnAnalysis(
+            function_name=analysis.function_name,
+            entry_point=analysis.entry_point,
+            parameters=list(analysis.parameters or []),
+            returns=list(affected_returns),
+            return_type=analysis.return_type,
+            unknown_event_count=analysis.unknown_event_count,
+            unknown_event_reasons=list(analysis.unknown_event_reasons),
+        )
+        if affected_analysis.has_unknown_return():
+            return True
+        if affected_analysis.has_unresolved_return_value():
+            return True
+        if affected_analysis.has_overlapping_unconditional_returns():
+            return True
+        return self._analysis_has_ambiguous_condition_region_returns(affected_analysis)
+
+    def _switch_recovery_improves_returns(
+        self,
+        analysis: FunctionReturnAnalysis,
+        affected_returns: List[ReturnInfo],
         recovered: List[ReturnInfo],
     ) -> bool:
         if not recovered:
@@ -1099,19 +1281,55 @@ class ReturnAnalyzer:
             return False
 
         original_unresolved = sum(
-            1
-            for ret in analysis.returns or []
-            if self._expression_contains_unresolved_value(ret.value)
+            1 for ret in affected_returns if self._expression_contains_unresolved_value(ret.value)
         )
         recovered_unresolved = sum(
             1 for ret in recovered if self._expression_contains_unresolved_value(ret.value)
         )
         if recovered_unresolved < original_unresolved:
             return True
-        if analysis.has_overlapping_unconditional_returns():
+
+        affected_analysis = FunctionReturnAnalysis(
+            function_name=analysis.function_name,
+            entry_point=analysis.entry_point,
+            parameters=list(analysis.parameters or []),
+            returns=list(affected_returns),
+            return_type=analysis.return_type,
+            unknown_event_count=analysis.unknown_event_count,
+            unknown_event_reasons=list(analysis.unknown_event_reasons),
+        )
+        if affected_analysis.has_overlapping_unconditional_returns():
             return True
-        if self._analysis_has_ambiguous_condition_region_returns(analysis):
+        if self._analysis_has_ambiguous_condition_region_returns(affected_analysis):
             return True
+        return False
+
+    def _switch_recovery_conflicts_with_unaffected_returns(
+        self,
+        unaffected_returns: List[ReturnInfo],
+        recovered: List[ReturnInfo],
+    ) -> bool:
+        for existing in unaffected_returns:
+            for candidate in recovered:
+                overlap_conditions = ConditionSimplifier.simplify_conditions(
+                    list(existing.conditions) + list(candidate.conditions)
+                )
+                if ConditionSimplifier.is_contradiction(overlap_conditions):
+                    continue
+                if _expressions_equivalent(existing.value, candidate.value):
+                    continue
+                if self.debug:
+                    cond_dump = [
+                        ConditionSimplifier.get_simplified_condition_string(cond)
+                        for cond in overlap_conditions
+                    ]
+                    self._debug_print(
+                        "Switch recovery rejected due to overlap with unaffected return case: "
+                        f"existing={self._debug_expr_summary(existing.value)} "
+                        f"candidate={self._debug_expr_summary(candidate.value)} "
+                        f"conditions={cond_dump}"
+                    )
+                return True
         return False
 
     def _find_terminal_call_on_block_path(
@@ -2511,8 +2729,8 @@ class ReturnAnalyzer:
         active_functions: Set[str],
     ) -> List[ReturnInfo]:
         """単一のRETURNを解析"""
-        seq = return_op.getSeqnum()
-        address = str(seq.getTarget()) if seq else "unknown"
+        site_metadata = self._describe_pcode_site(return_op, "unknown")
+        address = cast(str, site_metadata.get("address") or "unknown")
         
         num_inputs = return_op.getNumInputs()
         self._debug_print(f"RETURN at {address}, inputs: {num_inputs}")
@@ -2562,6 +2780,7 @@ class ReturnAnalyzer:
                 all_path_conditions=all_valid_path_conditions,
                 active_functions=active_functions,
                 current_function=current_function,
+                site_metadata=site_metadata,
             )
         else:
             implicit_results = self._analyze_implicit_return_value(
@@ -2575,16 +2794,18 @@ class ReturnAnalyzer:
                 path_entries=path_entries,
                 active_functions=active_functions,
                 current_function=current_function,
+                site_metadata=site_metadata,
             )
             if implicit_results is not None:
                 return implicit_results
             # void return
             simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
-            return [ReturnInfo(
+            return [self._make_return_info(
                 address=address,
                 value=Expression.unknown("void"),
                 conditions=simplified_conds,
-                branch_index=return_index
+                branch_index=return_index,
+                site_metadata=site_metadata,
             )]
 
     def _coerce_block_path_entries(self, path_entries) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
@@ -2739,6 +2960,7 @@ class ReturnAnalyzer:
         path_entries=None,
         active_functions: Optional[Set[str]] = None,
         current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """RETURN オペランドが欠落している場合に、返り値レジスタ由来の値を復元する。"""
         path_recovered = self._recover_implicit_return_from_block_paths(
@@ -2750,6 +2972,7 @@ class ReturnAnalyzer:
             path_entries,
             active_functions=active_functions,
             current_function=current_function,
+            site_metadata=site_metadata,
         )
         if path_recovered is not None:
             return path_recovered
@@ -2779,6 +3002,7 @@ class ReturnAnalyzer:
                 all_path_conditions=all_path_conditions,
                 active_functions=active_functions,
                 current_function=current_function,
+                site_metadata=site_metadata,
             )
 
         terminal_call = self._find_terminal_call_before_return(
@@ -2802,6 +3026,7 @@ class ReturnAnalyzer:
             all_path_conditions=all_path_conditions,
             active_functions=active_functions,
             current_function=current_function,
+            site_metadata=site_metadata,
         )
 
     def _recover_implicit_return_from_block_paths(
@@ -2814,6 +3039,7 @@ class ReturnAnalyzer:
         path_entries,
         active_functions: Optional[Set[str]] = None,
         current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """RETURN block 以前の path 上にある返り値レジスタ更新から暗黙 return を復元する。"""
         normalized_entries = self._coerce_block_path_entries(path_entries)
@@ -2847,6 +3073,7 @@ class ReturnAnalyzer:
                     all_path_conditions=[list(conditions)],
                     active_functions=active_functions,
                     current_function=current_function,
+                    site_metadata=site_metadata,
                 )
             )
 
@@ -3129,6 +3356,7 @@ class ReturnAnalyzer:
         all_path_conditions: Optional[List[List[Condition]]] = None,
         active_functions: Optional[Set[str]] = None,
         current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """`call foo(...); return;` 形式の wrapper を callee summary から復元する。"""
         from ..transform import ExpressionExpander
@@ -3170,6 +3398,7 @@ class ReturnAnalyzer:
             address,
             expanded_values,
             return_index,
+            site_metadata=site_metadata,
         )
         return results or None
 
@@ -3202,6 +3431,7 @@ class ReturnAnalyzer:
         all_path_conditions: Optional[List[List[Condition]]] = None,
         active_functions: Optional[Set[str]] = None,
         current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> List[ReturnInfo]:
         """Return値を解析"""
         from ..transform import ExpressionExpander
@@ -3284,6 +3514,7 @@ class ReturnAnalyzer:
             address,
             expanded_values,
             return_index,
+            site_metadata=site_metadata,
         )
         
         if not results:
@@ -3291,11 +3522,12 @@ class ReturnAnalyzer:
             value = tracer.trace_varnode(return_varnode, use_cache=False)
             simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
             resolved_value = self._concretize_readonly_loads(value, simplified_conds, self._current_parameters)
-            return [ReturnInfo(
+            return [self._make_return_info(
                 address=address,
                 value=resolved_value,
                 conditions=simplified_conds,
-                branch_index=return_index
+                branch_index=return_index,
+                site_metadata=site_metadata,
             )]
         
         return results
@@ -3305,6 +3537,7 @@ class ReturnAnalyzer:
         address: str,
         expanded_values,
         return_index: int,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> List[ReturnInfo]:
         results = []
         for i, ev in enumerate(expanded_values):
@@ -3334,11 +3567,12 @@ class ReturnAnalyzer:
                 self._debug_print(f"  conditions={cond_strs}")
 
             results.append(
-                ReturnInfo(
+                self._make_return_info(
                     address=address,
                     value=resolved_value,
                     conditions=simplified_conds,
                     branch_index=return_index * 100 + i,
+                    site_metadata=site_metadata,
                 )
             )
         pruned = self._prune_less_precise_return_infos(results)
@@ -3354,7 +3588,7 @@ class ReturnAnalyzer:
         grouped: Dict[Tuple[str, str], List[ReturnInfo]] = {}
         for info in return_infos:
             key = (
-                info.address,
+                self._return_site_key(info),
                 self._pruning_conditions_signature(info.conditions),
             )
             grouped.setdefault(key, []).append(info)
@@ -3409,7 +3643,7 @@ class ReturnAnalyzer:
         grouped: Dict[Tuple[str, str], List[ReturnInfo]] = {}
         for info in analysis.returns or []:
             key = (
-                info.address,
+                self._return_site_key(info),
                 self._pruning_conditions_signature(info.conditions),
             )
             grouped.setdefault(key, []).append(info)
@@ -3479,7 +3713,7 @@ class ReturnAnalyzer:
         left_index: Optional[int] = None,
         right_index: Optional[int] = None,
     ) -> Optional[ReturnInfo]:
-        if left.address != right.address:
+        if self._return_site_key(left) != self._return_site_key(right):
             return None
         if not _expressions_equivalent(left.value, right.value):
             return None
@@ -3538,7 +3772,7 @@ class ReturnAnalyzer:
         for index, other in enumerate(all_infos):
             if index == left_index or index == right_index:
                 continue
-            if other.address != left.address:
+            if self._return_site_key(other) != self._return_site_key(left):
                 continue
             if _expressions_equivalent(other.value, left.value):
                 continue
@@ -3611,11 +3845,16 @@ class ReturnAnalyzer:
             self._debug_print(
                 f"{reason}: value={self._debug_expr_summary(primary.value)} conditions={cond_dump}"
             )
-        return ReturnInfo(
+        return self._make_return_info(
             address=primary.address,
             value=primary.value,
             conditions=normalized_conditions,
             branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
+            site_metadata={
+                "pcode_identity": primary.pcode_identity,
+                "pcode_order": primary.pcode_order,
+                "pcode_time": primary.pcode_time,
+            },
         )
 
     def _min_branch_index(

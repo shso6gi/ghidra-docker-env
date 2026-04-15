@@ -346,7 +346,10 @@ def rewrite_analysis_returns(
             address=ret_info.address,
             value=value_result.expression,
             conditions=new_conditions,
-            branch_index=ret_info.branch_index
+            branch_index=ret_info.branch_index,
+            pcode_identity=ret_info.pcode_identity,
+            pcode_order=ret_info.pcode_order,
+            pcode_time=ret_info.pcode_time,
         )
         new_returns.append(new_ret)
     

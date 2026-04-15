@@ -192,6 +192,9 @@ def _rewrite_analysis_with_abstract_calls(
                 for cond in ret.conditions
             ],
             branch_index=ret.branch_index,
+            pcode_identity=ret.pcode_identity,
+            pcode_order=ret.pcode_order,
+            pcode_time=ret.pcode_time,
         )
         for ret in (analysis.returns or [])
     ]

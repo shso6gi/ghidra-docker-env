@@ -96,9 +96,10 @@ class PcodeTracer:
         seq = pcode_op.getSeqnum()
         if seq:
             target = seq.getTarget()
+            time = getattr(seq, "getTime", lambda: None)()
             order = seq.getOrder()
             obj_id = id(pcode_op)
-            return f"{target}:{order}:{obj_id}"
+            return f"{target}:t{time}:o{order}:{obj_id}"
         obj_id = id(pcode_op)
         return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{obj_id}"
 
@@ -131,8 +132,11 @@ class PcodeTracer:
 
         if seq:
             target = seq.getTarget()
+            time = getattr(seq, "getTime", lambda: None)()
             order = seq.getOrder()
-            return f"{target}:{order}:{pcode_op.getMnemonic()}:{output_key}"
+            if time is not None:
+                return f"{target}:t{time}:{pcode_op.getMnemonic()}:{output_key}"
+            return f"{target}:o{order}:{pcode_op.getMnemonic()}:{output_key}"
 
         try:
             return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{output_key}"
