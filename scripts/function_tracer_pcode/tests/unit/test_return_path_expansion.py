@@ -386,3 +386,53 @@ def test_return_analyzer_drops_stack_protector_condition_from_sole_return_case()
 
     assert len(stripped) == 1
     assert stripped[0].conditions == []
+
+
+def test_return_analyzer_detects_stack_protector_guard_by_structure_without_name_hint():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    base_ptr = Expression.variable("tmp_guard_base", size=8)
+    guard_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op(
+            "INT_SUB",
+            Expression.memory(
+                Expression.binary_op(
+                    "INDIRECT",
+                    Expression.memory(base_ptr, size=8),
+                    Expression.constant(48, 4),
+                ),
+                size=8,
+            ),
+            Expression.memory(
+                Expression.binary_op("INDIRECT", base_ptr, Expression.constant(48, 4)),
+                size=8,
+            ),
+        ),
+        Expression.constant(0, 8),
+    )
+
+    assert analyzer._condition_looks_like_stack_protector_guard(Condition(guard_expr, False)) is True
+
+
+def test_return_analyzer_local_memory_key_does_not_require_string_render(monkeypatch):
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    addr_expr = Expression.binary_op(
+        "INT_ADD",
+        _param("param_1", size=8),
+        Expression.constant(16, 4),
+    )
+
+    def _boom(_self, simplify=True):
+        raise AssertionError("local memory key generation should not require to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+
+    key = analyzer._local_memory_key(addr_expr, 8)
+
+    assert key[1] == 8
+    assert key[0] == addr_expr.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+    )

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
+from ..model.structural import StructuralKey
 from ..model.storage import StorageInfo
 from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from ..model.signature import (
@@ -43,20 +44,6 @@ from .recurrence_summary import StructuralRecurrenceSummarizer
 class ReturnAnalyzer:
     """関数のReturn値を解析"""
 
-    _KNOWN_NORETURN_NAME_FRAGMENTS = (
-        "stack_chk_fail",
-        "fortify_fail",
-        "assert_fail",
-        "abort",
-        "panic",
-        "fatal",
-    )
-    _KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS = (
-        "stack_chk_guard",
-        "stack_chk_fail",
-        "fortify_fail",
-    )
-    
     def __init__(self, program, debug: bool = False):
         self.program = program
         self.debug = debug
@@ -780,22 +767,142 @@ class ReturnAnalyzer:
         return merged
 
     def _condition_looks_like_stack_protector_guard(self, condition: Condition) -> bool:
-        names = sorted(condition.get_all_variables())
-        if names:
-            return all(self._name_looks_stack_protector_artifact(name) for name in names)
-        text = condition.to_string().lower()
-        return any(fragment in text for fragment in self._KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS)
-
-    def _name_looks_stack_protector_artifact(self, name: Optional[str]) -> bool:
-        if not name:
+        compared = self._extract_stack_protector_compare_pair(condition.expression)
+        if compared is None:
             return False
-        normalized = str(name).lower()
-        for prefix in ("ptr_", "thunk_", "__imp_"):
-            if normalized.startswith(prefix):
-                normalized = normalized[len(prefix):]
-        normalized = re.sub(r"_[0-9a-f]+$", "", normalized)
-        normalized = normalized.lstrip("_")
-        return any(fragment in normalized for fragment in self._KNOWN_STACK_PROTECTOR_NAME_FRAGMENTS)
+        left, right = compared
+        return self._reads_share_stack_protector_probe(left, right)
+
+    def _extract_stack_protector_compare_pair(
+        self,
+        expr: Optional[Expression],
+    ) -> Optional[Tuple[Expression, Expression]]:
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+
+        left, right = expr.operands
+        if expr.operator in {"INT_NOTEQUAL", "INT_EQUAL"}:
+            if self._is_zero_constant(right):
+                pair = self._extract_difference_pair(left)
+                if pair is not None:
+                    return pair
+            if self._is_zero_constant(left):
+                pair = self._extract_difference_pair(right)
+                if pair is not None:
+                    return pair
+            return left, right
+        return None
+
+    def _extract_difference_pair(
+        self,
+        expr: Optional[Expression],
+    ) -> Optional[Tuple[Expression, Expression]]:
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+        if expr.operator != "INT_SUB":
+            return None
+        return expr.operands[0], expr.operands[1]
+
+    def _is_zero_constant(self, expr: Optional[Expression]) -> bool:
+        return (
+            expr is not None
+            and expr.expr_type == ExpressionType.CONSTANT
+            and int(expr.value) == 0
+        )
+
+    def _reads_share_stack_protector_probe(
+        self,
+        left: Expression,
+        right: Expression,
+    ) -> bool:
+        left_probe = self._extract_stack_protector_memory_probe(left)
+        right_probe = self._extract_stack_protector_memory_probe(right)
+        if left_probe is None or right_probe is None:
+            return False
+
+        left_base_key, left_disp, left_deref_depth, left_size = left_probe
+        right_base_key, right_disp, right_deref_depth, right_size = right_probe
+        if left_size != right_size:
+            return False
+        if left_base_key != right_base_key or left_disp != right_disp:
+            return False
+        return {left_deref_depth, right_deref_depth} == {0, 1}
+
+    def _extract_stack_protector_memory_probe(
+        self,
+        expr: Optional[Expression],
+    ) -> Optional[Tuple[StructuralKey, int, int, int]]:
+        if expr is None:
+            return None
+
+        current = expr
+        while (
+            current.expr_type == ExpressionType.UNARY_OP
+            and current.operator in {"INT_ZEXT", "INT_SEXT"}
+            and current.operands
+        ):
+            current = current.operands[0]
+
+        if current.expr_type != ExpressionType.MEMORY or not current.operands:
+            return None
+
+        probe = self._extract_indirect_probe(current.operands[0])
+        if probe is None:
+            return None
+        base_key, displacement, deref_depth = probe
+        return (base_key, displacement, deref_depth, int(current.size or 0))
+
+    def _extract_indirect_probe(
+        self,
+        expr: Optional[Expression],
+    ) -> Optional[Tuple[StructuralKey, int, int]]:
+        if expr is None:
+            return None
+
+        current = expr
+        while (
+            current.expr_type == ExpressionType.UNARY_OP
+            and current.operator in {"INT_ZEXT", "INT_SEXT", "INT_2COMP"}
+            and current.operands
+        ):
+            current = current.operands[0]
+
+        if current.expr_type != ExpressionType.BINARY_OP or len(current.operands) != 2:
+            return None
+        if current.operator not in {"INDIRECT", "PTRADD", "PTRSUB", "INT_ADD"}:
+            return None
+
+        left, right = current.operands
+        displacement = self._constant_int_value(right)
+        base_expr = left
+        if displacement is None:
+            displacement = self._constant_int_value(left)
+            base_expr = right
+        if displacement is None:
+            return None
+
+        deref_depth = 0
+        while base_expr.expr_type == ExpressionType.MEMORY and base_expr.operands:
+            deref_depth += 1
+            base_expr = base_expr.operands[0]
+
+        return (
+            base_expr.structural_key(
+                normalize_commutative=True,
+                strip_width_adapters=True,
+                collapse_full_masks=True,
+            ),
+            displacement,
+            deref_depth,
+        )
+
+    def _constant_int_value(self, expr: Optional[Expression]) -> Optional[int]:
+        if expr is None or expr.expr_type != ExpressionType.CONSTANT:
+            return None
+        try:
+            return int(expr.value)
+        except (TypeError, ValueError):
+            return None
 
     def _mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
         """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
@@ -1967,7 +2074,7 @@ class ReturnAnalyzer:
         visited_offsets: Set[int] = set()
         local_values: Dict[Tuple[str, int, int], Expression] = {}
         local_storages: Dict[Tuple[str, int, int], Any] = {}
-        local_memory: Dict[Tuple[str, int], Expression] = {}
+        local_memory: Dict[Tuple[StructuralKey, int], Expression] = {}
 
         for _ in range(max_steps):
             typed_instruction = cast(Any, instruction)
@@ -2076,8 +2183,15 @@ class ReturnAnalyzer:
         except Exception:
             return ("synthetic", id(varnode), int(getattr(varnode, "getSize", lambda: 0)()))
 
-    def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[str, int]:
-        return (addr_expr.to_string(), int(size))
+    def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
+        return (
+            addr_expr.structural_key(
+                normalize_commutative=True,
+                strip_width_adapters=True,
+                collapse_full_masks=True,
+            ),
+            int(size),
+        )
 
     def _evaluate_local_varnode_expression(
         self,
@@ -2085,7 +2199,7 @@ class ReturnAnalyzer:
         tracer,
         local_values: Dict[Tuple[str, int, int], Expression],
         local_storages: Dict[Tuple[str, int, int], Any],
-        local_memory: Dict[Tuple[str, int], Expression],
+        local_memory: Dict[Tuple[StructuralKey, int], Expression],
         visiting: Optional[Set[int]] = None,
     ) -> Expression:
         if varnode is None:
@@ -2137,7 +2251,7 @@ class ReturnAnalyzer:
         tracer,
         local_values: Dict[Tuple[str, int, int], Expression],
         local_storages: Dict[Tuple[str, int, int], Any],
-        local_memory: Dict[Tuple[str, int], Expression],
+        local_memory: Dict[Tuple[StructuralKey, int], Expression],
         visiting: Optional[Set[int]] = None,
     ) -> Optional[Expression]:
         mnemonic = pcode_op.getMnemonic()
@@ -2213,7 +2327,7 @@ class ReturnAnalyzer:
         tracer,
         local_values: Dict[Tuple[str, int, int], Expression],
         local_storages: Dict[Tuple[str, int, int], Any],
-        local_memory: Dict[Tuple[str, int], Expression],
+        local_memory: Dict[Tuple[StructuralKey, int], Expression],
     ) -> None:
         if pcode_op.getNumInputs() < 3:
             return
@@ -2240,7 +2354,7 @@ class ReturnAnalyzer:
         tracer,
         local_values: Dict[Tuple[str, int, int], Expression],
         local_storages: Dict[Tuple[str, int, int], Any],
-        local_memory: Dict[Tuple[str, int], Expression],
+        local_memory: Dict[Tuple[StructuralKey, int], Expression],
         current_function=None,
     ) -> Expression:
         if pcode_op.getNumInputs() >= 2:
@@ -2872,84 +2986,117 @@ class ReturnAnalyzer:
         if pcode_op is None or pcode_op.getMnemonic() not in {"CALL", "CALLIND"}:
             return False
 
-        for candidate_name in self._collect_call_target_candidate_names(pcode_op, tracer):
-            if self._name_looks_noreturn(candidate_name):
-                return True
+        direct_function = self._resolve_direct_call_target_function(pcode_op, tracer)
+        if direct_function is not None and self._function_has_no_return(direct_function):
+            return True
 
         resolved_name = _resolve_call_target_name(tracer, pcode_op)
         if not resolved_name:
             return False
 
-        try:
-            function_manager = self.program.getFunctionManager() if self.program is not None else None
-            if function_manager is not None:
-                for func in function_manager.getFunctions(True):
-                    if func.getName() != resolved_name:
-                        continue
-                    for attr_name in ("hasNoReturn", "isNoReturn", "getNoReturn"):
-                        attr = getattr(func, attr_name, None)
-                        if callable(attr):
-                            try:
-                                if bool(attr()):
-                                    return True
-                            except Exception:
-                                continue
-        except Exception:
-            pass
+        function_by_name = self._find_function_by_name(resolved_name)
+        if function_by_name is not None and self._function_has_no_return(function_by_name):
+            return True
 
-        return self._name_looks_noreturn(resolved_name)
+        return False
 
-    def _collect_call_target_candidate_names(
-        self,
-        pcode_op,
-        tracer: PcodeTracer,
-    ) -> List[str]:
-        names: List[str] = []
-        if pcode_op is None or pcode_op.getNumInputs() < 1:
-            return names
-
-        def _append_name(candidate) -> None:
-            if not candidate:
-                return
-            candidate_str = str(candidate)
-            if candidate_str and candidate_str not in names:
-                names.append(candidate_str)
-
+    def _resolve_direct_call_target_function(self, pcode_op, tracer: Optional[PcodeTracer] = None):
+        if self.program is None or pcode_op is None or pcode_op.getNumInputs() < 1:
+            return None
         try:
             target_varnode = pcode_op.getInput(0)
+            if target_varnode is None:
+                return None
         except Exception:
-            return names
+            return None
+        function = self._resolve_function_from_address(target_varnode.getAddress())
+        if function is not None:
+            return function
+        traced_target = self._trace_call_target_expression(target_varnode, tracer)
+        if traced_target is None or traced_target.expr_type != ExpressionType.CONSTANT:
+            return None
+        target_offset = self._constant_int_value(traced_target)
+        if target_offset is None or target_offset < 0:
+            return None
+        return self._resolve_function_from_program_offset(target_offset)
 
-        _append_name(tracer._get_function_name(target_varnode))
-
+    def _resolve_function_from_address(self, address):
+        if self.program is None or address is None:
+            return None
         try:
-            high_var = target_varnode.getHigh()
-            if high_var is not None:
-                _append_name(high_var.getName())
-                symbol = high_var.getSymbol()
-                if symbol is not None:
-                    _append_name(symbol.getName())
+            function_manager = self.program.getFunctionManager()
+            if function_manager is None:
+                return None
+            get_function_at = getattr(function_manager, "getFunctionAt", None)
+            if callable(get_function_at):
+                function = get_function_at(address)
+                if function is not None:
+                    return function
+            get_referenced_function = getattr(function_manager, "getReferencedFunction", None)
+            if callable(get_referenced_function):
+                function = get_referenced_function(address)
+                if function is not None:
+                    return function
         except Exception:
-            pass
+            return None
+        return None
 
+    def _resolve_function_from_program_offset(self, address_value: int):
+        if self.program is None or address_value < 0:
+            return None
+        try:
+            address_factory = self.program.getAddressFactory()
+            if address_factory is None:
+                return None
+            default_space = address_factory.getDefaultAddressSpace()
+            if default_space is None:
+                return None
+            address = default_space.getAddress(address_value)
+        except Exception:
+            return None
+        return self._resolve_function_from_address(address)
+
+    def _trace_call_target_expression(
+        self,
+        target_varnode,
+        tracer: Optional[PcodeTracer],
+    ) -> Optional[Expression]:
+        if tracer is None or target_varnode is None:
+            return None
         try:
             traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
-            _append_name(getattr(traced_target, "name", None))
         except Exception:
-            pass
+            return None
+        if isinstance(traced_target, Expression):
+            return traced_target
+        return None
 
-        return names
+    def _find_function_by_name(self, resolved_name: str):
+        if self.program is None or not resolved_name:
+            return None
+        try:
+            function_manager = self.program.getFunctionManager()
+            if function_manager is None:
+                return None
+            for func in function_manager.getFunctions(True):
+                if func.getName() == resolved_name:
+                    return func
+        except Exception:
+            return None
+        return None
 
-    def _name_looks_noreturn(self, name: Optional[str]) -> bool:
-        if not name:
+    def _function_has_no_return(self, function) -> bool:
+        if function is None:
             return False
-        normalized = str(name).lower()
-        for prefix in ("ptr_", "thunk_", "__imp_"):
-            if normalized.startswith(prefix):
-                normalized = normalized[len(prefix):]
-        normalized = re.sub(r"_[0-9a-f]+$", "", normalized)
-        normalized = normalized.lstrip("_")
-        return any(fragment in normalized for fragment in self._KNOWN_NORETURN_NAME_FRAGMENTS)
+        for attr_name in ("hasNoReturn", "isNoReturn", "getNoReturn"):
+            attr = getattr(function, attr_name, None)
+            if callable(attr):
+                try:
+                    if bool(attr()):
+                        return True
+                except Exception:
+                    continue
+        return False
 
     def _analyze_implicit_return_value(
         self,

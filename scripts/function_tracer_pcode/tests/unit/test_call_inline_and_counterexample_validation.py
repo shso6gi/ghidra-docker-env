@@ -2510,19 +2510,30 @@ def test_return_analyzer_preserves_distinct_return_sites_with_same_instruction_a
     assert len(merged) == 2
 
 
-def test_return_analyzer_detects_noreturn_stack_chk_fail_target_from_symbol_name():
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    tracer = Mock()
-    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
-    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+def test_return_analyzer_detects_noreturn_target_from_traced_constant_address():
+    function = Mock()
+    function.hasNoReturn.return_value = True
 
-    symbol = Mock()
-    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var = Mock()
-    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var.getSymbol.return_value = symbol
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    address_space = Mock()
+    address_token = Mock()
+    address_space.getAddress.return_value = address_token
+
+    address_factory = Mock()
+    address_factory.getDefaultAddressSpace.return_value = address_space
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+    program.getAddressFactory.return_value = address_factory
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.constant(0x401234, size=8)
+
     target_varnode = Mock()
-    target_varnode.getHigh.return_value = high_var
+    target_varnode.getAddress.return_value = None
 
     call_op = Mock()
     call_op.getMnemonic.return_value = "CALLIND"
@@ -2532,19 +2543,55 @@ def test_return_analyzer_detects_noreturn_stack_chk_fail_target_from_symbol_name
     assert analyzer._is_noreturn_call_op(call_op, tracer) is True
 
 
-def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    tracer = Mock()
-    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
-    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+def test_return_analyzer_prefers_ghidra_noreturn_metadata_for_direct_calls():
+    function = Mock()
+    function.hasNoReturn.return_value = True
 
-    symbol = Mock()
-    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var = Mock()
-    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var.getSymbol.return_value = symbol
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+
+    address = Mock()
     target_varnode = Mock()
-    target_varnode.getHigh.return_value = high_var
+    target_varnode.getAddress.return_value = address
+
+    call_op = Mock()
+    call_op.getMnemonic.return_value = "CALL"
+    call_op.getNumInputs.return_value = 1
+    call_op.getInput.return_value = target_varnode
+
+    assert analyzer._is_noreturn_call_op(call_op, tracer) is True
+
+
+def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
+    function = Mock()
+    function.hasNoReturn.return_value = True
+
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    address_space = Mock()
+    address_token = Mock()
+    address_space.getAddress.return_value = address_token
+
+    address_factory = Mock()
+    address_factory.getDefaultAddressSpace.return_value = address_space
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+    program.getAddressFactory.return_value = address_factory
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.constant(0x401234, size=8)
+
+    target_varnode = Mock()
+    target_varnode.getAddress.return_value = None
 
     fail_call = Mock()
     fail_call.getMnemonic.return_value = "CALLIND"
@@ -2587,18 +2634,29 @@ def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
 
 
 def test_return_analyzer_skips_return_when_all_paths_are_pruned_as_noreturn():
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    tracer = Mock()
-    tracer._get_function_name.return_value = "UNKNOWN_FUNC"
-    tracer.trace_varnode.return_value = Expression.variable("PTR___stack_chk_fail_120013158", size=8)
+    function = Mock()
+    function.hasNoReturn.return_value = True
 
-    symbol = Mock()
-    symbol.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var = Mock()
-    high_var.getName.return_value = "PTR___stack_chk_fail_120013158"
-    high_var.getSymbol.return_value = symbol
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    address_space = Mock()
+    address_token = Mock()
+    address_space.getAddress.return_value = address_token
+
+    address_factory = Mock()
+    address_factory.getDefaultAddressSpace.return_value = address_space
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+    program.getAddressFactory.return_value = address_factory
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.constant(0x401234, size=8)
+
     target_varnode = Mock()
-    target_varnode.getHigh.return_value = high_var
+    target_varnode.getAddress.return_value = None
 
     fail_call = Mock()
     fail_call.getMnemonic.return_value = "CALLIND"
