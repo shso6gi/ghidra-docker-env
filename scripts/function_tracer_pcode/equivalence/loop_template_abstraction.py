@@ -493,7 +493,6 @@ def _extract_affine_base_and_const(expr: Expression) -> Optional[Tuple[Optional[
 
 
 def _same_expression_key(left: Expression, right: Expression) -> bool:
-    try:
-        return left.to_smt() == right.to_smt()
-    except Exception:
-        return left.to_string() == right.to_string()
+    return left.structural_key(normalize_commutative=True) == right.structural_key(
+        normalize_commutative=True
+    )

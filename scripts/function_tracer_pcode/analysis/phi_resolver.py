@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """PHI（MULTIEQUAL）の処理専用モジュール"""
 
-from typing import List, Optional, Set, Dict, Any
+from typing import List, Optional, Set, Dict, Any, Hashable
 from ..model import Expression, Condition, ExpressionType
 from .condition import ConditionSimplifier, ConditionNormalizer
 
@@ -25,7 +25,7 @@ class ExpandedBranch:
         conds = [c.to_string() for c in self.conditions]
         return f"ExpandedBranch(conds={conds}, value={self.value.to_string()})"
 
-    def get_condition_signature(self) -> str:
+    def get_condition_signature(self) -> Hashable:
         return ConditionNormalizer.conditions_signature(self.conditions)
 
 
@@ -52,7 +52,7 @@ class PhiHandler:
         self.condition_tracker = condition_tracker
         self.debug = tracer.debug
         self._expanding_ops: Set[str] = set()
-        self._expansion_cache: Dict[str, List[ExpandedBranch]] = {}
+        self._expansion_cache: Dict[tuple, List[ExpandedBranch]] = {}
         self._expansion_cache_limit = 2048
         self._debug_message_limit = 4000
         self._debug_message_count = 0
@@ -74,12 +74,12 @@ class PhiHandler:
         prefix = "  " * indent
         print(f"{prefix}[PhiHandler] {msg}")
 
-    def _condition_signature(self, conditions: List[Condition]) -> str:
+    def _condition_signature(self, conditions: List[Condition]) -> Hashable:
         return ConditionNormalizer.conditions_signature(conditions)
 
-    def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> str:
+    def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> tuple:
         op_key = self.tracer._get_stable_op_key(multiequal_op)
-        return f"{op_key}::{self._condition_signature(base_conditions)}"
+        return (op_key, self._condition_signature(base_conditions))
 
     def _clone_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
         return [ExpandedBranch(list(branch.conditions), branch.value) for branch in branches]
@@ -429,10 +429,7 @@ class PhiHandler:
         
         value_groups: Dict[tuple, List[ExpandedBranch]] = {}
         for branch in branches:
-            try:
-                value_key = branch.value.to_smt()
-            except Exception:
-                value_key = branch.value.to_string()
+            value_key = branch.value.structural_key(normalize_commutative=True)
             cond_key = branch.get_condition_signature()
             group_key = (value_key, cond_key)
             if group_key not in value_groups:

@@ -47,7 +47,12 @@ def test_normalize_zero_comparison_accepts_constant_zero():
 
     left, op, right, polarity = ConditionNormalizer.normalize_for_contradiction(cond)
 
-    assert (left, op, right, polarity) == ("param_2", "INT_EQUAL", "0", True)
+    assert (
+        left,
+        op,
+        right,
+        polarity,
+    ) == (_param("param_2").structural_key(), "INT_EQUAL", _const(0).structural_key(), True)
 
 
 def test_negated_zero_comparison_contradicts_nonzero_condition():

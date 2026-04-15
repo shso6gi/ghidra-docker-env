@@ -30,10 +30,10 @@ def test_normalization_context_fact_queries():
         pos_vars={"param_3"},
         neg_vars={"param_4"},
         nonzero_vars={"param_5"},
-        nonneg_exprs={"expr_nonneg"},
-        pos_exprs={"expr_pos"},
-        neg_exprs={"expr_neg"},
-        nonzero_exprs={"expr_nz"},
+        nonneg_exprs={Expression(ExpressionType.VARIABLE, name="x", size=8).structural_key()},
+        pos_exprs={Expression(ExpressionType.VARIABLE, name="y", size=8).structural_key()},
+        neg_exprs={Expression(ExpressionType.VARIABLE, name="z", size=8).structural_key()},
+        nonzero_exprs={Expression(ExpressionType.VARIABLE, name="w", size=8).structural_key()},
     )
 
     assert context.is_min_excluded("param_1") is True
@@ -51,13 +51,12 @@ def test_normalization_context_fact_queries():
     assert context.is_nonzero("param_2") is False
 
     dummy_expr = Expression(ExpressionType.VARIABLE, name="x", size=8)
-    dummy_expr.to_smt = lambda: "expr_nonneg"
     assert context.is_expr_nonneg(dummy_expr) is True
-    dummy_expr.to_smt = lambda: "expr_pos"
+    dummy_expr = Expression(ExpressionType.VARIABLE, name="y", size=8)
     assert context.is_expr_pos(dummy_expr) is True
-    dummy_expr.to_smt = lambda: "expr_neg"
+    dummy_expr = Expression(ExpressionType.VARIABLE, name="z", size=8)
     assert context.is_expr_neg(dummy_expr) is True
-    dummy_expr.to_smt = lambda: "expr_nz"
+    dummy_expr = Expression(ExpressionType.VARIABLE, name="w", size=8)
     assert context.is_expr_nonzero(dummy_expr) is True
 
 

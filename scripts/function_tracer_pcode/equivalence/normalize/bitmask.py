@@ -310,46 +310,12 @@ def _same_expr(left: Expression, right: Expression) -> bool:
     return _expr_signature(left) == _expr_signature(right)
 
 
-def _expr_signature(expr: Expression) -> str:
-    current = expr
-    while current.expr_type == ExpressionType.UNARY_OP and current.operands:
-        if current.operator not in {"INT_ZEXT", "INT_SEXT"}:
-            break
-        current = current.operands[0]
-
-    if current.expr_type == ExpressionType.BINARY_OP and len(current.operands) == 2:
-        left, right = current.operands
-        if current.operator == "INT_AND":
-            if _is_all_ones_mask_for_size(left, current.size or right.size or 1):
-                return _expr_signature(right)
-            if _is_all_ones_mask_for_size(right, current.size or left.size or 1):
-                return _expr_signature(left)
-
-        left_sig = _expr_signature(left)
-        right_sig = _expr_signature(right)
-        if current.operator in {"INT_ADD", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR", "INT_EQUAL", "INT_NOTEQUAL"}:
-            left_sig, right_sig = sorted((left_sig, right_sig))
-        return f"{current.operator}:{left_sig}:{right_sig}:{current.size or 0}"
-
-    if current.expr_type == ExpressionType.CONSTANT:
-        return f"CONST:{int(current.value)}:{current.size or 0}"
-
-    if current.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.LITERAL}:
-        return f"{current.expr_type.name}:{current.name}:{current.size or 0}"
-
-    if current.expr_type == ExpressionType.PHI and current.value:
-        parts = []
-        for cond, value in current.value:
-            cond_sig = "None"
-            if cond is not None:
-                cond_sig = f"{_expr_signature(cond.expression)}:{int(bool(cond.negated))}"
-            parts.append(f"{cond_sig}->{_expr_signature(value)}")
-        return f"PHI:{'|'.join(parts)}:{current.size or 0}"
-
-    try:
-        return current.to_smt()
-    except Exception:
-        return current.to_string()
+def _expr_signature(expr: Expression):
+    return expr.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+    )
 
 
 def _to_signed(value: int, bits: int) -> int:

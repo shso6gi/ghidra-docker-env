@@ -9,6 +9,7 @@ from .storage import StorageInfo
 from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
+from .structural import StructuralKey, expression_key, condition_key, key_contains_placeholder
 from .signature import (
     FunctionSignature,
     SignatureHypothesis,
@@ -27,6 +28,10 @@ __all__ = [
     "Expression",
     "ExpressionType",
     "Condition",
+    "StructuralKey",
+    "expression_key",
+    "condition_key",
+    "key_contains_placeholder",
     "SignednessResult",
     "FunctionSignature",
     "SignatureHypothesis",

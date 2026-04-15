@@ -89,14 +89,19 @@ class CommutativeNormalizationRule(RewriteRule):
                 result.size = expr.size
             return result
     
-    def _get_sort_key(self, expr: 'Expression') -> str:
+    def _get_sort_key(self, expr: 'Expression'):
         """ソート用のキーを安全に取得"""
-        if hasattr(expr, 'to_smt') and callable(getattr(expr, 'to_smt')):
+        if hasattr(expr, "structural_key") and callable(getattr(expr, "structural_key")):
             try:
-                return expr.to_smt()
+                return expr.structural_key(normalize_commutative=True)
             except Exception:
                 pass
-        return expr.to_string()
+        if hasattr(expr, 'to_smt') and callable(getattr(expr, 'to_smt')):
+            try:
+                return ("rendered", expr.to_smt())
+            except Exception:
+                pass
+        return ("rendered", expr.to_string())
     
     def _flatten(self, expr: 'Expression', target_op: str) -> List['Expression']:
         """同じ演算子のネストをフラット化"""

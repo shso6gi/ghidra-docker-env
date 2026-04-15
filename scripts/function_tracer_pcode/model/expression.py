@@ -308,6 +308,25 @@ class Expression:
             if not a.equals(b):
                 return False
         return True
+
+    def structural_key(
+        self,
+        *,
+        budget: int = 256,
+        normalize_commutative: bool = True,
+        strip_width_adapters: bool = False,
+        collapse_full_masks: bool = False,
+    ):
+        """Hashable structural key for AST/P-code based comparisons."""
+        from .structural import expression_key
+
+        return expression_key(
+            self,
+            budget=budget,
+            normalize_commutative=normalize_commutative,
+            strip_width_adapters=strip_width_adapters,
+            collapse_full_masks=collapse_full_masks,
+        )
     
     def to_smt(self) -> str:
         """SMT ソルバー用の式に変換"""

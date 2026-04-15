@@ -4,7 +4,7 @@
 from typing import Dict, Set, Optional, List, Union
 from dataclasses import dataclass, field
 
-from ...model import Expression
+from ...model import Expression, StructuralKey, expression_key
 
 
 ExpressionAuditValue = Optional[Union[str, Expression]]
@@ -32,10 +32,10 @@ class NormalizationContext:
     pos_vars: Set[str] = field(default_factory=set)
     neg_vars: Set[str] = field(default_factory=set)
     nonzero_vars: Set[str] = field(default_factory=set)
-    nonneg_exprs: Set[str] = field(default_factory=set)
-    pos_exprs: Set[str] = field(default_factory=set)
-    neg_exprs: Set[str] = field(default_factory=set)
-    nonzero_exprs: Set[str] = field(default_factory=set)
+    nonneg_exprs: Set[StructuralKey] = field(default_factory=set)
+    pos_exprs: Set[StructuralKey] = field(default_factory=set)
+    neg_exprs: Set[StructuralKey] = field(default_factory=set)
+    nonzero_exprs: Set[StructuralKey] = field(default_factory=set)
     upper_bounds: Dict[str, int] = field(default_factory=dict)
     allow_unsafe: bool = False
     
@@ -125,10 +125,7 @@ class NormalizationContext:
         if self.debug:
             print(f"[Normalize] Applied: {rule_name} ({reason})")
 
-    def _expr_key(self, expr) -> str:
+    def _expr_key(self, expr) -> StructuralKey:
         if expr is None:
-            return ""
-        try:
-            return expr.to_smt()
-        except Exception:
-            return ""
+            return ("none",)
+        return expression_key(expr, normalize_commutative=True)

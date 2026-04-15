@@ -2,9 +2,9 @@
 """Scalar comparison extraction helpers for condition analysis."""
 
 from dataclasses import dataclass
-from typing import Optional, Set, Tuple
+from typing import Optional, Tuple
 
-from ...model import Condition, Expression, ExpressionType
+from ...model import Condition, Expression, ExpressionType, StructuralKey, expression_key, key_contains_placeholder
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 
 
@@ -12,7 +12,7 @@ from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 class ScalarConstraint:
     """Single-variable scalar constraint derived from a condition."""
 
-    key: Tuple[str, int]
+    key: Tuple[StructuralKey, int]
     kind: str
     expr: Expression
     raw_value: Optional[int] = None
@@ -24,61 +24,20 @@ class ScalarConstraint:
 _SCALAR_KEY_MAX_NODES = 32
 
 
-def _stable_scalar_expr_key(expr: Expression) -> Optional[str]:
+def _stable_scalar_expr_key(expr: Expression) -> Optional[StructuralKey]:
     """Build a bounded structural key for scalar constraints.
 
     We intentionally decline expressions that are too large or contain
     unsupported node types so contradiction checks stay cheap and conservative.
     """
 
-    visited: Set[int] = set()
-
-    def _render(node: Optional[Expression], budget: int) -> Tuple[Optional[str], int]:
-        if node is None:
-            return None, budget
-        if budget <= 0:
-            return None, budget
-
-        node_id = id(node)
-        if node_id in visited:
-            return None, budget
-        visited.add(node_id)
-
-        try:
-            budget -= 1
-            expr_type = node.expr_type
-
-            if expr_type == ExpressionType.CONSTANT:
-                return f"C:{int(node.value)}:{node.size}", budget
-            if expr_type == ExpressionType.PARAMETER:
-                return f"P:{node.name or '?'}:{node.size}", budget
-            if expr_type == ExpressionType.VARIABLE:
-                return f"V:{node.name or '?'}:{node.size}", budget
-
-            if expr_type == ExpressionType.UNARY_OP:
-                if node.operator is None or len(node.operands or []) != 1:
-                    return None, budget
-                inner, budget = _render(node.operands[0], budget)
-                if inner is None:
-                    return None, budget
-                return f"U:{node.operator}({inner})", budget
-
-            if expr_type == ExpressionType.BINARY_OP:
-                if node.operator is None or len(node.operands or []) != 2:
-                    return None, budget
-                left, budget = _render(node.operands[0], budget)
-                if left is None:
-                    return None, budget
-                right, budget = _render(node.operands[1], budget)
-                if right is None:
-                    return None, budget
-                return f"B:{node.operator}({left},{right})", budget
-
-            return None, budget
-        finally:
-            visited.discard(node_id)
-
-    rendered, _remaining = _render(expr, _SCALAR_KEY_MAX_NODES)
+    rendered = expression_key(
+        expr,
+        budget=_SCALAR_KEY_MAX_NODES,
+        normalize_commutative=True,
+    )
+    if key_contains_placeholder(rendered):
+        return None
     return rendered
 
 

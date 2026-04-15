@@ -138,4 +138,4 @@ def _term_sort_key(expr: Expression):
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "INT_2COMP":
         inner = expr.operands[0] if expr.operands else Expression.unknown("missing")
         return (2, _term_sort_key(inner))
-    return (3, expr.to_smt())
+    return (3, expr.structural_key(normalize_commutative=True))

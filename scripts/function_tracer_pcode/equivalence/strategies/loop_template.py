@@ -114,12 +114,12 @@ def _normalize_values_under_exact_conditions(
 
 def _extract_exact_constant_replacements(
     conditions: Iterable[Condition],
-) -> tuple[dict[str, Expression], dict[str, Expression]]:
+) -> tuple[dict[str, Expression], dict[tuple, Expression]]:
     replacements: dict[str, Expression] = {}
-    expr_replacements: dict[str, Expression] = {}
+    expr_replacements: dict[tuple, Expression] = {}
     conflicts: set[str] = set()
-    expr_conflicts: set[str] = set()
-    expr_fact_exprs: dict[str, Expression] = {}
+    expr_conflicts: set[tuple] = set()
+    expr_fact_exprs: dict[tuple, Expression] = {}
 
     normalized_conditions = [
         _normalize_exact_fact_condition(condition) for condition in conditions
@@ -133,7 +133,7 @@ def _extract_exact_constant_replacements(
             if expr_key is None:
                 continue
             existing = expr_replacements.get(expr_key)
-            if existing is not None and existing.to_smt() != constant.to_smt():
+            if existing is not None and existing.structural_key() != constant.structural_key():
                 expr_conflicts.add(expr_key)
                 expr_replacements.pop(expr_key, None)
                 expr_fact_exprs.pop(expr_key, None)
@@ -155,7 +155,7 @@ def _extract_exact_constant_replacements(
                 if existing is None:
                     replacements[symbol] = constant
                     changed = True
-                elif existing.to_smt() != constant.to_smt():
+                elif existing.structural_key() != constant.structural_key():
                     conflicts.add(symbol)
                     replacements.pop(symbol, None)
                     changed = True
@@ -178,7 +178,7 @@ def _extract_exact_constant_replacements(
                 replacements[symbol] = constant
                 changed = True
                 continue
-            if existing.to_smt() != constant.to_smt():
+            if existing.structural_key() != constant.structural_key():
                 conflicts.add(symbol)
                 replacements.pop(symbol, None)
                 changed = True
@@ -262,7 +262,7 @@ def _extract_side_equals_constant(
 def _derive_symbol_replacement_from_condition(
     expr: Expression,
     replacements: dict[str, Expression],
-    expr_replacements: dict[str, Expression],
+    expr_replacements: dict[tuple, Expression],
 ) -> tuple[str, Expression] | None:
     if (
         expr.expr_type == ExpressionType.BINARY_OP
@@ -294,7 +294,7 @@ def _derive_symbol_replacement_from_fact(
     fact_expr: Expression,
     constant: Expression,
     replacements: dict[str, Expression],
-    expr_replacements: dict[str, Expression],
+    expr_replacements: dict[tuple, Expression],
 ) -> tuple[str, Expression] | None:
     if (
         fact_expr.expr_type != ExpressionType.BINARY_OP
@@ -350,7 +350,7 @@ def _derive_symbol_replacement_from_fact(
 def _lookup_known_constant(
     expr: Expression,
     replacements: dict[str, Expression],
-    expr_replacements: dict[str, Expression],
+    expr_replacements: dict[tuple, Expression],
 ) -> Expression | None:
     symbol = _extract_replacement_symbol(expr)
     if symbol is not None:
@@ -363,60 +363,23 @@ def _lookup_known_constant(
     return expr_replacements.get(expr_key)
 
 
-def _expr_key(expr: Expression) -> str | None:
-    def _canonical(expr: Expression) -> str:
-        if expr.expr_type == ExpressionType.CONSTANT:
-            return f"CONST:{int(expr.value)}:{expr.size or 0}"
-        if expr.expr_type in {
-            ExpressionType.PARAMETER,
-            ExpressionType.VARIABLE,
-            ExpressionType.LITERAL,
-        }:
-            return f"{expr.expr_type.name}:{expr.name}:{expr.size or 0}"
-        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
-            return f"UNARY:{expr.operator}:{_canonical(expr.operands[0])}:{expr.size or 0}"
-        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
-            left_key = _canonical(expr.operands[0])
-            right_key = _canonical(expr.operands[1])
-            if expr.operator in {
-                "INT_ADD",
-                "INT_MULT",
-                "INT_AND",
-                "INT_OR",
-                "INT_XOR",
-                "INT_EQUAL",
-                "INT_NOTEQUAL",
-            }:
-                left_key, right_key = sorted((left_key, right_key))
-            return f"BINARY:{expr.operator}:{left_key}:{right_key}:{expr.size or 0}"
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            branch_keys = []
-            for condition, value in expr.value:
-                cond_key = "None"
-                if condition is not None:
-                    cond_key = f"{_canonical(condition.expression)}:{int(bool(condition.negated))}"
-                branch_keys.append(f"{cond_key}->{_canonical(value)}")
-            return f"PHI:{'|'.join(branch_keys)}:{expr.size or 0}"
-        try:
-            return expr.to_smt()
-        except Exception:
-            return repr(expr)
-
+def _expr_key(expr: Expression) -> tuple | None:
     try:
         normalized = normalize_expression(expr, NormalizationContext())
-        return _canonical(normalized)
+        return normalized.structural_key(
+            normalize_commutative=True,
+            strip_width_adapters=True,
+            collapse_full_masks=True,
+        )
     except Exception:
         try:
-            normalized = normalize_expression(expr, NormalizationContext())
-            return _canonical(normalized)
+            return expr.structural_key(
+                normalize_commutative=True,
+                strip_width_adapters=True,
+                collapse_full_masks=True,
+            )
         except Exception:
-            try:
-                return _canonical(expr)
-            except Exception:
-                try:
-                    return expr.to_string()
-                except Exception:
-                    return None
+            return None
 
 
 def _extract_replacement_symbol(expr: Expression) -> str | None:
@@ -454,7 +417,7 @@ def _extract_replacement_constant(expr: Expression) -> Expression | None:
 def _substitute_exact_replacements(
     expr: Expression,
     replacements: dict[str, Expression],
-    expr_replacements: dict[str, Expression],
+    expr_replacements: dict[tuple, Expression],
 ) -> Expression:
     expr_key = _expr_key(expr)
     if expr_key is not None:

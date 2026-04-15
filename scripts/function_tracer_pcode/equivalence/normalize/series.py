@@ -270,10 +270,9 @@ def _accumulate_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, 
 def _same_nonconstant_expr(left: Expression, right: Expression) -> bool:
     left = _strip_series_wrapper(left)
     right = _strip_series_wrapper(right)
-    try:
-        return left.to_smt() == right.to_smt()
-    except Exception:
-        return left.to_string() == right.to_string()
+    return left.structural_key(normalize_commutative=True) == right.structural_key(
+        normalize_commutative=True
+    )
 
 
 def _same_condition_expression(left: Expression, right: Expression) -> bool:

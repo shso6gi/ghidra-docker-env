@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """条件の正規化モジュール（Expression構造ベース改善版）"""
 
-from typing import Dict, Optional, Set, Tuple
-from ...model import Expression, Condition, ExpressionType
+from typing import Dict, Optional, Tuple
+from ...model import Expression, Condition, ExpressionType, StructuralKey, expression_key
 
 
 class ConditionNormalizer:
@@ -16,24 +16,22 @@ class ConditionNormalizer:
     _EXPR_KEY_MAX_NODES = 48
     _EXPR_KEY_CACHE_LIMIT = 4096
     _CONTRADICTION_CACHE_LIMIT = 8192
-    _expr_key_cache: Dict[Expression, str] = {}
-    _contradiction_cache: Dict[Tuple[Expression, bool], Tuple[str, str, str, bool]] = {}
+    _expr_key_cache: Dict[Expression, StructuralKey] = {}
+    _contradiction_cache: Dict[Tuple[Expression, bool], Tuple[StructuralKey, str, StructuralKey, bool]] = {}
 
     @classmethod
-    def expression_signature(cls, expr: Optional[Expression]) -> str:
+    def expression_signature(cls, expr: Optional[Expression]) -> StructuralKey:
         """Stable structural key suitable for caches and deduplication."""
         return cls._expr_key(expr)
 
     @classmethod
-    def conditions_signature(cls, conditions) -> str:
+    def conditions_signature(cls, conditions):
         canonical = []
         for cond in conditions or []:
             normalized = cls.normalize_for_contradiction(cond)
-            canonical.append(
-                f"{normalized[0]}|{normalized[1]}|{normalized[2]}|{int(normalized[3])}"
-            )
+            canonical.append(normalized)
         canonical.sort()
-        return ";;".join(canonical)
+        return tuple(canonical)
     
     @staticmethod
     def normalize(condition: Condition) -> Tuple[str, str, str, bool]:
@@ -96,7 +94,7 @@ class ConditionNormalizer:
         return (expr.to_string(), "", "", not negated)
     
     @staticmethod
-    def normalize_for_contradiction(condition: Condition) -> Tuple[str, str, str, bool]:
+    def normalize_for_contradiction(condition: Condition) -> Tuple[StructuralKey, str, StructuralKey, bool]:
         """
         矛盾判定専用の正規化（Expression構造ベース改善版）
         
@@ -152,12 +150,12 @@ class ConditionNormalizer:
                     left_expr, right_expr
                 )
                 
-                left_str = ConditionNormalizer._expr_key(normalized_left)
-                right_str = ConditionNormalizer._expr_key(normalized_right)
+                left_key = ConditionNormalizer._expr_key(normalized_left)
+                right_key = ConditionNormalizer._expr_key(normalized_right)
                 
                 # 左右を辞書順にソート（順序依存性を排除）
                 if ConditionNormalizer._should_swap_operands(normalized_left, normalized_right):
-                    left_str, right_str = right_str, left_str
+                    left_key, right_key = right_key, left_key
                 
                 # INT_EQUAL に統一
                 if op == "INT_EQUAL":
@@ -165,28 +163,28 @@ class ConditionNormalizer:
                 else:  # INT_NOTEQUAL は INT_EQUAL の否定
                     polarity = negated
 
-                result = (left_str, "INT_EQUAL", right_str, polarity)
+                result = (left_key, "INT_EQUAL", right_key, polarity)
                 ConditionNormalizer._remember_contradiction_key(cache_key, result)
                 return result
             
             # 不等式比較
             elif op in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
-                left_str = ConditionNormalizer._expr_key(left_expr)
-                right_str = ConditionNormalizer._expr_key(right_expr)
+                left_key = ConditionNormalizer._expr_key(left_expr)
+                right_key = ConditionNormalizer._expr_key(right_expr)
                 
                 # ★★★ 改善2: Expression構造ベースのswap判定 ★★★
                 need_swap = ConditionNormalizer._should_swap_operands(left_expr, right_expr)
                 
                 if need_swap:
                     # swap してオペランドを入れ替え
-                    left_str, right_str = right_str, left_str
+                    left_key, right_key = right_key, left_key
                     new_op, final_negated = ConditionNormalizer._swap_comparison(op, negated)
                 else:
                     new_op = op
                     final_negated = negated
                 
                 polarity = not final_negated
-                result = (left_str, new_op, right_str, polarity)
+                result = (left_key, new_op, right_key, polarity)
                 ConditionNormalizer._remember_contradiction_key(cache_key, result)
                 return result
         
@@ -311,119 +309,27 @@ class ConditionNormalizer:
     def _remember_contradiction_key(
         cls,
         key: Tuple[Expression, bool],
-        value: Tuple[str, str, str, bool],
+        value: Tuple[StructuralKey, str, StructuralKey, bool],
     ) -> None:
         if len(cls._contradiction_cache) >= cls._CONTRADICTION_CACHE_LIMIT:
             cls._contradiction_cache.clear()
         cls._contradiction_cache[key] = value
 
     @classmethod
-    def _expr_key(cls, expr: Optional[Expression]) -> str:
+    def _expr_key(cls, expr: Optional[Expression]) -> StructuralKey:
         if expr is None:
-            return ""
+            return ("none",)
 
         cache_key = expr
         cached = cls._expr_key_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        visited: Set[int] = set()
-
-        def _render(node: Optional[Expression], budget: int) -> Tuple[str, int]:
-            if node is None:
-                return "", budget
-            if budget <= 0:
-                return f"{node.expr_type.name}#{id(node)}", budget
-
-            node_id = id(node)
-            if node_id in visited:
-                return f"REC#{node_id}", budget
-            visited.add(node_id)
-
-            try:
-                budget -= 1
-                expr_type = node.expr_type
-
-                if expr_type == ExpressionType.CONSTANT:
-                    try:
-                        value = int(node.value)
-                    except (TypeError, ValueError):
-                        value = node.value
-                    if isinstance(value, int) and value < 0:
-                        return f"({value})", budget
-                    return str(value), budget
-
-                if expr_type == ExpressionType.LITERAL:
-                    return str(node.value), budget
-
-                if expr_type == ExpressionType.PARAMETER:
-                    return node.name or "?", budget
-
-                if expr_type == ExpressionType.VARIABLE:
-                    return node.name or "?", budget
-
-                if expr_type == ExpressionType.UNKNOWN:
-                    return f"UNKNOWN({node.name or '?'})", budget
-
-                if expr_type == ExpressionType.UNARY_OP:
-                    operand = node.operands[0] if node.operands else None
-                    inner, budget = _render(operand, budget)
-                    operator = node.operator or "?"
-                    if operator == "BOOL_NEGATE":
-                        return f"(not {inner})", budget
-                    if operator in {"INT_2COMP", "INT_NEGATE"}:
-                        return f"(-{inner})", budget
-                    return f"{operator}({inner})", budget
-
-                if expr_type == ExpressionType.BINARY_OP:
-                    left = node.operands[0] if node.operands else None
-                    right = node.operands[1] if len(node.operands) > 1 else None
-                    left_key, budget = _render(left, budget)
-                    right_key, budget = _render(right, budget)
-                    operator = node.operator or "?"
-                    symbol_map = {
-                        "INT_ADD": "+",
-                        "INT_SUB": "-",
-                        "INT_MULT": "*",
-                        "INT_DIV": "/",
-                        "INT_AND": "&",
-                        "INT_OR": "|",
-                        "INT_XOR": "^",
-                        "INT_LEFT": "<<",
-                        "INT_RIGHT": ">>",
-                        "INT_SRIGHT": ">>",
-                        "INT_EQUAL": "==",
-                        "INT_NOTEQUAL": "!=",
-                        "INT_LESS": "<",
-                        "INT_SLESS": "<",
-                        "INT_LESSEQUAL": "<=",
-                        "INT_SLESSEQUAL": "<=",
-                        "BOOL_AND": "and",
-                        "BOOL_OR": "or",
-                    }
-                    symbol = symbol_map.get(operator)
-                    if symbol == "and" or symbol == "or":
-                        return f"({left_key} {symbol} {right_key})", budget
-                    if symbol is not None:
-                        return f"({left_key} {symbol} {right_key})", budget
-                    return f"{operator}({left_key}, {right_key})", budget
-
-                if expr_type == ExpressionType.MEMORY:
-                    address = node.operands[0] if node.operands else None
-                    address_key, budget = _render(address, budget)
-                    return f"MEM[{address_key}]", budget
-
-                if expr_type == ExpressionType.CALL:
-                    return f"{node.name or '?'}(...)", budget
-
-                if expr_type == ExpressionType.PHI:
-                    return f"PHI#{node_id}", budget
-
-                return f"{expr_type.name}#{node_id}", budget
-            finally:
-                visited.discard(node_id)
-
-        rendered, _remaining = _render(expr, cls._EXPR_KEY_MAX_NODES)
+        rendered = expression_key(
+            expr,
+            budget=cls._EXPR_KEY_MAX_NODES,
+            normalize_commutative=True,
+        )
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
         cls._expr_key_cache[cache_key] = rendered

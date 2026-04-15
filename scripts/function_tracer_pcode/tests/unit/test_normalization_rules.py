@@ -1108,7 +1108,7 @@ def test_normalize_expression_reduces_abs_bit_hack_when_expr_nonnegative():
         size=8,
     )
 
-    context = NormalizationContext(nonneg_exprs={value.to_smt()})
+    context = NormalizationContext(nonneg_exprs={value.structural_key(normalize_commutative=True)})
     normalized = normalize_expression(expr, context)
 
     assert normalized.to_smt() == value.to_smt()
@@ -1145,7 +1145,7 @@ def test_normalize_expression_reduces_abs_bit_hack_when_expr_negative():
         size=8,
     )
 
-    context = NormalizationContext(neg_exprs={value.to_smt()})
+    context = NormalizationContext(neg_exprs={value.structural_key(normalize_commutative=True)})
     normalized = normalize_expression(expr, context)
 
     assert normalized.operator == "INT_2COMP"

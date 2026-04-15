@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
-from ...model import Expression
+from ...model import Expression, StructuralKey, expression_key
 
 
 @dataclass
@@ -15,10 +15,10 @@ class SignFacts:
     pos_vars: Set[str]
     neg_vars: Set[str]
     nonzero_vars: Set[str]
-    nonneg_exprs: Set[str]
-    pos_exprs: Set[str]
-    neg_exprs: Set[str]
-    nonzero_exprs: Set[str]
+    nonneg_exprs: Set[StructuralKey]
+    pos_exprs: Set[StructuralKey]
+    neg_exprs: Set[StructuralKey]
+    nonzero_exprs: Set[StructuralKey]
     upper_bounds: Dict[str, int]
 
     def __init__(self):
@@ -84,8 +84,5 @@ class SignFacts:
         return self.upper_bounds.get(var_name)
 
 
-def expr_key(expr: Expression) -> str:
-    try:
-        return expr.to_smt()
-    except Exception:
-        return ""
+def expr_key(expr: Expression) -> StructuralKey:
+    return expression_key(expr, normalize_commutative=True)

@@ -39,9 +39,12 @@ class Condition:
         """条件が等価かどうかを判定"""
         if not isinstance(other, Condition):
             return False
-        if self.negated != other.negated:
-            return False
-        return self.expression.to_string() == other.expression.to_string()
+        return self.structural_key() == other.structural_key()
+
+    def structural_key(self, *, budget: int = 256):
+        from .structural import condition_key
+
+        return condition_key(self, budget=budget)
 
     @classmethod
     def combine_and(cls, conditions: List[Optional["Condition"]]) -> Optional["Condition"]:

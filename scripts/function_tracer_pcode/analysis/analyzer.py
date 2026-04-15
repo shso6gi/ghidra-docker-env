@@ -19,7 +19,7 @@ from ..config.settings import (
 )
 from . import PcodeTracer
 from .bounded_refinement import BoundedCallRefiner
-from .condition import ConditionTracker, ConditionSimplifier
+from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalizer
 from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
@@ -3244,7 +3244,7 @@ class ReturnAnalyzer:
         incoming_block,
         predecessor,
         condition_tracker: Optional[ConditionTracker],
-        current_condition_keys: Set[str],
+        current_condition_keys: Set[object],
     ) -> Tuple[int, int, int]:
         predecessor_match = 1 if self._blocks_match(incoming_block, predecessor) else 0
         if condition_tracker is None or not current_condition_keys:
@@ -3263,16 +3263,16 @@ class ReturnAnalyzer:
         specificity = len(incoming_keys)
         return (matched, predecessor_match, specificity)
 
-    def _build_condition_signature_set(self, conditions: List[Condition]) -> Set[str]:
+    def _build_condition_signature_set(self, conditions: List[Condition]) -> Set[object]:
         from .condition.simplifier import ConditionSimplifier
 
-        signatures: Set[str] = set()
+        signatures: Set[object] = set()
         for condition in conditions:
             try:
-                signatures.add(ConditionSimplifier.get_simplified_condition_string(condition))
+                signatures.add(ConditionNormalizer.normalize_for_contradiction(condition))
             except Exception:
                 try:
-                    signatures.add(condition.to_string())
+                    signatures.add(condition.structural_key())
                 except Exception:
                     continue
         return signatures
@@ -3670,13 +3670,13 @@ class ReturnAnalyzer:
     def _pruning_conditions_signature(
         self,
         conditions: List[Condition],
-    ) -> str:
+    ):
         parts = [
-            ConditionSimplifier.get_simplified_condition_string(condition)
+            ConditionNormalizer.normalize_for_contradiction(condition)
             for condition in (conditions or [])
         ]
         parts.sort()
-        return ";;".join(parts)
+        return tuple(parts)
 
     def _merge_equivalent_return_infos(
         self,

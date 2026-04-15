@@ -28,7 +28,7 @@ def _case_return_type_obj(case: ReturnCase):
 def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
     """FunctionReturnAnalysis から ReturnCase を抽出"""
     cases = []
-    merged_cases: Dict[Tuple[Tuple[Tuple[str, str, str, bool], ...], str], ReturnCase] = {}
+    merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
 
     for index, ret_info in enumerate(analysis.returns):
         simplified_conditions = ConditionSimplifier.simplify_conditions(ret_info.conditions)
@@ -59,7 +59,7 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
     return cases
 
 
-def _build_return_case_key(case: ReturnCase) -> Tuple[Tuple[Tuple[str, str, str, bool], ...], str]:
+def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
     cond_key = tuple(
         sorted(
@@ -67,7 +67,7 @@ def _build_return_case_key(case: ReturnCase) -> Tuple[Tuple[Tuple[str, str, str,
             for cond in case.conditions
         )
     )
-    value_key = case.value_expr.to_smt()
+    value_key = case.value_expr.structural_key(normalize_commutative=True)
     return cond_key, value_key
 
 

@@ -3,7 +3,7 @@
 
 from typing import Optional, Set
 
-from ...model import Expression, ExpressionType
+from ...model import Expression, ExpressionType, StructuralKey
 from .fact_types import SignFacts, expr_key
 
 
@@ -40,7 +40,7 @@ def normalize_fact_expr(expr: Expression) -> Expression:
 
 
 def record_expr_fact(
-    target: Set[str],
+    target: Set[StructuralKey],
     expr: Expression,
     debug: bool,
     message: str,
@@ -50,7 +50,7 @@ def record_expr_fact(
         return
     target.add(key)
     if debug:
-        print(f"[Facts] {message}: {key}")
+        print(f"[Facts] {message}: {expr.to_string()}")
 
 
 def is_integral_expression(expr: Expression) -> bool:
@@ -59,7 +59,7 @@ def is_integral_expression(expr: Expression) -> bool:
 
 
 def record_integral_expr_fact(
-    target: Set[str],
+    target: Set[StructuralKey],
     expr: Expression,
     debug: bool,
     message: str,

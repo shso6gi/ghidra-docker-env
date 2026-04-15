@@ -64,7 +64,6 @@ def _extract_div_and_multiplier(mult_expr: Expression):
 
 
 def _same_expr(lhs: Expression, rhs: Expression) -> bool:
-    try:
-        return lhs.to_smt() == rhs.to_smt()
-    except Exception:
-        return lhs.to_string() == rhs.to_string()
+    return lhs.structural_key(normalize_commutative=True) == rhs.structural_key(
+        normalize_commutative=True
+    )

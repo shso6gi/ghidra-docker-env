@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
-from typing import Callable, List, Optional, Set, Dict, Tuple, Any
+from typing import Callable, List, Optional, Set, Dict, Tuple, Any, Hashable
 from ..model import Expression, Condition, ExpressionType, StorageInfo
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
@@ -43,7 +43,7 @@ class ExpandedValue:
         """条件が矛盾していないかチェック"""
         return not ConditionSimplifier.is_contradiction(self.conditions)
     
-    def get_condition_signature(self) -> str:
+    def get_condition_signature(self) -> Hashable:
         """
         条件のシグネチャを取得（重複排除用）
         
@@ -147,10 +147,10 @@ class ExpressionExpander:
             return []
         return ConditionSimplifier.simplify_conditions(list(conditions))
 
-    def _expansion_expression_signature(self, expr: Optional[Expression]) -> str:
+    def _expansion_expression_signature(self, expr: Optional[Expression]):
         """展開中の重複排除に使う、可換結合演算を吸収した式シグネチャ。"""
         if expr is None:
-            return "<none>"
+            return ("none",)
 
         if (
             expr.expr_type == ExpressionType.BINARY_OP
@@ -163,8 +163,11 @@ class ExpressionExpander:
                 self._expansion_expression_signature(operand) for operand in flattened
             )
             return (
-                f"{expr.operator}[{','.join(operand_sigs)}]"
-                f":{expr.size}:{expr.get_bit_width()}"
+                "commutative",
+                expr.operator or "",
+                int(expr.size or 0),
+                int(expr.get_bit_width() or 0),
+                tuple(operand_sigs),
             )
 
         return ConditionNormalizer.expression_signature(expr)

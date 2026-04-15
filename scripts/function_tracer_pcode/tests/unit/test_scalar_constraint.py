@@ -16,7 +16,8 @@ def test_extract_scalar_constraint_handles_simple_affine_parameter():
 
     assert fact is not None
     assert fact.kind == "upper"
-    assert fact.key[0].startswith("B:INT_ADD(")
+    assert fact.key[0][0] == "binary"
+    assert fact.key[0][1] == "INT_ADD"
 
 
 def test_extract_scalar_constraint_skips_overly_complex_expression_without_to_string(monkeypatch):
