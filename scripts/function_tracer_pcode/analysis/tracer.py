@@ -3,7 +3,16 @@
 
 from __future__ import annotations
 from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
-from ..model import Expression, ExpressionType, Condition, StorageInfo, CallTargetRef, UnknownValueRef, AddressValueRef
+from ..model import (
+    Expression,
+    ExpressionType,
+    Condition,
+    StorageInfo,
+    CallTargetRef,
+    UnknownValueRef,
+    AddressValueRef,
+    LocationBaseRef,
+)
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
     UnknownTracker, UnknownEvent, UnknownReason,
@@ -516,7 +525,8 @@ class PcodeTracer:
                     
                     return Expression.parameter(
                         sym_name, param_idx, dtype, dtype_obj, varnode.getSize(),
-                        storage_info=storage_info
+                        storage_info=storage_info,
+                        runtime_ref=LocationBaseRef.parameter(sym_name, index=param_idx),
                     )
                 else:
                     dtype_obj = symbol.getDataType() if symbol.getDataType() else None

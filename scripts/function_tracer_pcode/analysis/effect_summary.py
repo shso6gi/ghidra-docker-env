@@ -1596,6 +1596,111 @@ def _expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequen
     return canonicalize_param_location(expr, parameters, size=size) is not None
 
 
+def _normalize_parameter_index(value: Optional[object]) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        normalized = int(value)
+    except Exception:
+        return None
+    return normalized if normalized >= 0 else None
+
+
+def _parameter_base_ref(
+    *,
+    name: Optional[object] = None,
+    index: Optional[object] = None,
+) -> LocationBaseRef:
+    normalized_name = str(name) if isinstance(name, str) and name else None
+    return LocationBaseRef(
+        kind="parameter",
+        parameter_name=normalized_name,
+        parameter_index=_normalize_parameter_index(index),
+        display_hint=normalized_name,
+    )
+
+
+def _parameter_base_ref_from_expression(expr: Optional[Expression]) -> Optional[LocationBaseRef]:
+    if expr is None:
+        return None
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, LocationBaseRef) and runtime_ref.is_parameter():
+        return runtime_ref
+    if isinstance(runtime_ref, CanonicalLocation) and runtime_ref.base_ref.is_parameter():
+        if not runtime_ref.steps and int(runtime_ref.offset) == 0:
+            return runtime_ref.base_ref
+
+    if expr.expr_type == ExpressionType.PARAMETER:
+        return _parameter_base_ref(name=expr.name, index=expr.value)
+    if expr.name:
+        return _parameter_base_ref(name=expr.name)
+    return None
+
+
+def _resolve_parameter_descriptor_from_identity(
+    parameters: Sequence[Dict],
+    *,
+    parameter_ref: Optional[LocationBaseRef] = None,
+    parameter_index: Optional[object] = None,
+    parameter_name: Optional[object] = None,
+    storage_info: Optional[StorageInfo] = None,
+) -> Optional[Dict]:
+    best_param: Optional[Dict] = None
+    best_score: Optional[int] = None
+    ambiguous = False
+
+    normalized_index = _normalize_parameter_index(parameter_index)
+    normalized_name = str(parameter_name) if isinstance(parameter_name, str) and parameter_name else None
+
+    for param in parameters:
+        score = 0
+        param_index = _normalize_parameter_index(param.get("index"))
+        param_name = param.get("name")
+        if not isinstance(param_name, str) or not param_name:
+            param_name = None
+
+        if parameter_ref is not None and parameter_ref.matches_parameter(param):
+            score += 100
+        if normalized_index is not None and param_index is not None and normalized_index == param_index:
+            score += 80
+        if storage_info is not None:
+            param_storage = _coerce_storage_info(param.get("storage"))
+            if param_storage is not None and _storage_matches_parameter(storage_info, param_storage):
+                score += 40
+        if normalized_name is not None and param_name == normalized_name:
+            score += 20
+
+        if score <= 0:
+            continue
+        if best_score is None or score > best_score:
+            best_param = param
+            best_score = score
+            ambiguous = False
+            continue
+        if score == best_score:
+            ambiguous = True
+
+    if ambiguous:
+        return None
+    return best_param
+
+
+def _resolve_parameter_descriptor(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+) -> Optional[Dict]:
+    if expr is None:
+        return None
+    return _resolve_parameter_descriptor_from_identity(
+        parameters,
+        parameter_ref=_parameter_base_ref_from_expression(expr),
+        parameter_index=getattr(expr, "value", None) if expr.expr_type == ExpressionType.PARAMETER else None,
+        parameter_name=getattr(expr, "name", None),
+        storage_info=_coerce_storage_info(getattr(expr, "storage_info", None)),
+    )
+
+
 def _parameter_expression_from_descriptor(param: Dict, size: Optional[int] = None) -> Optional[Expression]:
     name = param.get("name")
     if not name:
@@ -1616,6 +1721,7 @@ def _parameter_expression_from_descriptor(param: Dict, size: Optional[int] = Non
         param.get("data_type_obj"),
         param_size,
         storage_info=_coerce_storage_info(param.get("storage")),
+        runtime_ref=_parameter_base_ref(name=name, index=param_index),
     )
 
 
@@ -1712,48 +1818,38 @@ def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dic
     if high_var is not None:
         symbol = high_var.getSymbol()
         if symbol is not None:
-            symbol_name = symbol.getName()
-            for param in parameters:
-                if param.get("name") != symbol_name:
-                    continue
+            try:
+                symbol_name = symbol.getName()
+            except Exception:
+                symbol_name = None
+            try:
+                symbol_index = symbol.getCategoryIndex() if symbol.isParameter() else None
+            except Exception:
+                symbol_index = None
+            if symbol_index is None:
                 try:
-                    param_index = int(param.get("index", -1))
+                    symbol_index = high_var.getSlot()
                 except Exception:
-                    param_index = -1
-                return Expression.parameter(
-                    symbol_name,
-                    param_index,
-                    param.get("data_type"),
-                    param.get("data_type_obj"),
-                    varnode.getSize(),
-                    storage_info=storage_info,
-                )
+                    symbol_index = None
+            descriptor = _resolve_parameter_descriptor_from_identity(
+                parameters,
+                parameter_ref=_parameter_base_ref(name=symbol_name, index=symbol_index),
+                parameter_index=symbol_index,
+                parameter_name=symbol_name,
+                storage_info=storage_info,
+            )
+            if descriptor is not None:
+                return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
 
     probe = Expression.variable(
         getattr(high_var, "getName", lambda: None)() or f"var_{id(varnode):x}",
         size=varnode.getSize(),
         storage_info=storage_info,
     )
-    resolved_name = _resolve_parameter_name(probe, parameters)
-    if resolved_name is None:
+    descriptor = _resolve_parameter_descriptor(probe, parameters)
+    if descriptor is None:
         return None
-
-    param = next((item for item in parameters if item.get("name") == resolved_name), None)
-    if param is None:
-        return None
-
-    try:
-        param_index = int(param.get("index", -1))
-    except Exception:
-        param_index = -1
-    return Expression.parameter(
-        resolved_name,
-        param_index,
-        param.get("data_type"),
-        param.get("data_type_obj"),
-        varnode.getSize(),
-        storage_info=storage_info,
-    )
+    return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
 
 
 def _recover_parameter_from_stack_load(
@@ -2748,6 +2844,33 @@ def collapse_post_state_expr_to_canonical_memory(
     )
 
 
+def _latest_definite_effect_value_for_location(
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+) -> Optional[Expression]:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    latest_effect: Optional[StoreEffect] = None
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if effect.location.size != location.size:
+            continue
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        if not locations_match(
+            location,
+            effect.location,
+            normalized_return_conditions + normalized_effect_conditions,
+        ):
+            continue
+        residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
+        if residual:
+            continue
+        if latest_effect is None or effect.order_key > latest_effect.order_key:
+            latest_effect = effect
+    return latest_effect.value if latest_effect is not None else None
+
+
 def collapse_post_state_expr_to_canonical_read(
     expr: Optional[Expression],
     effects: Sequence[StoreEffect],
@@ -2758,15 +2881,44 @@ def collapse_post_state_expr_to_canonical_read(
 ) -> Optional[Expression]:
     if expr is None or not effects or not parameters:
         return None
-    if expr.expr_type == ExpressionType.MEMORY:
-        return None
 
     active_conditions = list(return_conditions or [])
-    normalized_expr = _reduce_expression_under_conditions(expr, active_conditions)
+    expr_is_memory = expr.expr_type == ExpressionType.MEMORY and bool(expr.operands)
+    normalized_expr = expr
+    candidate_effects = list(effects)
+    memory_location = None
+
+    if expr_is_memory:
+        memory_location = canonicalize_location(expr.operands[0], parameters, size=expr.size)
+        if memory_location is None:
+            return None
+        if expr.read_order_key is not None:
+            candidate_effects = [effect for effect in effects if effect.order_key < expr.read_order_key]
+            rewritten_observed = rewrite_observed_loads_from_effects(
+                expr,
+                active_conditions,
+                effects,
+                parameters,
+            )
+            if rewritten_observed is not None:
+                normalized_expr = rewritten_observed
+        else:
+            if _replay_definite_active_effects_for_location(
+                memory_location,
+                active_conditions,
+                effects,
+                parameters,
+            ) is None:
+                return None
+
+    reduced_expr = _reduce_expression_under_conditions(normalized_expr, active_conditions)
+    normalized_expr = reduced_expr if reduced_expr is not None else normalized_expr
+
     locations = sorted(
-        {effect.location for effect in effects},
+        {effect.location for effect in candidate_effects},
         key=_location_sort_key,
     )
+    same_location_fallback: Optional[Expression] = None
     for location in locations:
         candidate = post_state_read_expression_for_location(
             location,
@@ -2775,13 +2927,38 @@ def collapse_post_state_expr_to_canonical_read(
         )
         if candidate is None:
             continue
+        if expr_is_memory and expr.read_order_key is None:
+            latest_value = _latest_definite_effect_value_for_location(
+                location,
+                active_conditions,
+                candidate_effects,
+            )
+            if latest_value is not None:
+                normalized_latest_value = _reduce_expression_under_conditions(latest_value, active_conditions)
+                if _expressions_equivalent_under_conditions(
+                    normalized_expr,
+                    normalized_latest_value,
+                    active_conditions,
+                    parameters,
+                ):
+                    return candidate
+            if memory_location is not None and locations_match(location, memory_location, active_conditions):
+                same_location_fallback = candidate
         rewritten = rewrite_loads_from_effects(
             candidate,
             active_conditions,
-            effects,
+            candidate_effects,
             parameters,
         )
         normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
+        if expr_is_memory and expr.read_order_key is None:
+            if _expressions_equivalent_under_conditions(
+                normalized_expr,
+                normalized_rewritten,
+                active_conditions,
+                parameters,
+            ):
+                return candidate
         if _expressions_equivalent_under_conditions(
             normalized_expr,
             normalized_rewritten,
@@ -2792,7 +2969,7 @@ def collapse_post_state_expr_to_canonical_read(
         replayed = _replay_definite_active_effects_for_location(
             location,
             active_conditions,
-            effects,
+            candidate_effects,
             parameters,
         )
         if replayed is None:
@@ -2804,7 +2981,28 @@ def collapse_post_state_expr_to_canonical_read(
             active_conditions,
             parameters,
         ):
+            if expr_is_memory and expr.read_order_key is not None:
+                final_replayed = _replay_definite_active_effects_for_location(
+                    location,
+                    active_conditions,
+                    effects,
+                    parameters,
+                )
+                if final_replayed is not None:
+                    normalized_final_replayed = _reduce_expression_under_conditions(final_replayed, active_conditions)
+                    if not _expressions_equivalent_under_conditions(
+                        normalized_replayed,
+                        normalized_final_replayed,
+                        active_conditions,
+                        parameters,
+                    ):
+                        continue
             return candidate
+    if same_location_fallback is not None:
+        return same_location_fallback
+    return None
+
+
 @overload
 def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     expr: Expression,
@@ -2838,53 +3036,12 @@ def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     PHI/MULTIEQUAL, such as a nested MULTIEQUAL that a prior simplifier already
     reduced to one surviving branch.
     """
-    if expr is None or not effects or not parameters:
-        return None
-    if expr.expr_type != ExpressionType.MEMORY:
-        return None
-
-    active_conditions = list(return_conditions or [])
-    normalized_expr = _reduce_expression_under_conditions(expr, active_conditions)
-    locations = sorted(
-        {effect.location for effect in effects},
-        key=_location_sort_key,
+    return collapse_post_state_expr_to_canonical_memory(
+        expr,
+        effects,
+        parameters,
+        return_conditions=return_conditions,
     )
-    for location in locations:
-        candidate = memory_expression_for_location(location, parameters)
-        if candidate is None:
-            continue
-        rewritten = rewrite_loads_from_effects(
-            candidate,
-            active_conditions,
-            effects,
-            parameters,
-        )
-        normalized_rewritten = _reduce_expression_under_conditions(rewritten, active_conditions)
-        if _expressions_equivalent_under_conditions(
-            normalized_expr,
-            normalized_rewritten,
-            active_conditions,
-            parameters,
-        ):
-            return candidate
-        replayed = _replay_definite_active_effects_for_location(
-            location,
-            active_conditions,
-            effects,
-            parameters,
-        )
-        if replayed is None:
-            continue
-        normalized_replayed = _reduce_expression_under_conditions(replayed, active_conditions)
-        if _expressions_equivalent_under_conditions(
-            normalized_expr,
-            normalized_replayed,
-            active_conditions,
-            parameters,
-        ):
-            return candidate
-
-    return None
 
 
 @overload
@@ -2895,6 +3052,7 @@ def canonicalize_post_state_subexpressions(
     parameters: Sequence[Dict],
     *,
     symbolic_post_state: bool = False,
+    allow_memory_leaf_collapse: bool = False,
 ) -> Expression:
     ...
 
@@ -2907,6 +3065,7 @@ def canonicalize_post_state_subexpressions(
     parameters: Sequence[Dict],
     *,
     symbolic_post_state: bool = False,
+    allow_memory_leaf_collapse: bool = False,
 ) -> Optional[Expression]:
     ...
 
@@ -2918,19 +3077,21 @@ def canonicalize_post_state_subexpressions(
     parameters: Sequence[Dict],
     *,
     symbolic_post_state: bool = False,
+    allow_memory_leaf_collapse: bool = False,
 ) -> Optional[Expression]:
     if expr is None:
         return None
 
-    collapsed = collapse_post_state_expr_to_canonical_read(
-        expr,
-        effects,
-        parameters,
-        return_conditions=return_conditions,
-        symbolic_post_state=symbolic_post_state,
-    )
-    if collapsed is not None:
-        return collapsed
+    if expr.expr_type != ExpressionType.MEMORY or allow_memory_leaf_collapse:
+        collapsed = collapse_post_state_expr_to_canonical_read(
+            expr,
+            effects,
+            parameters,
+            return_conditions=return_conditions,
+            symbolic_post_state=symbolic_post_state,
+        )
+        if collapsed is not None:
+            return collapsed
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
         rewritten_operands = [
@@ -2940,6 +3101,7 @@ def canonicalize_post_state_subexpressions(
                 effects,
                 parameters,
                 symbolic_post_state=symbolic_post_state,
+                allow_memory_leaf_collapse=False,
             )
             for op in expr.operands
         ]
@@ -2963,6 +3125,7 @@ def canonicalize_post_state_subexpressions(
                 effects,
                 parameters,
                 symbolic_post_state=symbolic_post_state,
+                allow_memory_leaf_collapse=False,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -3035,6 +3198,7 @@ def normalize_post_state_expression(
             effects,
             parameters,
             symbolic_post_state=symbolic_post_state,
+            allow_memory_leaf_collapse=True,
         )
         if canonicalized is not None:
             normalized = canonicalized
@@ -3279,6 +3443,27 @@ def _rewrite_definite_post_state_subexpressions(
         return rebuilt
 
     return expr
+
+
+def materialize_definite_post_state_expression(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    preserve_composite_location_wrappers: bool = False,
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+    rewritten = _rewrite_definite_post_state_subexpressions(
+        expr,
+        return_conditions,
+        effects,
+        parameters,
+        rewrite_memory_leaf=True,
+        preserve_composite_location_wrappers=preserve_composite_location_wrappers,
+    )
+    return rewritten if rewritten is not None else expr
 
 
 def _should_preserve_composite_location_wrapper(
@@ -3554,6 +3739,10 @@ def memory_expression_for_location(
         param.get("data_type_obj"),
         param_size,
         storage_info=_coerce_storage_info(param.get("storage")),
+        runtime_ref=_parameter_base_ref(
+            name=location.base_ref.parameter_name or location.base_param,
+            index=param_index,
+        ),
     )
     addr: Expression = base
     for step in location.steps:
@@ -4183,17 +4372,12 @@ def _resolve_location_base_with_offset(
     expr: Expression,
     parameters: Sequence[Dict],
 ) -> Optional[Tuple[LocationBaseRef, int]]:
-    param_name = _resolve_parameter_name(expr, parameters)
-    if param_name is not None:
-        param_index = None
-        for param in parameters:
-            if param.get("name") == param_name:
-                try:
-                    param_index = int(param.get("index"))
-                except Exception:
-                    param_index = None
-                break
-        return LocationBaseRef.parameter(param_name, index=param_index), 0
+    param = _resolve_parameter_descriptor(expr, parameters)
+    if param is not None:
+        return _parameter_base_ref(
+            name=param.get("name"),
+            index=param.get("index"),
+        ), 0
 
     if _is_stack_frame_base_expression(expr):
         return LocationBaseRef.stack_frame(), 0
@@ -4253,27 +4437,11 @@ def _resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Opt
     if expr is None:
         return None
 
-    if expr.name:
-        for param in parameters:
-            if param.get("name") == expr.name:
-                return expr.name
-
-    expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
-    if expr_storage is None:
+    descriptor = _resolve_parameter_descriptor(expr, parameters)
+    if descriptor is None:
         return None
-
-    matches: List[str] = []
-    for param in parameters:
-        param_name = param.get("name")
-        param_storage = _coerce_storage_info(param.get("storage"))
-        if not param_name or param_storage is None:
-            continue
-        if _storage_matches_parameter(expr_storage, param_storage):
-            matches.append(param_name)
-
-    if len(matches) == 1:
-        return matches[0]
-    return None
+    name = descriptor.get("name")
+    return str(name) if isinstance(name, str) and name else None
 
 
 def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:

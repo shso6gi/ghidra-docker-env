@@ -34,6 +34,7 @@ from .effect_summary import (
     _reduce_expression_under_conditions,
     expression_contains_synthetic_location_reads,
     lower_post_state_expression_for_smt,
+    materialize_definite_post_state_expression,
     normalize_post_state_expression,
     summarize_store_effects,
     substitute_condition,
@@ -4462,14 +4463,24 @@ class ReturnAnalyzer:
                     f"{self._debug_expr_summary(value)} -> "
                     f"{self._debug_expr_summary(canonicalized)}"
                 )
-            fallback_replayed = normalize_post_state_expression(
-                value,
-                conditions,
-                effect_summary.effects,
-                self._current_parameters,
-                prefer_canonical_post_state=False,
-                preserve_composite_location_wrappers=True,
-            )
+            fallback_replayed = None
+            if value.expr_type == ExpressionType.MEMORY:
+                fallback_replayed = materialize_definite_post_state_expression(
+                    value,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    preserve_composite_location_wrappers=True,
+                )
+            if fallback_replayed is None or _expressions_equivalent(fallback_replayed, value):
+                fallback_replayed = normalize_post_state_expression(
+                    value,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    prefer_canonical_post_state=False,
+                    preserve_composite_location_wrappers=True,
+                )
             return fallback_replayed if fallback_replayed is not None else value
 
         return canonicalized
@@ -4502,9 +4513,20 @@ class ReturnAnalyzer:
             effect_summary.effects,
             self._current_parameters,
         )
+        comparison_target = original
+        if original.expr_type == ExpressionType.MEMORY:
+            expected_roundtrip = materialize_definite_post_state_expression(
+                original,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                preserve_composite_location_wrappers=True,
+            )
+            if expected_roundtrip is not None:
+                comparison_target = expected_roundtrip
         return lowered_roundtrip is None or not _expressions_equivalent_under_conditions(
             lowered_roundtrip,
-            original,
+            comparison_target,
             conditions,
             self._current_parameters,
         )

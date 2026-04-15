@@ -22,7 +22,6 @@ from ..analysis.effect_summary import (
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
-    collapse_pruned_post_state_memory_leaf_to_canonical_memory,
     expression_contains_synthetic_location_reads,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -757,13 +756,6 @@ class ExpressionExpander:
             self.parameters,
             return_conditions=conditions,
         )
-        if collapsed is None:
-            collapsed = collapse_pruned_post_state_memory_leaf_to_canonical_memory(
-                traced,
-                self.effect_summary.effects,
-                self.parameters,
-                return_conditions=conditions,
-            )
         if collapsed is not None:
             self._debug_print(
                 f"Collapsed nested MULTIEQUAL to canonical memory: {self._debug_expr_summary(collapsed)}",
@@ -1048,7 +1040,7 @@ class ExpressionExpander:
             and canonicalized is traced
             and traced.expr_type == ExpressionType.MEMORY
         ):
-            pruned_leaf = collapse_pruned_post_state_memory_leaf_to_canonical_memory(
+            pruned_leaf = collapse_post_state_expr_to_canonical_memory(
                 traced,
                 self.effect_summary.effects,
                 self.parameters,
@@ -1118,6 +1110,7 @@ class ExpressionExpander:
             conditions,
             self.effect_summary.effects,
             self.parameters,
+            allow_memory_leaf_collapse=True,
         )
         rewrite_target = canonicalized if canonicalized is not None else expr
         rewritten_post_state = (
@@ -1362,6 +1355,23 @@ class ExpressionExpander:
             return None
 
         canonicalized = self._canonicalize_traced_expression(traced, conditions)
+        if (
+            traced is not None
+            and canonicalized is traced
+            and traced.expr_type == ExpressionType.MEMORY
+            and self.effect_summary is not None
+            and getattr(self.effect_summary, "effects", None)
+            and self.parameters
+        ):
+            collapsed = collapse_post_state_expr_to_canonical_memory(
+                traced,
+                self.effect_summary.effects,
+                self.parameters,
+                return_conditions=conditions,
+            )
+            if collapsed is not None:
+                reduced = _reduce_expression_under_conditions(collapsed, conditions)
+                canonicalized = reduced if reduced is not None else collapsed
         if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
             canonicalized.size = output_size
         return canonicalized

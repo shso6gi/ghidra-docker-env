@@ -51,7 +51,7 @@ from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, Ty
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.param_semantics import ParameterSemanticHint
-from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
 
@@ -1556,6 +1556,34 @@ def test_resolve_parameter_name_rejects_full_register_when_only_fragment_param_e
 
     assert _resolve_parameter_name(full_reg_expr, params) is None
     assert _resolve_parameter_name(fragment_expr, params) == "param_1"
+
+
+def test_resolve_parameter_name_prefers_index_and_storage_over_stale_name():
+    params = [
+        _param(
+            "param_1",
+            size=8,
+            is_signed=False,
+            index=0,
+            storage=_reg_storage("a0", size_bytes=8, register_name="a0"),
+        ),
+        _param(
+            "param_2",
+            size=8,
+            is_signed=False,
+            index=1,
+            storage=_reg_storage("a1", size_bytes=8, register_name="a1"),
+        ),
+    ]
+
+    expr = Expression.parameter(
+        "stale_name",
+        index=1,
+        size=8,
+        storage_info=StorageInfo(**_reg_storage("a1", size_bytes=8, register_name="a1")),
+    )
+
+    assert _resolve_parameter_name(expr, params) == "param_2"
 
 
 def test_expression_expander_infers_stack_location_for_indirect_output_without_tracer_storage():
@@ -4113,6 +4141,42 @@ def test_effect_summary_collapses_pruned_post_state_memory_leaf_to_canonical_loc
     assert collapsed.to_string() == "MEM[b]"
 
 
+def test_effect_summary_generalized_collapse_resolves_raw_post_state_memory_leaf():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=CanonicalLocation("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        Expression.memory(a, size=4),
+        effects,
+        [
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+        return_conditions=[swap_taken],
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[b]"
+
+
 def test_expression_expander_collapses_nested_multiequal_using_active_conditions():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -5561,6 +5625,38 @@ def test_normalize_post_state_expression_stays_conservative_when_guards_do_not_m
     assert normalized.to_string() == "(MEM[value] + delta)"
 
 
+def test_normalize_post_state_expression_promotes_raw_memory_leaf_to_symbolic_post_state_read():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+
+    normalized = normalize_post_state_expression(
+        Expression.memory(ptr, size=4),
+        [ptr_nonnull],
+        [
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.unary_op("INT_2COMP", value),
+                conditions=[ptr_nonnull],
+                order_key=1,
+            ),
+        ],
+        [
+            _param("ptr", size=8, is_signed=False),
+            _param("value", size=4, is_signed=True, index=1),
+        ],
+        symbolic_post_state=True,
+    )
+
+    assert normalized is not None
+    assert normalized.expr_type == ExpressionType.VARIABLE
+    assert "__locread__" in normalized.to_string()
+    assert getattr(normalized, "runtime_ref", None) == CanonicalLocation("ptr", 0, 4)
+
+
 def test_normalize_post_state_expression_replays_definite_simple_store_then_read():
     ptr = Expression.parameter("ptr", 0, size=8)
     value = Expression.parameter("value", 1, size=4)
@@ -6237,6 +6333,98 @@ def test_return_analyzer_falls_back_to_definite_replay_when_symbolic_roundtrip_i
     )
 
     assert normalized.to_string() == "((MEM[param_1] - param_2) + (MEM[(param_1 + 4)] + 1))"
+
+
+def test_return_analyzer_keeps_symbolic_root_post_state_read_when_roundtrip_matches_materialized_leaf():
+    ptr = Expression.parameter("param_1", 0, size=8)
+    value = Expression.parameter("param_2", 1, size=4)
+    flag = Expression.parameter("param_3", 2, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+    flag_zero = Condition(
+        Expression.binary_op("INT_EQUAL", flag, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2", "param_3"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("param_1", 0, 4),
+                value=Expression.unary_op("INT_2COMP", value),
+                conditions=[ptr_nonnull, flag_zero],
+                order_key=1,
+            ),
+        ],
+    )
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=4, is_signed=True, index=1),
+        _param("param_3", size=4, is_signed=False, index=2),
+    ]
+
+    normalized = analyzer._normalize_expanded_return_value(
+        Expression.memory(ptr, size=4),
+        [ptr_nonnull, flag_zero],
+    )
+
+    assert normalized is not None
+    assert "__locread__" in normalized.to_string()
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [ptr_nonnull, flag_zero],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered.to_string() == "(-param_2)"
+
+
+def test_expression_expander_canonicalizes_direct_traced_memory_leaf_via_effect_summary():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    value = Expression.parameter("value", 1, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["ptr", "value"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation("ptr", 0, 4),
+                value=Expression.unary_op("INT_2COMP", value),
+                conditions=[ptr_nonnull],
+                order_key=1,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return Expression.memory(ptr, size=4)
+
+    class FakeOp:
+        pass
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("ptr", size=8, is_signed=False),
+            _param("value", size=4, is_signed=True, index=1),
+        ],
+    )
+
+    canonicalized = expander._trace_operation_expression(FakeOp(), [ptr_nonnull], depth=0, output_size=4)
+
+    assert canonicalized is not None
+    assert canonicalized.to_string() == "MEM[ptr]"
 
 
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions_regression():
