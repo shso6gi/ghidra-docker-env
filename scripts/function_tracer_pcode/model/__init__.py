@@ -11,7 +11,15 @@ from .runtime_refs import AddressValueRef, CanonicalLocation, LocationBaseRef, L
 from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
-from .structural import StructuralKey, expression_key, condition_key, key_contains_placeholder
+from .structural import (
+    StructuralKey,
+    expression_key,
+    expression_key_safe,
+    expression_key_or_identity,
+    condition_key,
+    key_contains_placeholder,
+    key_is_comparable,
+)
 from .signature import (
     FunctionSignature,
     SignatureHypothesis,
@@ -39,8 +47,11 @@ __all__ = [
     "Condition",
     "StructuralKey",
     "expression_key",
+    "expression_key_safe",
+    "expression_key_or_identity",
     "condition_key",
     "key_contains_placeholder",
+    "key_is_comparable",
     "SignednessResult",
     "FunctionSignature",
     "SignatureHypothesis",

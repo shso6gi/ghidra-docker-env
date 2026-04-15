@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Safe modulo canonicalization rules."""
 
-from ...model import Expression, ExpressionType
+from ...model import Expression, ExpressionType, expression_key_or_identity
 from .context import NormalizationContext
 
 
@@ -64,6 +64,6 @@ def _extract_div_and_multiplier(mult_expr: Expression):
 
 
 def _same_expr(lhs: Expression, rhs: Expression) -> bool:
-    return lhs.structural_key(normalize_commutative=True) == rhs.structural_key(
-        normalize_commutative=True
-    )
+    lhs_key = expression_key_or_identity(lhs, normalize_commutative=True)
+    rhs_key = expression_key_or_identity(rhs, normalize_commutative=True)
+    return lhs_key == rhs_key

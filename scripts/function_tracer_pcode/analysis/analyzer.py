@@ -1020,11 +1020,7 @@ class ReturnAnalyzer:
             base_expr = base_expr.operands[0]
 
         return (
-            base_expr.structural_key(
-                normalize_commutative=True,
-                strip_width_adapters=True,
-                collapse_full_masks=True,
-            ),
+            ConditionNormalizer.expression_signature(base_expr),
             displacement,
             deref_depth,
         )
@@ -1193,7 +1189,14 @@ class ReturnAnalyzer:
             return_results: List[ReturnInfo] = []
 
             for path_index, (block_path, path_conditions) in enumerate(path_entries):
-                terminal_call = self._find_terminal_call_on_block_path(block_path, return_op)
+                terminal_call = self._find_terminal_call_on_block_path(
+                    block_path,
+                    return_op,
+                    tracer=tracer,
+                    condition_tracker=condition_tracker,
+                    current_function=current_function,
+                    path_conditions=path_conditions,
+                )
                 if terminal_call is None:
                     if self.debug:
                         block_indexes = [block.index for block in block_path]
@@ -1592,6 +1595,11 @@ class ReturnAnalyzer:
         self,
         block_path: List[Any],
         return_op,
+        *,
+        tracer: Optional[PcodeTracer] = None,
+        condition_tracker: Optional[ConditionTracker] = None,
+        current_function=None,
+        path_conditions: Optional[List[Condition]] = None,
     ):
         """block path 上で RETURN に至る直前の wrapper 候補 CALL/CALLIND を探す。"""
         linear_ops = []
@@ -1617,6 +1625,17 @@ class ReturnAnalyzer:
         for pcode_op in linear_ops[terminal_index + 1:-1]:
             if not self._is_wrapper_passthrough_pcode_op(pcode_op):
                 return None
+
+        if not self._is_call_output_dominating_return_value(
+            linear_ops[terminal_index],
+            return_op,
+            tracer=tracer,
+            condition_tracker=condition_tracker,
+            current_function=current_function,
+            block_path=block_path,
+            path_conditions=path_conditions,
+        ):
+            return None
 
         return linear_ops[terminal_index]
 
@@ -2392,11 +2411,7 @@ class ReturnAnalyzer:
 
     def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
         return (
-            addr_expr.structural_key(
-                normalize_commutative=True,
-                strip_width_adapters=True,
-                collapse_full_masks=True,
-            ),
+            ConditionNormalizer.expression_signature(addr_expr),
             int(size),
         )
 
@@ -3369,6 +3384,8 @@ class ReturnAnalyzer:
         terminal_call = self._find_terminal_call_before_return(
             return_op,
             condition_tracker,
+            tracer=tracer,
+            current_function=current_function,
         )
         if terminal_call is None:
             if self.debug:
@@ -3622,15 +3639,13 @@ class ReturnAnalyzer:
         return (matched, predecessor_match, specificity)
 
     def _build_condition_signature_set(self, conditions: List[Condition]) -> Set[object]:
-        from .condition.simplifier import ConditionSimplifier
-
         signatures: Set[object] = set()
         for condition in conditions:
             try:
                 signatures.add(ConditionNormalizer.normalize_for_contradiction(condition))
             except Exception:
                 try:
-                    signatures.add(condition.structural_key())
+                    signatures.add(ConditionNormalizer.expression_signature(condition.expression))
                 except Exception:
                     continue
         return signatures
@@ -3667,6 +3682,8 @@ class ReturnAnalyzer:
         self,
         return_op,
         condition_tracker: ConditionTracker,
+        tracer: Optional[PcodeTracer] = None,
+        current_function=None,
     ):
         """同一 basic block 内で wrapper return とみなせる末尾 CALL/CALLIND を探す。"""
         return_parent = getattr(return_op, "getParent", lambda: None)()
@@ -3700,11 +3717,156 @@ class ReturnAnalyzer:
             if output is not None:
                 return None
 
+        if not self._is_call_output_dominating_return_value(
+            candidate,
+            return_op,
+            tracer=tracer,
+            condition_tracker=condition_tracker,
+            current_function=current_function,
+            block_path=None,
+            path_conditions=None,
+        ):
+            return None
+
         if self.debug:
             self._debug_print(
                 f"Implicit return wrapper recovery selected terminal {candidate.getMnemonic()} before RETURN"
             )
         return candidate
+
+    @staticmethod
+    def _varnode_location_key(varnode) -> Optional[Tuple[str, int, int]]:
+        if varnode is None:
+            return None
+        try:
+            address = varnode.getAddress()
+            size = int(varnode.getSize())
+            if address is None:
+                return None
+            space = address.getAddressSpace()
+            space_name = space.getName() if space is not None else "unknown"
+            return (space_name, int(address.getOffset()), size)
+        except Exception:
+            return None
+
+    @classmethod
+    def _varnodes_may_alias(cls, lhs, rhs) -> bool:
+        if lhs is None or rhs is None:
+            return False
+        if lhs is rhs:
+            return True
+        return cls._varnode_location_key(lhs) == cls._varnode_location_key(rhs)
+
+    def _extract_return_target_varnodes(
+        self,
+        return_op,
+        tracer: Optional[PcodeTracer],
+        current_function,
+        condition_tracker: Optional[ConditionTracker] = None,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        if return_op is None:
+            return None
+
+        explicit_inputs = getattr(return_op, "getNumInputs", lambda: 0)()
+        if explicit_inputs >= 2:
+            return return_op.getInput(1)
+
+        if tracer is None or current_function is None or condition_tracker is None:
+            return None
+
+        return self._find_implicit_return_source_varnode(
+            return_op,
+            tracer,
+            condition_tracker,
+            current_function,
+            block_path=block_path,
+            path_conditions=path_conditions,
+        )
+
+    def _is_call_output_dominating_return_value(
+        self,
+        call_op,
+        return_op,
+        *,
+        tracer: Optional[PcodeTracer] = None,
+        condition_tracker: Optional[ConditionTracker] = None,
+        current_function=None,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
+    ) -> bool:
+        call_output = getattr(call_op, "getOutput", lambda: None)()
+        if call_output is None:
+            if self.debug:
+                self._debug_print(
+                    "Terminal CALL/CALLIND wrapper rejected: no call output for provenance proof"
+                )
+            return False
+
+        if (
+            tracer is None
+            and condition_tracker is None
+            and current_function is None
+        ):
+            if self.debug:
+                self._debug_print(
+                    "Skipping call-output provenance proof due missing tracer/context"
+                )
+            return False
+
+        return_target = self._extract_return_target_varnodes(
+            return_op,
+            tracer=tracer,
+            current_function=current_function,
+            condition_tracker=condition_tracker,
+            block_path=block_path,
+            path_conditions=path_conditions,
+        )
+        if return_target is None:
+            if self.debug:
+                self._debug_print(
+                    "Terminal CALL/CALLIND wrapper rejected: no return target varnode for provenance proof"
+                )
+            return False
+
+        return self._def_chain_reaches_call_output(return_target, call_output, limit=64)
+
+    def _def_chain_reaches_call_output(self, sink_varnode, source_varnode, limit: int = 64) -> bool:
+        if sink_varnode is None or source_varnode is None:
+            return False
+        if self._varnodes_may_alias(sink_varnode, source_varnode):
+            return True
+
+        frontier = [sink_varnode]
+        visited: Set[tuple] = set()
+
+        for _ in range(limit):
+            next_frontier = []
+            for node in frontier:
+                key = self._varnode_location_key(node)
+                trace_key = key if key is not None else ("id", id(node))
+                if trace_key in visited:
+                    continue
+                visited.add(trace_key)
+
+                def_op = getattr(node, "getDef", lambda: None)()
+                if def_op is None:
+                    continue
+
+                get_num_inputs = getattr(def_op, "getNumInputs", lambda: 0)
+                for index in range(get_num_inputs()):
+                    input_varnode = getattr(def_op, "getInput", lambda _index: None)(index)
+                    if input_varnode is None:
+                        continue
+                    if self._varnodes_may_alias(input_varnode, source_varnode):
+                        return True
+                    next_frontier.append(input_varnode)
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        return False
 
     def _recover_implicit_return_from_terminal_call(
         self,

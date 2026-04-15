@@ -10,7 +10,7 @@ from ..loop_template_abstraction import prove_template_equivalence
 from ..normalize.context import NormalizationContext
 from ..normalize.core import normalize_expression
 from ..normalize.facts import extract_sign_facts
-from ...model import Condition, Expression, ExpressionType
+from ...model import Condition, Expression, ExpressionType, expression_key_or_identity
 from .pairwise import PairwiseStrategy
 from .pairwise_models import QueryResult, ReturnCase
 
@@ -133,7 +133,7 @@ def _extract_exact_constant_replacements(
             if expr_key is None:
                 continue
             existing = expr_replacements.get(expr_key)
-            if existing is not None and existing.structural_key() != constant.structural_key():
+            if existing is not None and expression_key_or_identity(existing) != expression_key_or_identity(constant):
                 expr_conflicts.add(expr_key)
                 expr_replacements.pop(expr_key, None)
                 expr_fact_exprs.pop(expr_key, None)
@@ -155,7 +155,7 @@ def _extract_exact_constant_replacements(
                 if existing is None:
                     replacements[symbol] = constant
                     changed = True
-                elif existing.structural_key() != constant.structural_key():
+                elif expression_key_or_identity(existing) != expression_key_or_identity(constant):
                     conflicts.add(symbol)
                     replacements.pop(symbol, None)
                     changed = True
@@ -178,7 +178,7 @@ def _extract_exact_constant_replacements(
                 replacements[symbol] = constant
                 changed = True
                 continue
-            if existing.structural_key() != constant.structural_key():
+            if expression_key_or_identity(existing) != expression_key_or_identity(constant):
                 conflicts.add(symbol)
                 replacements.pop(symbol, None)
                 changed = True
@@ -366,14 +366,16 @@ def _lookup_known_constant(
 def _expr_key(expr: Expression) -> tuple | None:
     try:
         normalized = normalize_expression(expr, NormalizationContext())
-        return normalized.structural_key(
+        return expression_key_or_identity(
+            normalized,
             normalize_commutative=True,
             strip_width_adapters=True,
             collapse_full_masks=True,
         )
     except Exception:
         try:
-            return expr.structural_key(
+            return expression_key_or_identity(
+                expr,
                 normalize_commutative=True,
                 strip_width_adapters=True,
                 collapse_full_masks=True,

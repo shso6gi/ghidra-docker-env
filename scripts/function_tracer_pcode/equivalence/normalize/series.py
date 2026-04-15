@@ -3,7 +3,7 @@
 
 from typing import Optional, Tuple
 
-from ...model import Expression, ExpressionType
+from ...model import Expression, ExpressionType, expression_key_or_identity
 from .context import NormalizationContext
 
 
@@ -270,9 +270,9 @@ def _accumulate_bias(expr: Expression, bias: int) -> Optional[Tuple[Expression, 
 def _same_nonconstant_expr(left: Expression, right: Expression) -> bool:
     left = _strip_series_wrapper(left)
     right = _strip_series_wrapper(right)
-    return left.structural_key(normalize_commutative=True) == right.structural_key(
-        normalize_commutative=True
-    )
+    left_key = expression_key_or_identity(left, normalize_commutative=True)
+    right_key = expression_key_or_identity(right, normalize_commutative=True)
+    return left_key == right_key
 
 
 def _same_condition_expression(left: Expression, right: Expression) -> bool:

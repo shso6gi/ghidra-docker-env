@@ -17,7 +17,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from ..model import Expression, ExpressionType, StructuralKey
+from ..model import (
+    Expression,
+    ExpressionType,
+    StructuralKey,
+    expression_key_or_identity,
+)
 from .normalize import NormalizationContext, normalize_expression
 from .normalize.series import (
     _match_expr_plus_const,
@@ -381,7 +386,8 @@ def _generic_atom(expr: Expression, width_bits: int) -> TemplateAtom:
 
 def _expr_key(expr: Expression, width_bits: int) -> StructuralKey:
     normalized = normalize_expression(_normalize_expression_for_width(expr, width_bits), NormalizationContext())
-    return normalized.structural_key(
+    return expression_key_or_identity(
+        normalized,
         normalize_commutative=True,
         strip_width_adapters=True,
         collapse_full_masks=True,
@@ -497,6 +503,7 @@ def _extract_affine_base_and_const(expr: Expression) -> Optional[Tuple[Optional[
 
 
 def _same_expression_key(left: Expression, right: Expression) -> bool:
-    return left.structural_key(normalize_commutative=True) == right.structural_key(
-        normalize_commutative=True
+    return expression_key_or_identity(left, normalize_commutative=True) == expression_key_or_identity(
+        right,
+        normalize_commutative=True,
     )

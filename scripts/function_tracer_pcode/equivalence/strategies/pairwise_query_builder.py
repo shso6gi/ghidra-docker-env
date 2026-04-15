@@ -61,13 +61,8 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
 
 def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
-    cond_key = tuple(
-        sorted(
-            ConditionNormalizer.normalize_for_contradiction(cond)
-            for cond in case.conditions
-        )
-    )
-    value_key = case.value_expr.structural_key(normalize_commutative=True)
+    cond_key = ConditionNormalizer.conditions_signature(case.conditions)
+    value_key = ConditionNormalizer.expression_signature(case.value_expr)
     return cond_key, value_key
 
 

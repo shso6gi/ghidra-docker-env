@@ -47,12 +47,7 @@ _MAX_CALL_ARGUMENT_VARIANTS = 16
 def _runtime_expression_signature(expr: Optional[Expression]):
     if expr is None:
         return ("none",)
-    return expr.structural_key(
-        normalize_commutative=True,
-        strip_width_adapters=True,
-        collapse_full_masks=True,
-        include_memory_read_order=False,
-    )
+    return ConditionNormalizer.expression_signature(expr)
 
 
 def _runtime_conditions_signature(conditions: Sequence[Condition]):

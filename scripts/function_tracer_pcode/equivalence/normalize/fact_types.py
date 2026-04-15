@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
-from ...model import Expression, StructuralKey, expression_key
+from ...model import Expression, StructuralKey, expression_key_or_identity
 
 
 @dataclass
@@ -85,4 +85,9 @@ class SignFacts:
 
 
 def expr_key(expr: Expression) -> StructuralKey:
-    return expression_key(expr, normalize_commutative=True)
+    return expression_key_or_identity(
+        expr,
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+    )

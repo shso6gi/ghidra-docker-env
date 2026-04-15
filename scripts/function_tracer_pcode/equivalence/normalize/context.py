@@ -4,7 +4,7 @@
 from typing import Dict, Set, Optional, List, Union
 from dataclasses import dataclass, field
 
-from ...model import Expression, StructuralKey, expression_key
+from ...model import Expression, StructuralKey, expression_key_or_identity
 
 
 ExpressionAuditValue = Optional[Union[str, Expression]]
@@ -128,4 +128,10 @@ class NormalizationContext:
     def _expr_key(self, expr) -> StructuralKey:
         if expr is None:
             return ("none",)
-        return expression_key(expr, normalize_commutative=True)
+        return expression_key_or_identity(
+            expr,
+            normalize_commutative=True,
+            strip_width_adapters=True,
+            collapse_full_masks=True,
+            include_memory_read_order=False,
+        )

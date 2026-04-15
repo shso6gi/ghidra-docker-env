@@ -4,7 +4,13 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from ...model import Condition, Expression, ExpressionType, StructuralKey, expression_key, key_contains_placeholder
+from ...model import (
+    Condition,
+    Expression,
+    ExpressionType,
+    StructuralKey,
+    expression_key_or_identity,
+)
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 
 
@@ -31,13 +37,11 @@ def _stable_scalar_expr_key(expr: Expression) -> Optional[StructuralKey]:
     unsupported node types so contradiction checks stay cheap and conservative.
     """
 
-    rendered = expression_key(
+    rendered = expression_key_or_identity(
         expr,
         budget=_SCALAR_KEY_MAX_NODES,
         normalize_commutative=True,
     )
-    if key_contains_placeholder(rendered):
-        return None
     return rendered
 
 

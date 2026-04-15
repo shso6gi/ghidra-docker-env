@@ -311,10 +311,14 @@ def _same_expr(left: Expression, right: Expression) -> bool:
 
 
 def _expr_signature(expr: Expression):
-    return expr.structural_key(
+    from ...model import expression_key_or_identity
+
+    return expression_key_or_identity(
+        expr,
         normalize_commutative=True,
         strip_width_adapters=True,
         collapse_full_masks=True,
+        include_memory_read_order=False,
     )
 
 

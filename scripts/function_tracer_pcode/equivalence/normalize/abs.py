@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Normalize branch-conditioned absolute-value idioms."""
 
-from ...model import Expression, ExpressionType
+from ...model import Expression, ExpressionType, expression_key_or_identity
 from .context import NormalizationContext
 
 
@@ -114,6 +114,6 @@ def _is_sign_shift_amount(amount: Expression, value: Expression) -> bool:
 
 
 def _same_expr(lhs: Expression, rhs: Expression) -> bool:
-    return lhs.structural_key(normalize_commutative=True) == rhs.structural_key(
-        normalize_commutative=True
-    )
+    lhs_key = expression_key_or_identity(lhs, normalize_commutative=True)
+    rhs_key = expression_key_or_identity(rhs, normalize_commutative=True)
+    return lhs_key == rhs_key

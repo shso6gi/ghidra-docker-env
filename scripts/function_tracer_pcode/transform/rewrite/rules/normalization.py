@@ -91,9 +91,12 @@ class CommutativeNormalizationRule(RewriteRule):
     
     def _get_sort_key(self, expr: 'Expression'):
         """ソート用の structural key を取得する。"""
+        from ....model import expression_key_or_identity
+
         if hasattr(expr, "structural_key") and callable(getattr(expr, "structural_key")):
             try:
-                return expr.structural_key(
+                return expression_key_or_identity(
+                    expr,
                     normalize_commutative=True,
                     strip_width_adapters=True,
                     collapse_full_masks=True,

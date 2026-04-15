@@ -87,8 +87,16 @@ class ModuloExpansionRule(RewriteRule):
         return None, None
     
     def _expressions_structurally_equal(self, expr1: 'Expression', expr2: 'Expression') -> bool:
-        return expr1.structural_key(normalize_commutative=True) == expr2.structural_key(
-            normalize_commutative=True
+        from ....model import expression_key_or_identity
+
+        return expression_key_or_identity(
+            expr1,
+            normalize_commutative=True,
+            strip_width_adapters=True,
+        ) == expression_key_or_identity(
+            expr2,
+            normalize_commutative=True,
+            strip_width_adapters=True,
         )
     
     def apply(self, expr: 'Expression') -> 'Expression':

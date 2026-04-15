@@ -315,3 +315,60 @@ def key_is_comparable(key: StructuralKey) -> bool:
     """Return False if the structural key contains placeholders/truncated markers."""
 
     return not key_contains_placeholder(key)
+
+
+def expression_key_safe(
+    expr: Optional[Expression],
+    *,
+    budget: int = 256,
+    normalize_commutative: bool = True,
+    strip_width_adapters: bool = False,
+    collapse_full_masks: bool = False,
+    include_memory_read_order: bool = True,
+) -> Optional[StructuralKey]:
+    """Return structural key only when it is safe for semantic equality.
+
+    If a bounded traversal is truncated/cycle-detected/opaque, the result is None
+    so callers can avoid treating two unrelated deep expressions as equal.
+    """
+
+    key = expression_key(
+        expr,
+        budget=budget,
+        normalize_commutative=normalize_commutative,
+        strip_width_adapters=strip_width_adapters,
+        collapse_full_masks=collapse_full_masks,
+        include_memory_read_order=include_memory_read_order,
+    )
+    if not key_is_comparable(key):
+        return None
+    return key
+
+
+def expression_key_or_identity(
+    expr: Optional[Expression],
+    *,
+    budget: int = 256,
+    normalize_commutative: bool = True,
+    strip_width_adapters: bool = False,
+    collapse_full_masks: bool = False,
+    include_memory_read_order: bool = True,
+) -> StructuralKey:
+    """Safe structural key with identity fallback for non-comparable inputs.
+
+    This avoids collapsing semantically unknown/truncated keys into equality.
+    """
+
+    safe = expression_key_safe(
+        expr,
+        budget=budget,
+        normalize_commutative=normalize_commutative,
+        strip_width_adapters=strip_width_adapters,
+        collapse_full_masks=collapse_full_masks,
+        include_memory_read_order=include_memory_read_order,
+    )
+    if safe is not None:
+        return safe
+    if expr is None:
+        return ("uncomparable_expression", "none")
+    return ("uncomparable_expression", type(expr).__name__, id(expr))

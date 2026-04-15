@@ -2,7 +2,15 @@
 """条件の正規化モジュール（Expression構造ベース改善版）"""
 
 from typing import Dict, Optional, Tuple
-from ...model import Expression, Condition, ExpressionType, StructuralKey, expression_key
+from ...model import (
+    Expression,
+    Condition,
+    ExpressionType,
+    StructuralKey,
+    expression_key,
+    key_is_comparable,
+    expression_key_or_identity,
+)
 
 
 class ConditionNormalizer:
@@ -22,7 +30,9 @@ class ConditionNormalizer:
     @classmethod
     def expression_signature(cls, expr: Optional[Expression]) -> StructuralKey:
         """Stable structural key suitable for caches and deduplication."""
-        return cls._expr_key(expr)
+        if expr is None:
+            return ("none",)
+        return cls._condition_expr_key(expr)
 
     @classmethod
     def conditions_signature(cls, conditions):
@@ -62,10 +72,10 @@ class ConditionNormalizer:
             
             if op in ("INT_EQUAL", "INT_NOTEQUAL"):
                 # 等価性比較：否定で反転
-                left_key = ConditionNormalizer._expr_key(
+                left_key = ConditionNormalizer._condition_expr_key(
                     expr.operands[0] if expr.operands else None
                 )
-                right_key = ConditionNormalizer._expr_key(
+                right_key = ConditionNormalizer._condition_expr_key(
                     expr.operands[1] if len(expr.operands) > 1 else None
                 )
                 
@@ -81,10 +91,10 @@ class ConditionNormalizer:
             
             elif op in ("INT_LESS", "INT_SLESS", "INT_LESSEQUAL", "INT_SLESSEQUAL"):
                 # 不等式比較：否定でswapと演算子変換
-                left_key = ConditionNormalizer._expr_key(
+                left_key = ConditionNormalizer._condition_expr_key(
                     expr.operands[0] if expr.operands else None
                 )
-                right_key = ConditionNormalizer._expr_key(
+                right_key = ConditionNormalizer._condition_expr_key(
                     expr.operands[1] if len(expr.operands) > 1 else None
                 )
                 if negated:
@@ -96,7 +106,7 @@ class ConditionNormalizer:
                     return (left_key, op, right_key, True)
         
         # その他の場合は構造キーとして返す
-        return (ConditionNormalizer._expr_key(expr), "", "", not negated)
+        return (ConditionNormalizer._condition_expr_key(expr), "", "", not negated)
     
     @staticmethod
     def _normalized_term_to_string(term: object) -> str:
@@ -162,8 +172,8 @@ class ConditionNormalizer:
                     left_expr, right_expr
                 )
                 
-                left_key = ConditionNormalizer._expr_key(normalized_left)
-                right_key = ConditionNormalizer._expr_key(normalized_right)
+                left_key = ConditionNormalizer._condition_expr_key(normalized_left)
+                right_key = ConditionNormalizer._condition_expr_key(normalized_right)
                 
                 # 左右を辞書順にソート（順序依存性を排除）
                 if ConditionNormalizer._should_swap_operands(normalized_left, normalized_right):
@@ -181,8 +191,8 @@ class ConditionNormalizer:
             
             # 不等式比較
             elif op in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"):
-                left_key = ConditionNormalizer._expr_key(left_expr)
-                right_key = ConditionNormalizer._expr_key(right_expr)
+                left_key = ConditionNormalizer._condition_expr_key(left_expr)
+                right_key = ConditionNormalizer._condition_expr_key(right_expr)
                 
                 # ★★★ 改善2: Expression構造ベースのswap判定 ★★★
                 need_swap = ConditionNormalizer._should_swap_operands(left_expr, right_expr)
@@ -201,7 +211,7 @@ class ConditionNormalizer:
                 return result
         
         # その他の場合
-        result = (ConditionNormalizer._expr_key(expr), "", "", not negated)
+        result = (ConditionNormalizer._condition_expr_key(expr), "", "", not negated)
         ConditionNormalizer._remember_contradiction_key(cache_key, result)
         return result
     
@@ -313,8 +323,8 @@ class ConditionNormalizer:
             return False
         
         # 両方変数または両方定数の場合、辞書順で小さい方を左に
-        left_str = ConditionNormalizer._expr_key(left_expr)
-        right_str = ConditionNormalizer._expr_key(right_expr)
+        left_str = ConditionNormalizer._condition_expr_key(left_expr)
+        right_str = ConditionNormalizer._condition_expr_key(right_expr)
         return left_str > right_str
 
     @classmethod
@@ -346,6 +356,15 @@ class ConditionNormalizer:
             cls._expr_key_cache.clear()
         cls._expr_key_cache[cache_key] = rendered
         return rendered
+
+    @staticmethod
+    def _condition_expr_key(expr: Optional[Expression]) -> StructuralKey:
+        if expr is None:
+            return ("none",)
+        key = ConditionNormalizer._expr_key(expr)
+        if key_is_comparable(key):
+            return key
+        return expression_key_or_identity(expr)
     
     @staticmethod
     def _is_constant_expr(expr: Expression) -> bool:

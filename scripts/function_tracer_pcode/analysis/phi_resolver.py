@@ -429,7 +429,7 @@ class PhiHandler:
         
         value_groups: Dict[tuple, List[ExpandedBranch]] = {}
         for branch in branches:
-            value_key = branch.value.structural_key(normalize_commutative=True)
+            value_key = ConditionNormalizer.expression_signature(branch.value)
             cond_key = branch.get_condition_signature()
             group_key = (value_key, cond_key)
             if group_key not in value_groups:
