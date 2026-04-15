@@ -29,6 +29,12 @@ from .types import ParameterInfo
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
     """return値のビット幅を取得する。"""
+    get_comparison_bit_width = getattr(analysis, "get_comparison_bit_width", None)
+    if callable(get_comparison_bit_width):
+        bits = int(get_comparison_bit_width() or 0)
+        if bits > 0:
+            return bits
+
     declared_bits = get_declared_return_size_bits(
         analysis.return_type,
         return_type_obj=getattr(analysis, "return_type_obj", None),
@@ -75,6 +81,24 @@ def coerce_return_value_to_bitvec(
 
 def should_sign_extend_to_return_size(analysis: FunctionReturnAnalysis) -> bool:
     """return値の幅補正で sign extension を使うべきか判定する。"""
+    surface_getter = getattr(analysis, "get_comparison_surface", None)
+    if callable(surface_getter):
+        surface = surface_getter()
+        override = getattr(surface, "use_sign_extension", None)
+        if override is not None:
+            return bool(override)
+
+        type_name_getter = getattr(analysis, "get_comparison_type_name", None)
+        type_obj_getter = getattr(analysis, "get_comparison_type_obj", None)
+        if callable(type_name_getter) or callable(type_obj_getter):
+            return should_sign_extend_return_type(
+                type_name_getter() if callable(type_name_getter) else analysis.return_type,
+                return_type_obj=(
+                    type_obj_getter()
+                    if callable(type_obj_getter)
+                    else getattr(analysis, "return_type_obj", None)
+                ),
+            )
     return should_sign_extend_return_type(
         analysis.return_type,
         return_type_obj=getattr(analysis, "return_type_obj", None),
@@ -297,6 +321,20 @@ def build_return_definition(
     """return 値の定義式を構築する。"""
     lines: List[str] = []
     return_size = get_return_size(analysis)
+    comparison_surface_getter = getattr(analysis, "get_comparison_surface", None)
+    comparison_surface = comparison_surface_getter() if callable(comparison_surface_getter) else None
+    comparison_type_name_getter = getattr(analysis, "get_comparison_type_name", None)
+    comparison_type_obj_getter = getattr(analysis, "get_comparison_type_obj", None)
+    comparison_type_name = (
+        comparison_type_name_getter()
+        if callable(comparison_type_name_getter)
+        else analysis.return_type
+    )
+    comparison_type_obj = (
+        comparison_type_obj_getter()
+        if callable(comparison_type_obj_getter)
+        else getattr(analysis, "return_type_obj", None)
+    )
     symbol_name_mapping = build_symbol_name_mapping(param_infos)
 
     return_defs: List[Dict[str, object]] = []
@@ -332,12 +370,16 @@ def build_return_definition(
                 rendered_value = lowered_value
 
         value_smt = rendered_value.to_smt(symbol_name_mapping=symbol_name_mapping)
-        use_sign_extension = should_sign_extend_value(
-            analysis.return_type,
-            rendered_value,
-            normalized_conditions,
-            return_type_obj=getattr(analysis, "return_type_obj", None),
-        )
+        surface_override = getattr(comparison_surface, "use_sign_extension", None)
+        if surface_override is not None:
+            use_sign_extension = bool(surface_override)
+        else:
+            use_sign_extension = should_sign_extend_value(
+                comparison_type_name,
+                rendered_value,
+                normalized_conditions,
+                return_type_obj=comparison_type_obj,
+            )
         value_smt = coerce_value_to_bitvec_width(
             rendered_value,
             value_smt,

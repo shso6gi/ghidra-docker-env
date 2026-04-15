@@ -369,6 +369,7 @@ def rewrite_analysis_returns(
         incomplete_control_flow=analysis.incomplete_control_flow,
         deferred_calls=dict(analysis.deferred_calls),
         effect_summary=analysis.effect_summary,
+        comparison_surface=analysis.comparison_surface,
     )
     
     return new_analysis, rewrite_results

@@ -511,6 +511,28 @@ def _rewrite_analysis_expressions(
     if rewritten_effect_summary is not getattr(analysis, "effect_summary", None):
         changed = True
 
+    rewritten_comparison_surface = getattr(analysis, "comparison_surface", None)
+    if rewritten_comparison_surface is not None and rewritten_comparison_surface.kind == "memory_effect":
+        synthetic_expr = (
+            getattr(rewritten_effect_summary, "synthetic_expr", None)
+            if rewritten_effect_summary is not None
+            else None
+        )
+        explicit_bits = 0
+        if synthetic_expr is not None:
+            get_bit_width = getattr(synthetic_expr, "get_bit_width", None)
+            if callable(get_bit_width):
+                try:
+                    explicit_bits = max(0, int(get_bit_width() or 0))
+                except Exception:
+                    explicit_bits = 0
+        if explicit_bits > 0 and explicit_bits != rewritten_comparison_surface.explicit_bit_width:
+            changed = True
+            rewritten_comparison_surface = replace(
+                rewritten_comparison_surface,
+                explicit_bit_width=explicit_bits,
+            )
+
     if not changed:
         return analysis
 
@@ -518,6 +540,7 @@ def _rewrite_analysis_expressions(
         analysis,
         returns=rewritten_returns,
         effect_summary=rewritten_effect_summary,
+        comparison_surface=rewritten_comparison_surface,
     )
 
 

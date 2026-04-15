@@ -10,19 +10,8 @@ from ...analysis.condition.normalizer import ConditionNormalizer
 from ..normalize import normalize_expression, NormalizationContext
 from ..formula.returns import (
     coerce_value_to_bitvec_width,
-    should_sign_extend_value,
 )
 from .pairwise_models import ReturnCase
-
-
-def _case_return_type(case: ReturnCase):
-    """古い Mock ベースのテストとも互換な return_type 取得。"""
-    return getattr(case, "return_type", None)
-
-
-def _case_return_type_obj(case: ReturnCase):
-    """ReturnCase の return_type_obj を取得。"""
-    return getattr(case, "return_type_obj", None)
 
 
 def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
@@ -45,10 +34,11 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
             conditions=simplified_conditions,
             value_expr=normalized_value,
             return_info=ret_info,
-            return_type=analysis.return_type,
-            return_type_obj=getattr(analysis, "return_type_obj", None),
+            return_type=analysis.get_comparison_type_name(),
+            return_type_obj=analysis.get_comparison_type_obj(),
             parameters=list(analysis.parameters or []),
             effect_summary=getattr(analysis, "effect_summary", None),
+            comparison_surface=analysis.get_comparison_surface(),
         )
         key = _build_return_case_key(case)
         existing = merged_cases.get(key)
@@ -129,22 +119,12 @@ def build_pair_query(
             case1.get_value_smt(
                 param_replace_fn1,
                 target_bits=base_ctx.get("return_size1", 32),
-                use_sign_extension=should_sign_extend_value(
-                    _case_return_type(case1),
-                    case1.value_expr,
-                    case1.conditions,
-                    return_type_obj=_case_return_type_obj(case1),
-                ),
+                use_sign_extension=case1.should_sign_extend_value(),
             ),
             case2.get_value_smt(
                 param_replace_fn2,
                 target_bits=base_ctx.get("return_size2", 32),
-                use_sign_extension=should_sign_extend_value(
-                    _case_return_type(case2),
-                    case2.value_expr,
-                    case2.conditions,
-                    return_type_obj=_case_return_type_obj(case2),
-                ),
+                use_sign_extension=case2.should_sign_extend_value(),
             ),
             base_ctx.get("return_size1", 32),
             base_ctx.get("return_size2", 32),
@@ -184,23 +164,13 @@ def build_normalized_inequality_query(
         value1_norm_expr,
         value1_smt_norm,
         return_size1,
-        use_sign_extension=should_sign_extend_value(
-            _case_return_type(case1),
-            value1_norm_expr,
-            case1.conditions,
-            return_type_obj=_case_return_type_obj(case1),
-        ),
+        use_sign_extension=case1.should_sign_extend_value(),
     )
     value2_smt_norm = coerce_value_to_bitvec_width(
         value2_norm_expr,
         value2_smt_norm,
         return_size2,
-        use_sign_extension=should_sign_extend_value(
-            _case_return_type(case2),
-            value2_norm_expr,
-            case2.conditions,
-            return_type_obj=_case_return_type_obj(case2),
-        ),
+        use_sign_extension=case2.should_sign_extend_value(),
     )
     lines.extend(
         _build_value_inequality_section(

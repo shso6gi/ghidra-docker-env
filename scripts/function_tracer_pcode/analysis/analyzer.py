@@ -9,7 +9,13 @@ from ..model.expression import Expression, ExpressionType, Condition
 from ..model.call_target import CallTargetRef, coerce_call_target_ref
 from ..model.structural import StructuralKey
 from ..model.storage import StorageInfo
-from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from ..model.analysis import (
+    ComparisonSurface,
+    DeferredCallInfo,
+    ReturnInfo,
+    FunctionReturnAnalysis,
+    SignednessResult,
+)
 from ..model.runtime_refs import UnknownValueRef
 from ..model.signature import (
     get_declared_type_signedness,
@@ -601,6 +607,15 @@ class ReturnAnalyzer:
                         value=effect_summary.synthetic_expr,
                     )
                 ]
+                result.comparison_surface = ComparisonSurface(
+                    kind="memory_effect",
+                    explicit_bit_width=max(1, effect_summary.synthetic_expr.get_bit_width()),
+                    use_sign_extension=False,
+                    evidence={
+                        "source": "effect_summary.synthetic_expr",
+                        "effect_count": len(getattr(effect_summary, "effects", []) or []),
+                    },
+                )
 
             recovered_returns = self._recover_call_wrapper_returns(
                 results,

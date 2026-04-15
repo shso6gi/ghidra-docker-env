@@ -374,6 +374,12 @@ def get_declared_type_size_bytes(
         except Exception:
             pass
 
+    normalized_name = normalize_type_name(
+        get_data_type_display_name(resolved, fallback_name)
+    )
+    if normalized_name in {"bool", "_bool", "boolean"}:
+        return 1
+
     return fallback_size
 
 

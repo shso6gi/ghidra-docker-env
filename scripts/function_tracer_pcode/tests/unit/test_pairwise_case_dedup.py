@@ -62,6 +62,18 @@ def _cond(operator: str, left: Expression, right: Expression, negated: bool = Fa
     )
 
 
+def _bool_or(left: Condition, right: Condition, negated: bool = False) -> Condition:
+    return Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="BOOL_OR",
+            operands=[left.expression, right.expression],
+            size=1,
+        ),
+        negated=negated,
+    )
+
+
 def _analysis(returns) -> FunctionReturnAnalysis:
     return FunctionReturnAnalysis(
         function_name="f",
@@ -159,6 +171,31 @@ def test_extract_return_cases_skips_contradictory_condition_regions():
                 address="0x1002",
                 value=_const(7),
                 conditions=[_cond("INT_NOTEQUAL", _param("param_1"), _const(0))],
+            ),
+        ]
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    assert cases[0].value_expr.to_smt() == _const(7).to_smt()
+
+
+def test_extract_return_cases_prunes_impossible_or_region():
+    cond_a = _cond("INT_EQUAL", _param("param_1"), _const(0))
+    cond_b = _cond("INT_EQUAL", _param("param_2"), _const(0))
+
+    analysis = _analysis(
+        [
+            ReturnInfo(
+                address="0x1001",
+                value=_param("param_1"),
+                conditions=[_bool_or(cond_a, cond_b), cond_a.negate(), cond_b.negate()],
+            ),
+            ReturnInfo(
+                address="0x1002",
+                value=_const(7),
+                conditions=[_bool_or(cond_a, cond_b)],
             ),
         ]
     )

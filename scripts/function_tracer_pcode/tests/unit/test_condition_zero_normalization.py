@@ -35,6 +35,24 @@ def _neg(expr: Expression) -> Expression:
     )
 
 
+def _or(left: Expression, right: Expression) -> Expression:
+    return Expression(
+        ExpressionType.BINARY_OP,
+        operator="BOOL_OR",
+        operands=[left, right],
+        size=1,
+    )
+
+
+def _and(left: Expression, right: Expression) -> Expression:
+    return Expression(
+        ExpressionType.BINARY_OP,
+        operator="BOOL_AND",
+        operands=[left, right],
+        size=1,
+    )
+
+
 def test_normalize_zero_comparison_accepts_constant_zero():
     cond = Condition(
         Expression(
@@ -99,6 +117,104 @@ def test_negated_zero_comparison_matches_zero_condition():
     ]
 
     assert ConditionSimplifier.is_contradiction(conditions) is False
+
+
+def test_or_clause_contradiction_detects_all_literals_ruled_out():
+    cond_a = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_1"), _const(0)],
+            size=1,
+        )
+    )
+    cond_b = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_2"), _const(0)],
+            size=1,
+        )
+    )
+    conditions = [
+        Condition(_or(cond_a.expression, cond_b.expression)),
+        cond_a.negate(),
+        cond_b.negate(),
+    ]
+
+    assert ConditionSimplifier.is_contradiction(conditions) is True
+
+
+def test_constraint_set_implies_or_clause_from_unit_literal():
+    cond_a = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_1"), _const(0)],
+            size=1,
+        )
+    )
+    cond_b = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_2"), _const(0)],
+            size=1,
+        )
+    )
+    constraint_set = ConditionSimplifier.build_constraint_set([cond_a])
+
+    assert constraint_set.implies_condition(Condition(_or(cond_a.expression, cond_b.expression))) is True
+
+
+def test_constraint_set_implies_negated_or_clause_from_all_negated_literals():
+    cond_a = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_1"), _const(0)],
+            size=1,
+        )
+    )
+    cond_b = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_2"), _const(0)],
+            size=1,
+        )
+    )
+    negated_or = Condition(_or(cond_a.expression, cond_b.expression), negated=True)
+    constraint_set = ConditionSimplifier.build_constraint_set(
+        [cond_a.negate(), cond_b.negate()]
+    )
+
+    assert constraint_set.implies_condition(negated_or) is True
+
+
+def test_constraint_set_detects_negated_and_overlap_precisely():
+    cond_a = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_1"), _const(0)],
+            size=1,
+        )
+    )
+    cond_b = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[_param("param_2"), _const(0)],
+            size=1,
+        )
+    )
+    left = ConditionSimplifier.build_constraint_set(
+        [Condition(_and(cond_a.expression, cond_b.expression), negated=True)]
+    )
+    right = ConditionSimplifier.build_constraint_set([cond_a, cond_b])
+
+    assert left.overlaps_with(right.conditions) is False
 
 
 def test_constant_false_condition_is_contradiction():

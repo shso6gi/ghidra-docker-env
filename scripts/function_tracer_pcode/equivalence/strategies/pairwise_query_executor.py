@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from ...smt import SolverStatus
 from ..formula.returns import (
     expression_has_unresolved_value,
-    should_sign_extend_value,
 )
 from .pairwise_models import QueryResult
 
@@ -380,22 +379,12 @@ def _build_model_validation_query(
     value1_smt = case1.get_value_smt(
         param_replace_fn1,
         target_bits=return_size1,
-        use_sign_extension=should_sign_extend_value(
-            getattr(case1, "return_type", None),
-            case1.value_expr,
-            case1.conditions,
-            return_type_obj=getattr(case1, "return_type_obj", None),
-        ),
+        use_sign_extension=case1.should_sign_extend_value(),
     )
     value2_smt = case2.get_value_smt(
         param_replace_fn2,
         target_bits=return_size2,
-        use_sign_extension=should_sign_extend_value(
-            getattr(case2, "return_type", None),
-            case2.value_expr,
-            case2.conditions,
-            return_type_obj=getattr(case2, "return_type_obj", None),
-        ),
+        use_sign_extension=case2.should_sign_extend_value(),
     )
 
     lines: List[str] = [

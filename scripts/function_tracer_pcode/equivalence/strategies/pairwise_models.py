@@ -8,7 +8,7 @@ from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.effect_summary import (
     lower_post_state_expression_for_smt_if_needed,
 )
-from ..formula.returns import coerce_value_to_bitvec_width
+from ..formula.returns import coerce_value_to_bitvec_width, should_sign_extend_value
 
 
 class ReturnCase:
@@ -25,6 +25,7 @@ class ReturnCase:
         source_indices: Optional[List[int]] = None,
         parameters: Optional[List[Dict]] = None,
         effect_summary=None,
+        comparison_surface=None,
     ):
         self.index = index
         self.conditions = conditions
@@ -35,6 +36,7 @@ class ReturnCase:
         self.source_indices = source_indices or [index]
         self.parameters = parameters or []
         self.effect_summary = effect_summary
+        self.comparison_surface = comparison_surface
         self.conditions_smt: Optional[List[str]] = None
         self._value_smt_cache: Dict[tuple, str] = {}
 
@@ -65,9 +67,11 @@ class ReturnCase:
         self,
         param_replace_fn,
         target_bits: Optional[int] = None,
-        use_sign_extension: bool = False,
+        use_sign_extension: Optional[bool] = None,
     ) -> str:
-        cache_key = (target_bits, use_sign_extension)
+        if use_sign_extension is None:
+            use_sign_extension = self.should_sign_extend_value()
+        cache_key = (target_bits, bool(use_sign_extension))
         result = self._value_smt_cache.get(cache_key)
         if result is not None:
             return result
@@ -99,10 +103,21 @@ class ReturnCase:
                 rendered_expr,
                 result,
                 target_bits,
-                use_sign_extension=use_sign_extension,
+                use_sign_extension=bool(use_sign_extension),
             )
         self._value_smt_cache[cache_key] = result
         return result
+
+    def should_sign_extend_value(self) -> bool:
+        override = getattr(self.comparison_surface, "use_sign_extension", None)
+        if override is not None:
+            return bool(override)
+        return should_sign_extend_value(
+            self.return_type,
+            self.value_expr,
+            self.conditions,
+            return_type_obj=self.return_type_obj,
+        )
 
     def get_condition_summary(self) -> str:
         if not self.conditions:

@@ -10,6 +10,18 @@ from .normalizer import ConditionNormalizer
 from .scalar import ScalarConstraint, extract_scalar_constraint
 
 
+BooleanAtom = Tuple[object, str, object]
+BooleanLiteral = Tuple[BooleanAtom, bool]
+
+
+@dataclass(frozen=True)
+class BooleanClause:
+    """CNF 句の object-centric 表現。"""
+
+    literals: Tuple[BooleanLiteral, ...]
+    source_indices: Tuple[int, ...]
+
+
 @dataclass(frozen=True)
 class ConditionConstraintSet:
     """Object-centric normalized view over a list of ``Condition`` objects."""
@@ -38,7 +50,11 @@ class ConditionConstraintSet:
         return ConditionNormalizer.conditions_signature(self.conditions)
 
     def implies_condition(self, condition: Condition) -> bool:
-        return ConditionSimplifier._condition_is_implied(condition, set(self.implied_norms))
+        return ConditionSimplifier._condition_is_implied(
+            condition,
+            list(self.conditions),
+            set(self.implied_norms),
+        )
 
     def implies_all(self, conditions: Iterable[Condition]) -> bool:
         return all(self.implies_condition(condition) for condition in (conditions or []))
@@ -63,6 +79,11 @@ class ConditionConstraintSet:
         )
         if self.is_contradictory or other_set.is_contradictory:
             return False
+        formula_overlap = ConditionSimplifier._formula_is_unsat(
+            list(self.conditions) + list(other_set.conditions)
+        )
+        if formula_overlap is not None:
+            return not formula_overlap
         combined = list(self.conditions) + list(other_set.conditions)
         return not ConditionConstraintSet.from_conditions(combined).is_contradictory
 
@@ -143,6 +164,305 @@ class ConditionSimplifier:
                 f"{event}: {summary} (further repeats suppressed)",
                 indent,
             )
+
+    @classmethod
+    def _literal_from_condition(
+        cls,
+        condition: Condition,
+    ) -> BooleanLiteral:
+        left, op, right, polarity = ConditionNormalizer.normalize_for_contradiction(condition)
+        return ((left, op, right), polarity)
+
+    @classmethod
+    def _merge_clause_literals(
+        cls,
+        literals: Iterable[BooleanLiteral],
+    ) -> Optional[Tuple[BooleanLiteral, ...]]:
+        seen: Dict[BooleanAtom, bool] = {}
+        merged: List[BooleanLiteral] = []
+        for atom, polarity in literals:
+            prior = seen.get(atom)
+            if prior is not None:
+                if prior != polarity:
+                    return None
+                continue
+            seen[atom] = polarity
+            merged.append((atom, polarity))
+        merged.sort()
+        return tuple(merged)
+
+    @classmethod
+    def _false_clause(
+        cls,
+        source_index: int,
+    ) -> BooleanClause:
+        return BooleanClause(tuple(), (source_index,))
+
+    @classmethod
+    def _is_false_clause_set(
+        cls,
+        clauses: List[BooleanClause],
+    ) -> bool:
+        return len(clauses) == 1 and not clauses[0].literals
+
+    @classmethod
+    def _cnf_or(
+        cls,
+        left: List[BooleanClause],
+        right: List[BooleanClause],
+        *,
+        max_clauses: int,
+    ) -> Optional[List[BooleanClause]]:
+        if not left or not right:
+            return []
+        if cls._is_false_clause_set(left):
+            return list(right)
+        if cls._is_false_clause_set(right):
+            return list(left)
+
+        result: List[BooleanClause] = []
+        for left_clause in left:
+            for right_clause in right:
+                merged_literals = cls._merge_clause_literals(
+                    list(left_clause.literals) + list(right_clause.literals)
+                )
+                if merged_literals is None:
+                    continue
+                merged_sources = tuple(
+                    sorted(set(left_clause.source_indices) | set(right_clause.source_indices))
+                )
+                result.append(BooleanClause(merged_literals, merged_sources))
+                if len(result) > max_clauses:
+                    return None
+
+        return result
+
+    @classmethod
+    def _expression_to_cnf_clauses(
+        cls,
+        expr: Expression,
+        negated: bool,
+        source_index: int,
+        *,
+        max_clauses: int,
+    ) -> Optional[List[BooleanClause]]:
+        current = expr
+        current_negated = negated
+        while (
+            current is not None
+            and current.expr_type == ExpressionType.UNARY_OP
+            and current.operator == "BOOL_NEGATE"
+        ):
+            current_negated = not current_negated
+            if not current.operands:
+                break
+            current = current.operands[0]
+
+        if current is None:
+            return [cls._false_clause(source_index)] if current_negated else []
+
+        truth_value = cls.evaluate_condition_truth(Condition(current, current_negated))
+        if truth_value is True:
+            return []
+        if truth_value is False:
+            return [cls._false_clause(source_index)]
+
+        if (
+            current.expr_type == ExpressionType.BINARY_OP
+            and current.operator in {"BOOL_AND", "BOOL_OR"}
+            and len(current.operands) == 2
+        ):
+            left_expr, right_expr = current.operands
+            if current.operator == "BOOL_AND":
+                if not current_negated:
+                    left = cls._expression_to_cnf_clauses(
+                        left_expr,
+                        False,
+                        source_index,
+                        max_clauses=max_clauses,
+                    )
+                    right = cls._expression_to_cnf_clauses(
+                        right_expr,
+                        False,
+                        source_index,
+                        max_clauses=max_clauses,
+                    )
+                    if left is None or right is None:
+                        return None
+                    combined = list(left) + list(right)
+                    return combined if len(combined) <= max_clauses else None
+                left = cls._expression_to_cnf_clauses(
+                    left_expr,
+                    True,
+                    source_index,
+                    max_clauses=max_clauses,
+                )
+                right = cls._expression_to_cnf_clauses(
+                    right_expr,
+                    True,
+                    source_index,
+                    max_clauses=max_clauses,
+                )
+                if left is None or right is None:
+                    return None
+                return cls._cnf_or(left, right, max_clauses=max_clauses)
+
+            if not current_negated:
+                left = cls._expression_to_cnf_clauses(
+                    left_expr,
+                    False,
+                    source_index,
+                    max_clauses=max_clauses,
+                )
+                right = cls._expression_to_cnf_clauses(
+                    right_expr,
+                    False,
+                    source_index,
+                    max_clauses=max_clauses,
+                )
+                if left is None or right is None:
+                    return None
+                return cls._cnf_or(left, right, max_clauses=max_clauses)
+
+            left = cls._expression_to_cnf_clauses(
+                left_expr,
+                True,
+                source_index,
+                max_clauses=max_clauses,
+            )
+            right = cls._expression_to_cnf_clauses(
+                right_expr,
+                True,
+                source_index,
+                max_clauses=max_clauses,
+            )
+            if left is None or right is None:
+                return None
+            combined = list(left) + list(right)
+            return combined if len(combined) <= max_clauses else None
+
+        literal = cls._literal_from_condition(Condition(current, current_negated))
+        return [BooleanClause((literal,), (source_index,))]
+
+    @classmethod
+    def _conditions_to_cnf_clauses(
+        cls,
+        conditions: Iterable[Condition],
+        *,
+        max_clauses: int = 64,
+    ) -> Optional[List[BooleanClause]]:
+        result: List[BooleanClause] = []
+        for index, condition in enumerate(list(conditions or [])):
+            clauses = cls._expression_to_cnf_clauses(
+                condition.expression,
+                condition.negated,
+                index,
+                max_clauses=max_clauses,
+            )
+            if clauses is None:
+                return None
+            result.extend(clauses)
+            if len(result) > max_clauses:
+                return None
+        return result
+
+    @classmethod
+    def _simplify_clauses_with_assignment(
+        cls,
+        clauses: List[Tuple[BooleanLiteral, ...]],
+        assignments: Dict[BooleanAtom, bool],
+    ) -> Optional[List[Tuple[BooleanLiteral, ...]]]:
+        simplified: List[Tuple[BooleanLiteral, ...]] = []
+        for clause in clauses:
+            unresolved: List[BooleanLiteral] = []
+            clause_satisfied = False
+            for atom, polarity in clause:
+                assigned = assignments.get(atom)
+                if assigned is None:
+                    unresolved.append((atom, polarity))
+                    continue
+                if assigned == polarity:
+                    clause_satisfied = True
+                    break
+            if clause_satisfied:
+                continue
+            if not unresolved:
+                return None
+            unresolved_tuple = tuple(sorted(set(unresolved)))
+            if unresolved_tuple not in simplified:
+                simplified.append(unresolved_tuple)
+        return simplified
+
+    @classmethod
+    def _clauses_are_satisfiable(
+        cls,
+        clauses: List[Tuple[BooleanLiteral, ...]],
+        assignments: Optional[Dict[BooleanAtom, bool]] = None,
+    ) -> bool:
+        current_assignments = dict(assignments or {})
+        current_clauses = list(clauses)
+
+        while True:
+            reduced = cls._simplify_clauses_with_assignment(current_clauses, current_assignments)
+            if reduced is None:
+                return False
+            if not reduced:
+                return True
+
+            unit_literals = [clause[0] for clause in reduced if len(clause) == 1]
+            if not unit_literals:
+                current_clauses = reduced
+                break
+
+            changed = False
+            for atom, polarity in unit_literals:
+                existing = current_assignments.get(atom)
+                if existing is not None:
+                    if existing != polarity:
+                        return False
+                    continue
+                current_assignments[atom] = polarity
+                changed = True
+            current_clauses = reduced
+            if not changed:
+                break
+
+        branch_literal = min(current_clauses, key=len)[0]
+        branch_atom, branch_polarity = branch_literal
+
+        true_assignments = dict(current_assignments)
+        true_assignments[branch_atom] = branch_polarity
+        if cls._clauses_are_satisfiable(current_clauses, true_assignments):
+            return True
+
+        false_assignments = dict(current_assignments)
+        false_assignments[branch_atom] = not branch_polarity
+        return cls._clauses_are_satisfiable(current_clauses, false_assignments)
+
+    @classmethod
+    def _formula_is_unsat(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> Optional[bool]:
+        clauses = cls._conditions_to_cnf_clauses(conditions)
+        if clauses is None:
+            return None
+        clause_literals = [clause.literals for clause in clauses]
+        return not cls._clauses_are_satisfiable(clause_literals)
+
+    @classmethod
+    def _formula_implies(
+        cls,
+        context_conditions: Iterable[Condition],
+        condition: Condition,
+    ) -> Optional[bool]:
+        clauses = cls._conditions_to_cnf_clauses(
+            list(context_conditions or []) + [condition.negate()]
+        )
+        if clauses is None:
+            return None
+        clause_literals = [clause.literals for clause in clauses]
+        return not cls._clauses_are_satisfiable(clause_literals)
 
     @classmethod
     def _conditions_structurally_equal(cls, left: Condition, right: Condition) -> bool:
@@ -531,8 +851,17 @@ class ConditionSimplifier:
                 and expr.expr_type == ExpressionType.BINARY_OP
                 and expr.operator == "BOOL_AND"
             ):
-                stack.append(Condition(expr.operands[0], False))
-                stack.append(Condition(expr.operands[1], False))
+                    stack.append(Condition(expr.operands[0], False))
+                    stack.append(Condition(expr.operands[1], False))
+
+        clauses = cls._conditions_to_cnf_clauses(conditions)
+        if clauses is not None:
+            for clause in clauses:
+                if len(clause.literals) != 1:
+                    continue
+                (atom, polarity) = clause.literals[0]
+                left, op, right = atom
+                implied.add((left, op, right, polarity))
 
         return implied
 
@@ -540,8 +869,15 @@ class ConditionSimplifier:
     def _condition_is_implied(
         cls,
         condition: Condition,
-        implied_conditions: Set[Tuple[str, str, str, bool]],
+        context_conditions: Optional[List[Condition]] = None,
+        implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
     ) -> bool:
+        if context_conditions:
+            formula_result = cls._formula_implies(context_conditions, condition)
+            if formula_result is not None:
+                return formula_result
+
+        implied_conditions = implied_conditions or set()
         normalized = ConditionNormalizer.normalize_for_contradiction(condition)
         if normalized in implied_conditions:
             return True
@@ -579,8 +915,11 @@ class ConditionSimplifier:
         context_conditions: List[Condition],
         implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
     ) -> bool:
+        formula_result = cls._formula_is_unsat(list(context_conditions) + [condition])
+        if formula_result is not None:
+            return formula_result
         implied = implied_conditions if implied_conditions is not None else cls._collect_implied_condition_norms(context_conditions)
-        if cls._condition_is_implied(condition.negate(), implied):
+        if cls._condition_is_implied(condition.negate(), context_conditions, implied):
             return True
         return any(
             ConditionNormalizer.are_contradictory(condition, context)
@@ -602,7 +941,7 @@ class ConditionSimplifier:
             for cond, value in expr.value:
                 if cond is None:
                     continue
-                if cls._condition_is_implied(cond, implied):
+                if cls._condition_is_implied(cond, conditions, implied):
                     return cls._reduce_expression_under_conditions(value, list(conditions) + [cond])
 
             surviving = []
@@ -783,6 +1122,10 @@ class ConditionSimplifier:
                 index_j, cond_j = fallback_conditions[j]
                 if ConditionNormalizer.are_contradictory(cond_i, cond_j):
                     contradiction_indices.update({index_i, index_j})
+
+        formula_unsat = cls._formula_is_unsat(unique_conditions)
+        if formula_unsat:
+            contradiction_indices.update(range(len(unique_conditions)))
 
         keep_indices: Set[int] = set(unsupported_indices)
 

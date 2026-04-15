@@ -147,6 +147,35 @@ class SignednessResult:
             excluded_opcode_counts=evidence.get_excluded_opcode_counts(),
         )
 
+
+@dataclass(frozen=True)
+class ComparisonSurface:
+    """等価性比較で使う値面の記述。
+
+    宣言上の return type と、実際に等価性比較へ流す値面を分離する。
+    ``return_value`` は通常の戻り値、``memory_effect`` は void 関数の副作用要約を表す。
+    """
+
+    kind: str
+    explicit_bit_width: Optional[int] = None
+    type_name: Optional[str] = None
+    type_obj: Any = None
+    use_sign_extension: Optional[bool] = None
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"return_value", "memory_effect"}:
+            raise ValueError(f"Unsupported comparison surface kind: {self.kind}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "explicit_bit_width": self.explicit_bit_width,
+            "type_name": self.type_name,
+            "use_sign_extension": self.use_sign_extension,
+            "evidence": dict(self.evidence),
+        }
+
 @dataclass
 class FunctionReturnAnalysis:
     """関数のreturn値解析結果"""
@@ -165,6 +194,7 @@ class FunctionReturnAnalysis:
     deferred_calls: Dict[str, DeferredCallInfo] = field(default_factory=dict)
     effect_summary: Optional["EffectSummary"] = None
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    comparison_surface: Optional[ComparisonSurface] = None
 
     def to_dict(self) -> Dict:
         result = {
@@ -188,6 +218,8 @@ class FunctionReturnAnalysis:
             result["signedness"] = self.signedness_result.to_dict()
         if self.signature_hypotheses:
             result["signature_hypotheses"] = list(self.signature_hypotheses)
+        if self.comparison_surface is not None:
+            result["comparison_surface"] = self.comparison_surface.to_dict()
         
         return result
     
@@ -368,3 +400,116 @@ class FunctionReturnAnalysis:
                 reasons.append(note)
 
         return reasons
+
+    def _expr_bit_width(self, expr) -> int:
+        if expr is None:
+            return 0
+        try:
+            from .render_smt import expression_smt_bit_width
+
+            return max(0, int(expression_smt_bit_width(expr) or 0))
+        except Exception:
+            pass
+        bit_width = getattr(expr, "get_bit_width", None)
+        if callable(bit_width):
+            try:
+                return max(0, int(bit_width() or 0))
+            except Exception:
+                return 0
+        return 0
+
+    def _default_return_bit_width(self) -> int:
+        from .signature import get_declared_type_size_bits
+
+        declared_bits = get_declared_type_size_bits(
+            getattr(self, "return_type_obj", None),
+            self.return_type,
+        )
+        if declared_bits is not None and int(declared_bits) > 0:
+            return int(declared_bits)
+
+        expr_bits = [
+            self._expr_bit_width(ret.value)
+            for ret in self.returns
+            if ret.value is not None
+        ]
+        expr_bits = [bits for bits in expr_bits if bits > 0]
+        if expr_bits:
+            return max(expr_bits)
+        return 32
+
+    def _derive_void_effect_surface(self) -> Optional[ComparisonSurface]:
+        effect_summary = getattr(self, "effect_summary", None)
+        synthetic_expr = getattr(effect_summary, "synthetic_expr", None) if effect_summary is not None else None
+        if synthetic_expr is None:
+            return None
+
+        bit_width = self._expr_bit_width(synthetic_expr)
+        if bit_width <= 0:
+            bit_width = max(
+                (
+                    self._expr_bit_width(ret.value)
+                    for ret in self.returns
+                    if ret.value is not None
+                ),
+                default=0,
+            )
+        if bit_width <= 0:
+            return None
+
+        evidence = {
+            "source": "effect_summary.synthetic_expr",
+            "effect_count": len(getattr(effect_summary, "effects", []) or []),
+        }
+        return ComparisonSurface(
+            kind="memory_effect",
+            explicit_bit_width=bit_width,
+            use_sign_extension=False,
+            evidence=evidence,
+        )
+
+    def get_comparison_surface(self) -> ComparisonSurface:
+        if self.comparison_surface is not None:
+            surface = self.comparison_surface
+            if surface.explicit_bit_width is not None and int(surface.explicit_bit_width) > 0:
+                return surface
+            if surface.kind == "memory_effect":
+                derived = self._derive_void_effect_surface()
+                if derived is not None:
+                    merged_evidence = dict(surface.evidence)
+                    merged_evidence.update(derived.evidence)
+                    return replace(
+                        surface,
+                        explicit_bit_width=derived.explicit_bit_width,
+                        evidence=merged_evidence,
+                    )
+            return surface
+
+        from .signature import get_data_type_display_name, is_void_data_type
+
+        display_name = get_data_type_display_name(self.return_type_obj, self.return_type)
+        if is_void_data_type(self.return_type_obj, display_name):
+            derived = self._derive_void_effect_surface()
+            if derived is not None:
+                return derived
+
+        return ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=self._default_return_bit_width(),
+            type_name=self.return_type,
+            type_obj=self.return_type_obj,
+        )
+
+    def get_comparison_bit_width(self) -> int:
+        surface = self.get_comparison_surface()
+        if surface.explicit_bit_width is not None and int(surface.explicit_bit_width) > 0:
+            return int(surface.explicit_bit_width)
+        return self._default_return_bit_width()
+
+    def get_comparison_type_name(self) -> Optional[str]:
+        surface = self.get_comparison_surface()
+        return surface.type_name
+
+    def get_comparison_type_obj(self):
+        surface = self.get_comparison_surface()
+        return surface.type_obj
