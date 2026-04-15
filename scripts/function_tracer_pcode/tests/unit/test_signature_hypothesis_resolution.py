@@ -4,11 +4,15 @@
 from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     FunctionSignature,
+    SignednessResult,
+    resolve_signed_counterpart_spec,
     resolve_type_spec,
 )
 from scripts.function_tracer_pcode.model.analysis import ReturnInfo
 from scripts.function_tracer_pcode.model.expression import Expression, ExpressionType
-from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixResult
+from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseContext, PhaseHandler
+from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.equivalence.typing.signedness_param_fix import ParamSignednessFixer
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
@@ -16,11 +20,13 @@ from scripts.function_tracer_pcode.smt import ParallelResult
 
 
 class MockDataType:
-    def __init__(self, name, length, is_signed, path=None):
+    def __init__(self, name, length, is_signed, path=None, opposite=None):
         self._name = name
         self._length = length
         self._is_signed = is_signed
         self._path = path or f"/{name}"
+        self._data_type_manager = None
+        self._opposite = opposite
 
     def getName(self):
         return self._name
@@ -33,6 +39,21 @@ class MockDataType:
 
     def getDataTypePath(self):
         return self._path
+
+    def getDataTypeManager(self):
+        return self._data_type_manager
+
+    def setDataTypeManager(self, data_type_manager):
+        self._data_type_manager = data_type_manager
+
+    def getOppositeSignednessDataType(self):
+        return self._opposite
+
+    def setOppositeSignednessDataType(self, opposite):
+        self._opposite = opposite
+
+    def isEquivalent(self, other):
+        return str(self.getDataTypePath()) == str(other.getDataTypePath())
 
 
 class MockDataOrganization:
@@ -67,6 +88,9 @@ class MockDataTypeManager:
     def __init__(self, data_types=None, data_organization=None):
         self._data_types = dict(data_types or {})
         self._data_organization = data_organization or MockDataOrganization()
+        for data_type in self._data_types.values():
+            if hasattr(data_type, "setDataTypeManager"):
+                data_type.setDataTypeManager(self)
 
     def getDataType(self, name):
         return self._data_types.get(name)
@@ -159,6 +183,110 @@ def test_type_fixer_uses_data_organization_for_overlay_widths():
     assert updated.parameters[0]["storage"]["size_bits"] == 32
     assert updated.parameters[0]["is_signed"] is True
     assert updated.signature_hypotheses[0]["resolved_parameter_overrides"][0]["source"] == "data_organization"
+
+
+def test_resolve_signed_counterpart_prefers_ghidra_opposite_signedness():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint32_t", 4, False, "/typedef/uint32_t", opposite=signed_dt)
+    signed_dt.setOppositeSignednessDataType(unsigned_dt)
+    program = MockProgram(MockDataTypeManager({"uint32_t": unsigned_dt, "int32_t": signed_dt}))
+
+    resolved = resolve_signed_counterpart_spec(
+        "uint32_t",
+        data_type_obj=unsigned_dt,
+        program=program,
+    )
+
+    assert resolved is not None
+    assert resolved.type_name == "int32_t"
+    assert resolved.source == "ghidra_opposite_signedness"
+    assert resolved.data_type_obj is signed_dt
+    assert resolved.data_type_path == "/typedef/int32_t"
+
+
+def test_phase1_signedness_fix_prefers_datatype_counterpart():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint32_t", 4, False, "/typedef/uint32_t", opposite=signed_dt)
+    signed_dt.setOppositeSignednessDataType(unsigned_dt)
+    program = MockProgram(MockDataTypeManager({"uint32_t": unsigned_dt, "int32_t": signed_dt}))
+
+    analysis = FunctionReturnAnalysis(
+        function_name="demo",
+        entry_point="0x401000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x401000",
+                conditions=[],
+                value=Expression(ExpressionType.CONSTANT, value=1, size=32),
+            )
+        ],
+        return_type="uint32_t",
+        return_type_obj=unsigned_dt,
+        signedness_result=SignednessResult(signedness="signed", opcode_counts={"INT_SLESS": 1}),
+    )
+
+    handler = PhaseHandler(TypeFixerConfig(), debug=False)
+    type_fixer = TypeFixer(program)
+    ctx = PhaseContext(
+        program1=program,
+        program2=program,
+        function_name1="demo",
+        function_name2="peer",
+        binary1_name="bin1",
+        binary2_name="bin2",
+        decompile_timeout=60,
+        save_formula=False,
+        type_fix_result=TypeFixResult(),
+        original_signature1=None,
+        original_signature2=None,
+        analysis1=analysis,
+        analysis2=None,
+    )
+
+    applied, changed1, changed2 = handler.run_phase1_signedness_fix(ctx, type_fixer, type_fixer)
+
+    assert applied is True
+    assert changed1 is True
+    assert changed2 is False
+    assert ctx.analysis1.return_type == "int32_t"
+    assert ctx.analysis1.return_type_obj is signed_dt
+    assert ctx.type_fix_result.fixed_type_binary1 == "int32_t"
+    assert ctx.analysis1.signature_hypotheses[0]["resolved_return_override"]["source"] == "ghidra_opposite_signedness"
+
+
+def test_param_signedness_fix_prefers_datatype_counterpart():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint32_t", 4, False, "/typedef/uint32_t", opposite=signed_dt)
+    signed_dt.setOppositeSignednessDataType(unsigned_dt)
+    program = MockProgram(MockDataTypeManager({"uint32_t": unsigned_dt, "int32_t": signed_dt}))
+
+    analysis = FunctionReturnAnalysis(
+        function_name="demo",
+        entry_point="0x401000",
+        parameters=[
+            {
+                "name": "arg0",
+                "data_type": "uint32_t",
+                "data_type_obj": unsigned_dt,
+                "size": 4,
+                "is_signed": False,
+                "index": 0,
+                "storage": {"kind": "register", "size": 4, "size_bits": 32},
+            }
+        ],
+        returns=[],
+        return_type="int",
+        signedness_result=SignednessResult(signedness="signed"),
+    )
+
+    fixer = ParamSignednessFixer(TypeFixerConfig(), debug=False)
+    override_map = fixer.detect_param_signedness_mismatch(analysis, program=program)
+
+    assert 0 in override_map
+    assert override_map[0].type_name == "int32_t"
+    assert override_map[0].data_type_obj is signed_dt
+    assert override_map[0].source == "ghidra_opposite_signedness"
 
 
 def test_equivalence_result_surfaces_effective_signatures_and_hypotheses():

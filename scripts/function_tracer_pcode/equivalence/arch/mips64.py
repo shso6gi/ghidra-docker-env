@@ -3,6 +3,7 @@
 
 from typing import Dict, List, Optional, Tuple, Any
 from ...model import FunctionReturnAnalysis, Expression, ExpressionType
+from ...model.signature import get_data_type_display_name, get_declared_type_size_bytes
 from ..param_semantics import ParameterSemanticHint, hint_objects_by_name
 
 
@@ -128,10 +129,10 @@ class MIPS64Handler:
     
     def _get_param_type_string(self, param: Dict[str, Any]) -> str:
         """パラメータの型文字列を取得"""
-        raw_dt = param.get("data_type_obj")
-        if raw_dt is not None and hasattr(raw_dt, 'getName'):
-            return str(raw_dt).lower().strip()
-        return param.get("data_type", "").lower().strip()
+        return (get_data_type_display_name(
+            param.get("data_type_obj"),
+            param.get("data_type", ""),
+        ) or "").lower().strip()
     
     def _is_long_vs_int(self, type1: str, type2: str) -> bool:
         """片方がlong、もう片方がintかを判定"""
@@ -148,21 +149,12 @@ class MIPS64Handler:
     
     def _get_param_size(self, param: Dict[str, Any]) -> int:
         """パラメータのサイズ（バイト数）を取得"""
-        raw_dt = param.get("data_type_obj")
-        if raw_dt is not None and hasattr(raw_dt, 'getLength'):
-            return raw_dt.getLength()
-        
-        type_str = self._get_param_type_string(param)
-        if any(kw in type_str for kw in ["long", "int8", "qword"]):
-            return 8
-        elif any(kw in type_str for kw in ["int", "int4", "dword"]):
-            return 4
-        elif any(kw in type_str for kw in ["short", "int2", "word"]):
-            return 2
-        elif any(kw in type_str for kw in ["char", "int1", "byte"]):
-            return 1
-        
-        return 4
+        size = get_declared_type_size_bytes(
+            param.get("data_type_obj"),
+            param.get("data_type"),
+            fallback_size=int(param.get("size", 4) or 4),
+        )
+        return int(size or 4)
     
     # ===== Phase 4-B：偽反例検出（拡張版） =====
     

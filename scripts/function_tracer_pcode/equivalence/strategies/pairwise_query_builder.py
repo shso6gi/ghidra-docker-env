@@ -20,6 +20,11 @@ def _case_return_type(case: ReturnCase):
     return getattr(case, "return_type", None)
 
 
+def _case_return_type_obj(case: ReturnCase):
+    """ReturnCase の return_type_obj を取得。"""
+    return getattr(case, "return_type_obj", None)
+
+
 def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
     """FunctionReturnAnalysis から ReturnCase を抽出"""
     cases = []
@@ -38,6 +43,7 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
             value_expr=normalized_value,
             return_info=ret_info,
             return_type=analysis.return_type,
+            return_type_obj=getattr(analysis, "return_type_obj", None),
             parameters=list(analysis.parameters or []),
             effect_summary=getattr(analysis, "effect_summary", None),
         )
@@ -129,6 +135,7 @@ def build_pair_query(
                     _case_return_type(case1),
                     case1.value_expr,
                     case1.conditions,
+                    return_type_obj=_case_return_type_obj(case1),
                 ),
             ),
             case2.get_value_smt(
@@ -138,6 +145,7 @@ def build_pair_query(
                     _case_return_type(case2),
                     case2.value_expr,
                     case2.conditions,
+                    return_type_obj=_case_return_type_obj(case2),
                 ),
             ),
             base_ctx.get("return_size1", 32),
@@ -182,6 +190,7 @@ def build_normalized_inequality_query(
             _case_return_type(case1),
             value1_norm_expr,
             case1.conditions,
+            return_type_obj=_case_return_type_obj(case1),
         ),
     )
     value2_smt_norm = coerce_value_to_bitvec_width(
@@ -192,6 +201,7 @@ def build_normalized_inequality_query(
             _case_return_type(case2),
             value2_norm_expr,
             case2.conditions,
+            return_type_obj=_case_return_type_obj(case2),
         ),
     )
     lines.extend(

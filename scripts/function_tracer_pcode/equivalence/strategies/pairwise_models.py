@@ -21,6 +21,7 @@ class ReturnCase:
         value_expr,
         return_info: ReturnInfo,
         return_type: Optional[str] = None,
+        return_type_obj=None,
         source_indices: Optional[List[int]] = None,
         parameters: Optional[List[Dict]] = None,
         effect_summary=None,
@@ -30,6 +31,7 @@ class ReturnCase:
         self.value_expr = value_expr
         self.return_info = return_info
         self.return_type = return_type
+        self.return_type_obj = return_type_obj
         self.source_indices = source_indices or [index]
         self.parameters = parameters or []
         self.effect_summary = effect_summary

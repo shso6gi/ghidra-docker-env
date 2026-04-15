@@ -7,6 +7,14 @@ from enum import Enum
 import time
 
 from ...model import FunctionReturnAnalysis, FunctionSignature
+from ...model.signature import (
+    ResolvedTypeSpec,
+    get_data_type_display_name,
+    get_declared_type_size_bytes,
+    is_undefined_data_type,
+    is_void_data_type,
+    type_matches_patterns,
+)
 from ..result import EquivalenceResult
 from ..typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from ..typing.signedness_param_fix import ParamSignednessFixer
@@ -96,6 +104,8 @@ class PhaseHandler:
         fix_param_types: bool,
         override_return_type_name: Optional[str] = None,
         override_param_type_names: Optional[Dict[int, str]] = None,
+        override_return_type_spec: Optional[ResolvedTypeSpec] = None,
+        override_param_type_specs: Optional[Dict[int, ResolvedTypeSpec]] = None,
         phase_name: str = "",
         reason: str = "",
         evidence: Optional[Dict[str, Any]] = None,
@@ -112,6 +122,8 @@ class PhaseHandler:
                 fix_param_types=fix_param_types,
                 override_return_type_name=override_return_type_name,
                 override_param_type_names=override_param_type_names,
+                override_return_type_spec=override_return_type_spec,
+                override_param_type_specs=override_param_type_specs,
                 phase_name=phase_name,
                 reason=reason,
                 evidence=evidence,
@@ -279,21 +291,26 @@ class PhaseHandler:
         counterpart_analysis: Optional[FunctionReturnAnalysis] = None,
     ) -> bool:
         """戻り値の型が修正対象かチェック（パターンマッチ）"""
-        if analysis is None or analysis.return_type is None:
+        if analysis is None:
             return False
         
         # 既に符号性修正が適用されている場合はスキップ
         if analysis.should_fix_return_to_signed():
             return False
         
-        type_str = analysis.return_type.lower().strip()
-        
-        for pattern in self.type_fixer_config.target_patterns:
-            if pattern in type_str:
-                self._debug_print(
-                    f"Return type '{analysis.return_type}' matches pattern '{pattern}'"
-                )
-                return True
+        type_str = get_data_type_display_name(
+            getattr(analysis, "return_type_obj", None),
+            analysis.return_type,
+        )
+        if type_matches_patterns(
+            getattr(analysis, "return_type_obj", None),
+            type_str,
+            patterns=list(self.type_fixer_config.target_patterns),
+        ):
+            self._debug_print(
+                f"Return type '{type_str}' matches suspicious target patterns"
+            )
+            return True
 
         suspicious_override = self._get_suspicious_void_return_override(
             analysis,
@@ -301,7 +318,7 @@ class PhaseHandler:
         )
         if suspicious_override is not None:
             self._debug_print(
-                f"Return type '{analysis.return_type}' looks suspicious; "
+                f"Return type '{type_str}' looks suspicious; "
                 f"will force '{suspicious_override}'"
             )
             return True
@@ -316,8 +333,11 @@ class PhaseHandler:
         if analysis is None:
             return None
 
-        type_str = (analysis.return_type or "").lower().strip()
-        if type_str != "void":
+        type_str = get_data_type_display_name(
+            getattr(analysis, "return_type_obj", None),
+            analysis.return_type,
+        )
+        if not is_void_data_type(getattr(analysis, "return_type_obj", None), type_str):
             return None
 
         if len(analysis.returns) != 1:
@@ -335,15 +355,22 @@ class PhaseHandler:
         if counterpart_analysis is None:
             return None
 
-        counterpart_type = (counterpart_analysis.return_type or "").lower().strip()
-        if not counterpart_type or counterpart_type == "void":
+        counterpart_type = get_data_type_display_name(
+            getattr(counterpart_analysis, "return_type_obj", None),
+            counterpart_analysis.return_type,
+        )
+        if (
+            not counterpart_type
+            or is_void_data_type(getattr(counterpart_analysis, "return_type_obj", None), counterpart_type)
+        ):
             return None
 
         if counterpart_analysis.has_unresolved_return_value():
             return None
 
         explicit_counterpart_type = self._infer_explicit_integral_return_type_name(
-            counterpart_analysis.return_type
+            counterpart_analysis.return_type,
+            getattr(counterpart_analysis, "return_type_obj", None),
         )
         if explicit_counterpart_type is not None:
             return explicit_counterpart_type
@@ -370,38 +397,32 @@ class PhaseHandler:
     def _infer_explicit_integral_return_type_name(
         self,
         type_name: Optional[str],
+        type_obj: Any = None,
     ) -> Optional[str]:
-        if not type_name:
+        display_name = get_data_type_display_name(type_obj, type_name)
+        if not display_name:
             return None
 
-        normalized = type_name.lower().strip()
-        if not normalized or normalized == "void":
+        normalized = display_name.lower().strip()
+        if not normalized or is_void_data_type(type_obj, display_name):
             return None
 
-        if any(pattern in normalized for pattern in self.type_fixer_config.target_patterns):
+        if type_matches_patterns(
+            type_obj,
+            display_name,
+            patterns=list(self.type_fixer_config.target_patterns),
+        ):
             return None
 
-        supported = (
-            "unsigned long long",
-            "long long",
-            "unsigned long",
-            "unsigned int",
-            "unsigned short",
-            "unsigned char",
-            "long",
-            "int",
-            "short",
-            "char",
-            "ulonglong",
-            "longlong",
-            "ulong",
-            "uint",
-            "ushort",
-            "uchar",
-        )
-        for candidate in supported:
-            if candidate in normalized:
-                return candidate
+        size = get_declared_type_size_bytes(type_obj, display_name)
+        if size == 8:
+            return "long long"
+        if size == 4:
+            return "int"
+        if size == 2:
+            return "short"
+        if size == 1:
+            return "char"
 
         return None
     
@@ -415,18 +436,17 @@ class PhaseHandler:
         
         for param in analysis.parameters:
             raw_dt = param.get("data_type_obj")
-            if raw_dt is not None and hasattr(raw_dt, 'getName'):
-                type_str = str(raw_dt).lower().strip()
-            else:
-                type_str = param.get("data_type", "").lower().strip()
-
-            if "*" in type_str or "ptr" in type_str:
+            type_str = get_data_type_display_name(raw_dt, param.get("data_type"))
+            type_lower = (type_str or "").lower().strip()
+            if "*" in type_lower or "ptr" in type_lower:
                 continue
-            
-            for pattern in self.type_fixer_config.target_patterns:
-                if pattern in type_str:
-                    self._debug_print(f"Param type '{type_str}' matches pattern '{pattern}'")
-                    return True
+            if type_matches_patterns(
+                raw_dt,
+                type_str,
+                patterns=list(self.type_fixer_config.target_patterns),
+            ):
+                self._debug_print(f"Param type '{type_str}' matches suspicious patterns")
+                return True
         
         return False
     
@@ -455,21 +475,30 @@ class PhaseHandler:
                 self._debug_print("Phase 1: Signedness-based type fix for Binary 1")
                 self._debug_print("=" * 60)
                 
-                original_type = ctx.analysis1.return_type
-                signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
+                original_type = get_data_type_display_name(
+                    getattr(ctx.analysis1, "return_type_obj", None),
+                    ctx.analysis1.return_type,
+                )
+                signed_spec = self.type_fixer_config.resolve_signed_type_spec(
+                    original_type,
+                    data_type_obj=getattr(ctx.analysis1, "return_type_obj", None),
+                    program=ctx.program1,
+                )
                 
-                if signed_type:
+                if signed_spec is not None:
                     updated_analysis1, ret_fixed, _ = self._apply_analysis_fix(
                         type_fixer1,
                         ctx.analysis1,
                         fix_return_type=False,
                         fix_param_types=False,
-                        override_return_type_name=signed_type,
+                        override_return_type_name=signed_spec.type_name,
+                        override_return_type_spec=signed_spec,
                         phase_name=PhaseID.P1_SIGNEDNESS.value,
                         reason="signedness-based return type hypothesis",
                         evidence={
                             "original_type": original_type,
-                            "signed_type": signed_type,
+                            "signed_type": signed_spec.type_name,
+                            "resolved_signed_type": signed_spec.to_dict(),
                             "opcode_counts": dict(ctx.analysis1.signedness_result.opcode_counts),
                         },
                     )
@@ -477,10 +506,11 @@ class PhaseHandler:
                         ctx.analysis1 = updated_analysis1
                         ctx.type_fix_result.signedness_fixed_binary1 = True
                         ctx.type_fix_result.original_type_binary1 = original_type
-                        ctx.type_fix_result.fixed_type_binary1 = signed_type
+                        ctx.type_fix_result.fixed_type_binary1 = signed_spec.type_name
                         changed_binary1 = True
                         self._debug_print(
-                            f"Binary 1: {original_type} -> {signed_type} (signedness fix)"
+                            f"Binary 1: {original_type} -> {signed_spec.type_name} "
+                            f"(signedness fix via {signed_spec.source})"
                         )
         
         if ctx.analysis2 and ctx.analysis2.signedness_result:
@@ -493,21 +523,30 @@ class PhaseHandler:
                 self._debug_print("Phase 1: Signedness-based type fix for Binary 2")
                 self._debug_print("=" * 60)
                 
-                original_type = ctx.analysis2.return_type
-                signed_type = self.type_fixer_config.get_signed_type_for(original_type or "")
+                original_type = get_data_type_display_name(
+                    getattr(ctx.analysis2, "return_type_obj", None),
+                    ctx.analysis2.return_type,
+                )
+                signed_spec = self.type_fixer_config.resolve_signed_type_spec(
+                    original_type,
+                    data_type_obj=getattr(ctx.analysis2, "return_type_obj", None),
+                    program=ctx.program2,
+                )
                 
-                if signed_type:
+                if signed_spec is not None:
                     updated_analysis2, ret_fixed, _ = self._apply_analysis_fix(
                         type_fixer2,
                         ctx.analysis2,
                         fix_return_type=False,
                         fix_param_types=False,
-                        override_return_type_name=signed_type,
+                        override_return_type_name=signed_spec.type_name,
+                        override_return_type_spec=signed_spec,
                         phase_name=PhaseID.P1_SIGNEDNESS.value,
                         reason="signedness-based return type hypothesis",
                         evidence={
                             "original_type": original_type,
-                            "signed_type": signed_type,
+                            "signed_type": signed_spec.type_name,
+                            "resolved_signed_type": signed_spec.to_dict(),
                             "opcode_counts": dict(ctx.analysis2.signedness_result.opcode_counts),
                         },
                     )
@@ -515,10 +554,11 @@ class PhaseHandler:
                         ctx.analysis2 = updated_analysis2
                         ctx.type_fix_result.signedness_fixed_binary2 = True
                         ctx.type_fix_result.original_type_binary2 = original_type
-                        ctx.type_fix_result.fixed_type_binary2 = signed_type
+                        ctx.type_fix_result.fixed_type_binary2 = signed_spec.type_name
                         changed_binary2 = True
                         self._debug_print(
-                            f"Binary 2: {original_type} -> {signed_type} (signedness fix)"
+                            f"Binary 2: {original_type} -> {signed_spec.type_name} "
+                            f"(signedness fix via {signed_spec.source})"
                         )
         
         applied = changed_binary1 or changed_binary2
@@ -542,9 +582,14 @@ class PhaseHandler:
         
         # Binary 1の引数符号性チェック
         if ctx.analysis1:
-            override_map1 = self.param_signedness_fixer.detect_param_signedness_mismatch(
-                ctx.analysis1
+            override_specs1 = self.param_signedness_fixer.detect_param_signedness_mismatch(
+                ctx.analysis1,
+                program=ctx.program1,
             )
+            override_map1 = {
+                index: spec.type_name
+                for index, spec in override_specs1.items()
+            }
             
             if override_map1:
                 self._debug_print("=" * 60)
@@ -558,9 +603,16 @@ class PhaseHandler:
                     fix_return_type=False,
                     fix_param_types=False,
                     override_param_type_names=override_map1,
+                    override_param_type_specs=override_specs1,
                     phase_name=PhaseID.P1_SIGNEDNESS.value,
                     reason="signedness-based parameter hypothesis",
-                    evidence={"override_map": dict(override_map1)},
+                    evidence={
+                        "override_map": dict(override_map1),
+                        "resolved_override_map": {
+                            index: spec.to_dict()
+                            for index, spec in override_specs1.items()
+                        },
+                    },
                 )
                 
                 if param_fixed:
@@ -575,22 +627,27 @@ class PhaseHandler:
                         param_name = param_info.get("name", f"param_{param_idx}")
                         
                         # 元の型を取得
-                        raw_dt = param_info.get("data_type_obj")
-                        if raw_dt is not None and hasattr(raw_dt, 'getName'):
-                            old_type = str(raw_dt)
-                        else:
-                            old_type = param_info.get("data_type", "?")
+                        old_type = get_data_type_display_name(
+                            param_info.get("data_type_obj"),
+                            param_info.get("data_type", "?"),
+                        ) or "?"
                         
                         self._debug_print(
                             f"Binary 1: param[{param_idx}] '{param_name}': "
-                            f"{old_type} -> {new_type} (param signedness fix)"
+                            f"{old_type} -> {new_type} "
+                            f"(param signedness fix via {override_specs1[param_idx].source})"
                         )
         
         # Binary 2の引数符号性チェック
         if ctx.analysis2:
-            override_map2 = self.param_signedness_fixer.detect_param_signedness_mismatch(
-                ctx.analysis2
+            override_specs2 = self.param_signedness_fixer.detect_param_signedness_mismatch(
+                ctx.analysis2,
+                program=ctx.program2,
             )
+            override_map2 = {
+                index: spec.type_name
+                for index, spec in override_specs2.items()
+            }
             
             if override_map2:
                 self._debug_print("=" * 60)
@@ -604,9 +661,16 @@ class PhaseHandler:
                     fix_return_type=False,
                     fix_param_types=False,
                     override_param_type_names=override_map2,
+                    override_param_type_specs=override_specs2,
                     phase_name=PhaseID.P1_SIGNEDNESS.value,
                     reason="signedness-based parameter hypothesis",
-                    evidence={"override_map": dict(override_map2)},
+                    evidence={
+                        "override_map": dict(override_map2),
+                        "resolved_override_map": {
+                            index: spec.to_dict()
+                            for index, spec in override_specs2.items()
+                        },
+                    },
                 )
                 
                 if param_fixed:
@@ -621,15 +685,15 @@ class PhaseHandler:
                         param_name = param_info.get("name", f"param_{param_idx}")
                         
                         # 元の型を取得
-                        raw_dt = param_info.get("data_type_obj")
-                        if raw_dt is not None and hasattr(raw_dt, 'getName'):
-                            old_type = str(raw_dt)
-                        else:
-                            old_type = param_info.get("data_type", "?")
+                        old_type = get_data_type_display_name(
+                            param_info.get("data_type_obj"),
+                            param_info.get("data_type", "?"),
+                        ) or "?"
                         
                         self._debug_print(
                             f"Binary 2: param[{param_idx}] '{param_name}': "
-                            f"{old_type} -> {new_type} (param signedness fix)"
+                            f"{old_type} -> {new_type} "
+                            f"(param signedness fix via {override_specs2[param_idx].source})"
                         )
         
         applied = changed_binary1 or changed_binary2

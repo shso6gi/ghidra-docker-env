@@ -10,6 +10,12 @@ from ...analysis.effect_summary import (
     lower_post_state_expression_for_smt_if_needed,
 )
 from ...model import Expression, FunctionReturnAnalysis
+from ...model.signature import (
+    get_declared_type_size_bits,
+    get_declared_type_signedness,
+    is_undefined_data_type,
+    is_unsigned_data_type,
+)
 from ...model.render_smt import (
     expression_contains_signed_comparison,
     expression_returns_bool,
@@ -22,7 +28,10 @@ from .types import ParameterInfo
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
     """return値のビット幅を取得する。"""
-    declared_bits = get_declared_return_size_bits(analysis.return_type)
+    declared_bits = get_declared_return_size_bits(
+        analysis.return_type,
+        return_type_obj=getattr(analysis, "return_type_obj", None),
+    )
     if declared_bits is not None:
         return declared_bits
 
@@ -36,32 +45,15 @@ def get_return_size(analysis: FunctionReturnAnalysis) -> int:
     return 32
 
 
-def get_declared_return_size_bits(return_type: Optional[str]) -> Optional[int]:
+def get_declared_return_size_bits(
+    return_type: Optional[str],
+    return_type_obj=None,
+) -> Optional[int]:
     """型名から戻り値のビット幅を推定する。"""
-    return_type = (return_type or "").strip()
-    if not return_type:
-        return None
-
-    type_lower = return_type.lower()
-
-    undefined_match = re.fullmatch(r"undefined(\d+)", type_lower)
-    if undefined_match:
-        return int(undefined_match.group(1)) * 8
-
-    if type_lower == "bool":
-        return 8
-    if any(token in type_lower for token in ["char", "byte"]):
-        return 8
-    if "short" in type_lower:
-        return 16
-    if "longlong" in type_lower or "long long" in type_lower:
-        return 64
-    if "long" in type_lower:
-        return 64
-    if "int" in type_lower:
-        return 32
-
-    return None
+    return get_declared_type_size_bits(
+        return_type_obj,
+        return_type,
+    )
 
 
 def is_boolean_return_expr(expr: Expression) -> bool:
@@ -82,21 +74,29 @@ def coerce_return_value_to_bitvec(
 
 def should_sign_extend_to_return_size(analysis: FunctionReturnAnalysis) -> bool:
     """return値の幅補正で sign extension を使うべきか判定する。"""
-    return should_sign_extend_return_type(analysis.return_type)
+    return should_sign_extend_return_type(
+        analysis.return_type,
+        return_type_obj=getattr(analysis, "return_type_obj", None),
+    )
 
 
-def should_sign_extend_return_type(return_type: Optional[str]) -> bool:
+def should_sign_extend_return_type(
+    return_type: Optional[str],
+    return_type_obj=None,
+) -> bool:
     """return型名から sign extension の要否を判定する。"""
-    return_type = (return_type or "").strip()
-    if not return_type:
+    if not return_type and return_type_obj is None:
         return False
-
-    type_lower = return_type.lower()
-    if "undefined" in type_lower or "unknown" in type_lower:
+    if is_undefined_data_type(return_type_obj, return_type):
         return False
-    if is_unsigned_type(return_type):
+    if is_unsigned_data_type(return_type_obj, return_type):
         return False
-    return "int" in type_lower or "long" in type_lower
+    signedness = get_declared_type_signedness(
+        return_type_obj,
+        return_type,
+        fallback_signed=True,
+    )
+    return bool(signedness)
 
 
 def has_signed_branch_evidence(expr: Expression, conditions) -> bool:
@@ -116,9 +116,10 @@ def should_sign_extend_value(
     return_type: Optional[str],
     expr: Expression,
     conditions,
+    return_type_obj=None,
 ) -> bool:
     """return_type だけでなく branch evidence も見て sign extension の要否を判定する。"""
-    if should_sign_extend_return_type(return_type):
+    if should_sign_extend_return_type(return_type, return_type_obj=return_type_obj):
         return True
     return has_signed_branch_evidence(expr, conditions)
 

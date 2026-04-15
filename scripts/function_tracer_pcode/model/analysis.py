@@ -11,6 +11,11 @@ if TYPE_CHECKING:
     from ..analysis.signedness import SignednessEvidence
     from ..analysis.effect_summary import EffectSummary
     from .signature import SignatureHypothesis, FunctionSignature
+from .signature import (
+    get_data_type_display_name,
+    is_unsigned_data_type,
+    parameters_without_runtime_objects,
+)
 
 @dataclass
 class ReturnInfo:
@@ -116,6 +121,7 @@ class FunctionReturnAnalysis:
     parameters: List[Dict]
     returns: List[ReturnInfo]
     return_type: Optional[str] = None
+    return_type_obj: Any = None
     signedness_result: Optional[SignednessResult] = None
     unknown_event_count: int = 0
     unknown_event_reasons: List[str] = field(default_factory=list)
@@ -130,9 +136,9 @@ class FunctionReturnAnalysis:
         result = {
             "function_name": self.function_name,
             "entry_point": self.entry_point,
-            "parameters": self.parameters,
+            "parameters": parameters_without_runtime_objects(self.parameters),
             "returns": [r.to_dict() for r in self.returns],
-            "return_type": self.return_type,
+            "return_type": get_data_type_display_name(self.return_type_obj, self.return_type),
             "unknown_event_count": self.unknown_event_count,
             "unknown_event_reasons": list(self.unknown_event_reasons),
             "analysis_notes": list(self.analysis_notes),
@@ -169,14 +175,11 @@ class FunctionReturnAnalysis:
             return False
         
         # 戻り値の型がunsigned系の場合のみ修正対象
-        if self.return_type:
-            type_lower = self.return_type.lower()
-            is_unsigned_type = (
-                "ulong" in type_lower or
-                "uint" in type_lower or
-                "unsigned" in type_lower
-            )
-            if is_unsigned_type and self.signedness_result.should_fix_to_signed():
+        if (
+            get_data_type_display_name(self.return_type_obj, self.return_type)
+            and is_unsigned_data_type(self.return_type_obj, self.return_type)
+            and self.signedness_result.should_fix_to_signed()
+        ):
                 return True
         
         return False
@@ -299,6 +302,7 @@ class FunctionReturnAnalysis:
         return replace(
             self,
             return_type=updated_signature.return_type,
+            return_type_obj=updated_signature.return_type_obj,
             parameters=updated_signature.parameters or [],
             analysis_notes=updated_notes,
             signature_hypotheses=updated_hypotheses,

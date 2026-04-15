@@ -1,41 +1,56 @@
 # -*- coding: utf-8 -*-
 """型判定ヘルパー関数"""
 
-
-def is_long_type(type_str: str) -> bool:
-    """型名が long/ulong 系かどうかを判定"""
-    type_lower = type_str.lower().strip()
-    return (
-        "long" in type_lower and
-        "longlong" not in type_lower and
-        "long long" not in type_lower
-    )
+from ...model.signature import (
+    get_data_type_display_name,
+    get_declared_type_size_bytes,
+    is_unsigned_data_type,
+)
 
 
-def is_int_type(type_str: str) -> bool:
-    """型名が int/uint 系かどうかを判定"""
-    type_lower = type_str.lower().strip()
-    return (
-        "int" in type_lower and
-        "long" not in type_lower and
-        "short" not in type_lower and
-        "pointer" not in type_lower and
-        "*" not in type_lower
-    )
+def is_long_type(type_ref) -> bool:
+    """型が long/ulong 系かどうかを判定"""
+    if isinstance(type_ref, dict):
+        data_type_obj = type_ref.get("data_type_obj")
+        type_name = type_ref.get("data_type")
+    else:
+        data_type_obj = None
+        type_name = type_ref
+
+    size = get_declared_type_size_bytes(data_type_obj, type_name)
+    display_name = (get_data_type_display_name(data_type_obj, type_name) or "").lower().strip()
+    return bool(size == 8 and "long long" not in display_name and "longlong" not in display_name)
 
 
-def is_unsigned_type(type_str: str) -> bool:
-    """型名が unsigned 系かどうかを判定"""
-    type_lower = type_str.lower().strip()
-    return (
-        "unsigned" in type_lower or
-        (type_lower.startswith("u") and not type_lower.startswith("undefined"))
-    )
+def is_int_type(type_ref) -> bool:
+    """型が int/uint 系かどうかを判定"""
+    if isinstance(type_ref, dict):
+        data_type_obj = type_ref.get("data_type_obj")
+        type_name = type_ref.get("data_type")
+    else:
+        data_type_obj = None
+        type_name = type_ref
+
+    size = get_declared_type_size_bytes(data_type_obj, type_name)
+    display_name = (get_data_type_display_name(data_type_obj, type_name) or "").lower().strip()
+    if "*" in display_name or "pointer" in display_name:
+        return False
+    return bool(size == 4)
+
+
+def is_unsigned_type(type_ref) -> bool:
+    """型が unsigned 系かどうかを判定"""
+    if isinstance(type_ref, dict):
+        return is_unsigned_data_type(
+            type_ref.get("data_type_obj"),
+            type_ref.get("data_type"),
+        )
+    return is_unsigned_data_type(None, type_ref)
 
 
 def get_type_name_from_param(param: dict) -> str:
-    """パラメータ辞書から型名を取得"""
-    dt = param.get("data_type_obj")
-    if dt is not None and hasattr(dt, 'getName'):
-        return str(dt)
-    return param.get("data_type", "")
+    """パラメータ辞書から表示用の型名を取得"""
+    return get_data_type_display_name(
+        param.get("data_type_obj"),
+        param.get("data_type"),
+    ) or ""

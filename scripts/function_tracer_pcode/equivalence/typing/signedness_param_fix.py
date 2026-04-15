@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """引数の符号性推定・修正モジュール（Phase 1.5用）"""
 
-from typing import Dict
+from typing import Any, Dict
 from ...model import FunctionReturnAnalysis
+from ...model.signature import (
+    ResolvedTypeSpec,
+    get_data_type_display_name,
+    is_unsigned_data_type,
+)
 from .fixer import TypeFixerConfig
 
 
@@ -19,8 +24,10 @@ class ParamSignednessFixer:
     
     def detect_param_signedness_mismatch(
         self,
-        analysis: FunctionReturnAnalysis
-    ) -> Dict[int, str]:
+        analysis: FunctionReturnAnalysis,
+        *,
+        program: Any = None,
+    ) -> Dict[int, ResolvedTypeSpec]:
         """
         引数の型が誤ってunsignedになっているかを検出
         
@@ -32,10 +39,9 @@ class ParamSignednessFixer:
             analysis: 関数解析結果
         
         Returns:
-            修正すべきparamのインデックス→型名のマップ
-            例: {0: "long", 1: "int"}
+            修正すべきparamのインデックス→型specのマップ
         """
-        override_map = {}
+        override_map: Dict[int, ResolvedTypeSpec] = {}
         
         # 符号性推定結果がない、またはsignedでない場合はスキップ
         if analysis.signedness_result is None:
@@ -56,21 +62,23 @@ class ParamSignednessFixer:
         for i, param in enumerate(analysis.parameters):
             # DataTypeオブジェクトがある場合はそれを優先
             raw_dt = param.get("data_type_obj")
-            if raw_dt is not None and hasattr(raw_dt, 'getName'):
-                type_str = str(raw_dt)
-            else:
-                type_str = param.get("data_type", "")
+            type_str = get_data_type_display_name(raw_dt, param.get("data_type", ""))
             
             if not type_str:
                 continue
             
             # unsigned型かどうかをチェック
-            if not self._is_unsigned_type(type_str):
+            if not self._is_unsigned_type(raw_dt, type_str):
                 continue
             
             # 対応するsigned型を取得
-            signed_type = self.config.get_signed_type_for(type_str)
-            if signed_type is None:
+            signed_spec = self.config.resolve_signed_type_spec(
+                type_str,
+                data_type_obj=raw_dt,
+                program=program,
+                fallback_size=param.get("size"),
+            )
+            if signed_spec is None:
                 self._debug_print(
                     f"  Param {i} '{param.get('name', 'unknown')}': "
                     f"'{type_str}' is unsigned but no signed mapping found"
@@ -78,10 +86,11 @@ class ParamSignednessFixer:
                 continue
             
             # 修正対象として登録
-            override_map[i] = signed_type
+            override_map[i] = signed_spec
             self._debug_print(
                 f"  Param {i} '{param.get('name', 'unknown')}': "
-                f"'{type_str}' -> '{signed_type}' (signedness mismatch detected)"
+                f"'{type_str}' -> '{signed_spec.type_name}' "
+                f"(signedness mismatch detected via {signed_spec.source})"
             )
         
         if override_map:
@@ -93,27 +102,6 @@ class ParamSignednessFixer:
         
         return override_map
     
-    def _is_unsigned_type(self, type_str: str) -> bool:
+    def _is_unsigned_type(self, data_type_obj, type_str: str) -> bool:
         """型がunsigned型かどうかを判定"""
-        type_lower = type_str.lower().strip()
-        
-        # 明示的なunsignedパターン
-        unsigned_indicators = [
-            "unsigned",
-            "ulong",
-            "uint",
-            "ushort",
-            "uchar",
-            "ubyte",
-        ]
-        
-        for indicator in unsigned_indicators:
-            if indicator in type_lower:
-                return True
-        
-        # "u" で始まる型名（ulong, uint等）- ただし "undefined" は除外
-        if type_lower.startswith("u") and len(type_lower) > 1:
-            if not type_lower.startswith("undefined"):
-                return True
-        
-        return False
+        return is_unsigned_data_type(data_type_obj, type_str)

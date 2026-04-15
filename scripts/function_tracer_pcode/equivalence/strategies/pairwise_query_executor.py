@@ -362,6 +362,7 @@ def _build_model_validation_query(
             getattr(case1, "return_type", None),
             case1.value_expr,
             case1.conditions,
+            return_type_obj=getattr(case1, "return_type_obj", None),
         ),
     )
     value2_smt = case2.get_value_smt(
@@ -371,6 +372,7 @@ def _build_model_validation_query(
             getattr(case2, "return_type", None),
             case2.value_expr,
             case2.conditions,
+            return_type_obj=getattr(case2, "return_type_obj", None),
         ),
     )
 

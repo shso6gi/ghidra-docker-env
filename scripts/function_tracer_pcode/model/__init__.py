@@ -14,6 +14,7 @@ from .signature import (
     SignatureHypothesis,
     ResolvedTypeSpec,
     resolve_type_spec,
+    resolve_signed_counterpart_spec,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "SignatureHypothesis",
     "ResolvedTypeSpec",
     "resolve_type_spec",
+    "resolve_signed_counterpart_spec",
 ]

@@ -8,6 +8,10 @@ from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.storage import StorageInfo
 from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
+from ..model.signature import (
+    get_declared_type_signedness,
+    is_void_data_type,
+)
 from ..config.settings import (
     BOUNDED_CALL_MAX_CASES,
     BOUNDED_CALL_REFINEMENT_ENABLED,
@@ -410,7 +414,7 @@ class ReturnAnalyzer:
             self._current_effect_summary = effect_summary
 
             # 戻り値の型を取得
-            return_type = self._get_return_type(high_function)
+            return_type_obj, return_type = self._get_return_type_info(high_function)
             self._debug_print(f"Return type: {return_type}")
 
             # === Phase 1: 符号性検出 ===
@@ -444,6 +448,7 @@ class ReturnAnalyzer:
                 parameters=parameters,
                 returns=return_infos,
                 return_type=return_type,
+                return_type_obj=return_type_obj,
                 signedness_result=signedness_result,
                 deferred_calls=dict(self._current_deferred_calls),
                 effect_summary=effect_summary,
@@ -457,8 +462,8 @@ class ReturnAnalyzer:
             )
 
             if (
-                return_type
-                and return_type.strip().lower() == "void"
+                return_type_obj is not None
+                and self._is_void_type(return_type_obj)
                 and effect_summary.synthetic_expr is not None
                 and not effect_summary.has_unsupported_call
             ):
@@ -1258,6 +1263,7 @@ class ReturnAnalyzer:
             parameters=list(analysis.parameters or []),
             returns=list(affected_returns),
             return_type=analysis.return_type,
+            return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
         )
@@ -1295,6 +1301,7 @@ class ReturnAnalyzer:
             parameters=list(analysis.parameters or []),
             returns=list(affected_returns),
             return_type=analysis.return_type,
+            return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
         )
@@ -2597,8 +2604,20 @@ class ReturnAnalyzer:
             self._debug_print(f"Signedness detection failed: {e}")
             return None
     
+    def _get_return_type_info(self, high_function):
+        """戻り値の型オブジェクトと表示名を取得"""
+        try:
+            func_proto = high_function.getFunctionPrototype()
+            if func_proto:
+                ret_type = func_proto.getReturnType()
+                if ret_type:
+                    return ret_type, self._get_return_type(high_function) or str(ret_type)
+        except Exception as e:
+            self._debug_print(f"Failed to get return type: {e}")
+        return None, None
+
     def _get_return_type(self, high_function) -> Optional[str]:
-        """戻り値の型を取得"""
+        """後方互換: 戻り値の表示名だけを返す。"""
         try:
             func_proto = high_function.getFunctionPrototype()
             if func_proto:
@@ -2644,27 +2663,11 @@ class ReturnAnalyzer:
     
     def _is_signed_type(self, data_type) -> bool:
         """データ型が符号付きかどうかを判定"""
-        if data_type is None:
-            return True
-        
-        type_name = str(data_type).lower()
-        
-        # 明示的に unsigned の場合
-        if "unsigned" in type_name or type_name.startswith("u"):
-            return False
-        
-        # uint, ulong, uchar 等
-        unsigned_patterns = ["uint", "ulong", "uchar", "ushort", "ubyte", 
-                             "size_t", "uintptr"]
-        for pattern in unsigned_patterns:
-            if pattern in type_name:
-                return False
-        
-        # pointer型は符号なし
-        if "*" in type_name or "ptr" in type_name:
-            return False
-        
-        return True
+        return get_declared_type_signedness(data_type, fallback_signed=True)
+
+    def _is_void_type(self, data_type) -> bool:
+        """データ型が void かどうかを判定"""
+        return is_void_data_type(data_type)
     
     def _get_storage_info(self, sym) -> Optional[Dict]:
         """シンボルのストレージ情報を取得"""
