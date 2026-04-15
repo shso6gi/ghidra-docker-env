@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
+from ..model.call_target import CallTargetRef, coerce_call_target_ref
 from ..model.structural import StructuralKey
 from ..model.storage import StorageInfo
 from ..model.analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
@@ -28,7 +29,7 @@ from .effect_summary import (
     _enumerate_constant_expression_branches,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
-    _resolve_call_target_name,
+    _resolve_call_target_ref,
     _reduce_expression_under_conditions,
     expression_contains_synthetic_location_reads,
     lower_post_state_expression_for_smt,
@@ -338,6 +339,9 @@ class ReturnAnalyzer:
         ConditionSimplifier.reset_debug_state()
         
         active_functions = set(active_functions or set())
+        current_active_key = self._target_active_key(CallTargetRef.from_function(function))
+        if current_active_key is not None:
+            active_functions.add(current_active_key)
         active_functions.add(function.getName())
 
         self._debug_print("=" * 60)
@@ -396,7 +400,14 @@ class ReturnAnalyzer:
                 tracer,
                 condition_tracker,
                 parameters,
-                active_functions={function.getName()},
+                active_functions=(
+                    {function.getName()}
+                    | (
+                        {self._target_active_key(CallTargetRef.from_function(function))}
+                        if self._target_active_key(CallTargetRef.from_function(function)) is not None
+                        else set()
+                    )
+                ),
             )
             self._current_effect_summary = effect_summary
 
@@ -932,20 +943,22 @@ class ReturnAnalyzer:
         analysis.incomplete_control_flow = bool(reasons)
 
     def _make_deferred_call_recorder(self, target_function_name: str):
-        def record_call(target_name: str, args: List[Expression]) -> str:
-            placeholder_name = f"call_out_of_scope:{target_name}#{self._deferred_call_counter}"
+        def record_call(target, args: List[Expression]) -> str:
+            target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
+            target_label = target_ref.placeholder_name()
+            placeholder_name = f"call_out_of_scope:{target_label}#{self._deferred_call_counter}"
             self._deferred_call_counter += 1
             cloned_args = [self._clone_expression(arg) for arg in args]
             self._current_deferred_calls[placeholder_name] = DeferredCallInfo(
                 placeholder_name=placeholder_name,
-                target_name=target_name,
+                target_ref=target_ref,
                 arguments=cloned_args,
             )
             if self.debug:
                 arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
                 self._debug_print(
                     f"Recorded deferred call in '{target_function_name}': "
-                    f"{placeholder_name} -> {target_name}([{arg_dump}])"
+                    f"{placeholder_name} -> {target_ref.display_name()}([{arg_dump}])"
                 )
             return placeholder_name
 
@@ -965,15 +978,19 @@ class ReturnAnalyzer:
         ):
             return
 
-        def provide_analysis(function_name: str) -> Optional[FunctionReturnAnalysis]:
-            if function_name == current_function_name:
+        def provide_analysis(target) -> Optional[FunctionReturnAnalysis]:
+            target_ref = self._coerce_runtime_target_ref(target)
+            if target_ref is None:
+                return None
+            if target_ref.function_name == current_function_name:
                 return analysis
-            in_progress = self._analysis_in_progress.get(function_name)
+            in_progress = self._analysis_in_progress.get(target_ref.function_name or "")
             if in_progress is not None:
                 return in_progress
-            if function_name in active_functions:
+            active_key = self._target_active_key(target_ref)
+            if active_key is not None and active_key in active_functions:
                 return None
-            return self._get_or_analyze_call_target(function_name, active_functions)
+            return self._get_or_analyze_call_target(target_ref, active_functions)
 
         refiner = BoundedCallRefiner(
             provide_analysis,
@@ -1580,12 +1597,48 @@ class ReturnAnalyzer:
             return fresh
         return cached
 
-    def _get_freshest_callee_parameters(self, function_name: str) -> List[Dict]:
-        callee = self._find_function_by_name(function_name)
+    def _coerce_runtime_target_ref(self, target) -> Optional[CallTargetRef]:
+        return coerce_call_target_ref(target)
+
+    def _function_cache_key(self, function) -> Optional[str]:
+        if function is None:
+            return None
+        try:
+            return str(function.getEntryPoint())
+        except Exception:
+            return None
+
+    def _target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[str]:
+        if target_ref is None:
+            return None
+        if target_ref.entry_offset is not None:
+            return f"entry@0x{target_ref.entry_offset:x}"
+        if target_ref.function_name:
+            return f"name:{target_ref.function_name}"
+        if target_ref.address_offset is not None:
+            return f"code@0x{target_ref.address_offset:x}"
+        return None
+
+    def _resolve_target_function(self, target) -> Optional[Any]:
+        target_ref = self._coerce_runtime_target_ref(target)
+        if target_ref is None or self.program is None:
+            return None
+        if target_ref.function_obj is not None:
+            return target_ref.function_obj
+        if target_ref.entry_offset is not None:
+            return self._find_function_by_entry_offset(target_ref.entry_offset)
+        if target_ref.function_name:
+            return self._find_function_by_name(target_ref.function_name)
+        return None
+
+    def _get_freshest_callee_parameters(self, target) -> List[Dict]:
+        callee = self._resolve_target_function(target)
         if callee is None:
             return []
 
-        callee_key = str(callee.getEntryPoint())
+        callee_key = self._function_cache_key(callee)
+        if callee_key is None:
+            return []
         cached_parameters = self._effect_summary_parameter_cache.get(callee_key)
 
         results = self._decompile_function(callee, timeout=60)
@@ -1625,12 +1678,19 @@ class ReturnAnalyzer:
             except Exception:
                 continue
 
-            target_name = _resolve_call_target_name(tracer, op)
-            if not target_name or target_name == "UNKNOWN_FUNC" or target_name in active_functions:
+            target_ref = _resolve_call_target_ref(tracer, op)
+            if target_ref is None:
+                continue
+            active_key = self._target_active_key(target_ref)
+            if target_ref.display_name() == "UNKNOWN_FUNC":
+                continue
+            if active_key is not None and active_key in active_functions:
+                continue
+            if target_ref.function_name and target_ref.function_name in active_functions:
                 continue
 
             explicit_count = max(0, int(op.getNumInputs()) - 1)
-            callee_parameters = self._get_freshest_callee_parameters(target_name)
+            callee_parameters = self._get_freshest_callee_parameters(target_ref)
             if len(callee_parameters) <= explicit_count:
                 continue
 
@@ -1824,13 +1884,21 @@ class ReturnAnalyzer:
         if cached is not None:
             return cached
 
-        def summarize_call(function_name: str, args):
-            if function_name in active_functions:
+        def summarize_call(target, args):
+            target_ref = self._coerce_runtime_target_ref(target)
+            if target_ref is None:
                 return None
-            callee = self._find_function_by_name(function_name)
+            active_key = self._target_active_key(target_ref)
+            if active_key is not None and active_key in active_functions:
+                return None
+            if target_ref.function_name and target_ref.function_name in active_functions:
+                return None
+            callee = self._resolve_target_function(target_ref)
             if callee is None:
                 return None
-            callee_key = str(callee.getEntryPoint())
+            callee_key = self._function_cache_key(callee)
+            if callee_key is None:
+                return None
             cached_callee = self._effect_summary_cache.get(callee_key)
             if cached_callee is not None:
                 return cached_callee
@@ -1858,7 +1926,10 @@ class ReturnAnalyzer:
             except Exception:
                 image_base = None
             callee_tracker.refine_branch_conditions(
-                call_resolver=self._make_call_resolver(active_functions | {function_name}, callee),
+                call_resolver=self._make_call_resolver(
+                    active_functions | ({active_key} if active_key is not None else set()),
+                    callee,
+                ),
                 parameters=callee_parameters,
                 resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
@@ -1870,21 +1941,25 @@ class ReturnAnalyzer:
                 callee_tracer,
                 callee_tracker,
                 callee_parameters,
-                active_functions | {function_name},
+                active_functions | ({active_key} if active_key is not None else set()),
             )
             return summary
 
-        def resolve_callee_parameters(function_name: str):
-            return self._get_freshest_callee_parameters(function_name)
+        def resolve_callee_parameters(target):
+            return self._get_freshest_callee_parameters(target)
 
-        current_function_name = function.getName()
+        current_target = CallTargetRef.from_function(function)
+        current_active_key = self._target_active_key(current_target)
         summary = summarize_store_effects(
             condition_tracker.block_by_index.values(),
             tracer,
             condition_tracker,
             parameters,
             direct_call_summary=summarize_call,
-            direct_call_expander=self._make_call_resolver(active_functions | {current_function_name}, function),
+            direct_call_expander=self._make_call_resolver(
+                active_functions | ({current_active_key} if current_active_key is not None else set()),
+                function,
+            ),
             resolve_callee_parameters=resolve_callee_parameters,
             debug=self.debug,
         )
@@ -1892,35 +1967,46 @@ class ReturnAnalyzer:
         return summary
 
     def _make_call_resolver(self, active_functions: Set[str], current_function=None):
-        def resolve_call(function_name: str, args):
-            return self._resolve_call_expansions(function_name, args, active_functions, current_function)
+        def resolve_call(target, args):
+            return self._resolve_call_expansions(target, args, active_functions, current_function)
 
         return resolve_call
 
     def _resolve_call_expansions(
         self,
-        function_name: str,
+        target,
         args: List[Expression],
         active_functions: Set[str],
         current_function=None,
     ):
         from ..transform.expander import ExpandedValue
 
-        local_address = self._parse_local_target_address(function_name)
-        if local_address is not None:
-            return self._resolve_local_code_target_expansions(local_address, active_functions, current_function)
+        target_ref = self._coerce_runtime_target_ref(target)
+        if target_ref is None:
+            return None
+        target_label = target_ref.display_name()
 
-        if function_name in active_functions:
-            self._debug_print(f"Skipping recursive call expansion for '{function_name}'")
+        if target_ref.is_code_address() and target_ref.address_offset is not None:
+            return self._resolve_local_code_target_expansions(
+                target_ref.address_offset,
+                active_functions,
+                current_function,
+            )
+
+        active_key = self._target_active_key(target_ref)
+        if (active_key is not None and active_key in active_functions) or (
+            target_ref.function_name and target_ref.function_name in active_functions
+        ):
+            self._debug_print(f"Skipping recursive call expansion for '{target_label}'")
             return None
 
-        analysis = self._get_or_analyze_call_target(function_name, active_functions)
+        analysis = self._get_or_analyze_call_target(target_ref, active_functions)
         if analysis is None:
-            self._debug_print(f"Call expansion skipped for '{function_name}': analysis unavailable")
+            self._debug_print(f"Call expansion skipped for '{target_label}': analysis unavailable")
             return None
         if not self._is_call_return_summary_allowed(analysis, args):
             self._debug_print(
-                f"Call expansion skipped for '{function_name}': "
+                f"Call expansion skipped for '{target_label}': "
                 "summary not safe enough for inlining"
             )
             return None
@@ -1933,7 +2019,7 @@ class ReturnAnalyzer:
         ]
         if len(args) < len(param_names):
             self._debug_print(
-                f"Call expansion skipped for '{function_name}': "
+                f"Call expansion skipped for '{target_label}': "
                 f"expected {len(param_names)} args, got {len(args)}"
             )
             return None
@@ -1953,7 +2039,7 @@ class ReturnAnalyzer:
 
             if not self._call_summary_is_safe(value, conditions, allowed_names):
                 self._debug_print(
-                    f"Call expansion rejected for '{function_name}': "
+                    f"Call expansion rejected for '{target_label}': "
                     "callee summary references unresolved symbols"
                 )
                 return None
@@ -1976,16 +2062,6 @@ class ReturnAnalyzer:
             return results
         except Exception:
             return None
-
-    def _parse_local_target_address(self, function_name: str) -> Optional[int]:
-        match = re.fullmatch(r"ADDR_([0-9a-fA-F]+)", function_name or "")
-        if not match:
-            return None
-        try:
-            return int(match.group(1), 16)
-        except Exception:
-            return None
-
     def _resolve_local_code_target_expansions(
         self,
         address_value: int,
@@ -2575,23 +2651,27 @@ class ReturnAnalyzer:
 
     def _get_or_analyze_call_target(
         self,
-        function_name: str,
+        target,
         active_functions: Set[str],
         minimum_param_count: int = 0,
     ) -> Optional[FunctionReturnAnalysis]:
-        callee = self._find_function_by_name(function_name)
+        target_ref = self._coerce_runtime_target_ref(target)
+        callee = self._resolve_target_function(target_ref)
         if callee is None:
             return None
 
-        cache_key = str(callee.getEntryPoint())
+        cache_key = self._function_cache_key(callee)
+        if cache_key is None:
+            return None
         cached = self._call_analysis_cache.get(cache_key)
         if cached is not None and len(getattr(cached, "parameters", []) or []) >= minimum_param_count:
             return cached
 
+        active_key = self._target_active_key(target_ref)
         analysis = self.analyze_function(
             callee,
             timeout=60,
-            active_functions=active_functions | {function_name},
+            active_functions=active_functions | ({active_key} if active_key is not None else set()),
         )
         if cached is None:
             self._call_analysis_cache[cache_key] = analysis
@@ -2990,11 +3070,11 @@ class ReturnAnalyzer:
         if direct_function is not None and self._function_has_no_return(direct_function):
             return True
 
-        resolved_name = _resolve_call_target_name(tracer, pcode_op)
-        if not resolved_name:
+        resolved_target = _resolve_call_target_ref(tracer, pcode_op)
+        if resolved_target is None or not resolved_target.function_name:
             return False
 
-        function_by_name = self._find_function_by_name(resolved_name)
+        function_by_name = self._find_function_by_name(resolved_target.function_name)
         if function_by_name is not None and self._function_has_no_return(function_by_name):
             return True
 

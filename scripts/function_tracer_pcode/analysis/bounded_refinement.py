@@ -13,7 +13,7 @@ from ..model import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
-from .condition import ConditionSimplifier
+from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     StoreEffect,
     lower_post_state_expression_for_smt_if_needed,
@@ -23,6 +23,21 @@ from .effect_summary import (
 
 
 ExpressionExpansion = Tuple[Expression, List[Condition]]
+
+
+def _runtime_expression_signature(expr: Optional[Expression]):
+    if expr is None:
+        return ("none",)
+    return expr.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+        include_memory_read_order=False,
+    )
+
+
+def _runtime_conditions_signature(conditions: Sequence[Condition]):
+    return ConditionNormalizer.conditions_signature(conditions)
 
 
 class BoundedCallRefiner:
@@ -36,7 +51,7 @@ class BoundedCallRefiner:
 
     def __init__(
         self,
-        analysis_provider: Callable[[str], Optional[FunctionReturnAnalysis]],
+        analysis_provider: Callable[[object], Optional[FunctionReturnAnalysis]],
         *,
         max_unroll: int = 2,
         max_cases: int = 128,
@@ -76,13 +91,13 @@ class BoundedCallRefiner:
             analysis.analysis_notes.append("bounded_call_refinement")
         return changed
 
-    def _analysis_signature(self, return_infos: Sequence[ReturnInfo]) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    def _analysis_signature(self, return_infos: Sequence[ReturnInfo]) -> Tuple[Tuple[object, object], ...]:
         signature = []
         for ret in return_infos or []:
             signature.append(
                 (
-                    ret.value.to_string(),
-                    tuple(sorted(cond.to_string() for cond in ret.conditions)),
+                    _runtime_expression_signature(ret.value),
+                    _runtime_conditions_signature(ret.conditions),
                 )
             )
         return tuple(signature)
@@ -221,7 +236,7 @@ class BoundedCallRefiner:
         fuel: int,
         trail: Set[str],
     ) -> List[ExpressionExpansion]:
-        callee_analysis = self.analysis_provider(deferred.target_name)
+        callee_analysis = self.analysis_provider(deferred.target_ref)
         if callee_analysis is None or not callee_analysis.returns:
             return []
 
@@ -383,7 +398,7 @@ class BoundedCallRefiner:
         seen = set()
         result: List[List[Condition]] = []
         for conditions in condition_sets:
-            key = tuple(sorted(cond.to_string() for cond in conditions))
+            key = _runtime_conditions_signature(conditions)
             if key in seen:
                 continue
             seen.add(key)
@@ -400,8 +415,8 @@ class BoundedCallRefiner:
         result: List[ExpressionExpansion] = []
         for expr, conditions in expansions:
             key = (
-                expr.to_string(),
-                tuple(sorted(cond.to_string() for cond in conditions)),
+                _runtime_expression_signature(expr),
+                _runtime_conditions_signature(conditions),
             )
             if key in seen:
                 continue
@@ -421,8 +436,8 @@ class BoundedCallRefiner:
             key = (
                 ret.pcode_identity or ret.address,
                 ret.branch_index,
-                ret.value.to_string(),
-                tuple(sorted(cond.to_string() for cond in ret.conditions)),
+                _runtime_expression_signature(ret.value),
+                _runtime_conditions_signature(ret.conditions),
             )
             if key in seen:
                 continue

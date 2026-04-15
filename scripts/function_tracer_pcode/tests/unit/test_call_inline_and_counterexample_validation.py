@@ -10,7 +10,14 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executo
     solve_query_twostage,
     validate_counterexample_across_cases,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    ReturnInfo,
+)
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
@@ -237,8 +244,8 @@ def test_expression_expander_inlines_direct_call_results():
         def _trace_pcode_op(self, *_args, **_kwargs):
             raise AssertionError("recursive tracing fallback should not run")
 
-    def _resolve_call(function_name, args):
-        assert function_name == "callee"
+    def _resolve_call(target_ref, args):
+        assert target_ref == CallTargetRef.from_name("callee")
         assert len(args) == 1
         return [
             ExpandedValue(
@@ -325,8 +332,8 @@ def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
         def _trace_pcode_op(self, *_args, **_kwargs):
             raise AssertionError("recursive tracing fallback should not run")
 
-    def _resolve_call(function_name, args):
-        assert function_name == "callee"
+    def _resolve_call(target_ref, args):
+        assert target_ref == CallTargetRef.from_name("callee")
         assert len(args) == 1
         return [
             ExpandedValue(
@@ -451,8 +458,8 @@ def test_expression_expander_recovers_callee_aligned_call_arguments_before_resol
 
     captured = {}
 
-    def _resolve_call(function_name, args):
-        captured["target"] = function_name
+    def _resolve_call(target_ref, args):
+        captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(7, 4), [])]
 
@@ -505,7 +512,7 @@ def test_expression_expander_recovers_callee_aligned_call_arguments_before_resol
                 },
             },
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             {
                 "name": "lhs",
                 "index": 0,
@@ -577,7 +584,7 @@ def test_expression_expander_recovers_callee_aligned_call_arguments_before_resol
 
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "7"
-    assert captured["target"] == "callee"
+    assert captured["target"] == CallTargetRef.from_name("callee")
     assert [arg.to_string() for arg in captured["args"]] == ["param_1", "param_2", "1"]
 
 
@@ -715,9 +722,9 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
         "case_3": 1003,
     }
 
-    def _resolve_call(function_name, args):
+    def _resolve_call(target_ref, args):
         assert args == []
-        return [ExpandedValue(Expression.constant(return_values[function_name], 4), [])]
+        return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 4), [])]
 
     expander = ExpressionExpander(
         _FakeTracer(),
@@ -862,21 +869,21 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
         def _get_storage_info_from_varnode(self, _varnode):
             return None
 
-    def _record_deferred_call(target_name, args):
-        recorded["call"] = (target_name, [arg.to_string() for arg in args])
+    def _record_deferred_call(target_ref, args):
+        recorded["call"] = (target_ref, [arg.to_string() for arg in args])
         return "call_out_of_scope:callee#0"
 
     expander = ExpressionExpander(
         _FakeTracer(),
         condition_tracker=None,
         debug=False,
-        call_resolver=lambda _name, _args: None,
+        call_resolver=lambda _target_ref, _args: None,
         parameters=[
             {"name": "param_1", "index": 0, "size": 8, "storage": reg_a0},
             {"name": "param_2", "index": 1, "size": 4, "storage": reg_a1_lo},
             {"name": "param_3", "index": 2, "size": 4, "storage": reg_a2_lo},
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             {"name": "trace", "index": 0, "size": 8, "storage": reg_a0},
             {"name": "start", "index": 1, "size": 4, "storage": reg_a1_lo},
             {"name": "limit", "index": 2, "size": 4, "storage": reg_a2_lo},
@@ -892,7 +899,7 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
     )
 
     assert len(expanded) == 1
-    assert recorded["call"][0] == "callee"
+    assert recorded["call"][0] == CallTargetRef.from_name("callee")
     assert recorded["call"][1] == ["param_1", "param_2", "param_3"]
     assert expanded[0].value.to_string() == "call_out_of_scope:callee#0"
 
@@ -1033,9 +1040,9 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_with_wrapped_pic
         "case_3": 1003,
     }
 
-    def _resolve_call(function_name, args):
+    def _resolve_call(target_ref, args):
         assert args == []
-        return [ExpandedValue(Expression.constant(return_values[function_name], 8), [])]
+        return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 8), [])]
 
     expander = ExpressionExpander(
         _FakeTracer(),
@@ -1190,9 +1197,9 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_to_raw_code_targ
         "ADDR_102558": 1003,
     }
 
-    def _resolve_call(function_name, args):
+    def _resolve_call(target_ref, args):
         assert args == []
-        return [ExpandedValue(Expression.constant(return_values[function_name], 8), [])]
+        return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 8), [])]
 
     expander = ExpressionExpander(
         _FakeTracer(),

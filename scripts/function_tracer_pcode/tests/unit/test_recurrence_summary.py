@@ -23,6 +23,27 @@ def _cond(operator: str, left: Expression, right: Expression, negated: bool = Fa
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
 
 
+def test_recurrence_terms_equivalent_does_not_require_to_string(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    left = Expression.binary_op(
+        "INT_ADD",
+        Expression.parameter("param_1", index=0, size=4),
+        Expression.constant(1, 4),
+    )
+    right = Expression.binary_op(
+        "INT_ADD",
+        Expression.constant(1, 4),
+        Expression.parameter("param_1", index=0, size=4),
+    )
+
+    def _boom_expr(_self, simplify=True):
+        raise AssertionError("recurrence equivalence should not depend on Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_expr)
+
+    assert summarizer._terms_equivalent(left, right, []) is True
+
+
 class _FakeIterator:
     def __init__(self, items):
         self._items = list(items)

@@ -221,6 +221,20 @@ def test_prove_template_equivalence_extracts_high_subpiece_from_piece() -> None:
     assert proved, reason
 
 
+def test_prove_template_equivalence_does_not_require_string_rendering(monkeypatch) -> None:
+    lhs = _add(_param("param_1"), _const(1))
+    rhs = _add(_const(1), _param("param_1"))
+
+    def _boom_to_string(_self, simplify=True):
+        raise AssertionError("template abstraction should not depend on Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_to_string)
+
+    proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
+
+    assert proved, reason
+
+
 def test_prove_template_equivalence_recognizes_wrapped_exact_triangular_phi() -> None:
     p1 = _param("param_1")
     prev = _sub(p1, _const(1))

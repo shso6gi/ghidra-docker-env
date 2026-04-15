@@ -60,6 +60,7 @@ def expression_key(
     normalize_commutative: bool = True,
     strip_width_adapters: bool = False,
     collapse_full_masks: bool = False,
+    include_memory_read_order: bool = True,
 ) -> StructuralKey:
     """Return a stable, hashable structural key for an expression tree."""
 
@@ -182,7 +183,7 @@ def expression_key(
                         "memory",
                         int(current.size or 0),
                         address_key,
-                        int(current.read_order_key or 0),
+                        int(current.read_order_key or 0) if include_memory_read_order else 0,
                     ),
                     remaining,
                 )

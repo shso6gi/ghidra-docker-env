@@ -7,12 +7,27 @@ from collections import Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, Expression, ExpressionType, ReturnInfo
-from .condition import ConditionSimplifier
+from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     CanonicalLocation,
     _reduce_expression_under_conditions,
     canonicalize_location,
 )
+
+
+def _runtime_expression_signature(expr: Optional[Expression]):
+    if expr is None:
+        return ("none",)
+    return expr.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+        include_memory_read_order=False,
+    )
+
+
+def _runtime_conditions_signature(conditions: Sequence[Condition]):
+    return ConditionNormalizer.conditions_signature(conditions)
 
 
 class StructuralRecurrenceSummarizer:
@@ -479,10 +494,10 @@ class StructuralRecurrenceSummarizer:
         if not coeffs:
             return []
 
-        grouped: Dict[Tuple[str, ...], List] = {}
+        grouped: Dict[Tuple[object, ...], List] = {}
         for effect in effect_summary.effects or []:
             conds = ConditionSimplifier.simplify_conditions(effect.conditions or [])
-            key = tuple(sorted(cond.to_string() for cond in conds))
+            key = _runtime_conditions_signature(conds)
             grouped.setdefault(key, []).append((conds, effect))
 
         synthesized: List[ReturnInfo] = []
@@ -678,7 +693,7 @@ class StructuralRecurrenceSummarizer:
             right_loc = canonicalize_location(right.operands[0], parameters, size=right.size)
             if left_loc is not None and right_loc is not None:
                 return left_loc == right_loc
-        return left.to_string() == right.to_string()
+        return _runtime_expression_signature(left) == _runtime_expression_signature(right)
 
     def _flatten_add_terms(
         self,

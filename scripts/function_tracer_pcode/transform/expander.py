@@ -2,7 +2,7 @@
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any, Hashable
-from ..model import Expression, Condition, ExpressionType, StorageInfo
+from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
 from ..config.settings import (
@@ -11,7 +11,7 @@ from ..config.settings import (
 )
 from ..analysis.effect_summary import (
     _reduce_expression_under_conditions,
-    _resolve_call_target_name,
+    _resolve_call_target_ref,
     _recover_call_argument_expressions,
     _resolve_call_argument_expression,
     _expression_maps_to_parameter,
@@ -78,13 +78,13 @@ class ExpressionExpander:
         tracer,
         condition_tracker,
         debug: bool = False,
-        call_resolver: Optional[Callable[[str, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
+        call_resolver: Optional[Callable[[CallTargetRef, List[Expression]], Optional[List["ExpandedValue"]]]] = None,
         effect_summary=None,
         parameters: Optional[List[Dict[str, Any]]] = None,
-        resolve_callee_parameters: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+        resolve_callee_parameters: Optional[Callable[[CallTargetRef], List[Dict[str, Any]]]] = None,
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
-        record_deferred_call: Optional[Callable[[str, List[Expression]], str]] = None,
+        record_deferred_call: Optional[Callable[[CallTargetRef, List[Expression]], str]] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -1413,15 +1413,16 @@ class ExpressionExpander:
             debug=self.debug,
         )
         if self.debug and resolved_targets:
-            for target_name, target_conditions in resolved_targets:
+            for target_ref, target_conditions in resolved_targets:
                 cond_strs = [cond.to_string() for cond in target_conditions]
                 self._debug_print(
-                    f"Resolved {pcode_op.getMnemonic()} target -> {target_name} with conditions {cond_strs}",
+                    f"Resolved {pcode_op.getMnemonic()} target -> {target_ref.display_name()} with conditions {cond_strs}",
                     depth,
                 )
 
         if not resolved_targets or self.call_resolver is None:
-            target_name = _resolve_call_target_name(self.tracer, pcode_op)
+            target_ref = _resolve_call_target_ref(self.tracer, pcode_op)
+            target_label = target_ref.display_name() if target_ref is not None else "UNKNOWN_FUNC"
             explicit_args = [
                 _resolve_call_argument_expression(
                     pcode_op.getInput(index),
@@ -1431,14 +1432,14 @@ class ExpressionExpander:
                 for index in range(1, pcode_op.getNumInputs())
             ]
             placeholder_name = None
-            if self.record_deferred_call is not None and target_name:
+            if self.record_deferred_call is not None and target_ref is not None:
                 deferred_args = self._recover_deferred_call_arguments(
                     pcode_op,
-                    target_name,
+                    target_ref,
                     explicit_args,
                 )
                 try:
-                    placeholder_name = self.record_deferred_call(target_name, deferred_args)
+                    placeholder_name = self.record_deferred_call(target_ref, deferred_args)
                 except Exception:
                     placeholder_name = None
             self.tracer.emit_unknown_event(
@@ -1446,13 +1447,13 @@ class ExpressionExpander:
                 varnode=pcode_op.getOutput(),
                 def_op=pcode_op,
                 depth=depth,
-                note=f"{pcode_op.getMnemonic()} target={target_name or 'UNKNOWN_FUNC'}",
+                note=f"{pcode_op.getMnemonic()} target={target_label}",
                 context="expander",
             )
             return [
                 ExpandedValue(
                     Expression.unknown(
-                        placeholder_name or f"call_out_of_scope:{target_name or 'UNKNOWN_FUNC'}"
+                        placeholder_name or f"call_out_of_scope:{target_label}"
                     ),
                     base_conditions,
                 )
@@ -1483,7 +1484,7 @@ class ExpressionExpander:
             )
 
         result: List[ExpandedValue] = []
-        fallback_args_by_target: Dict[str, List[Expression]] = {}
+        fallback_args_by_target: Dict[CallTargetRef, List[Expression]] = {}
 
         def resolve_with_args(
             arg_index: int,
@@ -1491,7 +1492,7 @@ class ExpressionExpander:
             current_conditions: List[Condition],
         ) -> None:
             if arg_index >= len(arg_expansions):
-                for target_name, target_conditions in resolved_targets:
+                for target_ref, target_conditions in resolved_targets:
                     merged_target_conditions = ConditionSimplifier.simplify_conditions(
                         current_conditions + target_conditions
                     )
@@ -1538,7 +1539,7 @@ class ExpressionExpander:
                                 stabilized_args.append(arg)
                         effective_args = stabilized_args
                     if self.resolve_callee_parameters is not None:
-                        callee_parameters = list(self.resolve_callee_parameters(target_name) or [])
+                        callee_parameters = list(self.resolve_callee_parameters(target_ref) or [])
                         if callee_parameters:
                             effective_args = _recover_call_argument_expressions(
                                 pcode_op,
@@ -1548,17 +1549,17 @@ class ExpressionExpander:
                                 effective_args,
                             )
                     fallback_args_by_target.setdefault(
-                        target_name,
+                        target_ref,
                         list(effective_args),
                     )
 
                     if self.call_resolver is None:
                         continue
-                    resolved = self.call_resolver(target_name, effective_args)
+                    resolved = self.call_resolver(target_ref, effective_args)
                     if not resolved:
                         if self.debug:
                             self._debug_print(
-                                f"Call summary unavailable for resolved target '{target_name}'",
+                                f"Call summary unavailable for resolved target '{target_ref.display_name()}'",
                                 depth,
                             )
                         continue
@@ -1587,19 +1588,20 @@ class ExpressionExpander:
         if result:
             return self._deduplicate_expanded_values(result, depth)
 
-        fallback_name = self._select_deferred_call_target_name(resolved_targets, pcode_op)
+        fallback_target = self._select_deferred_call_target(resolved_targets, pcode_op)
+        fallback_label = fallback_target.display_name()
         placeholder_name = None
         if self.record_deferred_call is not None:
-            deferred_args = fallback_args_by_target.get(fallback_name)
+            deferred_args = fallback_args_by_target.get(fallback_target)
             if deferred_args is None:
                 recovered_seed_args = [arg for arg in (canonical_explicit_args or []) if arg is not None]
                 deferred_args = self._recover_deferred_call_arguments(
                     pcode_op,
-                    fallback_name,
+                    fallback_target,
                     recovered_seed_args,
                 )
             try:
-                placeholder_name = self.record_deferred_call(fallback_name, deferred_args)
+                placeholder_name = self.record_deferred_call(fallback_target, deferred_args)
             except Exception:
                 placeholder_name = None
         self.tracer.emit_unknown_event(
@@ -1607,43 +1609,44 @@ class ExpressionExpander:
             varnode=pcode_op.getOutput(),
             def_op=pcode_op,
             depth=depth,
-            note=f"{pcode_op.getMnemonic()} target={fallback_name}",
+            note=f"{pcode_op.getMnemonic()} target={fallback_label}",
             context="expander",
         )
         return [
             ExpandedValue(
                 Expression.unknown(
-                    placeholder_name or f"call_out_of_scope:{fallback_name}"
+                    placeholder_name or f"call_out_of_scope:{fallback_label}"
                 ),
                 base_conditions,
             )
         ]
 
-    def _select_deferred_call_target_name(
+    def _select_deferred_call_target(
         self,
-        resolved_targets: List[Tuple[str, List[Condition]]],
+        resolved_targets: List[Tuple[CallTargetRef, List[Condition]]],
         pcode_op,
-    ) -> str:
-        unique_targets = {
-            target_name
-            for target_name, _target_conditions in (resolved_targets or [])
-            if target_name
-        }
-        if len(unique_targets) == 1:
-            return next(iter(unique_targets))
-        return _resolve_call_target_name(self.tracer, pcode_op) or "UNKNOWN_FUNC"
+    ) -> CallTargetRef:
+        unique_targets = [
+            target_ref
+            for target_ref, _target_conditions in (resolved_targets or [])
+            if target_ref is not None
+        ]
+        unique_keys = {target_ref.stable_key(): target_ref for target_ref in unique_targets}
+        if len(unique_keys) == 1:
+            return next(iter(unique_keys.values()))
+        return _resolve_call_target_ref(self.tracer, pcode_op) or CallTargetRef.unknown()
 
     def _recover_deferred_call_arguments(
         self,
         pcode_op,
-        target_name: str,
+        target_ref: CallTargetRef,
         explicit_args: List[Expression],
     ) -> List[Expression]:
         deferred_args = list(explicit_args or [])
-        if self.resolve_callee_parameters is None or not target_name:
+        if self.resolve_callee_parameters is None or target_ref is None:
             return deferred_args
 
-        callee_parameters = list(self.resolve_callee_parameters(target_name) or [])
+        callee_parameters = list(self.resolve_callee_parameters(target_ref) or [])
         if not callee_parameters:
             return deferred_args
 

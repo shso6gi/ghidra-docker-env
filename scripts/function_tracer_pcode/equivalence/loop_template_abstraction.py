@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from ..model import Expression, ExpressionType
+from ..model import Expression, ExpressionType, StructuralKey
 from .normalize import NormalizationContext, normalize_expression
 from .normalize.series import (
     _match_expr_plus_const,
@@ -32,10 +32,10 @@ MAX_TEMPLATE_TERMS = 256
 @dataclass(frozen=True, order=True)
 class TemplateAtom:
     kind: str
-    key: str
+    key: object
 
     def render(self) -> str:
-        return f"{self.kind}:{self.key}"
+        return f"{self.kind}:{repr(self.key)}"
 
 
 @dataclass
@@ -372,19 +372,21 @@ def _half_product_atom(left: Expression, right: Expression, width_bits: int) -> 
     right_key = _expr_key(right, width_bits)
     if right_key < left_key:
         left_key, right_key = right_key, left_key
-    return TemplateAtom("half", f"{left_key}|{right_key}")
+    return TemplateAtom("half", (left_key, right_key))
 
 
 def _generic_atom(expr: Expression, width_bits: int) -> TemplateAtom:
     return TemplateAtom("expr", _expr_key(expr, width_bits))
 
 
-def _expr_key(expr: Expression, width_bits: int) -> str:
+def _expr_key(expr: Expression, width_bits: int) -> StructuralKey:
     normalized = normalize_expression(_normalize_expression_for_width(expr, width_bits), NormalizationContext())
-    try:
-        return normalized.to_smt()
-    except Exception:
-        return normalized.to_string()
+    return normalized.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+        include_memory_read_order=False,
+    )
 
 
 def _normalize_expression_for_width(expr: Expression, width_bits: int) -> Expression:

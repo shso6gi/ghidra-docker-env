@@ -11,6 +11,9 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     LocationStep,
     StoreEffect,
+    _additive_signature,
+    _enumerate_call_argument_variants,
+    _resolve_call_target_ref,
     _resolve_call_target_name,
     _resolve_parameter_name,
     _storage_matches_parameter,
@@ -39,6 +42,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     _normalize_call_argument_expression,
     EffectSummary,
 )
+from scripts.function_tracer_pcode.model import CallTargetRef
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
@@ -89,6 +93,51 @@ def _stack_storage(offset: int, size_bytes: int = 4):
         "size": size_bytes,
         "size_bits": size_bytes * 8,
     }
+
+
+def test_enumerate_call_argument_variants_dedup_does_not_require_to_string(monkeypatch):
+    shared = Expression.parameter("param_1", index=0, size=4)
+    phi_expr = Expression.phi(
+        [
+            (Condition(Expression.binary_op("INT_EQUAL", shared, Expression.constant(0, 4))), shared),
+            (Condition(Expression.binary_op("INT_EQUAL", shared, Expression.constant(0, 4))), shared),
+        ]
+    )
+
+    def _boom_expr(_self, simplify=True):
+        raise AssertionError("variant dedup should not depend on Expression.to_string")
+
+    def _boom_cond(_self):
+        raise AssertionError("variant dedup should not depend on Condition.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_expr)
+    monkeypatch.setattr(Condition, "to_string", _boom_cond)
+
+    variants = _enumerate_call_argument_variants([phi_expr])
+
+    assert len(variants) == 1
+    assert variants[0][1][0].structural_key(normalize_commutative=True) == shared.structural_key(
+        normalize_commutative=True
+    )
+
+
+def test_additive_signature_does_not_require_to_string(monkeypatch):
+    shared = Expression.parameter("param_1", index=0, size=4)
+    expr = Expression.binary_op("INT_ADD", shared, Expression.constant(4, 4))
+    expr.size = 4
+
+    def _boom_expr(_self, simplify=True):
+        raise AssertionError("additive signature should not depend on Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_expr)
+
+    signature = _additive_signature(expr)
+
+    assert signature is not None
+    constant, terms, width = signature
+    assert constant == 4
+    assert len(terms) == 1
+    assert width == 4
 
 
 def test_formula_builder_declares_memory_arrays_for_memory_returns():
@@ -2128,7 +2177,7 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
             _param("param_2", size=8, is_signed=False, index=1, storage=_reg_storage("x1", register_name="x1")),
         ],
         direct_call_summary=_direct_call_summary,
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("a", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
             _param("b", size=8, is_signed=False, index=1, storage=_reg_storage("x1", register_name="x1")),
         ],
@@ -2249,7 +2298,7 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
         FakeTracer(call_op),
         FakeConditionTracker(),
         [_param("param_1", size=8, is_signed=False, index=0)],
-        direct_call_summary=lambda _name, _args: EffectSummary(
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["value", "out"],
             effects=[
                 StoreEffect(
@@ -2260,7 +2309,7 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
                 )
             ],
         ),
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("value", size=8, is_signed=False, index=0),
             _param("out", size=8, is_signed=False, index=1),
         ],
@@ -2429,8 +2478,8 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
 
     captured = {}
 
-    def resolve_call(function_name, args):
-        captured["target"] = function_name
+    def resolve_call(target_ref, args):
+        captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(1, 4), [])]
 
@@ -2443,7 +2492,7 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
             _param("param_1", size=4, index=0, storage=_reg_storage("a0", size_bytes=4, register_name="a0")),
             _param("param_3", size=4, index=2, storage=_reg_storage("a2", size_bytes=4, register_name="a2")),
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("value", size=4, index=0, storage=_reg_storage("a0", size_bytes=4, register_name="a0")),
             _param("bias", size=4, index=1, storage=_reg_storage("a1", size_bytes=4, register_name="a1")),
         ],
@@ -2456,7 +2505,7 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
     expanded = expander._expand_call_operation(call_op, [], depth=0, output_size=4)
 
     assert len(expanded) == 1
-    assert captured["target"] == "fc_bias"
+    assert captured["target"] == CallTargetRef.from_name("fc_bias")
     assert [arg.to_string() for arg in captured["args"]] == ["param_3", "4294967293"]
 
 
@@ -2577,10 +2626,10 @@ def test_summarize_store_effects_recovers_direct_call_store_values_from_call_exp
             _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
             _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
         ],
-        direct_call_expander=lambda _name, args: [
+        direct_call_expander=lambda _target_ref, args: [
             ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("a", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
             _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
         ],
@@ -2711,15 +2760,15 @@ def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_su
             _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
             _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
         ],
-        direct_call_summary=lambda _name, _args: EffectSummary(
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["a", "b"],
             effects=[],
             has_unsupported_call=False,
         ),
-        direct_call_expander=lambda _name, args: [
+        direct_call_expander=lambda _target_ref, args: [
             ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("a", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
             _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
         ],
@@ -2873,8 +2922,8 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
 
     captured = {}
 
-    def resolve_call(function_name, args):
-        captured["target"] = function_name
+    def resolve_call(target_ref, args):
+        captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(1, 4), [])]
 
@@ -2886,7 +2935,7 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
         parameters=[
             _param("param_1", size=4, index=0, storage=_reg_storage("a0", size_bytes=4, register_name="a0")),
         ],
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("value", size=4, index=0, storage=_reg_storage("a0", size_bytes=4, register_name="a0")),
         ],
     )
@@ -2897,7 +2946,7 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
     expanded = expander._expand_call_operation(call_op, [], depth=0, output_size=4)
 
     assert len(expanded) == 1
-    assert captured["target"] == "fc_scale"
+    assert captured["target"] == CallTargetRef.from_name("fc_scale")
     assert [arg.to_string() for arg in captured["args"]] == ["param_1"]
 
 
@@ -3021,7 +3070,7 @@ def test_summarize_store_effects_uses_callee_aligned_subset_for_hidden_call_oper
             _param("param_3", size=4, is_signed=False, index=2, storage=_reg_storage("a2", size_bytes=4)),
         ],
         direct_call_summary=_direct_call_summary,
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("lhs", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
             _param("rhs", size=4, is_signed=False, index=1, storage=_reg_storage("a1", size_bytes=4)),
             _param("bias", size=4, is_signed=False, index=2, storage=_reg_storage("a2", size_bytes=4)),
@@ -3170,7 +3219,7 @@ def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_
             _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
             _param("param_2", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
         ],
-        direct_call_summary=lambda _name, _args: EffectSummary(
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["ptr", "delta"],
             effects=[
                 StoreEffect(
@@ -3185,7 +3234,7 @@ def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_
                 ),
             ],
         ),
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("ptr", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
             _param("delta", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
         ],
@@ -3348,7 +3397,7 @@ def test_summarize_store_effects_reduces_phi_argument_and_path_conditions_under_
             _param("param_2", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
             _param("param_3", size=4, is_signed=True, index=2, storage=_reg_storage("a2", size_bytes=4)),
         ],
-        direct_call_summary=lambda _name, _args: EffectSummary(
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["ptr", "delta"],
             effects=[
                 StoreEffect(
@@ -3363,7 +3412,7 @@ def test_summarize_store_effects_reduces_phi_argument_and_path_conditions_under_
                 )
             ],
         ),
-        resolve_callee_parameters=lambda _name: [
+        resolve_callee_parameters=lambda _target_ref: [
             _param("ptr", size=8, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=8)),
             _param("delta", size=4, is_signed=True, index=1, storage=_reg_storage("a1", size_bytes=4)),
         ],
@@ -7317,6 +7366,68 @@ def test_effect_summary_prefers_traced_constant_over_synthetic_fun_name():
             return "CALL"
 
     assert _resolve_call_target_name(FakeTracer(), FakeOp()) == "callee"
+
+
+def test_effect_summary_returns_code_address_target_ref_for_raw_local_target():
+    class FakeVarnode:
+        def __init__(self):
+            self._address = None
+
+        def getAddress(self):
+            return self._address
+
+    class FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return FakeAddressSpace()
+
+    class FakeFunctionManager:
+        def getFunctionAt(self, _addr):
+            return None
+
+        def getFunctionContaining(self, _addr):
+            return None
+
+    class FakeProgram:
+        def getAddressFactory(self):
+            return FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return FakeFunctionManager()
+
+    class FakeTracer:
+        def __init__(self):
+            self.program = FakeProgram()
+
+        def _get_function_name(self, _addr_varnode):
+            return "UNKNOWN_FUNC"
+
+        def trace_varnode(self, _varnode, use_cache=False):
+            return Expression.constant(0x401234, 8)
+
+    class FakeOp:
+        def __init__(self):
+            self._input = FakeVarnode()
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return self._input
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+    target_ref = _resolve_call_target_ref(FakeTracer(), FakeOp())
+
+    assert target_ref is not None
+    assert target_ref.is_code_address() is True
+    assert target_ref.address_offset == 0x401234
+    assert target_ref.display_name() == "ADDR_401234"
 
 
 def test_call_effect_summary_policy_accepts_simple_param_store_summary():

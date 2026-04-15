@@ -6,6 +6,7 @@
 """
 
 from .storage import StorageInfo
+from .call_target import CallTargetRef, coerce_call_target_ref
 from .analysis import DeferredCallInfo, ReturnInfo, FunctionReturnAnalysis, SignednessResult
 from .expression import Expression, ExpressionType
 from .condition import Condition
@@ -22,6 +23,8 @@ from .signature import (
 
 __all__ = [
     "StorageInfo",
+    "CallTargetRef",
+    "coerce_call_target_ref",
     "DeferredCallInfo",
     "ReturnInfo",
     "FunctionReturnAnalysis",

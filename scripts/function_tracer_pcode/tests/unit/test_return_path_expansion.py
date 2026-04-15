@@ -177,6 +177,44 @@ def test_condition_tracker_caches_single_best_path_conditions():
     assert calls["count"] == 1
 
 
+def test_condition_tracker_refined_branch_dedup_does_not_require_to_string(monkeypatch):
+    tracer = Mock()
+    tracer.high_function = Mock()
+    tracer.debug = False
+    tracker = ConditionTracker(tracer)
+
+    shared = Expression.parameter("param_1", index=0, size=1)
+    duplicate_a = ExpandedValue(shared, [])
+    duplicate_b = ExpandedValue(shared, [])
+
+    def _boom_expr(_self, simplify=True):
+        raise AssertionError("branch dedup should not depend on Expression.to_string")
+
+    def _boom_cond(_self):
+        raise AssertionError("branch dedup should not depend on Condition.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_expr)
+    monkeypatch.setattr(Condition, "to_string", _boom_cond)
+
+    class _Simplifier:
+        @staticmethod
+        def simplify_conditions(conditions):
+            return list(conditions)
+
+        @staticmethod
+        def is_contradiction(_conditions):
+            return False
+
+    refined = tracker._build_refined_branch_condition(
+        [duplicate_a, duplicate_b],
+        output_size=1,
+        expression_returns_bool=lambda expr: expr.size == 1,
+        condition_simplifier=_Simplifier(),
+    )
+
+    assert refined is shared
+
+
 def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 

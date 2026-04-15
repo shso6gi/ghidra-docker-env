@@ -3,6 +3,7 @@
 
 from typing import Dict, List, Optional, Set, Any
 from ...model import Expression, Condition
+from .normalizer import ConditionNormalizer
 
 
 class BasicBlockInfo:
@@ -92,6 +93,21 @@ class ConditionTracker:
         if self.debug:
             prefix = "  " * indent
             print(f"{prefix}[CondTracker] {msg}")
+
+    @staticmethod
+    def _expression_signature(expr: Optional[Expression]):
+        if expr is None:
+            return ("none",)
+        return expr.structural_key(
+            normalize_commutative=True,
+            strip_width_adapters=True,
+            collapse_full_masks=True,
+            include_memory_read_order=False,
+        )
+
+    @staticmethod
+    def _conditions_signature(conditions: List[Condition]):
+        return ConditionNormalizer.conditions_signature(conditions)
     
     def _build_block_info(self):
         """ブロック情報を構築"""
@@ -247,8 +263,8 @@ class ConditionTracker:
                 continue
 
             key = (
-                tuple(cond.to_string() for cond in simplified_conditions),
-                value.to_string(),
+                self._conditions_signature(simplified_conditions),
+                self._expression_signature(value),
             )
             if key in seen:
                 continue

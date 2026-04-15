@@ -102,14 +102,13 @@ def _deferred_call_key(
     analysis: FunctionReturnAnalysis,
     info: DeferredCallInfo,
 ) -> Optional[Tuple[str, Tuple[str, ...]]]:
-    if info is None or not info.target_name:
+    if info is None or info.target_ref is None:
         return None
 
-    if info.target_name == analysis.function_name:
+    if info.target_ref.function_name == analysis.function_name:
         target_key = "__self__"
     else:
-        # 名前が一致する call にだけ共有抽象を許す
-        target_key = info.target_name
+        target_key = repr(info.target_ref.stable_key())
 
     arg_key = tuple(_canonicalize_expression(arg) for arg in (info.arguments or []))
     return target_key, arg_key

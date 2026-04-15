@@ -9,7 +9,7 @@ from itertools import product
 import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, overload
 
-from ..model import Condition, Expression, ExpressionType, StorageInfo
+from ..model import Condition, Expression, ExpressionType, StorageInfo, CallTargetRef
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
 from .memory_resolver import concretize_readonly_loads, _extract_address_suffix
@@ -53,6 +53,21 @@ _SYNTHETIC_LOCATION_BASE_PREFIX = "__locbase__"
 _SYNTHETIC_LOCATION_READ_PREFIX = "__locread__"
 _STACK_FRAME_LOCATION_BASE = f"{_SYNTHETIC_LOCATION_BASE_PREFIX}stackframe"
 _MAX_CALL_ARGUMENT_VARIANTS = 16
+
+
+def _runtime_expression_signature(expr: Optional[Expression]):
+    if expr is None:
+        return ("none",)
+    return expr.structural_key(
+        normalize_commutative=True,
+        strip_width_adapters=True,
+        collapse_full_masks=True,
+        include_memory_read_order=False,
+    )
+
+
+def _runtime_conditions_signature(conditions: Sequence[Condition]):
+    return ConditionNormalizer.conditions_signature(conditions)
 
 
 def _encode_signed_token(value: int) -> str:
@@ -283,9 +298,9 @@ def summarize_store_effects(
     tracer,
     condition_tracker,
     parameters: Sequence[Dict],
-    direct_call_summary: Optional[Callable[[str, Sequence[Expression]], Optional["EffectSummary"]]] = None,
-    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
-    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
+    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]] = None,
+    direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
     debug: bool = False,
 ) -> EffectSummary:
     parameter_names = _collect_named_parameter_names(parameters)
@@ -330,10 +345,11 @@ def summarize_store_effects(
             if mnemonic not in {"CALL", "CALLIND"} or direct_call_summary is None or op.getNumInputs() < 1:
                 continue
 
-            target_name = _resolve_call_target_name(tracer, op)
-            if not target_name:
+            target_ref = _resolve_call_target_ref(tracer, op)
+            if target_ref is None:
                 has_unsupported_call = True
                 continue
+            target_label = target_ref.display_name()
             explicit_args = [
                 _normalize_call_argument_expression(
                     _resolve_call_argument_expression(op.getInput(i), tracer, parameters),
@@ -342,7 +358,11 @@ def summarize_store_effects(
                 )
                 for i in range(1, op.getNumInputs())
             ]
-            callee_parameters = list(resolve_callee_parameters(target_name) or []) if resolve_callee_parameters else []
+            callee_parameters = (
+                list(resolve_callee_parameters(target_ref) or [])
+                if resolve_callee_parameters
+                else []
+            )
             args = _recover_call_argument_expressions(
                 op,
                 tracer,
@@ -355,7 +375,7 @@ def summarize_store_effects(
                 recovered_dump = ", ".join(arg.to_string() for arg in args)
                 print(
                     "[EffectSummary] call arguments: "
-                    f"target={target_name} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
+                    f"target={target_label} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
                 )
             for path_conditions in path_sets:
                 normalized_path_conditions = ConditionSimplifier.simplify_conditions(list(path_conditions))
@@ -367,13 +387,13 @@ def summarize_store_effects(
                 if debug and len(arg_variants) > 1:
                     print(
                         "[EffectSummary] enumerated call argument variants: "
-                        f"target={target_name} count={len(arg_variants)}"
+                        f"target={target_label} count={len(arg_variants)}"
                     )
                 for variant_conditions, variant_args in arg_variants:
                     active_conditions = ConditionSimplifier.simplify_conditions(
                         list(normalized_path_conditions) + list(variant_conditions)
                     )
-                    callee_summary = direct_call_summary(target_name, variant_args)
+                    callee_summary = direct_call_summary(target_ref, variant_args)
                     if callee_summary is None:
                         has_unsupported_call = True
                         continue
@@ -383,7 +403,7 @@ def summarize_store_effects(
                         elif debug:
                             print(
                                 "[EffectSummary] effect-free callee summary: "
-                                f"target={target_name}"
+                                f"target={target_label}"
                             )
                         continue
                     if not is_call_effect_summary_allowed(callee_summary):
@@ -470,8 +490,8 @@ def _resolve_store_value_effects(
     tracer,
     parameters: Sequence[Dict],
     *,
-    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
-    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
+    direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     value_varnode = store_op.getInput(2)
     resolved = _resolve_direct_call_value_effects(
@@ -491,8 +511,8 @@ def _resolve_direct_call_value_effects(
     tracer,
     parameters: Sequence[Dict],
     *,
-    direct_call_expander: Optional[Callable[[str, Sequence[Expression]], Optional[Sequence[object]]]] = None,
-    resolve_callee_parameters: Optional[Callable[[str], Sequence[Dict]]] = None,
+    direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     if direct_call_expander is None or value_varnode is None:
         return []
@@ -504,8 +524,8 @@ def _resolve_direct_call_value_effects(
     if def_op is None or def_op.getMnemonic() not in {"CALL", "CALLIND"}:
         return []
 
-    target_name = _resolve_call_target_name(tracer, def_op)
-    if not target_name:
+    target_ref = _resolve_call_target_ref(tracer, def_op)
+    if target_ref is None:
         return []
 
     explicit_args = [
@@ -517,7 +537,7 @@ def _resolve_direct_call_value_effects(
         for i in range(1, def_op.getNumInputs())
     ]
     callee_parameters = (
-        list(resolve_callee_parameters(target_name) or [])
+        list(resolve_callee_parameters(target_ref) or [])
         if resolve_callee_parameters is not None
         else []
     )
@@ -529,7 +549,7 @@ def _resolve_direct_call_value_effects(
         explicit_args,
     )
 
-    expanded = direct_call_expander(target_name, args)
+    expanded = direct_call_expander(target_ref, args)
     if not expanded:
         return []
 
@@ -638,8 +658,8 @@ def _enumerate_call_argument_variants(
         if ConditionSimplifier.is_contradiction(simplified):
             continue
         key = (
-            tuple(cond.to_string() for cond in simplified),
-            tuple(arg.to_string() for arg in merged_args),
+            _runtime_conditions_signature(simplified),
+            tuple(_runtime_expression_signature(arg) for arg in merged_args),
         )
         if key in seen:
             continue
@@ -670,8 +690,8 @@ def _enumerate_expression_variants(
                 if ConditionSimplifier.is_contradiction(simplified):
                     continue
                 key = (
-                    tuple(cond_item.to_string() for cond_item in simplified),
-                    branch_value.to_string(),
+                    _runtime_conditions_signature(simplified),
+                    _runtime_expression_signature(branch_value),
                 )
                 if key in seen:
                     continue
@@ -702,8 +722,8 @@ def _enumerate_expression_variants(
                     continue
                 rebuilt = _clone_expression_with_operands(expr, merged_operands)
                 key = (
-                    tuple(cond.to_string() for cond in simplified),
-                    rebuilt.to_string(),
+                    _runtime_conditions_signature(simplified),
+                    _runtime_expression_signature(rebuilt),
                 )
                 if key in seen:
                     continue
@@ -1039,27 +1059,58 @@ def _call_argument_semantic_rank(
     return 0
 
 
-def _resolve_call_target_name(tracer, op) -> Optional[str]:
-    if op.getNumInputs() < 1:
+def _resolve_call_target_ref(tracer, op) -> Optional[CallTargetRef]:
+    if op is None or op.getNumInputs() < 1:
         return None
 
-    target_varnode = op.getInput(0)
     mnemonic = op.getMnemonic()
     if mnemonic not in {"CALL", "CALLIND"}:
         return None
 
+    try:
+        target_varnode = op.getInput(0)
+    except Exception:
+        return None
+    if target_varnode is None:
+        return None
+
+    address = None
+    try:
+        address = target_varnode.getAddress()
+    except Exception:
+        address = None
+
+    resolved_from_address = _resolve_function_ref_from_address(tracer, address, allow_containing=True)
+    if resolved_from_address is not None:
+        return resolved_from_address
+
     target_name = tracer._get_function_name(target_varnode)
     if target_name != "UNKNOWN_FUNC" and not _is_synthetic_function_name(target_name):
-        return target_name
+        resolved_from_name = _resolve_function_ref_by_name(tracer, target_name)
+        if resolved_from_name is not None:
+            return resolved_from_name
+        return CallTargetRef.from_name(target_name)
 
     traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
-    if traced_target.expr_type != ExpressionType.CONSTANT or not isinstance(traced_target.value, int):
-        return target_name if target_name != "UNKNOWN_FUNC" else None
+    if traced_target.expr_type != ExpressionType.CONSTANT:
+        return None
 
-    resolved = _lookup_function_name_by_value(tracer, traced_target.value)
-    if resolved is not None:
-        return resolved
-    return target_name if target_name != "UNKNOWN_FUNC" else None
+    try:
+        target_value = int(traced_target.value)
+    except Exception:
+        return None
+
+    resolved_from_value = _resolve_function_ref_by_value(tracer, target_value, exact=False)
+    if resolved_from_value is not None:
+        return resolved_from_value
+    return CallTargetRef.from_code_address(target_value)
+
+
+def _resolve_call_target_name(tracer, op) -> Optional[str]:
+    target_ref = _resolve_call_target_ref(tracer, op)
+    if target_ref is None:
+        return None
+    return target_ref.display_name()
 
 
 def resolve_call_targets(
@@ -1070,11 +1121,11 @@ def resolve_call_targets(
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
     debug: bool = False,
-) -> List[Tuple[str, List[Condition]]]:
-    """Resolve CALL/CALLIND targets into finite (callee_name, branch_conditions) pairs."""
-    direct_name = _resolve_call_target_name(tracer, op)
-    if direct_name and direct_name != "UNKNOWN_FUNC" and not _is_synthetic_function_name(direct_name):
-        return [(direct_name, [])]
+) -> List[Tuple[CallTargetRef, List[Condition]]]:
+    """Resolve CALL/CALLIND targets into finite (callee_ref, branch_conditions) pairs."""
+    direct_target = _resolve_call_target_ref(tracer, op)
+    if direct_target is not None and direct_target.is_function():
+        return [(direct_target, [])]
 
     if op is None or op.getNumInputs() < 1:
         return []
@@ -1100,58 +1151,42 @@ def resolve_call_targets(
     if debug:
         print(f"[CallTargetResolver] rewritten target expr: {target_expr.to_string()}")
 
-    resolved: List[Tuple[str, List[Condition]]] = []
+    resolved: List[Tuple[CallTargetRef, List[Condition]]] = []
     for branch_conditions, address_value in _enumerate_constant_expression_branches(target_expr):
-        target_name = _lookup_exact_function_name_by_value(tracer, address_value)
-        if not target_name or target_name == "UNKNOWN_FUNC":
-            raw_target_name = _lookup_raw_code_target_name(tracer, address_value)
-            if raw_target_name is not None:
-                simplified = ConditionSimplifier.simplify_conditions(branch_conditions)
-                resolved.append((raw_target_name, simplified))
-                if debug:
-                    cond_strs = [cond.to_string() for cond in simplified]
-                    print(
-                        "[CallTargetResolver] resolved raw code target "
-                        f"0x{address_value:x} -> {raw_target_name} under {cond_strs}"
-                    )
-                continue
-            if debug:
-                print(
-                    "[CallTargetResolver] enumerated indirect target "
-                    f"0x{address_value:x} has no exact function entry"
-                )
-            continue
+        target_ref = _resolve_function_ref_by_value(tracer, address_value, exact=True)
+        if target_ref is None:
+            target_ref = CallTargetRef.from_code_address(address_value)
         simplified = ConditionSimplifier.simplify_conditions(branch_conditions)
-        resolved.append((target_name, simplified))
+        resolved.append((target_ref, simplified))
         if debug:
             cond_strs = [cond.to_string() for cond in simplified]
             print(
                 "[CallTargetResolver] resolved indirect target "
-                f"0x{address_value:x} -> {target_name} under {cond_strs}"
+                f"0x{address_value:x} -> {target_ref.display_name()} under {cond_strs}"
             )
 
     if resolved:
         return _deduplicate_resolved_call_targets(resolved)
 
-    if direct_name and direct_name != "UNKNOWN_FUNC":
-        return [(direct_name, [])]
+    if direct_target is not None and not direct_target.is_unknown():
+        return [(direct_target, [])]
     return []
 
 
 def _deduplicate_resolved_call_targets(
-    targets: Sequence[Tuple[str, List[Condition]]],
-) -> List[Tuple[str, List[Condition]]]:
-    deduped: List[Tuple[str, List[Condition]]] = []
+    targets: Sequence[Tuple[CallTargetRef, List[Condition]]],
+) -> List[Tuple[CallTargetRef, List[Condition]]]:
+    deduped: List[Tuple[CallTargetRef, List[Condition]]] = []
     seen = set()
-    for target_name, conditions in targets:
+    for target_ref, conditions in targets:
         key = (
-            target_name,
-            tuple(cond.to_string() for cond in conditions),
+            target_ref.stable_key(),
+            ConditionNormalizer.conditions_signature(conditions),
         )
         if key in seen:
             continue
         seen.add(key)
-        deduped.append((target_name, list(conditions)))
+        deduped.append((target_ref, list(conditions)))
     return deduped
 
 
@@ -1312,41 +1347,68 @@ def _is_synthetic_function_name(name: Optional[str]) -> bool:
     return bool(re.fullmatch(r"(?:thunk_)?FUN_[0-9a-fA-F]+", name))
 
 
-def _lookup_function_name_by_value(tracer, address_value: int) -> Optional[str]:
+def _resolve_function_ref_by_name(tracer, function_name: Optional[str]) -> Optional[CallTargetRef]:
+    if not function_name or function_name == "UNKNOWN_FUNC":
+        return None
     try:
-        default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
-        addr = default_space.getAddress(address_value)
         func_manager = tracer.program.getFunctionManager()
-        func = func_manager.getFunctionAt(addr)
-        if func is None:
-            func = func_manager.getFunctionContaining(addr)
-        if func:
-            return func.getName()
-        return f"FUN_{address_value:x}"
+        if func_manager is None:
+            return None
+        for func in func_manager.getFunctions(True):
+            if func.getName() == function_name:
+                return CallTargetRef.from_function(func)
     except Exception:
         return None
+    return None
 
 
-def _lookup_exact_function_name_by_value(tracer, address_value: int) -> Optional[str]:
-    try:
-        default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
-        addr = default_space.getAddress(address_value)
-        func_manager = tracer.program.getFunctionManager()
-        func = func_manager.getFunctionAt(addr)
-        if func:
-            return func.getName()
+def _resolve_function_ref_from_address(
+    tracer,
+    address,
+    *,
+    allow_containing: bool = True,
+) -> Optional[CallTargetRef]:
+    if tracer is None or getattr(tracer, "program", None) is None or address is None:
         return None
+    try:
+        func_manager = tracer.program.getFunctionManager()
+        if func_manager is None:
+            return None
+        get_function_at = getattr(func_manager, "getFunctionAt", None)
+        if callable(get_function_at):
+            func = get_function_at(address)
+            if func is not None:
+                return CallTargetRef.from_function(func)
+        get_referenced_function = getattr(func_manager, "getReferencedFunction", None)
+        if callable(get_referenced_function):
+            func = get_referenced_function(address)
+            if func is not None:
+                return CallTargetRef.from_function(func)
+        if allow_containing:
+            get_function_containing = getattr(func_manager, "getFunctionContaining", None)
+            if callable(get_function_containing):
+                func = get_function_containing(address)
+                if func is not None:
+                    return CallTargetRef.from_function(func)
     except Exception:
         return None
+    return None
 
 
-def _lookup_raw_code_target_name(tracer, address_value: int) -> Optional[str]:
+def _resolve_function_ref_by_value(
+    tracer,
+    address_value: int,
+    *,
+    exact: bool = False,
+) -> Optional[CallTargetRef]:
     try:
         if not isinstance(address_value, int) or address_value < 0:
             return None
-        return f"ADDR_{address_value:x}"
+        default_space = tracer.program.getAddressFactory().getDefaultAddressSpace()
+        addr = default_space.getAddress(address_value)
     except Exception:
         return None
+    return _resolve_function_ref_from_address(tracer, addr, allow_containing=not exact)
 
 
 def _resolve_call_argument_expression(
@@ -2638,13 +2700,13 @@ def _apply_condition_parameter_replacements(
     return current
 
 
-def _additive_signature(expr: Optional[Expression]) -> Optional[Tuple[int, Tuple[Tuple[str, int], ...], int]]:
+def _additive_signature(expr: Optional[Expression]) -> Optional[Tuple[int, Tuple[Tuple[object, int], ...], int]]:
     if expr is None:
         return None
 
     bit_width = int(getattr(expr, "size", 0) or 0)
     modulus = 1 << bit_width if bit_width > 0 else None
-    term_counts: Dict[str, int] = {}
+    term_counts: Dict[object, int] = {}
     const_value = 0
 
     def visit(node: Expression, sign: int) -> bool:
@@ -2674,7 +2736,7 @@ def _additive_signature(expr: Optional[Expression]) -> Optional[Tuple[int, Tuple
             if node.operator == "INT_SUB":
                 return visit(node.operands[0], sign) and visit(node.operands[1], -sign)
 
-        key = node.to_string()
+        key = _runtime_expression_signature(node)
         term_counts[key] = term_counts.get(key, 0) + sign
         if term_counts[key] == 0:
             term_counts.pop(key, None)
@@ -3948,10 +4010,63 @@ def _is_known_nonnull_stack_address(
 def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]:
     equalities: Set[frozenset] = set()
     for condition in conditions:
-        left, op, right, is_positive = ConditionNormalizer.normalize(condition)
-        if is_positive and op == "INT_EQUAL" and left and right:
-            equalities.add(frozenset((left, right)))
+        pair = _extract_positive_param_equality_pair(condition)
+        if pair is not None:
+            equalities.add(pair)
     return equalities
+
+
+def _extract_positive_param_equality_pair(condition: Optional[Condition]) -> Optional[frozenset]:
+    if condition is None:
+        return None
+
+    expr = condition.expression
+    negated = bool(condition.negated)
+    while (
+        expr is not None
+        and expr.expr_type == ExpressionType.UNARY_OP
+        and expr.operator == "BOOL_NEGATE"
+        and expr.operands
+    ):
+        negated = not negated
+        expr = expr.operands[0]
+
+    if (
+        expr is None
+        or expr.expr_type != ExpressionType.BINARY_OP
+        or len(expr.operands) != 2
+        or expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL"}
+    ):
+        return None
+
+    is_positive = (expr.operator == "INT_EQUAL" and not negated) or (
+        expr.operator == "INT_NOTEQUAL" and negated
+    )
+    if not is_positive:
+        return None
+
+    left_name = _parameter_like_name(expr.operands[0])
+    right_name = _parameter_like_name(expr.operands[1])
+    if not left_name or not right_name:
+        return None
+    return frozenset((left_name, right_name))
+
+
+def _parameter_like_name(expr: Optional[Expression]) -> Optional[str]:
+    current = expr
+    while (
+        current is not None
+        and current.expr_type == ExpressionType.UNARY_OP
+        and current.operator in {"INT_ZEXT", "INT_SEXT", "INT_2COMP"}
+        and current.operands
+    ):
+        current = current.operands[0]
+
+    if current is None:
+        return None
+    if current.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+        return current.name or None
+    return None
 
 
 def _normalize_location_steps(steps: Sequence[LocationStep]) -> Tuple[LocationStep, ...]:

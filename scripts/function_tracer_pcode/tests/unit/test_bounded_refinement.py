@@ -8,7 +8,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     expression_contains_synthetic_location_reads,
     post_state_read_expression_for_location,
 )
-from scripts.function_tracer_pcode.model import Condition, DeferredCallInfo, Expression, ReturnInfo
+from scripts.function_tracer_pcode.model import CallTargetRef, Condition, DeferredCallInfo, Expression, ReturnInfo
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -22,6 +22,32 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _cond(operator: str, left: Expression, right: Expression) -> Condition:
     return Condition(Expression.binary_op(operator, left, right), negated=False)
+
+
+def test_bounded_call_refiner_runtime_dedup_does_not_require_to_string(monkeypatch):
+    value = Expression.binary_op("INT_ADD", _param(), _const(1))
+    cond = _cond("INT_EQUAL", _param(), _const(0))
+    refiner = BoundedCallRefiner(lambda _target_ref: None, debug=False)
+
+    def _boom_expr(_self, simplify=True):
+        raise AssertionError("bounded refinement should not depend on Expression.to_string")
+
+    def _boom_cond(_self):
+        raise AssertionError("bounded refinement should not depend on Condition.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom_expr)
+    monkeypatch.setattr(Condition, "to_string", _boom_cond)
+
+    signature = refiner._analysis_signature([ReturnInfo(address="0x1000", value=value, conditions=[cond])])
+    deduped = refiner._deduplicate_return_infos(
+        [
+            ReturnInfo(address="0x1000", value=value, conditions=[cond]),
+            ReturnInfo(address="0x1000", value=value, conditions=[cond]),
+        ]
+    )
+
+    assert len(signature) == 1
+    assert len(deduped) == 1
 
 
 def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():
@@ -44,13 +70,13 @@ def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():
     analysis.deferred_calls = {
         recursive_placeholder: DeferredCallInfo(
             placeholder_name=recursive_placeholder,
-            target_name="sum",
+            target_ref=CallTargetRef.from_name("sum"),
             arguments=[Expression.binary_op("INT_SUB", n, _const(1))],
         )
     }
 
     refiner = BoundedCallRefiner(
-        lambda function_name: analysis if function_name == "sum" else None,
+        lambda target_ref: analysis if target_ref == CallTargetRef.from_name("sum") else None,
         max_unroll=2,
         max_cases=32,
         debug=False,
@@ -97,21 +123,24 @@ def test_bounded_call_refiner_handles_mutual_recursion_with_fuel_cap():
     analysis_a.deferred_calls = {
         b_placeholder: DeferredCallInfo(
             placeholder_name=b_placeholder,
-            target_name="B",
+            target_ref=CallTargetRef.from_name("B"),
             arguments=[Expression.binary_op("INT_SUB", n, _const(1))],
         )
     }
     analysis_b.deferred_calls = {
         a_placeholder: DeferredCallInfo(
             placeholder_name=a_placeholder,
-            target_name="A",
+            target_ref=CallTargetRef.from_name("A"),
             arguments=[Expression.binary_op("INT_SUB", n, _const(1))],
         )
     }
 
-    analyses = {"A": analysis_a, "B": analysis_b}
+    analyses = {
+        CallTargetRef.from_name("A"): analysis_a,
+        CallTargetRef.from_name("B"): analysis_b,
+    }
     refiner = BoundedCallRefiner(
-        lambda function_name: analyses.get(function_name),
+        lambda target_ref: analyses.get(target_ref),
         max_unroll=3,
         max_cases=24,
         debug=False,
@@ -142,7 +171,7 @@ def test_bounded_call_refiner_respects_case_cap():
     analysis.deferred_calls = {
         placeholder: DeferredCallInfo(
             placeholder_name=placeholder,
-            target_name="callee",
+            target_ref=CallTargetRef.from_name("callee"),
             arguments=[n],
         )
     }
@@ -157,7 +186,7 @@ def test_bounded_call_refiner_respects_case_cap():
     )
 
     refiner = BoundedCallRefiner(
-        lambda function_name: callee if function_name == "callee" else None,
+        lambda target_ref: callee if target_ref == CallTargetRef.from_name("callee") else None,
         max_unroll=1,
         max_cases=3,
         debug=False,
@@ -255,7 +284,7 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
     caller.deferred_calls = {
         placeholder: DeferredCallInfo(
             placeholder_name=placeholder,
-            target_name="callee",
+            target_ref=CallTargetRef.from_name("callee"),
             arguments=[
                 _param("param_1", 0, size=8),
                 _param("param_2", 1, size=4),
@@ -265,7 +294,7 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
     }
 
     refiner = BoundedCallRefiner(
-        lambda function_name: callee if function_name == "callee" else None,
+        lambda target_ref: callee if target_ref == CallTargetRef.from_name("callee") else None,
         max_unroll=1,
         max_cases=16,
         debug=False,
