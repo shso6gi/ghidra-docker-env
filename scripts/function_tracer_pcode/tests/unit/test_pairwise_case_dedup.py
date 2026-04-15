@@ -287,6 +287,71 @@ def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summ
     assert "bvneg start" in smt
 
 
+def test_return_case_value_smt_lowers_object_centric_post_state_memory_with_effect_summary():
+    trace = Expression(ExpressionType.PARAMETER, name="trace", value=0, size=8)
+    start = Expression(ExpressionType.PARAMETER, name="start", value=1, size=4)
+    limit = Expression(ExpressionType.PARAMETER, name="limit", value=2, size=4)
+
+    trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
+    loop_active = _cond("INT_SLESS", start, limit)
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    odd_iteration = _cond(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_AND", start, _const(1)),
+        _const(0),
+    )
+    even_iteration = odd_iteration.negate()
+
+    params = [
+        {"name": "trace", "index": 0, "size": 8},
+        {"name": "start", "index": 1, "size": 4},
+        {"name": "limit", "index": 2, "size": 4},
+    ]
+    value_expr = post_state_read_expression_for_location(
+        CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
+        params,
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
+            conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
+            order_key=5,
+        ),
+        StoreEffect(
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
+            conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
+            order_key=5,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=value_expr,
+                conditions=[trace_nonnull, loop_active, final_iter],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["trace", "start", "limit"],
+            effects=effects,
+        ),
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    smt = cases[0].get_value_smt(lambda expr: expr)
+    assert "__locread__" not in smt
+    assert "ite" in smt
+    assert "bvneg start" in smt
+
+
 def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effect_summary():
     trace = Expression(ExpressionType.PARAMETER, name="trace", size=8)
     start = Expression(ExpressionType.PARAMETER, name="start", size=4)

@@ -39,6 +39,7 @@ from .effect_summary import (
     _expressions_equivalent_under_conditions,
     _resolve_call_target_ref,
     _reduce_expression_under_conditions,
+    expression_contains_post_state_reads,
     expression_contains_synthetic_location_reads,
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
@@ -4503,6 +4504,7 @@ class ReturnAnalyzer:
         return (
             canonicalized is not None
             and not _expressions_equivalent(canonicalized, original)
+            and not expression_contains_post_state_reads(canonicalized)
             and self._count_memory_reads(canonicalized) > self._count_memory_reads(original)
         )
 

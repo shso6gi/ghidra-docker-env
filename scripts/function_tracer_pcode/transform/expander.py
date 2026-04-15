@@ -22,6 +22,7 @@ from ..analysis.effect_summary import (
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
+    expression_contains_post_state_reads,
     expression_contains_synthetic_location_reads,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -1120,7 +1121,10 @@ class ExpressionExpander:
                 self.effect_summary.effects,
                 self.parameters,
             )
-            if expression_contains_synthetic_location_reads(rewrite_target)
+            if (
+                expression_contains_synthetic_location_reads(rewrite_target)
+                and not expression_contains_post_state_reads(rewrite_target)
+            )
             else rewrite_target
         )
         reduced = _reduce_expression_under_conditions(
@@ -1302,6 +1306,7 @@ class ExpressionExpander:
                     addr_case.value,
                     expr.size,
                     read_order_key=expr.read_order_key,
+                    runtime_ref=getattr(expr, "runtime_ref", None),
                 )
                 expanded.append(ExpandedValue(rebuilt, simplified))
             return self._deduplicate_expanded_values(expanded, depth) if expanded else []

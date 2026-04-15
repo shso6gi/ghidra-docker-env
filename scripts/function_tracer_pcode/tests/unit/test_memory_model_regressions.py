@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     canonicalize_post_state_subexpressions,
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
+    expression_contains_post_state_reads,
     lower_post_state_expression_for_smt,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -4673,8 +4674,8 @@ def test_post_state_read_expression_for_location_can_build_symbolic_reads():
     )
 
     assert expr is not None
-    assert expr.expr_type.name == "VARIABLE"
-    assert "__locread__" in expr.to_string()
+    assert expr.expr_type == ExpressionType.MEMORY
+    assert getattr(expr, "runtime_ref", None) == _loc("trace", 4, 4)
 
 
 def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_until_smt_lowering():
@@ -4742,7 +4743,7 @@ def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_unt
     )
 
     assert normalized is not None
-    assert "__locread__" in normalized.to_string()
+    assert expression_contains_post_state_reads(normalized)
 
 
 def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged_guards():
@@ -4990,7 +4991,7 @@ def test_normalize_post_state_expression_preserves_iteration_delta_wrapped_step_
     )
 
     assert normalized is not None
-    assert "__locread__" in normalized.to_string()
+    assert expression_contains_post_state_reads(normalized)
 
 
 def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrapped_symbolic_value():
@@ -5698,8 +5699,7 @@ def test_normalize_post_state_expression_promotes_raw_memory_leaf_to_symbolic_po
     )
 
     assert normalized is not None
-    assert normalized.expr_type == ExpressionType.VARIABLE
-    assert "__locread__" in normalized.to_string()
+    assert normalized.expr_type == ExpressionType.MEMORY
     assert getattr(normalized, "runtime_ref", None) == _loc("ptr", 0, 4)
 
 
@@ -6292,7 +6292,8 @@ def test_return_analyzer_canonicalizes_partially_replayed_post_state_before_reap
 
     normalized = analyzer._normalize_expanded_return_value(partially_replayed, [nonnull])
 
-    assert "__locread__" in normalized.to_string()
+    assert expression_contains_post_state_reads(normalized) is False
+    assert normalized.to_string() == "(((param_2 + param_3) + param_4) + ((MEM[(param_1 + 4)] + 1) + 1))"
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -6418,7 +6419,8 @@ def test_return_analyzer_keeps_symbolic_root_post_state_read_when_roundtrip_matc
     )
 
     assert normalized is not None
-    assert "__locread__" in normalized.to_string()
+    assert normalized.expr_type == ExpressionType.MEMORY
+    assert getattr(normalized, "runtime_ref", None) == _loc("param_1", 0, 4)
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -7138,7 +7140,8 @@ def test_return_analyzer_collapses_even_iteration_wrapper_with_observed_step_loa
         [trace_nonnull, loop_active, even_iteration, final_iter],
     )
 
-    assert normalized.to_string() == "(__locread__706172616d5f317c7c70307c34 + __locread__706172616d5f317c7c70347c34)"
+    assert expression_contains_post_state_reads(normalized)
+    assert normalized.to_string() == "(MEM[param_1] + MEM[(param_1 + 4)])"
 
 
 def test_return_analyzer_keeps_even_iteration_wrapper_when_definite_replay_would_change_meaning():
