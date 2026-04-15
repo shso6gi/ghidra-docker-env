@@ -298,22 +298,21 @@ class ReturnAnalyzer:
             has_zero_check = False
             has_positive_check = False
             has_negative_check = False
+            param_referenced = False
             
             for ret_info in analysis.returns:
                 for cond in ret_info.conditions:
-                    cond_str = cond.expression.to_string()
+                    if not self._condition_mentions_param(cond, param_name):
+                        continue
+                    param_referenced = True
+                    is_zero, is_pos, is_neg = self._classify_param_condition(cond, param_name)
+                    has_zero_check = has_zero_check or is_zero
+                    has_positive_check = has_positive_check or is_pos
+                    has_negative_check = has_negative_check or is_neg
                     
-                    # パラメータが条件に含まれるか
-                    if param_name in cond_str:
-                        # ゼロチェック
-                        if "== 0" in cond_str or "!= 0" in cond_str:
-                            has_zero_check = True
-                        
-                        # 符号チェック
-                        if "< 0" in cond_str or "<= 0" in cond_str:
-                            has_negative_check = True
-                        if "> 0" in cond_str or ">= 0" in cond_str:
-                            has_positive_check = True
+            if not param_referenced:
+                self._debug_print(f"  {param_name}: not referenced in conditions")
+                continue
             
             coverage_info = []
             if has_zero_check:
@@ -327,6 +326,132 @@ class ReturnAnalyzer:
                 self._debug_print(f"  {param_name}: {', '.join(coverage_info)} checks found", 1)
             else:
                 self._debug_print(f"  {param_name}: no explicit checks", 1)
+
+    def _condition_mentions_param(self, condition: Condition, param_name: str) -> bool:
+        """条件が指定パラメータ変数を参照するか判定（to_string 非依存）。"""
+        expression = condition.expression
+        if expression is None:
+            return False
+        try:
+            return param_name in expression.get_all_variables()
+        except Exception:
+            return False
+
+    def _expression_is_zero_constant(self, expr: Optional[Expression]) -> bool:
+        """式が 0 定数、または同値なゼロ表現か判定（to_string 非依存）。"""
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.CONSTANT:
+            try:
+                return int(expr.value) == 0
+            except Exception:
+                return False
+        if expr.expr_type == ExpressionType.LITERAL:
+            try:
+                return int(expr.value) == 0
+            except Exception:
+                return False
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_2COMP", "INT_NEGATE"}:
+            if not expr.operands:
+                return False
+            return self._expression_is_zero_constant(expr.operands[0])
+        return False
+
+    @staticmethod
+    def _expression_has_param(expr: Optional[Expression], param_name: str) -> bool:
+        """式の内部に指定パラメータが含まれるかを判定。"""
+        if expr is None:
+            return False
+        try:
+            return param_name in expr.get_all_variables()
+        except Exception:
+            return False
+
+    def _decompose_comparison_condition(
+        self,
+        condition: Condition,
+    ) -> Optional[Tuple[bool, str, Expression, Expression]]:
+        """条件を比較式 `(negated, op, left, right)` に展開。"""
+        expr = condition.expression
+        negated = bool(condition.negated)
+        while expr is not None and expr.expr_type == ExpressionType.UNARY_OP:
+            if expr.operator == "BOOL_NEGATE":
+                negated = not negated
+                expr = expr.operands[0] if expr.operands else None
+                continue
+            break
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) < 2:
+            return None
+        return (
+            negated,
+            expr.operator or "",
+            expr.operands[0],
+            expr.operands[1],
+        )
+
+    def _classify_param_condition(
+        self,
+        condition: Condition,
+        param_name: str,
+    ) -> Tuple[bool, bool, bool]:
+        """
+        条件を零・正・負チェックへ分類（display 文字列不使用）。
+        
+        戻り値: (has_zero_check, has_positive_check, has_negative_check)
+        """
+        decompose = self._decompose_comparison_condition(condition)
+        if decompose is None:
+            return False, False, False
+
+        negated, op, left, right = decompose
+        has_pos = False
+        has_neg = False
+        has_zero = False
+
+        left_param = self._expression_has_param(left, param_name)
+        right_param = self._expression_has_param(right, param_name)
+        left_zero = self._expression_is_zero_constant(left)
+        right_zero = self._expression_is_zero_constant(right)
+
+        if op in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            if (left_zero and right_param) or (right_zero and left_param):
+                has_zero = True
+            return has_zero, has_pos, has_neg
+
+        if not (
+            (left_param and right_zero) or (right_param and left_zero)
+        ):
+            return has_zero, has_pos, has_neg
+
+        relation_positive_on_zero = op in {"INT_LESSEQUAL", "INT_SLESSEQUAL", "INT_LESS", "INT_SLESS"}
+        if not relation_positive_on_zero:
+            return has_zero, has_pos, has_neg
+
+        # op が param < 0 系の場合
+        if left_param and right_zero:
+            if op in {"INT_LESS", "INT_SLESS"}:
+                # param < 0
+                has_neg = not negated
+                has_pos = negated
+            elif op in {"INT_LESSEQUAL", "INT_SLESSEQUAL"}:
+                # param <= 0
+                has_neg = not negated
+                has_pos = False
+        # op が 0 < param 系の場合
+        elif left_zero and right_param:
+            if op in {"INT_LESS", "INT_SLESS"}:
+                # 0 < param
+                has_pos = not negated
+                has_neg = negated
+            elif op in {"INT_LESSEQUAL", "INT_SLESSEQUAL"}:
+                # 0 <= param
+                has_pos = not negated
+                has_neg = False
+
+        if op in {"INT_NOTEQUAL"} and (left_zero and right_param or right_zero and left_param):
+            has_zero = True
+
+        return has_zero, has_pos, has_neg
     
     def analyze_function(
         self,

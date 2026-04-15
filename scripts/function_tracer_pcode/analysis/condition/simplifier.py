@@ -95,7 +95,9 @@ class ConditionSimplifier:
         return left.expression.equals(right.expression)
     
     @classmethod
-    def normalize_to_canonical(cls, condition: Condition) -> Tuple[str, str, str, bool]:
+    def normalize_to_canonical(
+        cls, condition: Condition
+    ) -> Tuple[object, str, object, bool]:
         """
         条件を正規形に変換（normalizer に委譲、表示用）
         

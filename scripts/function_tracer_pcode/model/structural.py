@@ -177,8 +177,8 @@ def expression_key(
                 return (
                     (
                         expr_type.name.lower(),
-                        _atom_key(getattr(current, "runtime_ref", None)),
                         current.name or "",
+                        _atom_key(current.value),
                         int(current.size or 0),
                     ),
                     remaining,
@@ -309,3 +309,9 @@ def key_contains_placeholder(key: StructuralKey) -> bool:
             if key_contains_placeholder(item):
                 return True
     return False
+
+
+def key_is_comparable(key: StructuralKey) -> bool:
+    """Return False if the structural key contains placeholders/truncated markers."""
+
+    return not key_contains_placeholder(key)

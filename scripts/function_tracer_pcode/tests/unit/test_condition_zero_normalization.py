@@ -266,6 +266,30 @@ def test_normalize_for_contradiction_skips_full_render_for_large_expression(monk
     assert left or right
 
 
+def test_normalize_non_comparison_condition_does_not_call_expression_to_string(monkeypatch):
+    condition = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_ADD",
+            operands=[_param("param_1"), _const(1)],
+            size=8,
+        )
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("normalize() should not depend on Expression.to_string")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+
+    left, op, right, polarity = ConditionNormalizer.normalize(condition)
+
+    assert op == ""
+    assert polarity is False
+    assert isinstance(left, tuple)
+    assert isinstance(right, tuple)
+    assert left and right
+
+
 def test_is_contradiction_skips_pairwise_check_for_duplicate_comparisons(monkeypatch):
     duplicate_conditions = [
         Condition(

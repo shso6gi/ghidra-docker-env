@@ -34,7 +34,7 @@ class ConditionNormalizer:
         return tuple(canonical)
     
     @staticmethod
-    def normalize(condition: Condition) -> Tuple[str, str, str, bool]:
+    def normalize(condition: Condition) -> Tuple[object, str, object, bool]:
         """
         条件を正規形に変換（表示用）
         
@@ -62,36 +62,48 @@ class ConditionNormalizer:
             
             if op in ("INT_EQUAL", "INT_NOTEQUAL"):
                 # 等価性比較：否定で反転
-                left = expr.operands[0].to_string() if expr.operands else ""
-                right = expr.operands[1].to_string() if len(expr.operands) > 1 else ""
+                left_key = ConditionNormalizer._expr_key(
+                    expr.operands[0] if expr.operands else None
+                )
+                right_key = ConditionNormalizer._expr_key(
+                    expr.operands[1] if len(expr.operands) > 1 else None
+                )
                 
                 if negated:
                     # not (a == b) -> (a != b)
                     # not (a != b) -> (a == b)
                     if op == "INT_EQUAL":
-                        return (left, "INT_NOTEQUAL", right, True)
+                        return (left_key, "INT_NOTEQUAL", right_key, True)
                     else:
-                        return (left, "INT_EQUAL", right, True)
+                        return (left_key, "INT_EQUAL", right_key, True)
                 else:
-                    return (left, op, right, True)
+                    return (left_key, op, right_key, True)
             
             elif op in ("INT_LESS", "INT_SLESS", "INT_LESSEQUAL", "INT_SLESSEQUAL"):
                 # 不等式比較：否定でswapと演算子変換
-                left = expr.operands[0].to_string() if expr.operands else ""
-                right = expr.operands[1].to_string() if len(expr.operands) > 1 else ""
-                
+                left_key = ConditionNormalizer._expr_key(
+                    expr.operands[0] if expr.operands else None
+                )
+                right_key = ConditionNormalizer._expr_key(
+                    expr.operands[1] if len(expr.operands) > 1 else None
+                )
                 if negated:
                     # not (a < b) -> (a >= b) = (b <= a) with swap
                     # not (a <= b) -> (a > b) = (b < a) with swap
-                    swapped_left = right
-                    swapped_right = left
                     new_op = ConditionNormalizer._negate_comparison_op(op)
-                    return (swapped_left, new_op, swapped_right, True)
+                    return (right_key, new_op, left_key, True)
                 else:
-                    return (left, op, right, True)
+                    return (left_key, op, right_key, True)
         
-        # その他の場合は文字列として返す
-        return (expr.to_string(), "", "", not negated)
+        # その他の場合は構造キーとして返す
+        return (ConditionNormalizer._expr_key(expr), "", "", not negated)
+    
+    @staticmethod
+    def _normalized_term_to_string(term: object) -> str:
+        """正規化トークンを表示文字列へ変換（to_string 非依存）。"""
+        if isinstance(term, str):
+            return term
+        return repr(term)
     
     @staticmethod
     def normalize_for_contradiction(condition: Condition) -> Tuple[StructuralKey, str, StructuralKey, bool]:
@@ -419,17 +431,19 @@ class ConditionNormalizer:
         """
         left, op, right, is_positive = ConditionNormalizer.normalize(condition)
         
+        left_display = ConditionNormalizer._normalized_term_to_string(left)
+        right_display = ConditionNormalizer._normalized_term_to_string(right)
         if op:
             op_str = ConditionNormalizer._operator_to_symbol(op)
             if is_positive:
-                return f"({left} {op_str} {right})"
+                return f"({left_display} {op_str} {right_display})"
             else:
-                return f"(not ({left} {op_str} {right}))"
+                return f"(not ({left_display} {op_str} {right_display}))"
         else:
             if is_positive:
-                return left
+                return left_display
             else:
-                return f"(not {left})"
+                return f"(not {left_display})"
     
     @staticmethod
     def _operator_to_symbol(op: str) -> str:

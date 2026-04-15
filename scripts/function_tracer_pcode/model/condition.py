@@ -47,18 +47,42 @@ class Condition:
         return self.equals(other)
 
     def __hash__(self) -> int:
-        return hash(self.structural_key())
+        stable_key = self._safe_structural_key()
+        if stable_key is None:
+            return hash(("uncomparable_condition", id(self)))
+        return hash(stable_key)
 
     def equals(self, other: "Condition") -> bool:
         """条件が等価かどうかを判定"""
         if not isinstance(other, Condition):
             return False
-        return self.structural_key() == other.structural_key()
+        if self is other:
+            return True
+
+        self_key = self._safe_structural_key()
+        other_key = other._safe_structural_key()
+        if self_key is None or other_key is None:
+            return False
+        return self_key == other_key
 
     def structural_key(self, *, budget: int = 256):
         from .structural import condition_key
 
         return condition_key(self, budget=budget)
+
+    def _safe_structural_key(self, *, budget: int = 256):
+        """Comparison-safe structural key.
+
+        If the key contains placeholders (truncated/cycle/opaque), we intentionally
+        return None to avoid treating those expressions as equal by construction.
+        """
+
+        from .structural import condition_key, key_contains_placeholder
+
+        key = condition_key(self, budget=budget)
+        if key_contains_placeholder(key):
+            return None
+        return key
 
     @classmethod
     def combine_and(cls, conditions: List[Optional["Condition"]]) -> Optional["Condition"]:
