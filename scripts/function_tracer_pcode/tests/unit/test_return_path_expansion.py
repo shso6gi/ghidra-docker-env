@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
 from scripts.function_tracer_pcode.model import AddressValueRef, Condition, Expression, ExpressionType, ReturnInfo
-from scripts.function_tracer_pcode.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
 
 def _param(name: str, size: int = 4) -> Expression:
@@ -274,7 +274,7 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
                 path_conditions=path_a,
                 return_index=7,
                 all_path_conditions=all_paths,
-            )
+    )
 
     assert len(results) == 2
     assert [ret.branch_index for ret in results] == [700, 701]
@@ -289,6 +289,69 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
         [cond.to_string() for cond in path_b],
     ]
     tracer.clear_cache.assert_called_once()
+
+
+def test_expression_expander_prunes_multiequal_paths_that_become_contradictory_after_merge():
+    selector_eq_zero = _cond("INT_EQUAL", _param("param_1"), Expression.constant(0, 4))
+    selector_nonzero = _cond("INT_NOTEQUAL", _param("param_1"), Expression.constant(0, 4))
+
+    class _InputVarnode:
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return 4
+
+    class _ParentBlock:
+        def getInSize(self):
+            return 1
+
+        def getIn(self, index):
+            return pred_block if index == 0 else None
+
+    class _MultiequalOp:
+        def getParent(self):
+            return parent_block
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            return input_varnode if index == 0 else None
+
+    class _BlockInfo:
+        def __init__(self, index):
+            self.index = index
+
+    class _Tracker:
+        def get_block_by_hash(self, block):
+            return _BlockInfo(1) if block is pred_block else None
+
+        def get_all_valid_paths_to_block(self, target_block):
+            assert target_block.index == 1
+            return [[], [selector_nonzero]]
+
+    class _Tracer:
+        debug = False
+
+        def trace_varnode(self, _varnode, depth=0, use_cache=False):
+            return Expression.constant(7, 4)
+
+    pred_block = object()
+    parent_block = _ParentBlock()
+    input_varnode = _InputVarnode()
+    expander = ExpressionExpander(_Tracer(), condition_tracker=_Tracker(), debug=False)
+    expander._get_edge_condition = lambda from_block_info, to_block: None
+
+    expanded = expander._expand_multiequal_internal(
+        _MultiequalOp(),
+        [selector_eq_zero],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].value.to_smt() == "(_ bv7 32)"
+    assert [cond.to_string() for cond in expanded[0].conditions] == ["(param_1 == 0)"]
 
 
 def test_return_analyzer_collapses_same_value_under_complementary_conditions():

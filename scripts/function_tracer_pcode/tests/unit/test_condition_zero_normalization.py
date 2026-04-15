@@ -142,6 +142,32 @@ def test_simplify_conditions_drops_constant_true_conditions():
     assert [cond.to_string() for cond in simplified] == ["(param_2 != 0)"]
 
 
+def test_simplify_conditions_preserves_eq_ne_contradiction_witness():
+    conditions = [
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_EQUAL",
+                operands=[_param("param_2"), _const(0)],
+                size=1,
+            )
+        ),
+        Condition(
+            Expression(
+                ExpressionType.BINARY_OP,
+                operator="INT_NOTEQUAL",
+                operands=[_param("param_2"), _const(0)],
+                size=1,
+            )
+        ),
+    ]
+
+    simplified = ConditionSimplifier.simplify_conditions(conditions)
+
+    assert {cond.to_string() for cond in simplified} == {"(param_2 == 0)", "(param_2 != 0)"}
+    assert ConditionSimplifier.is_contradiction(simplified) is True
+
+
 def test_interval_contradiction_detects_incompatible_signed_bounds():
     conditions = [
         Condition(

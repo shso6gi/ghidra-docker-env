@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+from functools import cmp_to_key
 from typing import Dict, List, Optional
 
 from ...analysis.effect_summary import (
     lower_post_state_expression_for_smt_if_needed,
 )
+from ...analysis.condition.simplifier import ConditionSimplifier
 from ...model import Expression, FunctionReturnAnalysis
 from ...model.signature import (
     get_declared_type_size_bits,
@@ -20,6 +22,7 @@ from ...model.render_smt import (
     expression_returns_bool,
     expression_smt_bit_width,
 )
+from ...analysis.condition.normalizer import ConditionNormalizer
 from .params import build_symbol_name_mapping
 from .types import ParameterInfo
 
@@ -216,6 +219,76 @@ def build_ite_expression(return_defs: List[Dict[str, str]], return_size: int) ->
     return result
 
 
+def _build_relation_return_definition(
+    return_defs: List[Dict[str, object]],
+    return_var_name: str,
+    return_size: int,
+) -> List[str]:
+    lines = [f"(declare-const {return_var_name} (_ BitVec {return_size}))"]
+
+    disjuncts: List[str] = []
+    negated_conditions: List[str] = []
+    has_unconditional = False
+    for ret_def in return_defs:
+        cond = str(ret_def["condition"])
+        value = str(ret_def["value"])
+        if cond == "true":
+            disjuncts.append(f"(= {return_var_name} {value})")
+            has_unconditional = True
+            break
+        negated_conditions.append(f"(not {cond})")
+        disjuncts.append(f"(and {cond} (= {return_var_name} {value}))")
+
+    if not has_unconditional:
+        default_guard = "true"
+        if negated_conditions:
+            default_guard = (
+                negated_conditions[0]
+                if len(negated_conditions) == 1
+                else f"(and {' '.join(negated_conditions)})"
+            )
+        disjuncts.append(f"(and {default_guard} (= {return_var_name} (_ bv0 {return_size})))")
+    if len(disjuncts) == 1:
+        lines.append(f"(assert {disjuncts[0]})")
+    else:
+        lines.append(f"(assert (or {' '.join(disjuncts)}))")
+    return lines
+
+
+def _return_defs_require_relation(return_defs: List[Dict[str, object]]) -> bool:
+    for i, left in enumerate(return_defs):
+        for right in return_defs[i + 1 :]:
+            if left["value_key"] == right["value_key"]:
+                continue
+            combined = list(left["raw_conditions"]) + list(right["raw_conditions"])
+            if not ConditionSimplifier.is_contradiction(combined):
+                left_implies_right = left["condition_set"].implies_all(right["raw_conditions"])
+                right_implies_left = right["condition_set"].implies_all(left["raw_conditions"])
+                if left_implies_right != right_implies_left:
+                    continue
+                return True
+    return False
+
+
+def _order_return_defs_by_specificity(
+    return_defs: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    def _compare(left: Dict[str, object], right: Dict[str, object]) -> int:
+        left_implies_right = left["condition_set"].implies_all(right["raw_conditions"])
+        right_implies_left = right["condition_set"].implies_all(left["raw_conditions"])
+        if left_implies_right and not right_implies_left:
+            return -1
+        if right_implies_left and not left_implies_right:
+            return 1
+        left_len = len(left["raw_conditions"])
+        right_len = len(right["raw_conditions"])
+        if left_len != right_len:
+            return -1 if left_len > right_len else 1
+        return -1 if int(left["index"]) < int(right["index"]) else (1 if int(left["index"]) > int(right["index"]) else 0)
+
+    return sorted(return_defs, key=cmp_to_key(_compare))
+
+
 def build_return_definition(
     analysis: FunctionReturnAnalysis,
     return_var_name: str,
@@ -226,11 +299,17 @@ def build_return_definition(
     return_size = get_return_size(analysis)
     symbol_name_mapping = build_symbol_name_mapping(param_infos)
 
-    return_defs: List[Dict[str, str]] = []
+    return_defs: List[Dict[str, object]] = []
+    seen_defs = set()
     for ret in analysis.returns:
-        if ret.conditions:
+        condition_set = ConditionSimplifier.build_constraint_set(ret.conditions)
+        if condition_set.is_contradictory:
+            continue
+        normalized_conditions = condition_set.simplified_conditions()
+
+        if normalized_conditions:
             cond_parts = []
-            for condition in ret.conditions:
+            for condition in normalized_conditions:
                 cond_smt = condition.to_smt(symbol_name_mapping=symbol_name_mapping)
                 cond_parts.append(cond_smt)
             cond_str = cond_parts[0] if len(cond_parts) == 1 else f"(and {' '.join(cond_parts)})"
@@ -256,7 +335,7 @@ def build_return_definition(
         use_sign_extension = should_sign_extend_value(
             analysis.return_type,
             rendered_value,
-            ret.conditions,
+            normalized_conditions,
             return_type_obj=getattr(analysis, "return_type_obj", None),
         )
         value_smt = coerce_value_to_bitvec_width(
@@ -265,9 +344,37 @@ def build_return_definition(
             return_size,
             use_sign_extension=use_sign_extension,
         )
-        return_defs.append({"condition": cond_str, "value": value_smt})
+        value_key = ConditionNormalizer.expression_signature(rendered_value)
+        dedup_key = (condition_set.signature(), value_key)
+        if dedup_key in seen_defs:
+            continue
+        seen_defs.add(dedup_key)
+        return_defs.append(
+            {
+                "index": len(return_defs),
+                "condition": cond_str,
+                "value": value_smt,
+                "raw_conditions": normalized_conditions,
+                "condition_set": condition_set,
+                "value_key": value_key,
+            }
+        )
 
-    unified_return = build_ite_expression(return_defs, return_size)
+    return_defs = _order_return_defs_by_specificity(return_defs)
+    if _return_defs_require_relation(return_defs):
+        lines.extend(
+            _build_relation_return_definition(
+                return_defs,
+                return_var_name,
+                return_size,
+            )
+        )
+        return lines
+
+    unified_return = build_ite_expression(
+        [{"condition": str(ret_def["condition"]), "value": str(ret_def["value"])} for ret_def in return_defs],
+        return_size,
+    )
     lines.append(f"(define-fun {return_var_name} () (_ BitVec {return_size})")
     lines.append(f"  {unified_return})")
     return lines

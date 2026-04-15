@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Set, Dict, Tuple, Any, Hashable
-from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef
+from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
 from ..config.settings import (
@@ -54,6 +55,17 @@ class ExpandedValue:
     def __repr__(self):
         conds = [c.to_string() for c in self.conditions]
         return f"ExpandedValue(value={self.value.to_string()}, conds={conds})"
+
+
+@dataclass(frozen=True)
+class MultiequalBranchObservation:
+    """Object-centric branch observation for a MULTIEQUAL input edge."""
+
+    value: Expression
+    conditions: Tuple[Condition, ...]
+    predecessor_index: int
+    input_object_key: Optional[Hashable]
+    observed_location: Optional[CanonicalLocation]
 
 
 class ExpressionExpander:
@@ -780,9 +792,9 @@ class ExpressionExpander:
         if inferred_location is None:
             if self._debug_available():
                 branch_summaries = [
-                    f"{self._debug_expr_summary(ev.value)} @ "
-                    f"{[self._debug_condition_summary(c) for c in ev.conditions]}"
-                    for ev in observations
+                    f"{self._debug_expr_summary(observation.value)} @ "
+                    f"{[self._debug_condition_summary(c) for c in observation.conditions]}"
+                    for observation in observations
                 ]
                 self._debug_print(
                     f"Effect-summary inference failed for nested MULTIEQUAL: {branch_summaries}",
@@ -816,7 +828,7 @@ class ExpressionExpander:
         multiequal_op,
         base_conditions: List[Condition],
         depth: int,
-    ) -> List[ExpandedValue]:
+    ) -> List[MultiequalBranchObservation]:
         if not hasattr(multiequal_op, "getParent"):
             if self.debug:
                 self._debug_print(
@@ -828,7 +840,7 @@ class ExpressionExpander:
         if not phi_parent or self.condition_tracker is None:
             return []
 
-        observations: List[ExpandedValue] = []
+        observations: List[MultiequalBranchObservation] = []
         num_inputs = multiequal_op.getNumInputs()
         in_size = phi_parent.getInSize()
 
@@ -867,20 +879,67 @@ class ExpressionExpander:
                     continue
                 if self._expression_contains_unknown_or_call(branch_value):
                     continue
-                observations.append(ExpandedValue(branch_value, branch_conditions))
+                observations.append(
+                    MultiequalBranchObservation(
+                        value=branch_value,
+                        conditions=tuple(branch_conditions),
+                        predecessor_index=getattr(in_block_info, "index", -1),
+                        input_object_key=self._stable_multiequal_input_object_key(input_varnode),
+                        observed_location=self._observed_location_for_expression(branch_value),
+                    )
+                )
 
         return observations
 
     def _infer_multiequal_canonical_location(
         self,
-        observations: List[ExpandedValue],
+        observations,
         depth: int,
     ):
         if not observations or self.effect_summary is None:
             return None
 
-        candidate_locations = sorted(
-            {effect.location for effect in self.effect_summary.effects},
+        normalized_observations: List[MultiequalBranchObservation] = []
+        for observation in observations:
+            if isinstance(observation, MultiequalBranchObservation):
+                normalized_observations.append(observation)
+                continue
+            value = getattr(observation, "value", None)
+            conditions = tuple(getattr(observation, "conditions", ()) or ())
+            if value is None:
+                continue
+            normalized_observations.append(
+                MultiequalBranchObservation(
+                    value=value,
+                    conditions=conditions,
+                    predecessor_index=-1,
+                    input_object_key=None,
+                    observed_location=self._observed_location_for_expression(value),
+                )
+            )
+
+        observations = normalized_observations
+        if not observations:
+            return None
+
+        observed_locations = [obs.observed_location for obs in observations if obs.observed_location is not None]
+        if observed_locations:
+            first = observed_locations[0]
+            if all(location == first for location in observed_locations[1:]):
+                if self.debug:
+                    self._debug_print(
+                        "Inferred MULTIEQUAL canonical location by unanimous object-centric "
+                        f"branch observation: {first.base_param} steps={getattr(first, 'steps', ())} "
+                        f"offset={first.offset}",
+                        depth,
+                    )
+                return first
+
+        candidate_locations = list({effect.location for effect in self.effect_summary.effects})
+        for observed_location in observed_locations:
+            if observed_location not in candidate_locations:
+                candidate_locations.append(observed_location)
+        candidate_locations.sort(
             key=lambda loc: (loc.base_param, getattr(loc, "steps", ()), loc.offset, loc.size),
         )
 
@@ -890,16 +949,16 @@ class ExpressionExpander:
                 continue
 
             all_match = True
-            for ev in observations:
+            for observation in observations:
                 expected = rewrite_loads_from_effects(
                     candidate,
-                    ev.conditions,
+                    list(observation.conditions),
                     self.effect_summary.effects,
                     self.parameters,
                 )
-                reduced_expected = _reduce_expression_under_conditions(expected, ev.conditions)
-                observed = _reduce_expression_under_conditions(ev.value, ev.conditions)
-                observed = observed if observed is not None else ev.value
+                reduced_expected = _reduce_expression_under_conditions(expected, list(observation.conditions))
+                observed = _reduce_expression_under_conditions(observation.value, list(observation.conditions))
+                observed = observed if observed is not None else observation.value
                 reduced_expected = reduced_expected if reduced_expected is not None else expected
                 if not _expressions_equivalent(observed, reduced_expected):
                     all_match = False
@@ -913,33 +972,59 @@ class ExpressionExpander:
                     )
                 return location
 
-        observed_locations = []
-        for ev in observations:
-            if ev.value.expr_type != ExpressionType.MEMORY or not ev.value.operands:
-                return None
-            location = canonicalize_param_location(
-                ev.value.operands[0],
-                self.parameters,
-                size=ev.value.size,
-            )
-            if location is None:
-                return None
-            observed_locations.append(location)
+        return None
 
-        if not observed_locations:
+    def _stable_multiequal_input_object_key(self, varnode) -> Optional[Hashable]:
+        if varnode is None:
+            return None
+        try:
+            high_var = varnode.getHigh()
+        except Exception:
+            high_var = None
+        if high_var is not None:
+            try:
+                representative = high_var.getRepresentative()
+            except Exception:
+                representative = None
+            try:
+                symbol = high_var.getSymbol()
+                symbol_name = symbol.getName() if symbol is not None else None
+            except Exception:
+                symbol_name = None
+            if representative is not None:
+                try:
+                    rep_addr = representative.getAddress()
+                    rep_space = rep_addr.getAddressSpace().getName() if rep_addr is not None else "?"
+                    rep_offset = representative.getOffset()
+                    rep_size = representative.getSize()
+                    return ("high", symbol_name, rep_space, rep_offset, rep_size)
+                except Exception:
+                    return ("high", symbol_name, id(representative))
+            return ("high", symbol_name, id(high_var))
+
+        try:
+            addr = varnode.getAddress()
+            space = addr.getAddressSpace().getName() if addr is not None else "?"
+            return ("varnode", space, varnode.getOffset(), varnode.getSize())
+        except Exception:
             return None
 
-        first = observed_locations[0]
-        if all(loc == first for loc in observed_locations[1:]):
-            if self.debug:
-                self._debug_print(
-                    "Inferred MULTIEQUAL canonical location by identical observed load "
-                    f"location: {first.base_param} steps={getattr(first, 'steps', ())} offset={first.offset}",
-                    depth,
-                )
-            return first
-
-        return None
+    def _observed_location_for_expression(
+        self,
+        expr: Optional[Expression],
+    ) -> Optional[CanonicalLocation]:
+        if expr is None or not self.parameters:
+            return None
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, CanonicalLocation):
+            return runtime_ref
+        if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
+            return None
+        return canonicalize_param_location(
+            expr.operands[0],
+            self.parameters,
+            size=expr.size,
+        )
 
     def _trace_and_canonicalize_input_value(
         self,

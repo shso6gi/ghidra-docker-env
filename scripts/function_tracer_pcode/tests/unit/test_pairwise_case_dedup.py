@@ -143,6 +143,31 @@ def test_extract_return_cases_keeps_distinct_conditions_separate():
     assert cases[1].source_indices == [1]
 
 
+def test_extract_return_cases_skips_contradictory_condition_regions():
+    analysis = _analysis(
+        [
+            ReturnInfo(
+                address="0x1001",
+                value=_param("param_1"),
+                conditions=[
+                    _cond("INT_EQUAL", _param("param_1"), _const(0)),
+                    _cond("INT_NOTEQUAL", _param("param_1"), _const(0)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1002",
+                value=_const(7),
+                conditions=[_cond("INT_NOTEQUAL", _param("param_1"), _const(0))],
+            ),
+        ]
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    assert cases[0].value_expr.to_smt() == _const(7).to_smt()
+
+
 def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summary():
     trace = Expression(ExpressionType.PARAMETER, name="trace", size=8)
     start = Expression(ExpressionType.PARAMETER, name="start", size=4)

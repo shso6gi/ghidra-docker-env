@@ -321,6 +321,41 @@ class TestBooleanReturnNormalization:
         assert "((_ zero_extend 32) (_ bv2 32))" in formula
         assert "ite (=" in formula
 
+    def test_formula_builder_uses_relation_lowering_for_overlapping_different_valued_returns(self):
+        builder = FormulaBuilder(debug=False)
+        guard = Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression(ExpressionType.PARAMETER, name="x", size=4),
+                Expression(ExpressionType.CONSTANT, value=0, size=4),
+            )
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func_overlap",
+            entry_point="0x00401000",
+            parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[guard],
+                    value=Expression(ExpressionType.CONSTANT, value=1, size=4),
+                ),
+                ReturnInfo(
+                    address="0x00401004",
+                    conditions=[guard],
+                    value=Expression(ExpressionType.CONSTANT, value=2, size=4),
+                ),
+            ],
+            return_type="int",
+        )
+
+        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+        assert "(declare-const return_1 (_ BitVec 32))" in formula
+        assert "(declare-const return_2 (_ BitVec 32))" in formula
+        assert "(define-fun return_1 () (_ BitVec 32)" not in formula
+        assert "(assert (or (and (= x_1 (_ bv0 32)) (= return_1 (_ bv1 32)))" in formula
+
     def test_declared_return_type_takes_priority_over_first_branch_size(self):
         builder = FormulaBuilder(debug=False)
         analysis = FunctionReturnAnalysis(

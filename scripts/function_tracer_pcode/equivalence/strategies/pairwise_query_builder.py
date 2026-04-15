@@ -31,7 +31,10 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
     merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
 
     for index, ret_info in enumerate(analysis.returns):
-        simplified_conditions = ConditionSimplifier.simplify_conditions(ret_info.conditions)
+        condition_set = ConditionSimplifier.build_constraint_set(ret_info.conditions)
+        if condition_set.is_contradictory:
+            continue
+        simplified_conditions = condition_set.simplified_conditions()
         normalized_value = normalize_expression(
             ret_info.value,
             NormalizationContext(),
@@ -61,7 +64,7 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
 
 def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
-    cond_key = ConditionNormalizer.conditions_signature(case.conditions)
+    cond_key = ConditionSimplifier.build_constraint_set(case.conditions).signature()
     value_key = ConditionNormalizer.expression_signature(case.value_expr)
     return cond_key, value_key
 
