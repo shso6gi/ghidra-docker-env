@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     LocationStep,
     StoreEffect,
     _additive_signature,
+    _build_parameter_replacements,
     _enumerate_call_argument_variants,
     _resolve_call_target_ref,
     _resolve_call_target_name,
@@ -43,7 +44,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     _call_argument_semantic_rank,
     EffectSummary,
 )
-from scripts.function_tracer_pcode.model import AddressValueRef, CallTargetRef
+from scripts.function_tracer_pcode.model import AddressValueRef, CallTargetRef, LocationBaseRef
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
@@ -67,6 +68,48 @@ def _param(
     if storage is not None:
         result["storage"] = storage
     return result
+
+
+_LEGACY_TEST_PARAM_INDEX = {
+    "a": 0,
+    "b": 1,
+    "box": 0,
+    "bias": 2,
+    "delta": 1,
+    "dst": 0,
+    "guard": 0,
+    "lhs": 1,
+    "limit": 2,
+    "negate": 2,
+    "out": 1,
+    "pick_right": 1,
+    "ptr": 0,
+    "rhs": 2,
+    "selector": 0,
+    "slot": 0,
+    "src": 1,
+    "start": 1,
+    "trace": 0,
+    "value": 0,
+}
+
+
+def _loc(name: str, offset: int = 0, size: int = 0, steps=()):
+    if name in {"stackframe", "__locbase__stackframe"}:
+        return CanonicalLocation(name, offset, size, steps=steps)
+    if name.startswith("param_"):
+        try:
+            index = int(name.split("_", 1)[1]) - 1
+        except Exception:
+            index = None
+    else:
+        index = _LEGACY_TEST_PARAM_INDEX.get(name)
+    return CanonicalLocation(
+        base_ref=LocationBaseRef.parameter(name, index=index),
+        offset=offset,
+        size=size,
+        steps=steps,
+    )
 
 
 def _reg_storage(base_name: str, size_bytes: int = 8, register_name: Optional[str] = None):
@@ -773,7 +816,7 @@ def test_effect_summary_rewrites_load_from_prior_store_under_same_path():
         Expression.constant(0xFFFFFFFF, 4),
     )
     effect = StoreEffect(
-        location=CanonicalLocation("ptr", 0, 4),
+        location=_loc("ptr", 0, 4),
         value=Expression.binary_op("INT_ADD", value, Expression.constant(3, 4)),
         conditions=[
             Condition(
@@ -804,13 +847,13 @@ def test_effect_summary_builds_synthetic_expr_for_void_writes():
     non_positive = positive.negate()
     effects = [
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=value,
             conditions=[positive],
             order_key=2,
         ),
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=Expression.unary_op("INT_2COMP", value),
             conditions=[non_positive],
             order_key=1,
@@ -825,7 +868,7 @@ def test_effect_summary_builds_synthetic_expr_for_void_writes():
 
 
 def test_effect_summary_accepts_variable_based_parameter_addresses():
-    addr_expr = Expression.variable("ptr", size=8)
+    addr_expr = Expression.parameter("ptr", 0, size=8)
 
     location = canonicalize_param_location(
         addr_expr,
@@ -833,13 +876,13 @@ def test_effect_summary_accepts_variable_based_parameter_addresses():
         size=4,
     )
 
-    assert location == CanonicalLocation("ptr", 0, 4)
+    assert location == _loc("ptr", 0, 4)
 
 
 def test_effect_summary_accepts_variable_plus_constant_parameter_addresses():
     addr_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.variable("box", size=8),
+        Expression.parameter("box", 0, size=8),
         Expression.constant(4, 8),
     )
 
@@ -849,7 +892,7 @@ def test_effect_summary_accepts_variable_plus_constant_parameter_addresses():
         size=4,
     )
 
-    assert location == CanonicalLocation("box", 4, 4)
+    assert location == _loc("box", 4, 4)
 
 
 def test_effect_summary_accepts_register_alias_parameter_addresses():
@@ -875,7 +918,7 @@ def test_effect_summary_accepts_register_alias_parameter_addresses():
         size=4,
     )
 
-    assert location == CanonicalLocation("param_1", 0, 4)
+    assert location == _loc("param_1", 0, 4)
 
 
 def test_effect_summary_accepts_double_indirect_parameter_addresses():
@@ -891,9 +934,9 @@ def test_effect_summary_accepts_double_indirect_parameter_addresses():
     )
 
     assert location == CanonicalLocation(
-        "slot",
-        0,
-        4,
+        base_ref=LocationBaseRef.parameter("slot", index=0),
+        offset=0,
+        size=4,
         steps=(LocationStep("deref", 8),),
     )
 
@@ -901,9 +944,9 @@ def test_effect_summary_accepts_double_indirect_parameter_addresses():
 def test_memory_expression_for_location_reconstructs_double_indirect_location():
     expr = memory_expression_for_location(
         CanonicalLocation(
-            "slot",
-            0,
-            4,
+            base_ref=LocationBaseRef.parameter("slot", index=0),
+            offset=0,
+            size=4,
             steps=(LocationStep("deref", 8),),
         ),
         [_param("slot", size=8, is_signed=False)],
@@ -948,7 +991,7 @@ def test_substitute_location_accepts_register_alias_call_arguments():
     ]
 
     substituted = substitute_location(
-        CanonicalLocation("a", 0, 4),
+        _loc("a", 0, 4),
         ["a", "b"],
         call_args,
         [
@@ -957,7 +1000,7 @@ def test_substitute_location_accepts_register_alias_call_arguments():
         ],
     )
 
-    assert substituted == CanonicalLocation("param_1", 0, 4)
+    assert substituted == _loc("param_1", 0, 4)
 
 
 def test_substitute_location_accepts_stack_local_call_arguments():
@@ -969,7 +1012,7 @@ def test_substitute_location_accepts_stack_local_call_arguments():
     )
 
     substituted = substitute_location(
-        CanonicalLocation("out", 0, 4),
+        _loc("out", 0, 4),
         ["in", "out"],
         [Expression.parameter("param_1", 0, size=8), local_out],
         caller_params,
@@ -999,7 +1042,7 @@ def test_canonicalize_location_accepts_stack_pointer_relative_address_expression
 
     location = canonicalize_location(addr_expr, params, size=4)
 
-    assert location == CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+    assert location == _loc("__locbase__stackframe", -0x1C, 4)
 
 
 def test_substitute_condition_simplifies_stack_local_nonnull_guard():
@@ -1031,7 +1074,7 @@ def test_substitute_condition_simplifies_stack_local_nonnull_guard():
 
     substituted = substitute_condition(
         guard,
-        {"out": local_addr},
+        _build_parameter_replacements([{"name": "out", "index": 1}], [local_addr]),
         params,
     )
 
@@ -1088,7 +1131,7 @@ def test_effect_summary_rewrites_stack_local_post_state_reads_in_arithmetic_expr
 
 def test_rewrite_location_read_from_effects_drops_stack_local_nonnull_phi_guard():
     params = [_param("a", size=4), _param("b", size=4, index=1)]
-    location = CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+    location = _loc("__locbase__stackframe", -0x1C, 4)
     raw_guard = Condition(
         Expression.binary_op(
             "INT_NOTEQUAL",
@@ -1099,27 +1142,30 @@ def test_rewrite_location_read_from_effects_drops_stack_local_nonnull_phi_guard(
     )
     cond = substitute_condition(
         raw_guard,
-        {
-            "out": Expression.binary_op(
-                "INT_ADD",
-                Expression.variable(
-                    "sp",
-                    size=8,
-                    storage_info=StorageInfo(
-                        is_register=True,
-                        space_name="register",
-                        register_name="sp",
-                        base_register_name="sp",
+        _build_parameter_replacements(
+            [{"name": "out", "index": 2}],
+            [
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.variable(
+                        "sp",
                         size=8,
-                        size_bits=64,
-                        base_register_size=8,
-                        base_register_size_bits=64,
-                        bit_offset_in_base=0,
+                        storage_info=StorageInfo(
+                            is_register=True,
+                            space_name="register",
+                            register_name="sp",
+                            base_register_name="sp",
+                            size=8,
+                            size_bits=64,
+                            base_register_size=8,
+                            base_register_size_bits=64,
+                            bit_offset_in_base=0,
+                        ),
                     ),
+                    Expression.constant(-0x1C, 8),
                 ),
-                Expression.constant(-0x1C, 8),
-            ),
-        },
+            ],
+        ),
         params,
     )
 
@@ -1155,7 +1201,7 @@ def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering(
         parameter_names=["param_1", "param_2"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("__locbase__stackframe", -32, 4),
+                location=_loc("__locbase__stackframe", -32, 4),
                 value=Expression.binary_op(
                     "INT_SUB",
                     Expression.parameter("param_1", 0, size=4),
@@ -1165,7 +1211,7 @@ def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering(
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("__locbase__stackframe", -28, 4),
+                location=_loc("__locbase__stackframe", -28, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.parameter("param_1", 0, size=4),
@@ -1179,10 +1225,10 @@ def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering(
 
     expr = Expression.binary_op(
         "INT_ADD",
-        memory_expression_for_location(CanonicalLocation("__locbase__stackframe", -32, 4), []),
+        memory_expression_for_location(_loc("__locbase__stackframe", -32, 4), []),
         Expression.binary_op(
             "INT_MULT",
-            memory_expression_for_location(CanonicalLocation("__locbase__stackframe", -28, 4), []),
+            memory_expression_for_location(_loc("__locbase__stackframe", -28, 4), []),
             Expression.constant(4, 4),
         ),
     )
@@ -1218,7 +1264,7 @@ def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_
         [],
         [
             StoreEffect(
-                location=CanonicalLocation("guard", 0, 8),
+                location=_loc("guard", 0, 8),
                 value=Expression.constant(1, 8),
                 conditions=[],
                 order_key=1,
@@ -1631,7 +1677,7 @@ def test_expression_expander_infers_stack_location_for_indirect_output_without_t
 
     location = expander._infer_indirect_output_location(FakeVarnode(), 4)
 
-    assert location == CanonicalLocation("__locbase__stackframe", -0x30, 4)
+    assert location == _loc("__locbase__stackframe", -0x30, 4)
 
 
 def test_recover_call_argument_expressions_prefers_explicit_stack_local_address_over_storage_guess():
@@ -2138,7 +2184,7 @@ def test_normalize_call_argument_expression_falls_back_to_positional_parameter()
 
 def test_choose_effect_substitution_args_retries_with_positional_parameters():
     chosen = _choose_effect_substitution_args(
-        CanonicalLocation("a", 0, 4),
+        _loc("a", 0, 4),
         ["a", "b"],
         [Expression.variable("opaque0", size=8), Expression.variable("opaque1", size=8)],
         [
@@ -2233,13 +2279,13 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
             parameter_names=["a", "b"],
             effects=[
                 StoreEffect(
-                    location=CanonicalLocation("a", 0, 4),
+                    location=_loc("a", 0, 4),
                     value=Expression.memory(Expression.parameter("b", 1, size=8), size=4),
                     conditions=[],
                     order_key=1,
                 ),
                 StoreEffect(
-                    location=CanonicalLocation("b", 0, 4),
+                    location=_loc("b", 0, 4),
                     value=Expression.memory(Expression.parameter("a", 0, size=8), size=4),
                     conditions=[],
                     order_key=1,
@@ -2265,9 +2311,9 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
 
     assert [arg.name for arg in captured_args["args"]] == ["param_1", "param_2"]
     assert len(summary.effects) == 2
-    assert summary.effects[0].location == CanonicalLocation("param_1", 0, 4)
+    assert summary.effects[0].location == _loc("param_1", 0, 4)
     assert summary.effects[0].value.to_string() == "MEM[param_2]"
-    assert summary.effects[1].location == CanonicalLocation("param_2", 0, 4)
+    assert summary.effects[1].location == _loc("param_2", 0, 4)
     assert summary.effects[1].value.to_string() == "MEM[param_1]"
 
 
@@ -2381,7 +2427,7 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
             parameter_names=["value", "out"],
             effects=[
                 StoreEffect(
-                    location=CanonicalLocation("out", 0, 4),
+                    location=_loc("out", 0, 4),
                     value=Expression.parameter("value", 0, size=4),
                     conditions=[],
                     order_key=1,
@@ -2396,7 +2442,7 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
     )
 
     assert len(summary.effects) == 1
-    assert summary.effects[0].location == CanonicalLocation("__locbase__stackframe", -0x1C, 4)
+    assert summary.effects[0].location == _loc("__locbase__stackframe", -0x1C, 4)
     assert summary.effects[0].value.expr_type.name == "PARAMETER"
     assert summary.effects[0].value.name == "param_1"
 
@@ -2720,7 +2766,7 @@ def test_summarize_store_effects_recovers_direct_call_store_values_from_call_exp
 
     assert summary.has_unsupported_call is False
     assert len(summary.effects) == 1
-    assert summary.effects[0].location == CanonicalLocation("slot", 0, 4)
+    assert summary.effects[0].location == _loc("slot", 0, 4)
     assert summary.effects[0].value.to_string() == "(lhs + rhs)"
 
 
@@ -2859,7 +2905,7 @@ def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_su
 
     assert summary.has_unsupported_call is False
     assert len(summary.effects) == 1
-    assert summary.effects[0].location == CanonicalLocation("slot", 0, 4)
+    assert summary.effects[0].location == _loc("slot", 0, 4)
     assert summary.effects[0].value.to_string() == "(lhs + rhs)"
 
 
@@ -3308,7 +3354,7 @@ def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_
             parameter_names=["ptr", "delta"],
             effects=[
                 StoreEffect(
-                    location=CanonicalLocation("ptr", 0, 4),
+                    location=_loc("ptr", 0, 4),
                     value=Expression.binary_op(
                         "INT_ADD",
                         Expression.memory(Expression.parameter("ptr", 0, data_type="int *", size=8), size=4),
@@ -3486,7 +3532,7 @@ def test_summarize_store_effects_reduces_phi_argument_and_path_conditions_under_
             parameter_names=["ptr", "delta"],
             effects=[
                 StoreEffect(
-                    location=CanonicalLocation("ptr", 0, 4),
+                    location=_loc("ptr", 0, 4),
                     value=Expression.binary_op(
                         "INT_ADD",
                         Expression.memory(Expression.parameter("ptr", 0, data_type="int *", size=8), size=4),
@@ -3607,7 +3653,7 @@ def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
         Expression.constant(1, 8),
         Expression.binary_op(
             "INT_ADD",
-            Expression.variable("box", size=8),
+            Expression.parameter("box", 0, size=8),
             Expression.constant(4, 8),
         ),
     )
@@ -3618,7 +3664,7 @@ def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
         size=4,
     )
 
-    assert location == CanonicalLocation("box", 4, 4)
+    assert location == _loc("box", 4, 4)
 
 
 def test_effect_summary_accepts_subpiece_lower_parameter_addresses():
@@ -3635,7 +3681,7 @@ def test_effect_summary_accepts_subpiece_lower_parameter_addresses():
         size=4,
     )
 
-    assert location == CanonicalLocation("ptr", 0, 4)
+    assert location == _loc("ptr", 0, 4)
 
 
 def test_effect_summary_accepts_ptradd_style_constant_offsets():
@@ -3656,7 +3702,7 @@ def test_effect_summary_accepts_ptradd_style_constant_offsets():
         size=4,
     )
 
-    assert location == CanonicalLocation("ptr", 4, 4)
+    assert location == _loc("ptr", 4, 4)
 
 
 def test_normalize_post_state_expression_composes_same_location_increment_effects():
@@ -3674,13 +3720,13 @@ def test_normalize_post_state_expression_composes_same_location_increment_effect
     expr = Expression.binary_op("INT_ADD", field_load, Expression.constant(7, 4))
     effects = [
         StoreEffect(
-            location=CanonicalLocation("ptr", 4, 4),
+            location=_loc("ptr", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(field, size=4), Expression.constant(1, 4)),
             conditions=[],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("ptr", 4, 4),
+            location=_loc("ptr", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(field, size=4), Expression.constant(1, 4)),
             conditions=[],
             order_key=2,
@@ -3704,13 +3750,13 @@ def test_effect_summary_keeps_load_when_multiple_writes_overlap():
     original = Expression.memory(ptr, size=4)
     effects = [
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=Expression.constant(1, 4),
             conditions=[],
             order_key=2,
         ),
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=Expression.constant(2, 4),
             conditions=[],
             order_key=1,
@@ -3738,13 +3784,13 @@ def test_effect_summary_skips_effects_that_contradict_return_conditions():
     negative = positive.negate()
     effects = [
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=Expression.parameter("v_true", 2, size=4),
             conditions=[positive],
             order_key=2,
         ),
         StoreEffect(
-            location=CanonicalLocation("ptr", 0, 4),
+            location=_loc("ptr", 0, 4),
             value=Expression.parameter("v_false", 3, size=4),
             conditions=[negative],
             order_key=1,
@@ -3772,7 +3818,7 @@ def test_effect_summary_does_not_reapply_self_referential_store():
     right_addr = Expression.binary_op("INT_ADD", box, Expression.constant(4, 8))
     original = Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta)
     effect = StoreEffect(
-        location=CanonicalLocation("box", 4, 4),
+        location=_loc("box", 4, 4),
         value=Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta),
         conditions=[],
         order_key=3,
@@ -3794,7 +3840,7 @@ def test_effect_summary_does_not_reapply_commuted_self_referential_store():
     right_addr = Expression.binary_op("INT_ADD", box, Expression.constant(4, 8))
     original = Expression.binary_op("INT_ADD", delta, Expression.memory(right_addr, size=4))
     effect = StoreEffect(
-        location=CanonicalLocation("box", 4, 4),
+        location=_loc("box", 4, 4),
         value=Expression.binary_op("INT_ADD", Expression.memory(right_addr, size=4), delta),
         conditions=[],
         order_key=3,
@@ -3828,13 +3874,13 @@ def test_normalize_post_state_expression_does_not_replay_existing_effect_value_t
         [trace_nonnull],
         [
             StoreEffect(
-                location=CanonicalLocation("trace", 4, 4),
+                location=_loc("trace", 4, 4),
                 value=already_replayed,
                 conditions=[trace_nonnull],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("trace", 4, 4),
+                location=_loc("trace", 4, 4),
                 value=already_replayed,
                 conditions=[trace_nonnull],
                 order_key=2,
@@ -3853,13 +3899,13 @@ def test_call_effect_summary_policy_accepts_interdependent_swap_writes():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(Expression.parameter("b", 1, size=8), size=4),
                 conditions=[],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(Expression.parameter("a", 0, size=8), size=4),
                 conditions=[],
                 order_key=2,
@@ -3880,13 +3926,13 @@ def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -3922,13 +3968,13 @@ def test_effect_summary_rewrites_observed_post_call_loads_into_phi_difference():
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=10,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=11,
@@ -3964,13 +4010,13 @@ def test_effect_summary_collapses_post_state_phi_to_canonical_memory_location():
     post_swap_b.size = 4
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -4008,13 +4054,13 @@ def test_expression_expander_collapses_nested_multiequal_matching_effect_post_st
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -4078,13 +4124,13 @@ def test_effect_summary_collapses_post_state_phi_with_explicit_complementary_gua
     post_swap_b.size = 4
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -4114,13 +4160,13 @@ def test_effect_summary_collapses_pruned_post_state_memory_leaf_to_canonical_loc
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -4150,13 +4196,13 @@ def test_effect_summary_generalized_collapse_resolves_raw_post_state_memory_leaf
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -4196,13 +4242,13 @@ def test_expression_expander_collapses_nested_multiequal_using_active_conditions
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -4278,13 +4324,13 @@ def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -4332,13 +4378,13 @@ def test_expression_expander_canonicalizes_multiequal_branch_memory_leaf_using_e
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -4423,13 +4469,13 @@ def test_canonicalize_post_state_subexpressions_handles_composite_guard_without_
     expr.operands[1].size = 4
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -4471,13 +4517,13 @@ def test_expression_expander_collapses_nested_multiequal_with_grouped_active_con
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -4535,13 +4581,13 @@ def test_normalize_post_state_expression_collapses_effect_rewritten_branch_value
     negate_nonzero = negate_zero.negate()
     effects = [
         StoreEffect(
-            location=CanonicalLocation("value", 0, 4),
+            location=_loc("value", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
             conditions=[negate_zero],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("value", 0, 4),
+            location=_loc("value", 0, 4),
             value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
             conditions=[negate_nonzero],
             order_key=5,
@@ -4621,7 +4667,7 @@ def test_normalize_post_state_expression_rewrites_double_indirect_post_state_loa
 
 def test_post_state_read_expression_for_location_can_build_symbolic_reads():
     expr = post_state_read_expression_for_location(
-        CanonicalLocation("trace", 4, 4),
+        _loc("trace", 4, 4),
         [_param("trace", size=8, is_signed=False)],
         symbolic=True,
     )
@@ -4670,13 +4716,13 @@ def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_unt
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
@@ -4740,31 +4786,31 @@ def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged
     symbolic_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 4, 4),
+            _loc("trace", 4, 4),
             params,
             symbolic=True,
         ),
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
@@ -4827,7 +4873,7 @@ def test_lower_post_state_expression_for_smt_rewrites_nested_symbolic_effect_val
     symbolic_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
@@ -4837,7 +4883,7 @@ def test_lower_post_state_expression_for_smt_rewrites_nested_symbolic_effect_val
                 "INT_ADD",
                 limit,
                 post_state_read_expression_for_location(
-                    CanonicalLocation("trace", 4, 4),
+                    _loc("trace", 4, 4),
                     params,
                     symbolic=True,
                 ),
@@ -4847,19 +4893,19 @@ def test_lower_post_state_expression_for_smt_rewrites_nested_symbolic_effect_val
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op(
                 "INT_SUB",
                 Expression.binary_op("INT_ADD", limit, Expression.memory(steps_addr, size=4)),
@@ -4925,7 +4971,7 @@ def test_normalize_post_state_expression_preserves_iteration_delta_wrapped_step_
         [trace_nonnull, loop_active, final_iter],
         [
             StoreEffect(
-                location=CanonicalLocation("trace", 4, 4),
+                location=_loc("trace", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -4987,7 +5033,7 @@ def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrappe
     symbolic_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
@@ -4997,7 +5043,7 @@ def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrappe
                 "INT_ADD",
                 limit,
                 post_state_read_expression_for_location(
-                    CanonicalLocation("trace", 4, 4),
+                    _loc("trace", 4, 4),
                     params,
                     symbolic=True,
                 ),
@@ -5010,13 +5056,13 @@ def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrappe
         [trace_nonnull, loop_active, odd_iteration, final_iter],
         [
             StoreEffect(
-                location=CanonicalLocation("trace", 0, 4),
+                location=_loc("trace", 0, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
                 conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("trace", 4, 4),
+                location=_loc("trace", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -5035,13 +5081,13 @@ def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrappe
         [trace_nonnull, loop_active, odd_iteration, final_iter],
         [
             StoreEffect(
-                location=CanonicalLocation("trace", 0, 4),
+                location=_loc("trace", 0, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
                 conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("trace", 4, 4),
+                location=_loc("trace", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -5119,7 +5165,7 @@ def test_normalize_and_lower_post_state_expression_avoids_extra_increment_for_wr
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("param_1", 0, 4),
+            location=_loc("param_1", 0, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(trace, size=4),
@@ -5129,7 +5175,7 @@ def test_normalize_and_lower_post_state_expression_avoids_extra_increment_for_wr
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("param_1", 4, 4),
+            location=_loc("param_1", 4, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(steps_addr, size=4),
@@ -5197,7 +5243,7 @@ def test_lower_post_state_expression_for_smt_does_not_double_replay_add_neg_form
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("param_1", 0, 4),
+            location=_loc("param_1", 0, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(trace, size=4),
@@ -5207,7 +5253,7 @@ def test_lower_post_state_expression_for_smt_does_not_double_replay_add_neg_form
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("param_1", 4, 4),
+            location=_loc("param_1", 4, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(steps_addr, size=4),
@@ -5274,31 +5320,31 @@ def test_formula_builder_lowers_symbolic_post_state_reads_before_smt_emission():
     value_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 4, 4),
+            _loc("trace", 4, 4),
             params,
             symbolic=True,
         ),
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), Expression.unary_op("INT_2COMP", start)),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), Expression.constant(1, 4)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
@@ -5372,7 +5418,7 @@ def test_formula_builder_lowers_nested_symbolic_post_state_reads_before_smt_emis
     symbolic_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
@@ -5382,7 +5428,7 @@ def test_formula_builder_lowers_nested_symbolic_post_state_reads_before_smt_emis
                 "INT_ADD",
                 limit,
                 post_state_read_expression_for_location(
-                    CanonicalLocation("trace", 4, 4),
+                    _loc("trace", 4, 4),
                     params,
                     symbolic=True,
                 ),
@@ -5392,19 +5438,19 @@ def test_formula_builder_lowers_nested_symbolic_post_state_reads_before_smt_emis
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), odd_delta),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op(
                 "INT_SUB",
                 Expression.binary_op("INT_ADD", limit, Expression.memory(steps_addr, size=4)),
@@ -5485,13 +5531,13 @@ def test_normalize_post_state_expression_collapses_ordered_alias_updates_to_post
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("dst", 0, 4),
+            location=_loc("dst", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
             conditions=[dst_nonnull, src_nonnull],
             order_key=10,
         ),
         StoreEffect(
-            location=CanonicalLocation("src", 0, 4),
+            location=_loc("src", 0, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(src, size=4),
@@ -5545,13 +5591,13 @@ def test_normalize_post_state_expression_keeps_ordered_alias_update_when_alias_n
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("dst", 0, 4),
+            location=_loc("dst", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
             conditions=[dst_nonnull, src_nonnull],
             order_key=10,
         ),
         StoreEffect(
-            location=CanonicalLocation("src", 0, 4),
+            location=_loc("src", 0, 4),
             value=Expression.binary_op(
                 "INT_ADD",
                 Expression.memory(src, size=4),
@@ -5609,7 +5655,7 @@ def test_normalize_post_state_expression_stays_conservative_when_guards_do_not_m
         [negate_zero],
         [
             StoreEffect(
-                location=CanonicalLocation("value", 0, 4),
+                location=_loc("value", 0, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
                 conditions=[other_guard],
                 order_key=5,
@@ -5638,7 +5684,7 @@ def test_normalize_post_state_expression_promotes_raw_memory_leaf_to_symbolic_po
         [ptr_nonnull],
         [
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.unary_op("INT_2COMP", value),
                 conditions=[ptr_nonnull],
                 order_key=1,
@@ -5654,7 +5700,7 @@ def test_normalize_post_state_expression_promotes_raw_memory_leaf_to_symbolic_po
     assert normalized is not None
     assert normalized.expr_type == ExpressionType.VARIABLE
     assert "__locread__" in normalized.to_string()
-    assert getattr(normalized, "runtime_ref", None) == CanonicalLocation("ptr", 0, 4)
+    assert getattr(normalized, "runtime_ref", None) == _loc("ptr", 0, 4)
 
 
 def test_normalize_post_state_expression_replays_definite_simple_store_then_read():
@@ -5675,7 +5721,7 @@ def test_normalize_post_state_expression_replays_definite_simple_store_then_read
         [ptr_nonnull],
         [
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.binary_op("INT_ADD", value, Expression.constant(3, 4)),
                 conditions=[ptr_nonnull],
                 order_key=5,
@@ -5713,7 +5759,7 @@ def test_normalize_post_state_expression_rewrites_wide_param_store_then_read_per
         [param_4_zero],
         [
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.binary_op(
@@ -5731,7 +5777,7 @@ def test_normalize_post_state_expression_rewrites_wide_param_store_then_read_per
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
                 conditions=[param_4_nonzero],
                 order_key=5,
@@ -5749,7 +5795,7 @@ def test_normalize_post_state_expression_rewrites_wide_param_store_then_read_per
         [param_4_nonzero],
         [
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.binary_op(
@@ -5767,7 +5813,7 @@ def test_normalize_post_state_expression_rewrites_wide_param_store_then_read_per
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
                 conditions=[param_4_nonzero],
                 order_key=5,
@@ -5803,13 +5849,13 @@ def test_expression_expander_prefers_canonical_post_state_memory_after_observed_
         parameter_names=["value", "delta", "negate"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("value", 0, 4),
+                location=_loc("value", 0, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
                 conditions=[negate_zero],
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("value", 0, 4),
+                location=_loc("value", 0, 4),
                 value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
                 conditions=[negate_nonzero],
                 order_key=5,
@@ -5848,13 +5894,13 @@ def test_expression_expander_collapses_nested_multiequal_after_phi_handler_prune
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -5913,13 +5959,13 @@ def test_expression_expander_uses_multiequal_canonical_location_per_branch():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6020,13 +6066,13 @@ def test_return_analyzer_keeps_canonical_post_state_return_unchanged():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6080,13 +6126,13 @@ def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonical
         parameter_names=["param_1", "param_2"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_2", 0, 4),
+                location=_loc("param_2", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6134,7 +6180,7 @@ def test_return_analyzer_prefers_definite_branch_store_value_over_canonical_post
         parameter_names=["param_1", "param_2", "param_3", "param_4"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.binary_op(
@@ -6152,7 +6198,7 @@ def test_return_analyzer_prefers_definite_branch_store_value_over_canonical_post
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op("INT_XOR", param_2_lo, param_3),
                 conditions=[param_4_nonzero],
                 order_key=5,
@@ -6212,25 +6258,25 @@ def test_return_analyzer_canonicalizes_partially_replayed_post_state_before_reap
         parameter_names=["param_1", "param_2", "param_3", "param_4"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op("INT_ADD", a, b),
                 conditions=[nonnull],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(count_addr, size=4), Expression.constant(1, 4)),
                 conditions=[nonnull],
                 order_key=2,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(stats, size=4), delta),
                 conditions=[nonnull],
                 order_key=3,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op("INT_ADD", Expression.memory(count_addr, size=4), Expression.constant(1, 4)),
                 conditions=[nonnull],
                 order_key=4,
@@ -6300,7 +6346,7 @@ def test_return_analyzer_falls_back_to_definite_replay_when_symbolic_roundtrip_i
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(trace, size=4),
@@ -6310,7 +6356,7 @@ def test_return_analyzer_falls_back_to_definite_replay_when_symbolic_roundtrip_i
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -6353,7 +6399,7 @@ def test_return_analyzer_keeps_symbolic_root_post_state_read_when_roundtrip_matc
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.unary_op("INT_2COMP", value),
                 conditions=[ptr_nonnull, flag_zero],
                 order_key=1,
@@ -6395,7 +6441,7 @@ def test_expression_expander_canonicalizes_direct_traced_memory_leaf_via_effect_
         parameter_names=["ptr", "value"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.unary_op("INT_2COMP", value),
                 conditions=[ptr_nonnull],
                 order_key=1,
@@ -6456,13 +6502,13 @@ def test_expression_expander_reduces_full_operation_trace_under_active_condition
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6514,13 +6560,13 @@ def test_expression_expander_rewrites_observed_loads_before_post_state_canonical
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=10,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=11,
@@ -6589,13 +6635,13 @@ def test_expression_expander_infers_multiequal_location_by_branch_match():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6625,7 +6671,7 @@ def test_expression_expander_infers_multiequal_location_by_branch_match():
         depth=0,
     )
 
-    assert inferred == CanonicalLocation("b", 0, 4)
+    assert inferred == _loc("b", 0, 4)
 
 
 def test_expression_expander_infers_multiequal_location_by_identical_observed_load():
@@ -6640,13 +6686,13 @@ def test_expression_expander_infers_multiequal_location_by_identical_observed_lo
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6676,7 +6722,7 @@ def test_expression_expander_infers_multiequal_location_by_identical_observed_lo
         depth=0,
     )
 
-    assert inferred == CanonicalLocation("a", 0, 4)
+    assert inferred == _loc("a", 0, 4)
 
 
 def test_expression_expander_reduces_full_operation_trace_under_active_conditions():
@@ -6708,13 +6754,13 @@ def test_expression_expander_reduces_full_operation_trace_under_active_condition
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=1,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=2,
@@ -6766,13 +6812,13 @@ def test_expression_expander_rewrites_observed_loads_before_post_state_canonical
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=10,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=11,
@@ -6818,13 +6864,13 @@ def test_expression_expander_keeps_canonical_memory_without_read_order_key_uncha
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=10,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=11,
@@ -6898,7 +6944,7 @@ def test_expression_expander_does_not_replay_plain_memory_leaf_inside_iteration_
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -6976,7 +7022,7 @@ def test_expression_expander_ignores_identity_only_observed_load_rewrite_in_iter
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -7060,7 +7106,7 @@ def test_return_analyzer_collapses_even_iteration_wrapper_with_observed_step_loa
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(trace, size=4),
@@ -7070,7 +7116,7 @@ def test_return_analyzer_collapses_even_iteration_wrapper_with_observed_step_loa
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(steps_addr, size=4),
@@ -7161,7 +7207,7 @@ def test_return_analyzer_keeps_even_iteration_wrapper_when_definite_replay_would
         parameter_names=["param_1", "param_2", "param_3"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
+                location=_loc("param_1", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(trace, size=4),
@@ -7171,7 +7217,7 @@ def test_return_analyzer_keeps_even_iteration_wrapper_when_definite_replay_would
                 order_key=5,
             ),
             StoreEffect(
-                location=CanonicalLocation("param_1", 4, 4),
+                location=_loc("param_1", 4, 4),
                 value=wrapped_steps_effect,
                 conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
                 order_key=6,
@@ -7210,13 +7256,13 @@ def test_expression_expander_expands_observed_load_phi_difference_into_cases():
         parameter_names=["a", "b"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("a", 0, 4),
+                location=_loc("a", 0, 4),
                 value=Expression.memory(b, size=4),
                 conditions=[swap_taken],
                 order_key=10,
             ),
             StoreEffect(
-                location=CanonicalLocation("b", 0, 4),
+                location=_loc("b", 0, 4),
                 value=Expression.memory(a, size=4),
                 conditions=[swap_taken],
                 order_key=11,
@@ -7291,13 +7337,13 @@ def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_l
     expr.operands[1].size = 4
     effects = [
         StoreEffect(
-            location=CanonicalLocation("a", 0, 4),
+            location=_loc("a", 0, 4),
             value=Expression.memory(b, size=4),
             conditions=[swap_taken],
             order_key=1,
         ),
         StoreEffect(
-            location=CanonicalLocation("b", 0, 4),
+            location=_loc("b", 0, 4),
             value=Expression.memory(a, size=4),
             conditions=[swap_taken],
             order_key=2,
@@ -7327,7 +7373,7 @@ def test_effect_summary_does_not_reapply_alias_equivalent_store_inside_rhs():
     )
     original = Expression.memory(src, size=4)
     effect = StoreEffect(
-        location=CanonicalLocation("dst", 0, 4),
+        location=_loc("dst", 0, 4),
         value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
         conditions=[alias_cond],
         order_key=4,
@@ -7358,7 +7404,7 @@ def test_effect_summary_does_not_reapply_when_expr_matches_phi_branch_value():
     choose_false = choose_true.negate()
     original = Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), Expression.constant(1, 4))
     effect = StoreEffect(
-        location=CanonicalLocation("dst", 0, 4),
+        location=_loc("dst", 0, 4),
         value=Expression.phi(
             [
                 (choose_true, Expression.memory(src, size=4)),
@@ -7393,7 +7439,7 @@ def test_effect_summary_does_not_reapply_when_expr_matches_true_phi_branch_value
     )
     original = Expression.memory(src, size=4)
     effect = StoreEffect(
-        location=CanonicalLocation("dst", 0, 4),
+        location=_loc("dst", 0, 4),
         value=Expression.phi(
             [
                 (choose_true, Expression.memory(src, size=4)),
@@ -7680,7 +7726,7 @@ def test_call_effect_summary_policy_accepts_simple_param_store_summary():
         parameter_names=["ptr", "value"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.binary_op(
                     "INT_ADD",
                     Expression.memory(Expression.parameter("ptr", 0, size=8), size=4),
@@ -7700,7 +7746,7 @@ def test_call_effect_summary_policy_rejects_nested_call_values():
         parameter_names=["ptr"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.call("callee", [Expression.parameter("ptr", 0, size=8)]),
                 conditions=[],
                 order_key=1,
@@ -7716,7 +7762,7 @@ def test_call_effect_summary_policy_rejects_unsupported_nested_calls():
         parameter_names=["ptr"],
         effects=[
             StoreEffect(
-                location=CanonicalLocation("ptr", 0, 4),
+                location=_loc("ptr", 0, 4),
                 value=Expression.constant(1, 4),
                 conditions=[],
                 order_key=1,
@@ -7767,7 +7813,7 @@ def test_expander_resolves_indirect_stack_slot_read_via_effect_summary():
             parameter_names=["a", "b"],
             effects=[
                 StoreEffect(
-                    location=CanonicalLocation("__locbase__stackframe", -0x1C, 4),
+                    location=_loc("__locbase__stackframe", -0x1C, 4),
                     value=Expression.binary_op(
                         "INT_ADD",
                         Expression.parameter("a", 0, size=4),

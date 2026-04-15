@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
 )
 from conftest import resolve_mock_data_type
@@ -169,9 +170,9 @@ def test_extract_return_cases_skips_contradictory_condition_regions():
 
 
 def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summary():
-    trace = Expression(ExpressionType.PARAMETER, name="trace", size=8)
-    start = Expression(ExpressionType.PARAMETER, name="start", size=4)
-    limit = Expression(ExpressionType.PARAMETER, name="limit", size=4)
+    trace = Expression(ExpressionType.PARAMETER, name="trace", value=0, size=8)
+    start = Expression(ExpressionType.PARAMETER, name="start", value=1, size=4)
+    limit = Expression(ExpressionType.PARAMETER, name="limit", value=2, size=4)
 
     trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
     loop_active = _cond("INT_SLESS", start, limit)
@@ -192,31 +193,31 @@ def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summ
     value_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 4, 4),
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=4, size=4),
             params,
             symbolic=True,
         ),
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
             params,
             symbolic=True,
         ),
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=4, size=4),
             value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,

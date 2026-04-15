@@ -16,6 +16,7 @@ from ..model import (
 from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     StoreEffect,
+    _build_parameter_replacements,
     lower_post_state_expression_for_smt_if_needed,
     substitute_condition,
     substitute_expression,
@@ -235,20 +236,17 @@ class BoundedCallRefiner:
         if callee_analysis is None or not callee_analysis.returns:
             return []
 
-        param_names = [
-            name
-            for param in callee_analysis.parameters
-            for name in [param.get("name")]
-            if isinstance(name, str) and name
-        ]
-        if len(deferred.arguments) < len(param_names):
+        if len(deferred.arguments) < len(callee_analysis.parameters):
             self._debug(
                 f"Skipped deferred call '{deferred.placeholder_name}': expected "
-                f"{len(param_names)} args, got {len(deferred.arguments)}"
+                f"{len(callee_analysis.parameters)} args, got {len(deferred.arguments)}"
             )
             return []
 
-        replacements = dict(zip(param_names, deferred.arguments))
+        replacements = _build_parameter_replacements(
+            callee_analysis.parameters,
+            deferred.arguments,
+        )
         results: List[ExpressionExpansion] = []
         substituted_effects = self._substitute_effects_for_deferred_call(
             callee_analysis,
@@ -256,9 +254,9 @@ class BoundedCallRefiner:
         )
 
         for ret in callee_analysis.returns:
-            substituted_value = substitute_expression(ret.value, replacements)
+            substituted_value = substitute_expression(ret.value, replacements, callee_analysis.parameters)
             substituted_conditions = [
-                substitute_condition(cond, replacements)
+                substitute_condition(cond, replacements, callee_analysis.parameters)
                 for cond in ret.conditions
             ]
             substituted_value = self._lower_symbolic_post_state_after_substitution(
@@ -306,7 +304,7 @@ class BoundedCallRefiner:
     def _substitute_effects_for_deferred_call(
         self,
         callee_analysis: FunctionReturnAnalysis,
-        replacements: Dict[str, Expression],
+        replacements: Dict[Tuple[object, ...], Expression],
     ) -> List[StoreEffect]:
         effect_summary = getattr(callee_analysis, "effect_summary", None)
         if effect_summary is None or not getattr(effect_summary, "effects", None):
@@ -317,9 +315,9 @@ class BoundedCallRefiner:
             substituted.append(
                 StoreEffect(
                     location=effect.location,
-                    value=substitute_expression(effect.value, replacements),
+                    value=substitute_expression(effect.value, replacements, callee_analysis.parameters),
                     conditions=[
-                        substitute_condition(cond, replacements)
+                        substitute_condition(cond, replacements, callee_analysis.parameters)
                         for cond in (effect.conditions or [])
                     ],
                     order_key=effect.order_key,

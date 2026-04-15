@@ -181,7 +181,7 @@ class LocationBaseRef:
                 return int(param_index) == int(self.parameter_index)
         except Exception:
             pass
-        return param.get("name") == self.parameter_name
+        return False
 
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {

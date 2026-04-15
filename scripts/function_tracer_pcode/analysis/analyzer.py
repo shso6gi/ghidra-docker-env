@@ -27,6 +27,7 @@ from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
     EffectSummary,
+    _build_parameter_replacements,
     _enumerate_constant_expression_branches,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
@@ -2162,29 +2163,23 @@ class ReturnAnalyzer:
             )
             return None
 
-        param_names = [
-            name
-            for param in analysis.parameters
-            for name in [param.get("name")]
-            if isinstance(name, str) and name
-        ]
-        if len(args) < len(param_names):
+        if len(args) < len(analysis.parameters):
             self._debug_print(
                 f"Call expansion skipped for '{target_label}': "
-                f"expected {len(param_names)} args, got {len(args)}"
+                f"expected {len(analysis.parameters)} args, got {len(args)}"
             )
             return None
 
-        replacements: Dict[str, Expression] = dict(zip(param_names, args))
+        replacements = _build_parameter_replacements(analysis.parameters, args)
         allowed_names: Set[str] = set()
         for arg in args:
             allowed_names.update(arg.get_all_variables())
 
         expanded = []
         for ret in analysis.returns:
-            value = substitute_expression(ret.value, replacements)
+            value = substitute_expression(ret.value, replacements, analysis.parameters)
             conditions = [
-                substitute_condition(cond, replacements)
+                substitute_condition(cond, replacements, analysis.parameters)
                 for cond in ret.conditions
             ]
 

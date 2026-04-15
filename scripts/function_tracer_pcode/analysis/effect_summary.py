@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 import re
 from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, overload
@@ -40,6 +40,19 @@ class EffectSummary:
     effects: List[StoreEffect]
     synthetic_expr: Optional[Expression] = None
     has_unsupported_call: bool = False
+    parameter_refs: List[LocationBaseRef] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.parameter_refs:
+            self.parameter_refs = [
+                _coerce_callee_parameter_ref(ref, index)
+                for index, ref in enumerate(self.parameter_refs)
+            ]
+            return
+        self.parameter_refs = [
+            LocationBaseRef.parameter(name, index=index)
+            for index, name in enumerate(self.parameter_names)
+        ]
 
 
 _MAX_CALL_ARGUMENT_VARIANTS = 16
@@ -331,13 +344,13 @@ def summarize_store_effects(
                     for effect in callee_summary.effects:
                         substitution_args = _choose_effect_substitution_args(
                             effect.location,
-                            callee_summary.parameter_names,
+                            callee_summary.parameter_refs,
                             variant_args,
                             parameters,
                         )
                         substituted_location = substitute_location(
                             effect.location,
-                            callee_summary.parameter_names,
+                            callee_summary.parameter_refs,
                             substitution_args,
                             parameters,
                         )
@@ -349,7 +362,10 @@ def summarize_store_effects(
                                     f"callee_loc={effect.location} args=[{arg_dump}]"
                                 )
                             continue
-                        substitutions = dict(zip(callee_summary.parameter_names, substitution_args))
+                        substitutions = _build_parameter_replacements(
+                            callee_summary.parameter_refs,
+                            substitution_args,
+                        )
                         substituted_value = substitute_expression(effect.value, substitutions, parameters)
                         substituted_value = _reduce_expression_under_conditions(
                             substituted_value,
@@ -808,13 +824,13 @@ def _score_call_argument_alignment(
         total_explicit,
         total_params,
     )
-    expr_name = _resolve_parameter_name(expr, caller_parameters)
-    preferred_name = _resolve_parameter_name(preferred, caller_parameters) if preferred is not None else None
+    expr_param = _resolve_parameter_descriptor(expr, caller_parameters)
+    preferred_param = _resolve_parameter_descriptor(preferred, caller_parameters) if preferred is not None else None
 
     if preferred is not None:
         if _expressions_equivalent(expr, preferred):
             score += 100
-        elif expr_name is not None and expr_name == preferred_name:
+        elif _parameter_descriptors_share_identity(expr_param, preferred_param):
             score += 85
         else:
             expr_size = max(1, int(expr.size or (callee_param or {}).get("size") or 8))
@@ -824,12 +840,9 @@ def _score_call_argument_alignment(
             if expr_location is not None and expr_location == preferred_location:
                 score += 70
 
-    if expr_name is not None:
+    if expr_param is not None:
         score += 15
-        caller_param = next(
-            (param for param in caller_parameters if param.get("name") == expr_name),
-            None,
-        )
+        caller_param = expr_param
         if caller_param is not None and callee_param is not None:
             caller_storage = _coerce_storage_info(caller_param.get("storage"))
             callee_storage = _coerce_storage_info(callee_param.get("storage"))
@@ -953,11 +966,7 @@ def _call_argument_semantic_rank(
     if effective_size <= 0:
         effective_size = max(1, int(expr.size or 8))
 
-    caller_param_name = _resolve_parameter_name(expr, caller_parameters)
-    caller_param = next(
-        (param for param in caller_parameters if param.get("name") == caller_param_name),
-        None,
-    )
+    caller_param = _resolve_parameter_descriptor(expr, caller_parameters)
     caller_param_is_pointer = _parameter_descriptor_looks_pointer(caller_param)
 
     if expr.expr_type == ExpressionType.CONSTANT and int(getattr(expr, "value", 1)) == 0:
@@ -970,10 +979,10 @@ def _call_argument_semantic_rank(
                 return 8
             if location.base_ref.is_storage():
                 return 7
-            if caller_param_name is not None:
+            if caller_param is not None:
                 return 6 if caller_param_is_pointer else 1
             return 5
-        if caller_param_name is not None:
+        if caller_param is not None:
             return 6 if caller_param_is_pointer else 1
         return 0
 
@@ -1535,11 +1544,11 @@ def _normalize_call_argument_expression(
 
 def _choose_effect_substitution_args(
     location: CanonicalLocation,
-    callee_parameter_names: Sequence[str],
+    callee_params: Sequence[object],
     args: Sequence[Expression],
     caller_parameters: Sequence[Dict],
 ) -> Sequence[Expression]:
-    direct_location = substitute_location(location, callee_parameter_names, args, caller_parameters)
+    direct_location = substitute_location(location, callee_params, args, caller_parameters)
     if direct_location is not None:
         return args
 
@@ -1549,7 +1558,7 @@ def _choose_effect_substitution_args(
 
     positional_location = substitute_location(
         location,
-        callee_parameter_names,
+        callee_params,
         positional_args,
         caller_parameters,
     )
@@ -1584,7 +1593,7 @@ def _build_positional_parameter_args(
 def _expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequence[Dict]) -> bool:
     if expr is None:
         return False
-    if _resolve_parameter_name(expr, parameters) is not None:
+    if _resolve_parameter_descriptor(expr, parameters) is not None:
         return True
     size = expr.size or 0
     try:
@@ -1604,6 +1613,136 @@ def _normalize_parameter_index(value: Optional[object]) -> Optional[int]:
     except Exception:
         return None
     return normalized if normalized >= 0 else None
+
+
+def _storage_identity_key(storage: Optional[StorageInfo]) -> Optional[Tuple[object, ...]]:
+    storage = _coerce_storage_info(storage)
+    if storage is None:
+        return None
+    if storage.is_register:
+        base_name = StorageInfo._normalize_reg_name(storage.base_register_name or storage.register_name or "")
+        if not base_name:
+            return None
+        return (
+            "param_storage_reg",
+            base_name,
+            int(storage.bit_offset_in_base or 0),
+            int(storage.size_bits or 0),
+        )
+    return (
+        "param_storage_mem",
+        storage.space_name or "",
+        int(storage.offset or 0),
+        int(storage.size or 0),
+    )
+
+
+def _parameter_identity_key_from_base_ref(
+    base_ref: Optional[LocationBaseRef],
+) -> Optional[Tuple[object, ...]]:
+    if base_ref is None or not base_ref.is_parameter():
+        return None
+    if base_ref.parameter_index is None:
+        return None
+    return ("parameter", int(base_ref.parameter_index))
+
+
+def _parameter_identity_keys_from_descriptor(param: Optional[Dict]) -> Set[Tuple[object, ...]]:
+    if not param:
+        return set()
+    keys: Set[Tuple[object, ...]] = set()
+    param_index = _normalize_parameter_index(param.get("index"))
+    if param_index is not None:
+        keys.add(("parameter", param_index))
+    storage_key = _storage_identity_key(_coerce_storage_info(param.get("storage")))
+    if storage_key is not None:
+        keys.add(storage_key)
+    return keys
+
+
+def _parameter_identity_keys_from_expression(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+) -> Set[Tuple[object, ...]]:
+    if expr is None:
+        return set()
+
+    keys: Set[Tuple[object, ...]] = set()
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, LocationBaseRef):
+        base_key = _parameter_identity_key_from_base_ref(runtime_ref)
+        if base_key is not None:
+            keys.add(base_key)
+    elif isinstance(runtime_ref, CanonicalLocation):
+        base_key = _parameter_identity_key_from_base_ref(runtime_ref.base_ref)
+        if base_key is not None and not runtime_ref.steps and int(runtime_ref.offset) == 0:
+            keys.add(base_key)
+
+    if expr.expr_type == ExpressionType.PARAMETER:
+        param_index = _normalize_parameter_index(getattr(expr, "value", None))
+        if param_index is not None:
+            keys.add(("parameter", param_index))
+
+    storage_key = _storage_identity_key(_coerce_storage_info(getattr(expr, "storage_info", None)))
+    if storage_key is not None:
+        keys.add(storage_key)
+
+    descriptor = _resolve_parameter_descriptor(expr, parameters)
+    keys.update(_parameter_identity_keys_from_descriptor(descriptor))
+    return keys
+
+
+def _parameter_descriptors_share_identity(left: Optional[Dict], right: Optional[Dict]) -> bool:
+    if not left or not right:
+        return False
+    return bool(
+        _parameter_identity_keys_from_descriptor(left).intersection(
+            _parameter_identity_keys_from_descriptor(right)
+        )
+    )
+
+
+def _parameter_base_ref_matches_descriptor(
+    base_ref: Optional[LocationBaseRef],
+    param: Optional[Dict],
+) -> bool:
+    base_key = _parameter_identity_key_from_base_ref(base_ref)
+    if base_key is None or not param:
+        return False
+    return base_key in _parameter_identity_keys_from_descriptor(param)
+
+
+def _coerce_callee_parameter_ref(param: object, index: int) -> LocationBaseRef:
+    if isinstance(param, LocationBaseRef) and param.is_parameter():
+        normalized_index = _normalize_parameter_index(param.parameter_index)
+        if normalized_index is not None:
+            return LocationBaseRef.parameter(param.parameter_name, index=normalized_index)
+        return LocationBaseRef.parameter(param.parameter_name, index=index)
+    if isinstance(param, dict):
+        return _parameter_base_ref(
+            name=param.get("name"),
+            index=param.get("index", index),
+        )
+    if isinstance(param, str):
+        return LocationBaseRef.parameter(param, index=index)
+    return LocationBaseRef.parameter(None, index=index)
+
+
+def _coerce_callee_parameter_refs(params: Sequence[object]) -> List[LocationBaseRef]:
+    return [_coerce_callee_parameter_ref(param, index) for index, param in enumerate(params)]
+
+
+def _build_parameter_replacements(
+    callee_params: Sequence[object],
+    args: Sequence[Expression],
+) -> Dict[Tuple[object, ...], Expression]:
+    replacements: Dict[Tuple[object, ...], Expression] = {}
+    for param_ref, arg in zip(_coerce_callee_parameter_refs(callee_params), args):
+        key = _parameter_identity_key_from_base_ref(param_ref)
+        if key is not None:
+            replacements[key] = arg
+    return replacements
 
 
 def _parameter_base_ref(
@@ -1633,8 +1772,6 @@ def _parameter_base_ref_from_expression(expr: Optional[Expression]) -> Optional[
 
     if expr.expr_type == ExpressionType.PARAMETER:
         return _parameter_base_ref(name=expr.name, index=expr.value)
-    if expr.name:
-        return _parameter_base_ref(name=expr.name)
     return None
 
 
@@ -1643,7 +1780,6 @@ def _resolve_parameter_descriptor_from_identity(
     *,
     parameter_ref: Optional[LocationBaseRef] = None,
     parameter_index: Optional[object] = None,
-    parameter_name: Optional[object] = None,
     storage_info: Optional[StorageInfo] = None,
 ) -> Optional[Dict]:
     best_param: Optional[Dict] = None
@@ -1651,16 +1787,12 @@ def _resolve_parameter_descriptor_from_identity(
     ambiguous = False
 
     normalized_index = _normalize_parameter_index(parameter_index)
-    normalized_name = str(parameter_name) if isinstance(parameter_name, str) and parameter_name else None
 
     for param in parameters:
         score = 0
         param_index = _normalize_parameter_index(param.get("index"))
-        param_name = param.get("name")
-        if not isinstance(param_name, str) or not param_name:
-            param_name = None
 
-        if parameter_ref is not None and parameter_ref.matches_parameter(param):
+        if parameter_ref is not None and _parameter_base_ref_matches_descriptor(parameter_ref, param):
             score += 100
         if normalized_index is not None and param_index is not None and normalized_index == param_index:
             score += 80
@@ -1668,8 +1800,6 @@ def _resolve_parameter_descriptor_from_identity(
             param_storage = _coerce_storage_info(param.get("storage"))
             if param_storage is not None and _storage_matches_parameter(storage_info, param_storage):
                 score += 40
-        if normalized_name is not None and param_name == normalized_name:
-            score += 20
 
         if score <= 0:
             continue
@@ -1696,7 +1826,6 @@ def _resolve_parameter_descriptor(
         parameters,
         parameter_ref=_parameter_base_ref_from_expression(expr),
         parameter_index=getattr(expr, "value", None) if expr.expr_type == ExpressionType.PARAMETER else None,
-        parameter_name=getattr(expr, "name", None),
         storage_info=_coerce_storage_info(getattr(expr, "storage_info", None)),
     )
 
@@ -1835,7 +1964,6 @@ def _parameter_expression_from_varnode(varnode, tracer, parameters: Sequence[Dic
                 parameters,
                 parameter_ref=_parameter_base_ref(name=symbol_name, index=symbol_index),
                 parameter_index=symbol_index,
-                parameter_name=symbol_name,
                 storage_info=storage_info,
             )
             if descriptor is not None:
@@ -1974,7 +2102,7 @@ def _summary_has_interdependent_writes(summary: EffectSummary) -> bool:
     if summary is None or len(summary.effects) <= 1:
         return False
 
-    params = [{"name": name} for name in summary.parameter_names]
+    params = [{"name": name, "index": index} for index, name in enumerate(summary.parameter_names)]
     for index, effect in enumerate(summary.effects):
         for other_index, other in enumerate(summary.effects):
             if index == other_index:
@@ -1996,7 +2124,7 @@ def canonicalize_param_location(
         return None
     if not canonical.base_ref.is_parameter():
         return None
-    if not any(canonical.base_ref.matches_parameter(param) for param in parameters):
+    if not any(_parameter_base_ref_matches_descriptor(canonical.base_ref, param) for param in parameters):
         return None
     return canonical
 
@@ -2011,16 +2139,23 @@ def canonicalize_location(
 
 def substitute_location(
     location: CanonicalLocation,
-    callee_params: Sequence[str],
+    callee_params: Sequence[object],
     call_args: Sequence[Expression],
     caller_params: Sequence[Dict],
 ) -> Optional[CanonicalLocation]:
     if not location.base_ref.is_parameter():
         return None
-    arg_map = dict(zip(callee_params, call_args))
-    actual_addr = arg_map.get(location.base_ref.parameter_name or location.base_param)
-    if actual_addr is None:
+    callee_refs = _coerce_callee_parameter_refs(callee_params)
+    param_index = _normalize_parameter_index(location.base_ref.parameter_index)
+    if param_index is None or param_index >= len(callee_refs):
         return None
+    if _parameter_identity_key_from_base_ref(callee_refs[param_index]) != _parameter_identity_key_from_base_ref(
+        location.base_ref
+    ):
+        return None
+    if param_index >= len(call_args):
+        return None
+    actual_addr = call_args[param_index]
     caller_location = canonicalize_location(actual_addr, caller_params, size=location.size)
     if caller_location is None:
         return None
@@ -2647,25 +2782,37 @@ def _expressions_equivalent(left: Optional[Expression], right: Optional[Expressi
     )
 
 
-def _expression_contains_parameter_name(expr: Optional[Expression], name: str) -> bool:
+def _expression_contains_parameter_identity(
+    expr: Optional[Expression],
+    identities: Set[Tuple[object, ...]],
+    parameters: Sequence[Dict],
+) -> bool:
     if expr is None:
         return False
-    if expr.expr_type == ExpressionType.PARAMETER and expr.name == name:
+    if identities.intersection(_parameter_identity_keys_from_expression(expr, parameters)):
         return True
     if expr.expr_type == ExpressionType.PHI and expr.value:
         for cond, value in expr.value:
-            if cond is not None and _expression_contains_parameter_name(cond.expression, name):
+            if cond is not None and _expression_contains_parameter_identity(
+                cond.expression,
+                identities,
+                parameters,
+            ):
                 return True
-            if _expression_contains_parameter_name(value, name):
+            if _expression_contains_parameter_identity(value, identities, parameters):
                 return True
         return False
-    return any(_expression_contains_parameter_name(op, name) for op in getattr(expr, "operands", []) or [])
+    return any(
+        _expression_contains_parameter_identity(op, identities, parameters)
+        for op in getattr(expr, "operands", []) or []
+    )
 
 
 def _collect_parameter_replacements_from_conditions(
     conditions: Sequence[Condition],
-) -> Dict[str, Expression]:
-    replacements: Dict[str, Expression] = {}
+    parameters: Sequence[Dict],
+) -> Dict[Tuple[object, ...], Expression]:
+    replacements: Dict[Tuple[object, ...], Expression] = {}
     for cond in conditions or []:
         if cond is None or cond.negated:
             continue
@@ -2678,11 +2825,15 @@ def _collect_parameter_replacements_from_conditions(
         ):
             continue
         left, right = expr.operands
-        if left.expr_type == ExpressionType.PARAMETER and not _expression_contains_parameter_name(right, left.name):
-            replacements[left.name] = right
+        left_keys = _parameter_identity_keys_from_expression(left, parameters)
+        right_keys = _parameter_identity_keys_from_expression(right, parameters)
+        if left_keys and not _expression_contains_parameter_identity(right, left_keys, parameters):
+            for key in left_keys:
+                replacements[key] = right
             continue
-        if right.expr_type == ExpressionType.PARAMETER and not _expression_contains_parameter_name(left, right.name):
-            replacements[right.name] = left
+        if right_keys and not _expression_contains_parameter_identity(left, right_keys, parameters):
+            for key in right_keys:
+                replacements[key] = left
     return replacements
 
 
@@ -2693,7 +2844,7 @@ def _apply_condition_parameter_replacements(
 ) -> Optional[Expression]:
     if expr is None:
         return None
-    replacements = _collect_parameter_replacements_from_conditions(conditions)
+    replacements = _collect_parameter_replacements_from_conditions(conditions, parameters)
     if not replacements:
         return expr
 
@@ -3713,7 +3864,10 @@ def memory_expression_for_location(
     parameters: Sequence[Dict],
 ) -> Expression:
     location = _normalize_canonical_location(location)
-    param = next((item for item in parameters if location.base_ref.matches_parameter(item)), None)
+    param = next(
+        (item for item in parameters if _parameter_base_ref_matches_descriptor(location.base_ref, item)),
+        None,
+    )
     if param is None:
         return Expression.variable(
             _synthetic_location_read_name(location),
@@ -3842,8 +3996,12 @@ def locations_match(
         return True
     if not left.base_ref.is_parameter() or not right.base_ref.is_parameter():
         return False
+    left_key = _parameter_identity_key_from_base_ref(left.base_ref)
+    right_key = _parameter_identity_key_from_base_ref(right.base_ref)
+    if left_key is None or right_key is None:
+        return False
     equalities = _collect_param_equalities(conditions)
-    return frozenset((left.base_ref.parameter_name, right.base_ref.parameter_name)) in equalities
+    return frozenset((left_key, right_key)) in equalities
 
 
 def subtract_implied_conditions(
@@ -3920,7 +4078,7 @@ def _condition_is_implied(
 
 def substitute_condition(
     condition: Condition,
-    replacements: Dict[str, Expression],
+    replacements: Dict[Tuple[object, ...], Expression],
     parameters: Optional[Sequence[Dict]] = None,
 ) -> Condition:
     return Condition(
@@ -3931,11 +4089,12 @@ def substitute_condition(
 
 def substitute_expression(
     expr: Expression,
-    replacements: Dict[str, Expression],
+    replacements: Dict[Tuple[object, ...], Expression],
     parameters: Optional[Sequence[Dict]] = None,
 ) -> Expression:
-    if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE) and expr.name in replacements:
-        return _simplify_substituted_expression(replacements[expr.name], parameters)
+    replacement = _lookup_parameter_replacement(expr, replacements, parameters)
+    if replacement is not None:
+        return _simplify_substituted_expression(replacement, parameters)
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
         new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
@@ -3959,6 +4118,20 @@ def substitute_expression(
         return _simplify_substituted_expression(rebuilt, parameters)
 
     return expr
+
+
+def _lookup_parameter_replacement(
+    expr: Optional[Expression],
+    replacements: Dict[Tuple[object, ...], Expression],
+    parameters: Optional[Sequence[Dict]],
+) -> Optional[Expression]:
+    if expr is None or not replacements or parameters is None:
+        return None
+    for key in _parameter_identity_keys_from_expression(expr, parameters):
+        replacement = replacements.get(key)
+        if replacement is not None:
+            return replacement
+    return None
 
 
 def _simplify_substituted_expression(
@@ -4111,8 +4284,10 @@ def _is_known_nonnull_stack_address(
     return location.base_ref.is_stack_frame()
 
 
-def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]:
-    equalities: Set[frozenset] = set()
+def _collect_param_equalities(
+    conditions: Sequence[Condition],
+) -> Set[FrozenSet[Tuple[object, ...]]]:
+    equalities: Set[FrozenSet[Tuple[object, ...]]] = set()
     for condition in conditions:
         pair = _extract_positive_param_equality_pair(condition)
         if pair is not None:
@@ -4120,7 +4295,9 @@ def _collect_param_equalities(conditions: Sequence[Condition]) -> Set[frozenset]
     return equalities
 
 
-def _extract_positive_param_equality_pair(condition: Optional[Condition]) -> Optional[frozenset]:
+def _extract_positive_param_equality_pair(
+    condition: Optional[Condition],
+) -> Optional[FrozenSet[Tuple[object, ...]]]:
     if condition is None:
         return None
 
@@ -4149,14 +4326,14 @@ def _extract_positive_param_equality_pair(condition: Optional[Condition]) -> Opt
     if not is_positive:
         return None
 
-    left_name = _parameter_like_name(expr.operands[0])
-    right_name = _parameter_like_name(expr.operands[1])
-    if not left_name or not right_name:
+    left_key = _parameter_like_identity(expr.operands[0])
+    right_key = _parameter_like_identity(expr.operands[1])
+    if left_key is None or right_key is None:
         return None
-    return frozenset((left_name, right_name))
+    return frozenset((left_key, right_key))
 
 
-def _parameter_like_name(expr: Optional[Expression]) -> Optional[str]:
+def _parameter_like_identity(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
     current = expr
     while (
         current is not None
@@ -4168,8 +4345,15 @@ def _parameter_like_name(expr: Optional[Expression]) -> Optional[str]:
 
     if current is None:
         return None
-    if current.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
-        return current.name or None
+    if current.expr_type == ExpressionType.PARAMETER:
+        param_index = _normalize_parameter_index(getattr(current, "value", None))
+        if param_index is not None:
+            return ("parameter", param_index)
+    runtime_ref = getattr(current, "runtime_ref", None)
+    if isinstance(runtime_ref, LocationBaseRef):
+        return _parameter_identity_key_from_base_ref(runtime_ref)
+    if isinstance(runtime_ref, CanonicalLocation):
+        return _parameter_identity_key_from_base_ref(runtime_ref.base_ref)
     return None
 
 
@@ -4312,7 +4496,11 @@ def _flatten_param_addition(
     const_total, bases = _flatten_location_addition(expr, parameters)
     if const_total is None:
         return None, []
-    if not all(base.is_parameter() and any(base.matches_parameter(param) for param in parameters) for base in bases):
+    if not all(
+        base.is_parameter()
+        and any(_parameter_base_ref_matches_descriptor(base, param) for param in parameters)
+        for base in bases
+    ):
         return None, []
     return const_total, bases
 

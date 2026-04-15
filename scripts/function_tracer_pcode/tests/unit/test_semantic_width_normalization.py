@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
 )
 
@@ -301,8 +302,8 @@ def test_normalize_analysis_rewrites_effect_summary_for_fragment_backed_pointer_
         {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": False},
         {"name": "param_3", "data_type": "int", "size": 4, "index": 2, "is_signed": False},
     ]
-    loc0 = CanonicalLocation("param_1", 0, 4)
-    loc4 = CanonicalLocation("param_1", 4, 4)
+    loc0 = CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=4)
+    loc4 = CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=4, size=4)
     symbolic_sum = _binary(
         "INT_ADD",
         post_state_read_expression_for_location(loc0, params, symbolic=True),
