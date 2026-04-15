@@ -19,6 +19,7 @@ from ..model import (
     LocationBaseRef,
     LocationStep,
     StorageInfo,
+    expression_key_or_identity,
 )
 from ..model.signature import is_pointer_data_type
 from .condition import ConditionSimplifier
@@ -47,7 +48,7 @@ _MAX_CALL_ARGUMENT_VARIANTS = 16
 def _runtime_expression_signature(expr: Optional[Expression]):
     if expr is None:
         return ("none",)
-    return ConditionNormalizer.expression_signature(expr)
+    return expression_key_or_identity(expr, include_memory_read_order=False)
 
 
 def _runtime_conditions_signature(conditions: Sequence[Condition]):

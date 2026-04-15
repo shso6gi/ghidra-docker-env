@@ -4,15 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from typing import Any, Dict, Optional, Tuple
 
 from .call_target import CallTargetRef, coerce_call_target_ref
-
-_ADDRESS_NAME_PATTERNS = (
-    re.compile(r"^(PTR|DAT|LAB|FUN|UNK)_([0-9A-Fa-f]{4,})$"),
-    re.compile(r"^(?:PTR|DAT|LAB|FUN|UNK)_.+_([0-9A-Fa-f]{4,})$"),
-)
 
 
 @dataclass(frozen=True)
@@ -20,30 +14,31 @@ class AddressValueRef:
     """Structured constant-address identity for runtime analysis."""
 
     address_offset: int
-    source: str = "symbolic_name"
+    source: str = "ghidra_object"
     display_hint: Optional[str] = None
-
-    @classmethod
-    def from_name(cls, name: Optional[str]) -> Optional["AddressValueRef"]:
-        if not name:
-            return None
-        for pattern in _ADDRESS_NAME_PATTERNS:
-            match = pattern.fullmatch(name)
-            if match is None:
-                continue
-            hex_text = match.group(match.lastindex or 1)
-            try:
-                return cls(
-                    address_offset=int(hex_text, 16),
-                    source="symbolic_name",
-                    display_hint=name,
-                )
-            except Exception:
-                return None
-        return None
+    space_name: Optional[str] = None
+    symbol_name: Optional[str] = None
+    block_name: Optional[str] = None
+    is_initialized: Optional[bool] = None
+    can_read: Optional[bool] = None
+    can_write: Optional[bool] = None
+    can_execute: Optional[bool] = None
+    is_volatile: Optional[bool] = None
 
     def stable_key(self) -> Tuple[str, int]:
-        return ("address", int(self.address_offset))
+        return ("address", self.space_name or "", int(self.address_offset))
+
+    def has_concrete_address(self) -> bool:
+        return int(self.address_offset) >= 0
+
+    def is_readonly_memory(self) -> bool:
+        return bool(
+            self.has_concrete_address()
+            and self.is_initialized
+            and self.can_read
+            and not self.can_write
+            and not self.is_volatile
+        )
 
     def display_name(self) -> str:
         return self.display_hint or f"ADDR_{int(self.address_offset):x}"
@@ -54,6 +49,15 @@ class AddressValueRef:
             "address_offset": int(self.address_offset),
             "source": self.source,
             "display_name": self.display_name(),
+            "space_name": self.space_name,
+            "symbol_name": self.symbol_name,
+            "block_name": self.block_name,
+            "is_initialized": self.is_initialized,
+            "can_read": self.can_read,
+            "can_write": self.can_write,
+            "can_execute": self.can_execute,
+            "is_volatile": self.is_volatile,
+            "is_readonly_memory": self.is_readonly_memory(),
         }
 
 

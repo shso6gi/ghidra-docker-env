@@ -98,34 +98,151 @@ class PcodeTracer:
         symbol: Any = None,
         high_var: Any = None,
     ) -> Optional[AddressValueRef]:
+        representative = None
+        if high_var is not None:
+            try:
+                representative = high_var.getRepresentative()
+            except Exception:
+                representative = None
+
         probes = (
             (symbol, "getAddress", "symbol_address"),
             (high_var, "getAddress", "high_var_address"),
             (high_var, "getPCAddress", "high_var_pc_address"),
+            (representative, "getAddress", "high_var_representative_address"),
+            (representative, "getPCAddress", "high_var_representative_pc_address"),
         )
+        probe_failures = []
         for owner, method_name, source in probes:
             if owner is None:
                 continue
             getter = getattr(owner, method_name, None)
             if not callable(getter):
+                probe_failures.append(f"{source}=missing_method")
                 continue
             try:
                 address = getter()
-            except Exception:
+            except Exception as exc:
+                probe_failures.append(f"{source}=error:{type(exc).__name__}")
                 continue
             if address is None:
+                probe_failures.append(f"{source}=none")
                 continue
             try:
                 offset = int(address.getOffset())
-            except Exception:
+            except Exception as exc:
+                probe_failures.append(f"{source}=bad_offset:{type(exc).__name__}")
                 continue
             if offset < 0:
+                probe_failures.append(f"{source}=negative_offset")
                 continue
+            space_name = None
+            try:
+                space = address.getAddressSpace()
+                if space is not None:
+                    space_name = space.getName()
+            except Exception:
+                space_name = None
+
+            symbol_name = None
+            if symbol is not None:
+                try:
+                    symbol_name = symbol.getName()
+                except Exception:
+                    symbol_name = None
+            if not symbol_name:
+                symbol_name = self._lookup_symbol_name_for_address(address)
+
+            block_name = None
+            is_initialized = None
+            can_read = None
+            can_write = None
+            can_execute = None
+            is_volatile = None
+            try:
+                memory = self.program.getMemory()
+                block = memory.getBlock(address) if memory is not None else None
+                if block is not None:
+                    block_name = block.getName()
+                    is_initialized = bool(block.isInitialized())
+                    can_read = bool(block.isRead())
+                    can_write = bool(block.isWrite())
+                    can_execute = bool(block.isExecute())
+                    is_volatile = bool(block.isVolatile())
+            except Exception:
+                pass
+
             return AddressValueRef(
                 address_offset=offset,
                 source=source,
                 display_hint=display_name,
+                space_name=space_name,
+                symbol_name=symbol_name,
+                block_name=block_name,
+                is_initialized=is_initialized,
+                can_read=can_read,
+                can_write=can_write,
+                can_execute=can_execute,
+                is_volatile=is_volatile,
             )
+        if self.debug and display_name:
+            self._debug_print(
+                "[PcodeTracer] failed to build AddressValueRef "
+                f"name={display_name} probes={probe_failures}"
+            )
+        return None
+
+    def _lookup_symbol_name_for_address(self, address) -> Optional[str]:
+        if address is None:
+            return None
+
+        try:
+            symbol_table = self.program.getSymbolTable()
+        except Exception:
+            symbol_table = None
+        if symbol_table is not None:
+            try:
+                primary_symbol = symbol_table.getPrimarySymbol(address)
+            except Exception:
+                primary_symbol = None
+            if primary_symbol is not None:
+                try:
+                    name = primary_symbol.getName()
+                except Exception:
+                    name = None
+                if name:
+                    return name
+
+        try:
+            listing = self.program.getListing()
+        except Exception:
+            listing = None
+        if listing is None:
+            return None
+
+        for getter_name in ("getDataAt", "getDataContaining"):
+            getter = getattr(listing, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                data = getter(address)
+            except Exception:
+                data = None
+            if data is None:
+                continue
+            primary_symbol_getter = getattr(data, "getPrimarySymbol", None)
+            if callable(primary_symbol_getter):
+                try:
+                    data_symbol = primary_symbol_getter()
+                except Exception:
+                    data_symbol = None
+                if data_symbol is not None:
+                    try:
+                        name = data_symbol.getName()
+                    except Exception:
+                        name = None
+                    if name:
+                        return name
         return None
     
     def _get_op_key(self, pcode_op) -> str:

@@ -49,8 +49,11 @@ def normalize_expression(
         original_size = expr.size
         normalized_branches = []
         for condition, branch_expr in expr.value:
-            normalized_condition_expr = normalize_expression(condition.expression, context)
             normalized_branch_expr = normalize_expression(branch_expr, context)
+            if condition is None:
+                normalized_branches.append((None, normalized_branch_expr))
+                continue
+            normalized_condition_expr = normalize_expression(condition.expression, context)
             normalized_branches.append(
                 (
                     Condition(normalized_condition_expr, condition.negated),

@@ -96,11 +96,19 @@ def _stack_storage(offset: int, size_bytes: int = 4):
     }
 
 
-def _addr_var(name: str, size: int = 8) -> Expression:
+def _addr_var(name: str, address_offset: int, size: int = 8) -> Expression:
     return Expression.variable(
         name,
         size=size,
-        runtime_ref=AddressValueRef.from_name(name),
+        runtime_ref=AddressValueRef(
+            address_offset=address_offset,
+            display_hint=name,
+            symbol_name=name,
+            is_initialized=True,
+            can_read=True,
+            can_write=False,
+            is_volatile=False,
+        ),
     )
 
 
@@ -245,7 +253,7 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", 0x00112058, size=8),
         Expression.binary_op(
             "INT_ADD",
             Expression.binary_op("INT_MULT", index_expr, Expression.constant(4, 8)),
@@ -280,7 +288,7 @@ def test_memory_resolver_concretizes_small_readonly_jump_table():
 
 def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
     load_expr = Expression.memory(
-        _addr_var("PTR_ptr_op_add_00113090", size=8),
+        _addr_var("PTR_ptr_op_add_00113090", 0x00113090, size=8),
         size=8,
     )
 
@@ -303,7 +311,7 @@ def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
 def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_position():
     expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("DAT_00113090", size=8),
+        _addr_var("DAT_00113090", 0x00113090, size=8),
         Expression.constant(1, 8),
     )
 
@@ -329,7 +337,7 @@ def test_memory_resolver_concretizes_direct_readonly_scalar_symbol_in_value_posi
 def test_memory_resolver_concretizes_direct_unknown_symbol_when_readable():
     expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("UNK_00113090", size=8),
+        _addr_var("UNK_00113090", 0x00113090, size=8),
         Expression.constant(1, 8),
     )
 
@@ -360,7 +368,7 @@ def test_memory_resolver_concretizes_jump_table_when_additive_index_is_wrapped_b
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", 0x00112058, size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.constant(1, 8),
@@ -405,7 +413,7 @@ def test_memory_resolver_concretizes_mips_pic_jump_table_using_image_base_fallba
     index_expr.size = 8
     address_expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00112058", size=8),
+        _addr_var("PTR_00112058", 0x00112058, size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -651,7 +659,7 @@ def test_memory_resolver_concretizes_mips_got_base_symbol_with_address_suffix():
     param = Expression.parameter("param_1", 0, size=8)
     address_expr = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR___DT_MIPS_BASE_ADDRESS_120011050", size=8),
+        _addr_var("PTR___DT_MIPS_BASE_ADDRESS_120011050", 0x120011050, size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(

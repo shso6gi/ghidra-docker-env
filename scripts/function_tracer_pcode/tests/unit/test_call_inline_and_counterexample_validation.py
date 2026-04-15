@@ -27,11 +27,19 @@ def _param_expr(name: str, index: int = 0, size: int = 4) -> Expression:
     return Expression.parameter(name, index=index, size=size)
 
 
-def _addr_var(name: str, size: int = 8) -> Expression:
+def _addr_var(name: str, address_offset: int, size: int = 8) -> Expression:
     return Expression.variable(
         name,
         size=size,
-        runtime_ref=AddressValueRef.from_name(name),
+        runtime_ref=AddressValueRef(
+            address_offset=address_offset,
+            display_hint=name,
+            symbol_name=name,
+            is_initialized=True,
+            can_read=True,
+            can_write=False,
+            is_volatile=False,
+        ),
     )
 
 
@@ -683,7 +691,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
     index.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", 0x00114058, size=8),
         Expression.binary_op(
             "INT_ADD",
             Expression.binary_op("INT_MULT", index, Expression.constant(8, 8)),
@@ -999,7 +1007,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_with_wrapped_pic
     widened.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", 0x00114058, size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -1162,7 +1170,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_to_raw_code_targ
     widened.size = 8
     table_address = Expression.binary_op(
         "INT_ADD",
-        _addr_var("PTR_00114058", size=8),
+        _addr_var("PTR_00114058", 0x00114058, size=8),
         Expression.binary_op(
             "INT_MULT",
             Expression.binary_op(
@@ -2240,7 +2248,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
     target_expr = Expression.memory(
         Expression.binary_op(
             "INT_ADD",
-            _addr_var("PTR_00002000", size=8),
+            _addr_var("PTR_00002000", 0x00002000, size=8),
             Expression.binary_op(
                 "INT_ADD",
                 Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),
@@ -2387,7 +2395,7 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
     tracer.trace_varnode.return_value = Expression.memory(
         Expression.binary_op(
             "INT_ADD",
-            _addr_var("PTR_00002000", size=8),
+            _addr_var("PTR_00002000", 0x00002000, size=8),
             Expression.binary_op(
                 "INT_ADD",
                 Expression.binary_op("INT_MULT", index_expr, Expression.constant(8, 8)),

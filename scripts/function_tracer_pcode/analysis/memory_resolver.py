@@ -538,8 +538,8 @@ def _flatten_additive_terms(
 
 def _extract_symbolic_base_address(expr: Expression) -> Optional[int]:
     if expr.expr_type == ExpressionType.VARIABLE:
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        if isinstance(runtime_ref, AddressValueRef):
+        runtime_ref = _coerce_address_runtime_ref(expr)
+        if runtime_ref is not None:
             return int(runtime_ref.address_offset)
     return None
 
@@ -549,9 +549,19 @@ def _extract_constant_address(expr: Expression) -> Optional[int]:
         return expr.value
 
     if expr.expr_type == ExpressionType.VARIABLE:
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        if isinstance(runtime_ref, AddressValueRef):
+        runtime_ref = _coerce_address_runtime_ref(expr)
+        if runtime_ref is not None:
             return int(runtime_ref.address_offset)
+    return None
+
+
+def _coerce_address_runtime_ref(expr: Optional[Expression]) -> Optional[AddressValueRef]:
+    if expr is None:
+        return None
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, AddressValueRef):
+        return runtime_ref
     return None
 
 

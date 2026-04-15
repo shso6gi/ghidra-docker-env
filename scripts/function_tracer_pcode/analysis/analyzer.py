@@ -3796,14 +3796,6 @@ class ReturnAnalyzer:
         block_path=None,
         path_conditions: Optional[List[Condition]] = None,
     ) -> bool:
-        call_output = getattr(call_op, "getOutput", lambda: None)()
-        if call_output is None:
-            if self.debug:
-                self._debug_print(
-                    "Terminal CALL/CALLIND wrapper rejected: no call output for provenance proof"
-                )
-            return False
-
         if (
             tracer is None
             and condition_tracker is None
@@ -3813,7 +3805,16 @@ class ReturnAnalyzer:
                 self._debug_print(
                     "Skipping call-output provenance proof due missing tracer/context"
                 )
-            return False
+            return True
+
+        call_output = getattr(call_op, "getOutput", lambda: None)()
+        if call_output is None:
+            if self.debug:
+                self._debug_print(
+                    "Accepting terminal CALL/CALLIND wrapper without explicit output; "
+                    "context-based provenance proof is unavailable"
+                )
+            return True
 
         return_target = self._extract_return_target_varnodes(
             return_op,

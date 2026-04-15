@@ -152,9 +152,15 @@ def try_normalization_equivalence(
         if param_replace_fn is None:
             return expr.to_smt()
         try:
-            return param_replace_fn(expr)
+            rendered = param_replace_fn(expr)
         except TypeError:
-            return param_replace_fn(expr.to_smt())
+            rendered = param_replace_fn(expr.to_smt())
+        if isinstance(rendered, str):
+            return rendered
+        to_smt = getattr(rendered, "to_smt", None)
+        if callable(to_smt):
+            return to_smt()
+        return str(rendered)
 
     value1_smt_orig = _render_with_replacer(value1_orig, param_replace_fn1)
     value2_smt_orig = _render_with_replacer(value2_orig, param_replace_fn2)

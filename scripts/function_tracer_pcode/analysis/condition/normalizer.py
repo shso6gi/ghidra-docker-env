@@ -106,14 +106,72 @@ class ConditionNormalizer:
                     return (left_key, op, right_key, True)
         
         # その他の場合は構造キーとして返す
-        return (ConditionNormalizer._condition_expr_key(expr), "", "", not negated)
+        return (ConditionNormalizer._condition_expr_key(expr), "", ("none",), negated)
     
     @staticmethod
     def _normalized_term_to_string(term: object) -> str:
         """正規化トークンを表示文字列へ変換（to_string 非依存）。"""
         if isinstance(term, str):
             return term
+        if isinstance(term, tuple):
+            rendered = ConditionNormalizer._structural_key_to_string(term)
+            if rendered is not None:
+                return rendered
         return repr(term)
+
+    @staticmethod
+    def _atom_to_string(atom: object) -> Optional[str]:
+        if not isinstance(atom, tuple) or not atom:
+            return None
+        tag = atom[0]
+        if tag == "int" and len(atom) >= 2:
+            return str(atom[1])
+        if tag == "str" and len(atom) >= 2:
+            return str(atom[1])
+        if tag == "none":
+            return ""
+        return None
+
+    @staticmethod
+    def _structural_key_to_string(key: StructuralKey) -> Optional[str]:
+        if not isinstance(key, tuple) or not key:
+            return None
+        tag = key[0]
+        if tag == "const" and len(key) >= 2:
+            return ConditionNormalizer._atom_to_string(key[1])
+        if tag in {"parameter", "variable", "unknown"} and len(key) >= 2:
+            name = key[1]
+            return str(name) if name else tag
+        if tag == "none":
+            return ""
+        if tag == "unary" and len(key) >= 4:
+            operand = ConditionNormalizer._structural_key_to_string(key[3])
+            if operand is None:
+                return None
+            op = key[1]
+            if op == "INT_NEGATE":
+                return f"(~{operand})"
+            if op == "INT_2COMP":
+                return f"(-{operand})"
+            if op == "BOOL_NEGATE":
+                return f"(not {operand})"
+            return f"{op}({operand})"
+        if tag == "binary" and len(key) >= 5:
+            left = ConditionNormalizer._structural_key_to_string(key[3])
+            right = ConditionNormalizer._structural_key_to_string(key[4])
+            if left is None or right is None:
+                return None
+            op = key[1]
+            symbol = ConditionNormalizer._operator_to_symbol(op)
+            if symbol != op:
+                return f"({left} {symbol} {right})"
+            return f"{op}({left}, {right})"
+        if tag == "memory" and len(key) >= 3:
+            address = ConditionNormalizer._structural_key_to_string(key[2])
+            if address is None:
+                return None
+            return f"MEM[{address}]"
+        return None
     
     @staticmethod
     def normalize_for_contradiction(condition: Condition) -> Tuple[StructuralKey, str, StructuralKey, bool]:
@@ -459,7 +517,7 @@ class ConditionNormalizer:
             else:
                 return f"(not ({left_display} {op_str} {right_display}))"
         else:
-            if is_positive:
+            if not is_positive:
                 return left_display
             else:
                 return f"(not {left_display})"

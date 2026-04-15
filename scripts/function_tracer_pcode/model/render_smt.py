@@ -4,6 +4,7 @@
 from typing import Mapping, Optional
 
 from .signature import get_declared_type_signedness
+from .runtime_refs import AddressValueRef
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -345,6 +346,7 @@ def _to_smt_internal(
     expr,
     prefer_signed_arithmetic: bool = False,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    address_context: bool = False,
 ) -> str:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
@@ -363,6 +365,11 @@ def _to_smt_internal(
         return symbol_name_mapping.get(name, name)
 
     if expr_type == expr_kind.VARIABLE:
+        if address_context:
+            address_ref = _coerce_address_value_ref(expr)
+            if address_ref is not None:
+                bits = max(1, expression_smt_bit_width(expr))
+                return f"(_ bv{int(address_ref.address_offset)} {bits})"
         name = expr.name if expr.name else "var"
         if symbol_name_mapping is None:
             return name
@@ -375,12 +382,17 @@ def _to_smt_internal(
         if expr.operator == "PIECE":
             return (
                 f"(concat "
-                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)})"
+                f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context)} "
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)})"
             )
 
         if expr.operator == "SUBPIECE":
-            source_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)
+            source_smt = _to_smt_internal(
+                left,
+                prefer_signed_arithmetic,
+                symbol_name_mapping,
+                address_context,
+            )
             right_kind = right.expr_type.__class__
             if right.expr_type == right_kind.CONSTANT:
                 byte_offset = right.value
@@ -390,13 +402,13 @@ def _to_smt_internal(
                 return f"((_ extract {high_bit} {low_bit}) {source_smt})"
             return (
                 f"(subpiece {source_smt} "
-                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)})"
+                f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)})"
             )
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)
-        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping)
-        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping)
+        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context)
+        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
@@ -457,8 +469,8 @@ def _to_smt_internal(
             prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
             left_is_bool = expression_returns_bool(left)
             right_is_bool = expression_returns_bool(right)
-            left_smt = _to_smt_internal(left, False, symbol_name_mapping)
-            right_smt = _to_smt_internal(right, False, symbol_name_mapping)
+            left_smt = _to_smt_internal(left, False, symbol_name_mapping, address_context)
+            right_smt = _to_smt_internal(right, False, symbol_name_mapping, address_context)
 
             # Bool sort を含む比較は、そのまま zero/sign-extend すると
             # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
@@ -503,6 +515,7 @@ def _to_smt_internal(
             operand,
             prefer_signed_arithmetic,
             symbol_name_mapping,
+            address_context,
         )
         operand_bits = expression_smt_bit_width(operand)
 
@@ -542,7 +555,12 @@ def _to_smt_internal(
 
     if expr_type == expr_kind.CALL:
         args = " ".join(
-            _to_smt_internal(operand, prefer_signed_arithmetic, symbol_name_mapping)
+            _to_smt_internal(
+                operand,
+                prefer_signed_arithmetic,
+                symbol_name_mapping,
+                address_context,
+            )
             for operand in expr.operands
         )
         if args:
@@ -558,6 +576,7 @@ def _to_smt_internal(
             addr_expr,
             prefer_signed_arithmetic,
             symbol_name_mapping,
+            True,
         )
         addr_smt = _coerce_expr_to_bitvec_width(
             addr_expr,
@@ -582,6 +601,7 @@ def _to_smt_internal(
                     branch_expr,
                     prefer_sign_extension,
                     symbol_name_mapping,
+                    address_context,
                 )
             else:
                 branch_smt = str(branch_expr)
@@ -606,6 +626,7 @@ def _to_smt_internal(
                     cond,
                     prefer_sign_extension,
                     symbol_name_mapping,
+                    address_context,
                 )
             elif cond is not None and hasattr(cond, "to_smt"):
                 cond_str = cond.to_smt(symbol_name_mapping=symbol_name_mapping)
@@ -619,6 +640,13 @@ def _to_smt_internal(
         return result
 
     return "unknown"
+
+
+def _coerce_address_value_ref(expr) -> Optional[AddressValueRef]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, AddressValueRef):
+        return runtime_ref
+    return None
 
 
 def get_smt_operator(operator: Optional[str] = None) -> str:

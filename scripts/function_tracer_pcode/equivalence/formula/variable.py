@@ -14,6 +14,7 @@ from enum import Enum, auto
 import re
 
 from ...model import (
+    AddressValueRef,
     Expression,
     ExpressionType,
     Condition,
@@ -147,6 +148,44 @@ class VariableAnalyzer:
 
     def _is_symbolic_location_read_expr(self, expr: Optional[Expression]) -> bool:
         return isinstance(getattr(expr, "runtime_ref", None), CanonicalLocation)
+
+    def _is_concrete_address_expr(self, expr: Optional[Expression]) -> bool:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        return isinstance(runtime_ref, AddressValueRef) and runtime_ref.has_concrete_address()
+
+    def _describe_expression_origin(self, expr: Optional[Expression]) -> str:
+        if expr is None:
+            return "origin=missing_expr"
+
+        parts = []
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, AddressValueRef):
+            parts.append(
+                "runtime_ref="
+                f"AddressValueRef(offset=0x{int(runtime_ref.address_offset):x},"
+                f"source={runtime_ref.source},space={runtime_ref.space_name},"
+                f"symbol={runtime_ref.symbol_name},block={runtime_ref.block_name},"
+                f"readonly={runtime_ref.is_readonly_memory()})"
+            )
+        elif runtime_ref is None:
+            parts.append("runtime_ref=None")
+        else:
+            parts.append(f"runtime_ref={type(runtime_ref).__name__}")
+
+        storage = getattr(expr, "storage_info", None)
+        if storage is None:
+            parts.append("storage=None")
+        else:
+            parts.append(
+                "storage="
+                f"{storage.space_name}:off=0x{int(storage.offset or 0):x}:"
+                f"size={int(storage.size or 0)}:reg={storage.register_name}:"
+                f"base={storage.base_register_name}"
+            )
+
+        parts.append(f"expr_type={expr.expr_type.name}")
+        parts.append(f"size={int(expr.size or 0)}")
+        return ", ".join(parts)
 
     def _collect_variable_exprs(
         self,
@@ -337,7 +376,11 @@ class VariableAnalyzer:
         extra_var_names = {
             name
             for name, expr in all_var_exprs.items()
-            if name not in param_names and not self._is_symbolic_location_read_expr(expr)
+            if (
+                name not in param_names
+                and not self._is_symbolic_location_read_expr(expr)
+                and not self._is_concrete_address_expr(expr)
+            )
         }
         
         self._debug_print(f"Found {len(extra_var_names)} extra variables: {extra_var_names}")
@@ -380,6 +423,7 @@ class VariableAnalyzer:
         for var_name in sorted(extra_var_names):
             var_storage = all_vars_with_storage.get(var_name)
             bit_width = var_sizes.get(var_name, 32)
+            expr = all_var_exprs.get(var_name)
 
             storage_result = self.classify_variable_by_storage(
                 var_name, var_storage, bit_width, analysis.parameters
@@ -400,6 +444,9 @@ class VariableAnalyzer:
                     reason=inferred_fragment.get_reason_string(),
                 )
                 continue
+            origin_details = self._describe_expression_origin(expr)
+            base_reason = storage_result.reason or "No classification reason"
+            storage_result.reason = f"{base_reason}; {origin_details}"
             results[var_name] = storage_result
         
         return results

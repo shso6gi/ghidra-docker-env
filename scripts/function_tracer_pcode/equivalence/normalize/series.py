@@ -186,6 +186,8 @@ def _match_exact_triangular_phi_operands(expr: Expression) -> Optional[Tuple[Exp
     branches = expr.value
     even_condition, even_value = branches[0]
     odd_condition, odd_value = branches[1]
+    if even_condition is None or odd_condition is None:
+        return None
     if not _same_condition_expression(even_condition.expression, odd_condition.expression):
         return None
     if even_condition.negated == odd_condition.negated:

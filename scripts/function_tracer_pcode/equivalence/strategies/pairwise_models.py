@@ -38,6 +38,15 @@ class ReturnCase:
         self.conditions_smt: Optional[List[str]] = None
         self._value_smt_cache: Dict[tuple, str] = {}
 
+    @staticmethod
+    def _coerce_rendered_smt(rendered) -> str:
+        if isinstance(rendered, str):
+            return rendered
+        to_smt = getattr(rendered, "to_smt", None)
+        if callable(to_smt):
+            return to_smt()
+        return str(rendered)
+
     def get_conditions_smt(self, param_replace_fn) -> List[str]:
         if self.conditions_smt is None:
             self.conditions_smt = []
@@ -49,7 +58,7 @@ class ReturnCase:
                         cond_str = param_replace_fn(cond)
                     except TypeError:
                         cond_str = param_replace_fn(cond.to_smt())
-                self.conditions_smt.append(cond_str)
+                self.conditions_smt.append(self._coerce_rendered_smt(cond_str))
         return self.conditions_smt
 
     def get_value_smt(
@@ -84,6 +93,7 @@ class ReturnCase:
                 result = param_replace_fn(rendered_expr)
             except TypeError:
                 result = param_replace_fn(rendered_expr.to_smt())
+            result = self._coerce_rendered_smt(result)
         if target_bits is not None:
             result = coerce_value_to_bitvec_width(
                 rendered_expr,

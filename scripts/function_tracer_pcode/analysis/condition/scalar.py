@@ -9,7 +9,7 @@ from ...model import (
     Expression,
     ExpressionType,
     StructuralKey,
-    expression_key_or_identity,
+    expression_key_safe,
 )
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 
@@ -37,7 +37,7 @@ def _stable_scalar_expr_key(expr: Expression) -> Optional[StructuralKey]:
     unsupported node types so contradiction checks stay cheap and conservative.
     """
 
-    rendered = expression_key_or_identity(
+    rendered = expression_key_safe(
         expr,
         budget=_SCALAR_KEY_MAX_NODES,
         normalize_commutative=True,

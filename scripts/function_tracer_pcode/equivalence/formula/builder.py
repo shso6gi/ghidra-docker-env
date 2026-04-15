@@ -493,7 +493,7 @@ class FormulaBuilder:
             comment = ""
             if v.analysis:
                 comment = f"  ; {v.analysis.classification.name}"
-                if v.analysis.fragment_info:
+                if v.analysis.reason:
                     comment += f": {v.analysis.reason}"
             lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width})){comment}")
         lines.append("")
