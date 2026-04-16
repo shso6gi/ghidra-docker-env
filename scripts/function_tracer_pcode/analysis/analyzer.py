@@ -45,6 +45,7 @@ from .effect_summary import (
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
+    resolve_call_targets,
     rewrite_loads_from_effects,
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
@@ -793,6 +794,7 @@ class ReturnAnalyzer:
 
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             result.returns = self._strip_stack_protector_only_conditions(result.returns)
+            result.returns = self._merge_equivalent_return_infos(result.returns)
             if (
                 result.has_symbolic_post_state_reads()
                 and "symbolic_post_state_reads" not in result.analysis_notes
@@ -849,38 +851,55 @@ class ReturnAnalyzer:
         self,
         return_infos: List[ReturnInfo],
     ) -> List[ReturnInfo]:
-        if len(return_infos) != 1:
+        if not return_infos:
             return return_infos
 
-        only_return = return_infos[0]
-        if not only_return.conditions:
-            return return_infos
-        if not all(self._condition_looks_like_stack_protector_guard(cond) for cond in only_return.conditions):
-            return return_infos
+        stripped_infos: List[ReturnInfo] = []
+        changed = False
 
-        if self.debug:
-            cond_dump = [
-                ConditionSimplifier.get_simplified_condition_string(cond)
-                for cond in only_return.conditions
+        for info in return_infos:
+            if not info.conditions:
+                stripped_infos.append(info)
+                continue
+
+            retained_conditions = [
+                cond
+                for cond in info.conditions
+                if not self._condition_looks_like_stack_protector_guard(cond)
             ]
-            self._debug_print(
-                "Dropped stack-protector-only return conditions from the sole surviving return case: "
-                f"{cond_dump}"
+            if len(retained_conditions) == len(info.conditions):
+                stripped_infos.append(info)
+                continue
+
+            changed = True
+            if self.debug:
+                removed_dump = [
+                    ConditionSimplifier.get_simplified_condition_string(cond)
+                    for cond in info.conditions
+                    if cond not in retained_conditions
+                ]
+                self._debug_print(
+                    "Dropped object-centric stack-protector guard conditions from "
+                    f"return case: {removed_dump}"
+                )
+
+            stripped_infos.append(
+                self._make_return_info(
+                    address=info.address,
+                    value=info.value,
+                    conditions=retained_conditions,
+                    branch_index=info.branch_index,
+                    site_metadata={
+                        "pcode_identity": info.pcode_identity,
+                        "pcode_order": info.pcode_order,
+                        "pcode_time": info.pcode_time,
+                    },
+                )
             )
 
-        return [
-            self._make_return_info(
-                address=only_return.address,
-                value=only_return.value,
-                conditions=[],
-                branch_index=only_return.branch_index,
-                site_metadata={
-                    "pcode_identity": only_return.pcode_identity,
-                    "pcode_order": only_return.pcode_order,
-                    "pcode_time": only_return.pcode_time,
-                },
-            )
-        ]
+        if not changed:
+            return return_infos
+        return stripped_infos
 
     def _synchronize_parameters_with_referenced_parameter_expressions(
         self,
@@ -1045,7 +1064,7 @@ class ReturnAnalyzer:
         return merged
 
     def _condition_looks_like_stack_protector_guard(self, condition: Condition) -> bool:
-        compared = self._extract_stack_protector_compare_pair(condition.expression)
+        compared = self._extract_stack_protector_compare_pair(condition)
         if compared is None:
             return False
         left, right = compared
@@ -1053,13 +1072,17 @@ class ReturnAnalyzer:
 
     def _extract_stack_protector_compare_pair(
         self,
-        expr: Optional[Expression],
+        condition: Optional[Condition],
     ) -> Optional[Tuple[Expression, Expression]]:
-        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        if condition is None:
             return None
 
-        left, right = expr.operands
-        if expr.operator in {"INT_NOTEQUAL", "INT_EQUAL"}:
+        decomposed = self._decompose_comparison_condition(condition)
+        if decomposed is None:
+            return None
+
+        _negated, operator, left, right = decomposed
+        if operator in {"INT_NOTEQUAL", "INT_EQUAL"}:
             if self._is_zero_constant(right):
                 pair = self._extract_difference_pair(left)
                 if pair is not None:
@@ -1121,10 +1144,17 @@ class ReturnAnalyzer:
         ):
             current = current.operands[0]
 
-        if current.expr_type != ExpressionType.MEMORY or not current.operands:
-            return None
+        if current.expr_type == ExpressionType.MEMORY and current.operands:
+            probe = self._extract_indirect_probe(current.operands[0])
+            if probe is None:
+                return None
+            base_key, displacement, deref_depth = probe
+            return (base_key, displacement, deref_depth, int(current.size or 0))
 
-        probe = self._extract_indirect_probe(current.operands[0])
+        # Some architectures materialize the stack-protector spill as a direct
+        # INDIRECT expression over an already-dereferenced guard pointer instead
+        # of wrapping it in a MEMORY node. Preserve the same structured probe.
+        probe = self._extract_indirect_probe(current)
         if probe is None:
             return None
         base_key, displacement, deref_depth = probe
@@ -3924,19 +3954,73 @@ class ReturnAnalyzer:
         if pcode_op is None or pcode_op.getMnemonic() not in {"CALL", "CALLIND"}:
             return False
 
-        direct_function = self._resolve_direct_call_target_function(pcode_op, tracer)
-        if direct_function is not None and self._function_has_no_return(direct_function):
-            return True
-
-        resolved_target = _resolve_call_target_ref(tracer, pcode_op)
-        if resolved_target is None or not resolved_target.function_name:
-            return False
-
-        function_by_name = self._find_function_by_name(resolved_target.function_name)
-        if function_by_name is not None and self._function_has_no_return(function_by_name):
-            return True
-
+        for target_ref in self._resolve_object_centric_call_targets(pcode_op, tracer):
+            target_function = self._resolve_function_from_call_target_ref(target_ref)
+            if target_function is not None and self._function_has_no_return(target_function):
+                return True
         return False
+
+    def _resolve_object_centric_call_targets(
+        self,
+        pcode_op,
+        tracer: Optional[PcodeTracer],
+    ) -> List[CallTargetRef]:
+        if pcode_op is None or tracer is None:
+            return []
+
+        resolved: List[CallTargetRef] = []
+
+        try:
+            image_base = None
+            if self.program is not None:
+                image_base = self.program.getImageBase().getOffset()
+            for target_ref, _conditions in resolve_call_targets(
+                tracer,
+                pcode_op,
+                conditions=[],
+                parameters=list(self._current_parameters or []),
+                read_memory_value=self._read_memory_value if self.program is not None else None,
+                image_base=image_base,
+                debug=self.debug,
+            ):
+                if target_ref is not None:
+                    resolved.append(target_ref)
+        except Exception:
+            pass
+
+        if not resolved:
+            fallback_target = _resolve_call_target_ref(tracer, pcode_op)
+            if fallback_target is not None:
+                resolved.append(fallback_target)
+
+        deduped: List[CallTargetRef] = []
+        seen_keys = set()
+        for target_ref in resolved:
+            stable_key = target_ref.stable_key()
+            if stable_key in seen_keys:
+                continue
+            seen_keys.add(stable_key)
+            deduped.append(target_ref)
+        return deduped
+
+    def _resolve_function_from_call_target_ref(
+        self,
+        target_ref: Optional[CallTargetRef],
+    ):
+        if target_ref is None or target_ref.is_unknown():
+            return None
+
+        function_obj = getattr(target_ref, "function_obj", None)
+        if function_obj is not None:
+            return function_obj
+
+        if target_ref.entry_offset is not None:
+            return self._resolve_function_from_program_offset(target_ref.entry_offset)
+
+        if target_ref.address_offset is not None:
+            return self._resolve_function_from_program_offset(target_ref.address_offset)
+
+        return None
 
     def _resolve_direct_call_target_function(self, pcode_op, tracer: Optional[PcodeTracer] = None):
         if self.program is None or pcode_op is None or pcode_op.getNumInputs() < 1:
@@ -5134,16 +5218,6 @@ class ReturnAnalyzer:
 
         if len(left_residual) == 1 and len(right_residual) == 1:
             if ConditionSimplifier.are_contradictory_conditions(left_residual[0], right_residual[0]):
-                if (
-                    expression_contains_synthetic_location_reads(left.value)
-                    or expression_contains_synthetic_location_reads(right.value)
-                ):
-                    if self.debug:
-                        self._debug_print(
-                            "skipping complementary return-case collapse due to "
-                            "symbolic post-state reads in value"
-                        )
-                    return None
                 if not self._can_safely_collapse_complementary_return_pair(
                     left,
                     right,

@@ -583,7 +583,7 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
     assert smt.count("(_ bv1 32)") == 1
 
 
-def test_return_analyzer_does_not_collapse_complementary_symbolic_post_state_cases():
+def test_return_analyzer_collapses_complementary_symbolic_post_state_cases_when_values_match():
     params = [{"name": "trace", "index": 0, "size": 8}]
     symbolic_value = post_state_read_expression_for_location(
         CanonicalLocation("trace", 0, 4),
@@ -609,7 +609,8 @@ def test_return_analyzer_does_not_collapse_complementary_symbolic_post_state_cas
 
     merged = ReturnAnalyzer(program=None, debug=False)._merge_equivalent_return_infos(infos)
 
-    assert len(merged) == 2
+    assert len(merged) == 1
+    assert merged[0].conditions == []
 
 
 def test_return_analyzer_keeps_pre_and_post_state_values_separate_even_when_rendering_matches():

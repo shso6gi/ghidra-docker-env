@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from importlib import import_module
 from pathlib import Path
+from types import MethodType
 from typing import Any, ContextManager, Optional, Protocol, cast
 
 
@@ -57,3 +60,42 @@ class PyGhidraModule(Protocol):
 def load_pyghidra() -> PyGhidraModule:
     """Import pyghidra with an explicit protocol for type checkers."""
     return cast(PyGhidraModule, import_module("pyghidra"))
+
+
+def _ensure_headless_ghidra_user_dirs() -> None:
+    """Provide writable XDG locations for headless Ghidra sessions."""
+    base_dir = Path(tempfile.gettempdir()) / "codex-ghidra"
+    config_dir = base_dir / "config"
+    cache_dir = base_dir / "cache"
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    os.environ.setdefault("XDG_CONFIG_HOME", str(config_dir))
+    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
+
+
+def start_headless_pyghidra(pyghidra: PyGhidraModule, *, install_dir: Optional[Path] = None) -> None:
+    """Start PyGhidra on a headless-safe path that avoids GUI plugin bootstrap."""
+
+    _ensure_headless_ghidra_user_dirs()
+
+    launcher_cls = getattr(pyghidra, "HeadlessPyGhidraLauncher", None)
+    if launcher_cls is None:
+        pyghidra.start(install_dir=install_dir)
+        return
+
+    launcher = launcher_cls(verbose=False, install_dir=install_dir)
+    if not hasattr(launcher, "start") or not hasattr(launcher, "uninstall_plugin"):
+        pyghidra.start(install_dir=install_dir)
+        return
+
+    def _pre_launch_init_without_ui_plugins(self) -> None:
+        from ghidra import GhidraApplicationLayout, GhidraLauncher
+
+        self._layout = GhidraApplicationLayout()
+        self.uninstall_plugin("pyhidra")
+        self._layout = GhidraLauncher.initializeGhidraEnvironment()
+
+    launcher._pre_launch_init = MethodType(_pre_launch_init_without_ui_plugins, launcher)
+    launcher.start()

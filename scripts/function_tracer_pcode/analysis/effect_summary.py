@@ -20,6 +20,7 @@ from ..model import (
     LocationStep,
     ObservedMemoryReadRef,
     StorageInfo,
+    coerce_call_target_ref,
     expression_key_or_identity,
     expression_key_safe,
 )
@@ -1135,18 +1136,19 @@ def _resolve_call_target_ref(tracer, op) -> Optional[CallTargetRef]:
             allow_containing=True,
             allow_code_address=True,
         )
-        if resolved is not None:
-            return resolved
-    else:
-        address = None
-        try:
-            address = target_varnode.getAddress()
-        except Exception:
-            address = None
+        resolved_ref = coerce_call_target_ref(resolved)
+        if resolved_ref is not None:
+            return resolved_ref
 
-        resolved_from_address = _resolve_function_ref_from_address(tracer, address, allow_containing=True)
-        if resolved_from_address is not None:
-            return resolved_from_address
+    address = None
+    try:
+        address = target_varnode.getAddress()
+    except Exception:
+        address = None
+
+    resolved_from_address = _resolve_function_ref_from_address(tracer, address, allow_containing=True)
+    if resolved_from_address is not None:
+        return resolved_from_address
 
     traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
     if traced_target.expr_type != ExpressionType.CONSTANT:

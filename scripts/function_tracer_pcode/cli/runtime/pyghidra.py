@@ -5,14 +5,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .._pyghidra_support import load_pyghidra
-from ...config import GHIDRA_INSTALL_DIR
+from .._pyghidra_support import load_pyghidra, start_headless_pyghidra
+from ...config import GHIDRA_INSTALL_DIR, apply_runtime_environment
 from ..commands.analyze import analyze_and_output, get_target_functions, list_all_functions
 from ..commands.equivalence import run_equivalence_check
 
 
 def run_pyghidra_mode(args):
     """PyGhidra モードで実行する。"""
+    apply_runtime_environment()
     pyghidra = load_pyghidra()
 
     if args.equiv:
@@ -43,7 +44,10 @@ def run_pyghidra_mode(args):
         print(f"定数形式: {const_format}")
         print()
 
-    pyghidra.start(install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None)
+    start_headless_pyghidra(
+        pyghidra,
+        install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None,
+    )
 
     with tempfile.TemporaryDirectory() as temp_dir:
         with pyghidra.open_project(temp_dir, "AnalysisProject", create=True) as project:

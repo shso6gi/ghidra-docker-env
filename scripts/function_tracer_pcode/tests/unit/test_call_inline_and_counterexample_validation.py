@@ -13,10 +13,12 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executo
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
     CallTargetRef,
+    CanonicalLocation,
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
@@ -2980,6 +2982,51 @@ def test_return_analyzer_prefers_ghidra_noreturn_metadata_for_direct_calls():
     assert analyzer._is_noreturn_call_op(call_op, tracer) is True
 
 
+def test_return_analyzer_detects_noreturn_target_from_object_centric_resolved_code_address():
+    function = Mock()
+    function.hasNoReturn.return_value = True
+
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    address_space = Mock()
+    address_token = Mock()
+    address_space.getAddress.return_value = address_token
+
+    address_factory = Mock()
+    address_factory.getDefaultAddressSpace.return_value = address_space
+
+    image_base = Mock()
+    image_base.getOffset.return_value = 0
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+    program.getAddressFactory.return_value = address_factory
+    program.getImageBase.return_value = image_base
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    tracer = Mock()
+
+    target_varnode = Mock()
+    target_varnode.getAddress.return_value = None
+
+    call_op = Mock()
+    call_op.getMnemonic.return_value = "CALLIND"
+    call_op.getNumInputs.return_value = 1
+    call_op.getInput.return_value = target_varnode
+
+    with patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.resolve_call_targets",
+        return_value=[(CallTargetRef.from_code_address(0x401234), [])],
+    ):
+        with patch.object(
+            analyzer,
+            "_find_function_by_name",
+            side_effect=AssertionError("string-based fallback should not be used"),
+        ):
+            assert analyzer._is_noreturn_call_op(call_op, tracer) is True
+
+
 def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
     function = Mock()
     function.hasNoReturn.return_value = True
@@ -3127,6 +3174,38 @@ def test_return_analyzer_prefers_pcode_wrapper_recovery_before_decompiler_fallba
 
     assert result == recovered
     mock_pcode.assert_called_once()
+
+
+def test_merge_equivalent_return_infos_collapses_symbolic_post_state_reads_under_complementary_conditions():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    post_state_value = Expression.variable(
+        "post_state_slot",
+        size=4,
+        runtime_ref=CanonicalLocation(
+            base_ref=LocationBaseRef.stack_frame(),
+            offset=-48,
+            size=4,
+        ),
+    )
+    even_cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.binary_op("INT_AND", _param_expr("param_1", 0), Expression.constant(1, 4)),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    odd_cond = Condition(even_cond.expression, True)
+
+    merged = analyzer._merge_equivalent_return_infos(
+        [
+            ReturnInfo(address="0x1000", value=post_state_value, conditions=[odd_cond], branch_index=0),
+            ReturnInfo(address="0x1000", value=post_state_value, conditions=[even_cond], branch_index=1),
+        ]
+    )
+
+    assert len(merged) == 1
+    assert merged[0].conditions == []
 
 
 def test_function_return_analysis_skips_monolithic_fallback_for_nested_unresolved_values():

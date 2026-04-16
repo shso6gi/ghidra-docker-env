@@ -2,6 +2,9 @@
 """設定ファイル"""
 
 import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, MutableMapping, Optional
 
 # Ghidra内で実行されているかどうかを検出
 try:
@@ -10,11 +13,109 @@ try:
 except ImportError:
     IN_GHIDRA = False
 
+@dataclass(frozen=True)
+class RuntimeEnvironment:
+    """Runtime dependency paths used by the PyGhidra entrypoints."""
+
+    ghidra_install_dir: Optional[str]
+    java_home: Optional[str]
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _is_ghidra_install_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "ghidraRun").exists() and (path / "support").is_dir()
+
+
+def _is_java_home(path: Path) -> bool:
+    java_names = ("java.exe", "java") if os.name == "nt" else ("java", "java.exe")
+    return path.is_dir() and any((path / "bin" / java_name).exists() for java_name in java_names)
+
+
+def _iter_ghidra_install_candidates(repo_root: Path):
+    yield repo_root / ".local-ghidra"
+
+    extracted_root = repo_root / ".local-ghidra-extract"
+    if extracted_root.is_dir():
+        for child in sorted(extracted_root.iterdir()):
+            yield child
+
+    for child in sorted(repo_root.glob("ghidra_*_PUBLIC")):
+        yield child
+
+    yield Path("/opt/ghidra")
+
+
+def _discover_ghidra_install_dir(repo_root: Path) -> Optional[str]:
+    for candidate in _iter_ghidra_install_candidates(repo_root):
+        if _is_ghidra_install_dir(candidate):
+            return str(candidate)
+    return None
+
+
+def _discover_java_home(repo_root: Path) -> Optional[str]:
+    candidates = [
+        repo_root / ".local-jdk",
+        Path("/usr/lib/jvm/default-java"),
+        Path("/usr/lib/jvm/java-17-openjdk-amd64"),
+        Path("/usr/lib/jvm/java-21-openjdk-amd64"),
+    ]
+    for candidate in candidates:
+        if _is_java_home(candidate):
+            return str(candidate)
+    return None
+
+
+def discover_runtime_environment(
+    repo_root: Optional[Path] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> RuntimeEnvironment:
+    """Resolve Ghidra/JDK locations, preferring explicit env vars and repo-local assets."""
+
+    effective_env = environ if environ is not None else os.environ
+    base_dir = repo_root if repo_root is not None else _repo_root()
+
+    ghidra_install_dir = effective_env.get("GHIDRA_INSTALL_DIR") or _discover_ghidra_install_dir(base_dir)
+    java_home = effective_env.get("JAVA_HOME") or _discover_java_home(base_dir)
+
+    return RuntimeEnvironment(
+        ghidra_install_dir=ghidra_install_dir,
+        java_home=java_home,
+    )
+
+
+def apply_runtime_environment(
+    runtime_env: Optional[RuntimeEnvironment] = None,
+    environ: Optional[MutableMapping[str, str]] = None,
+) -> RuntimeEnvironment:
+    """Backfill runtime env vars for local PyGhidra execution without overriding explicit values."""
+
+    target_env = environ if environ is not None else os.environ
+    resolved_env = runtime_env if runtime_env is not None else discover_runtime_environment(environ=target_env)
+
+    if resolved_env.ghidra_install_dir and "GHIDRA_INSTALL_DIR" not in target_env:
+        target_env["GHIDRA_INSTALL_DIR"] = resolved_env.ghidra_install_dir
+    if resolved_env.java_home and "JAVA_HOME" not in target_env:
+        target_env["JAVA_HOME"] = resolved_env.java_home
+    if resolved_env.java_home and "JAVA_HOME_OVERRIDE" not in target_env:
+        target_env["JAVA_HOME_OVERRIDE"] = resolved_env.java_home
+    if resolved_env.java_home:
+        java_bin = str(Path(resolved_env.java_home) / "bin")
+        current_path = target_env.get("PATH", "")
+        path_entries = current_path.split(os.pathsep) if current_path else []
+        if java_bin not in path_entries:
+            target_env["PATH"] = os.pathsep.join([java_bin, *path_entries]) if path_entries else java_bin
+
+    return resolved_env
+
+
+_RUNTIME_ENV = discover_runtime_environment()
+
 # PyGhidra用設定
-GHIDRA_INSTALL_DIR = os.environ.get(
-    "GHIDRA_INSTALL_DIR",
-    "/opt/ghidra/"
-)
+GHIDRA_INSTALL_DIR = _RUNTIME_ENV.ghidra_install_dir
+JAVA_HOME = _RUNTIME_ENV.java_home
 
 # デフォルトの解析対象関数
 TARGET_FUNCTIONS = ["add", "subtract", "multiply", "divide", "modulo", "combined_arithmetic"]

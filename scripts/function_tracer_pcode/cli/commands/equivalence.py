@@ -5,8 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .._pyghidra_support import load_pyghidra
-from ...config import GHIDRA_INSTALL_DIR
+from .._pyghidra_support import load_pyghidra, start_headless_pyghidra
+from ...config import GHIDRA_INSTALL_DIR, apply_runtime_environment
 from ...io import output_result
 from .analyze import get_target_functions
 
@@ -26,6 +26,7 @@ def _safe_close_context(manager) -> None:
 
 def run_equivalence_check(args):
     """等価性判定を実行する。"""
+    apply_runtime_environment()
     pyghidra = load_pyghidra()
 
     from ...equivalence import EquivalenceChecker, TypeFixerConfig
@@ -58,7 +59,10 @@ def run_equivalence_check(args):
         )
         print()
 
-    pyghidra.start(install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None)
+    start_headless_pyghidra(
+        pyghidra,
+        install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None,
+    )
 
     type_fixer_config = TypeFixerConfig()
     enable_rewrite = not getattr(args, "no_rewrite", False)

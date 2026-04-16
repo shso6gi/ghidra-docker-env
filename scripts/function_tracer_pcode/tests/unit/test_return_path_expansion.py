@@ -7,9 +7,11 @@ from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
+    CanonicalLocation,
     Condition,
     Expression,
     ExpressionType,
+    LocationBaseRef,
     ReturnInfo,
     StorageInfo,
 )
@@ -512,6 +514,51 @@ def test_return_analyzer_drops_stack_protector_condition_from_sole_return_case()
     assert stripped[0].conditions == []
 
 
+def test_return_analyzer_drops_stack_protector_conditions_from_all_equivalent_cases():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    guard_ptr = _addr_var("PTR___stack_chk_guard_120013160", 0x120013160, size=8)
+    guard_expr = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.memory(
+            Expression.binary_op(
+                "INDIRECT",
+                Expression.memory(guard_ptr, size=8),
+                Expression.constant(74, 4),
+            ),
+            size=8,
+        ),
+        Expression.memory(
+            Expression.binary_op("INDIRECT", guard_ptr, Expression.constant(74, 4)),
+            size=8,
+        ),
+    )
+    value = Expression.variable(
+        "guard_after_call",
+        size=4,
+        runtime_ref=CanonicalLocation(
+            base_ref=LocationBaseRef.stack_frame(),
+            offset=-48,
+            size=4,
+        ),
+    )
+
+    stripped = analyzer._strip_stack_protector_only_conditions(
+        [
+            ReturnInfo(address="0x2000", value=value, conditions=[Condition(guard_expr, False)], branch_index=0),
+            ReturnInfo(address="0x2000", value=value, conditions=[Condition(guard_expr, True)], branch_index=1),
+        ]
+    )
+
+    assert len(stripped) == 2
+    assert all(info.conditions == [] for info in stripped)
+
+    merged = analyzer._merge_equivalent_return_infos(stripped)
+
+    assert len(merged) == 1
+    assert merged[0].conditions == []
+
+
 def test_return_analyzer_detects_stack_protector_guard_by_structure_without_name_hint():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 
@@ -537,6 +584,59 @@ def test_return_analyzer_detects_stack_protector_guard_by_structure_without_name
     )
 
     assert analyzer._condition_looks_like_stack_protector_guard(Condition(guard_expr, False)) is True
+
+
+def test_return_analyzer_detects_stack_protector_guard_through_bool_negate_wrapper():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    base_ptr = Expression.variable("tmp_guard_base", size=8)
+    guard_compare = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op(
+            "INT_SUB",
+            Expression.memory(
+                Expression.binary_op(
+                    "INDIRECT",
+                    Expression.memory(base_ptr, size=8),
+                    Expression.constant(48, 4),
+                ),
+                size=8,
+            ),
+            Expression.memory(
+                Expression.binary_op("INDIRECT", base_ptr, Expression.constant(48, 4)),
+                size=8,
+            ),
+        ),
+        Expression.constant(0, 8),
+    )
+    wrapped = Condition(Expression.unary_op("BOOL_NEGATE", guard_compare), False)
+
+    assert analyzer._condition_looks_like_stack_protector_guard(wrapped) is True
+
+
+def test_return_analyzer_detects_stack_protector_guard_with_direct_indirect_probe_shape():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    guard_addr = Expression.constant(0x111FE8, size=8)
+    displacement = Expression.constant(48, 4)
+    guard_compare = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op(
+            "INT_SUB",
+            Expression.binary_op(
+                "INDIRECT",
+                Expression.memory(guard_addr, size=8),
+                displacement,
+            ),
+            Expression.memory(
+                Expression.binary_op("INDIRECT", guard_addr, displacement),
+                size=8,
+            ),
+        ),
+        Expression.constant(0, 8),
+    )
+
+    assert analyzer._condition_looks_like_stack_protector_guard(Condition(guard_compare, False)) is True
 
 
 def test_return_analyzer_local_memory_key_does_not_require_string_render(monkeypatch):
