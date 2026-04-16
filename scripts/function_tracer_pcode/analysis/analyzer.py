@@ -2505,7 +2505,7 @@ class ReturnAnalyzer:
         if target_ref.function_obj is not None:
             return target_ref.function_obj
         if target_ref.entry_offset is not None:
-            return self._find_function_by_entry_offset(target_ref.entry_offset)
+            return self._resolve_function_from_program_offset(target_ref.entry_offset)
         if target_ref.function_name:
             return self._find_function_by_name(target_ref.function_name)
         return None
@@ -4022,31 +4022,19 @@ class ReturnAnalyzer:
 
         return None
 
-    def _resolve_direct_call_target_function(self, pcode_op, tracer: Optional[PcodeTracer] = None):
-        if self.program is None or pcode_op is None or pcode_op.getNumInputs() < 1:
+    def _get_function_manager(self):
+        if self.program is None:
             return None
         try:
-            target_varnode = pcode_op.getInput(0)
-            if target_varnode is None:
-                return None
+            return self.program.getFunctionManager()
         except Exception:
             return None
-        function = self._resolve_function_from_address(target_varnode.getAddress())
-        if function is not None:
-            return function
-        traced_target = self._trace_call_target_expression(target_varnode, tracer)
-        if traced_target is None or traced_target.expr_type != ExpressionType.CONSTANT:
-            return None
-        target_offset = self._constant_int_value(traced_target)
-        if target_offset is None or target_offset < 0:
-            return None
-        return self._resolve_function_from_program_offset(target_offset)
 
     def _resolve_function_from_address(self, address):
-        if self.program is None or address is None:
+        if address is None:
             return None
         try:
-            function_manager = self.program.getFunctionManager()
+            function_manager = self._get_function_manager()
             if function_manager is None:
                 return None
             get_function_at = getattr(function_manager, "getFunctionAt", None)
@@ -4077,35 +4065,6 @@ class ReturnAnalyzer:
         except Exception:
             return None
         return self._resolve_function_from_address(address)
-
-    def _trace_call_target_expression(
-        self,
-        target_varnode,
-        tracer: Optional[PcodeTracer],
-    ) -> Optional[Expression]:
-        if tracer is None or target_varnode is None:
-            return None
-        try:
-            traced_target = tracer.trace_varnode(target_varnode, use_cache=False)
-        except Exception:
-            return None
-        if isinstance(traced_target, Expression):
-            return traced_target
-        return None
-
-    def _find_function_by_name(self, resolved_name: str):
-        if self.program is None or not resolved_name:
-            return None
-        try:
-            function_manager = self.program.getFunctionManager()
-            if function_manager is None:
-                return None
-            for func in function_manager.getFunctions(True):
-                if func.getName() == resolved_name:
-                    return func
-        except Exception:
-            return None
-        return None
 
     def _function_has_no_return(self, function) -> bool:
         if function is None:
@@ -5656,8 +5615,15 @@ class ReturnAnalyzer:
             return None
     
     def _find_function_by_name(self, function_name: str):
-        function_manager = self.program.getFunctionManager()
-        for func in function_manager.getFunctions(True):
-            if func.getName() == function_name:
-                return func
+        if not function_name:
+            return None
+        function_manager = self._get_function_manager()
+        if function_manager is None:
+            return None
+        try:
+            for func in function_manager.getFunctions(True):
+                if func.getName() == function_name:
+                    return func
+        except Exception:
+            return None
         return None

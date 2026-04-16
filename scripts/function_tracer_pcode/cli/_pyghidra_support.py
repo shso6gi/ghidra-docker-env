@@ -75,6 +75,19 @@ def _ensure_headless_ghidra_user_dirs() -> None:
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
 
 
+def _install_headless_pre_launch_hook(launcher: Any) -> None:
+    """Trim PyGhidra's UI plugin bootstrap, which is fragile in headless sandboxes."""
+
+    def _pre_launch_init_without_ui_plugins(self) -> None:
+        from ghidra import GhidraApplicationLayout, GhidraLauncher
+
+        self._layout = GhidraApplicationLayout()
+        self.uninstall_plugin("pyhidra")
+        self._layout = GhidraLauncher.initializeGhidraEnvironment()
+
+    launcher._pre_launch_init = MethodType(_pre_launch_init_without_ui_plugins, launcher)
+
+
 def start_headless_pyghidra(pyghidra: PyGhidraModule, *, install_dir: Optional[Path] = None) -> None:
     """Start PyGhidra on a headless-safe path that avoids GUI plugin bootstrap."""
 
@@ -90,12 +103,5 @@ def start_headless_pyghidra(pyghidra: PyGhidraModule, *, install_dir: Optional[P
         pyghidra.start(install_dir=install_dir)
         return
 
-    def _pre_launch_init_without_ui_plugins(self) -> None:
-        from ghidra import GhidraApplicationLayout, GhidraLauncher
-
-        self._layout = GhidraApplicationLayout()
-        self.uninstall_plugin("pyhidra")
-        self._layout = GhidraLauncher.initializeGhidraEnvironment()
-
-    launcher._pre_launch_init = MethodType(_pre_launch_init_without_ui_plugins, launcher)
+    _install_headless_pre_launch_hook(launcher)
     launcher.start()

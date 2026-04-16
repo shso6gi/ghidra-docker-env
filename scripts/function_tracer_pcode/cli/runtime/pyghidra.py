@@ -6,14 +6,14 @@ import tempfile
 from pathlib import Path
 
 from .._pyghidra_support import load_pyghidra, start_headless_pyghidra
-from ...config import GHIDRA_INSTALL_DIR, apply_runtime_environment
+from ...config import apply_runtime_environment
 from ..commands.analyze import analyze_and_output, get_target_functions, list_all_functions
 from ..commands.equivalence import run_equivalence_check
 
 
 def run_pyghidra_mode(args):
     """PyGhidra モードで実行する。"""
-    apply_runtime_environment()
+    runtime_env = apply_runtime_environment()
     pyghidra = load_pyghidra()
 
     if args.equiv:
@@ -37,7 +37,7 @@ def run_pyghidra_mode(args):
         const_format = args.const_format
 
     if not quiet:
-        print(f"Ghidraを起動: {GHIDRA_INSTALL_DIR}")
+        print(f"Ghidraを起動: {runtime_env.ghidra_install_dir}")
         print(f"解析対象: {target_path}")
         print(f"対象関数: {', '.join(target_functions)}")
         print(f"出力形式: {output_format}")
@@ -46,7 +46,11 @@ def run_pyghidra_mode(args):
 
     start_headless_pyghidra(
         pyghidra,
-        install_dir=Path(GHIDRA_INSTALL_DIR) if GHIDRA_INSTALL_DIR else None,
+        install_dir=(
+            Path(runtime_env.ghidra_install_dir)
+            if runtime_env.ghidra_install_dir
+            else None
+        ),
     )
 
     with tempfile.TemporaryDirectory() as temp_dir:
