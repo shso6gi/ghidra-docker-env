@@ -2335,26 +2335,27 @@ def test_return_analyzer_falls_back_to_terminal_call_wrapper_recovery():
     condition_tracker = Mock()
     return_op = Mock()
     call_op = Mock()
+    call_op.getMnemonic.return_value = "CALL"
+    tracked = Mock(varnode=None, producer_op=call_op)
     recovered = [ReturnInfo(address="0x1000", value=Expression.constant(9, 4), conditions=[], branch_index=0)]
 
-    with patch.object(analyzer, "_find_implicit_return_source_varnode", return_value=None):
-        with patch.object(analyzer, "_find_terminal_call_before_return", return_value=call_op):
-            with patch.object(
-                analyzer,
-                "_recover_implicit_return_from_terminal_call",
-                return_value=recovered,
-            ) as mock_recover:
-                result = analyzer._analyze_implicit_return_value(
-                    return_op,
-                    "0x1000",
-                    tracer,
-                    condition_tracker,
-                    [],
-                    0,
-                    all_path_conditions=[[]],
-                    active_functions=set(),
-                    current_function=Mock(),
-                )
+    with patch.object(analyzer, "_resolve_implicit_return_tracked_values", return_value=[tracked]):
+        with patch.object(
+            analyzer,
+            "_recover_implicit_return_from_terminal_call",
+            return_value=recovered,
+        ) as mock_recover:
+            result = analyzer._analyze_implicit_return_value(
+                return_op,
+                "0x1000",
+                tracer,
+                condition_tracker,
+                [],
+                0,
+                all_path_conditions=[[]],
+                active_functions=set(),
+                current_function=Mock(),
+            )
 
     assert result == recovered
     assert mock_recover.call_args.args[0] is call_op
@@ -2401,23 +2402,22 @@ def test_return_analyzer_uses_last_terminal_call_for_implicit_return_wrapper():
 
     recovered = [ReturnInfo(address="0x1000", value=Expression.constant(9, 4), conditions=[], branch_index=0)]
 
-    with patch.object(analyzer, "_find_implicit_return_source_varnode", return_value=None):
-        with patch.object(
-            analyzer,
-            "_recover_implicit_return_from_terminal_call",
-            return_value=recovered,
-        ) as mock_recover:
-            result = analyzer._analyze_implicit_return_value(
-                return_op,
-                "0x1000",
-                tracer,
-                condition_tracker,
-                [],
-                0,
-                all_path_conditions=[[]],
-                active_functions=set(),
-                current_function=current_function,
-            )
+    with patch.object(
+        analyzer,
+        "_recover_implicit_return_from_terminal_call",
+        return_value=recovered,
+    ) as mock_recover:
+        result = analyzer._analyze_implicit_return_value(
+            return_op,
+            "0x1000",
+            tracer,
+            condition_tracker,
+            [],
+            0,
+            all_path_conditions=[[]],
+            active_functions=set(),
+            current_function=current_function,
+        )
 
     assert result == recovered
     assert mock_recover.call_args.args[0] is call_op_2

@@ -5,7 +5,14 @@ from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
-from scripts.function_tracer_pcode.model import AddressValueRef, Condition, Expression, ExpressionType, ReturnInfo
+from scripts.function_tracer_pcode.model import (
+    AddressValueRef,
+    Condition,
+    Expression,
+    ExpressionType,
+    ReturnInfo,
+    StorageInfo,
+)
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
 
@@ -553,3 +560,204 @@ def test_return_analyzer_local_memory_key_does_not_require_string_render(monkeyp
         strip_width_adapters=True,
         collapse_full_masks=True,
     )
+
+
+def test_implicit_return_path_recovery_prefers_terminal_call_producer_over_older_output_varnode():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    class _FakeSpace:
+        def getName(self):
+            return "register"
+
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getAddressSpace(self):
+            return _FakeSpace()
+
+        def getOffset(self):
+            return self._offset
+
+    class _FakeVarnode:
+        def __init__(self, offset, size=8):
+            self._offset = offset
+            self._size = size
+
+        def getAddress(self):
+            return _FakeAddress(self._offset)
+
+        def getOffset(self):
+            return self._offset
+
+        def getSize(self):
+            return self._size
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None):
+            self._mnemonic = mnemonic
+            self._output = output
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+    return_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        offset=0x4000,
+        size=8,
+        size_bits=64,
+        register_name="x0",
+        base_register_name="x0",
+        base_register_offset=0x4000,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    leaf_output = _FakeVarnode(0x4000, 8)
+    leaf_call = _FakeOp("CALL", output=leaf_output)
+    terminal_call = _FakeOp("CALL", output=None)
+    return_op = _FakeOp("RETURN", output=None)
+    block_info = Mock()
+    block_info.pcode_ops = [leaf_call, terminal_call, return_op]
+
+    tracer = Mock()
+    tracer._get_storage_info_from_varnode.side_effect = (
+        lambda varnode: return_storage if varnode is leaf_output else None
+    )
+    condition_tracker = Mock()
+
+    analyzer._get_implicit_return_target_storages = Mock(return_value=[return_storage])
+    analyzer._analyze_return_value = Mock(
+        side_effect=AssertionError("older output varnode should not be selected")
+    )
+    expected = [
+        ReturnInfo(
+            address="0x1000",
+            value=Expression.constant(11, 4),
+            conditions=[],
+            branch_index=0,
+        )
+    ]
+    analyzer._recover_implicit_return_from_terminal_call = Mock(return_value=expected)
+
+    recovered = analyzer._recover_implicit_return_from_block_paths(
+        return_op=return_op,
+        address="0x1000",
+        tracer=tracer,
+        condition_tracker=condition_tracker,
+        return_index=0,
+        path_entries=[([block_info], [])],
+        active_functions=set(),
+        current_function=Mock(),
+        site_metadata=None,
+    )
+
+    assert recovered == expected
+    analyzer._recover_implicit_return_from_terminal_call.assert_called_once()
+    assert (
+        analyzer._recover_implicit_return_from_terminal_call.call_args.args[0]
+        is terminal_call
+    )
+
+
+def test_implicit_return_path_recovery_materializes_non_call_terminal_output_varnode():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    class _FakeSpace:
+        def getName(self):
+            return "register"
+
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getAddressSpace(self):
+            return _FakeSpace()
+
+        def getOffset(self):
+            return self._offset
+
+    class _FakeVarnode:
+        def __init__(self, offset, size=8):
+            self._offset = offset
+            self._size = size
+
+        def getAddress(self):
+            return _FakeAddress(self._offset)
+
+        def getOffset(self):
+            return self._offset
+
+        def getSize(self):
+            return self._size
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None):
+            self._mnemonic = mnemonic
+            self._output = output
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+    return_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        offset=0x4000,
+        size=8,
+        size_bits=64,
+        register_name="x0",
+        base_register_name="x0",
+        base_register_offset=0x4000,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    arithmetic_output = _FakeVarnode(0x4000, 8)
+    prep_call = _FakeOp("CALL", output=None)
+    arithmetic_op = _FakeOp("INT_ADD", output=arithmetic_output)
+    return_op = _FakeOp("RETURN", output=None)
+    block_info = Mock()
+    block_info.pcode_ops = [prep_call, arithmetic_op, return_op]
+
+    tracer = Mock()
+    tracer._get_storage_info_from_varnode.side_effect = (
+        lambda varnode: return_storage if varnode is arithmetic_output else None
+    )
+    condition_tracker = Mock()
+
+    analyzer._get_implicit_return_target_storages = Mock(return_value=[return_storage])
+    expected = [
+        ReturnInfo(
+            address="0x2000",
+            value=Expression.constant(23, 4),
+            conditions=[],
+            branch_index=1,
+        )
+    ]
+    analyzer._analyze_return_value = Mock(return_value=expected)
+    analyzer._recover_implicit_return_from_terminal_call = Mock(
+        side_effect=AssertionError("non-call producer should stay on varnode analysis")
+    )
+
+    recovered = analyzer._recover_implicit_return_from_block_paths(
+        return_op=return_op,
+        address="0x2000",
+        tracer=tracer,
+        condition_tracker=condition_tracker,
+        return_index=1,
+        path_entries=[([block_info], [])],
+        active_functions=set(),
+        current_function=Mock(),
+        site_metadata=None,
+    )
+
+    assert recovered == expected
+    analyzer._analyze_return_value.assert_called_once()
+    assert analyzer._analyze_return_value.call_args.args[0] is arithmetic_output

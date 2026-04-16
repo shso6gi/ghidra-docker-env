@@ -100,6 +100,7 @@ class _TrackedReturnValue:
 
     varnode: Optional[Any] = None
     storage: Optional[StorageInfo] = None
+    producer_op: Optional[Any] = None
 
 
 class ReturnAnalyzer:
@@ -1860,7 +1861,10 @@ class ReturnAnalyzer:
                 getattr(storage, "base_register_name", None),
                 getattr(storage, "bit_offset_in_base", None),
             )
-        return (varnode_key, storage_key)
+        producer_key = self._pcode_op_identity_key(tracked.producer_op)
+        if producer_key is None and tracked.producer_op is not None:
+            producer_key = ("id", id(tracked.producer_op))
+        return (varnode_key, storage_key, producer_key)
 
     def _deduplicate_tracked_return_values(
         self,
@@ -1880,24 +1884,154 @@ class ReturnAnalyzer:
         self,
         varnode,
         tracer: Optional[PcodeTracer],
+        *,
+        storage: Optional[StorageInfo] = None,
+        producer_op=None,
     ) -> _TrackedReturnValue:
-        storage = None
-        if tracer is not None and varnode is not None:
+        resolved_storage = storage
+        if resolved_storage is None and tracer is not None and varnode is not None:
             try:
-                storage = tracer._get_storage_info_from_varnode(varnode)
+                resolved_storage = tracer._get_storage_info_from_varnode(varnode)
             except Exception:
-                storage = None
-        return _TrackedReturnValue(varnode=varnode, storage=storage)
+                resolved_storage = None
+        return _TrackedReturnValue(
+            varnode=varnode,
+            storage=resolved_storage,
+            producer_op=producer_op,
+        )
+
+    def _make_tracked_return_storage_value(
+        self,
+        storage: Optional[StorageInfo],
+        *,
+        producer_op=None,
+    ) -> _TrackedReturnValue:
+        return _TrackedReturnValue(
+            varnode=None,
+            storage=storage,
+            producer_op=producer_op,
+        )
+
+    def _make_tracked_return_value_from_affecting_op(
+        self,
+        pcode_op,
+        target_storage: Optional[StorageInfo],
+        tracer: Optional[PcodeTracer],
+    ) -> Optional[_TrackedReturnValue]:
+        if pcode_op is None:
+            return None
+
+        output = getattr(pcode_op, "getOutput", lambda: None)()
+        if output is not None:
+            return self._make_tracked_return_value(
+                output,
+                tracer,
+                storage=target_storage,
+                producer_op=pcode_op,
+            )
+
+        if self._is_pcode_call_op(pcode_op):
+            return self._make_tracked_return_storage_value(
+                target_storage,
+                producer_op=pcode_op,
+            )
+        return None
+
+    def _pcode_op_affects_tracked_storage(
+        self,
+        pcode_op,
+        target_storage: Optional[StorageInfo],
+        tracer: Optional[PcodeTracer],
+        current_function=None,
+    ) -> bool:
+        if pcode_op is None or target_storage is None or tracer is None:
+            return False
+
+        output = getattr(pcode_op, "getOutput", lambda: None)()
+        if output is not None:
+            output_storage = None
+            try:
+                output_storage = tracer._get_storage_info_from_varnode(output)
+            except Exception:
+                output_storage = None
+            if output_storage is not None and self._storages_overlap_for_return_recovery(
+                output_storage,
+                target_storage,
+            ):
+                return True
+
+        if not self._is_pcode_call_op(pcode_op):
+            return False
+
+        for return_storage in self._get_implicit_return_target_storages(current_function, tracer):
+            if self._storages_overlap_for_return_recovery(target_storage, return_storage):
+                return True
+        return False
+
+    def _resolve_implicit_return_tracked_values(
+        self,
+        return_op,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        current_function=None,
+        block_path=None,
+    ) -> List[_TrackedReturnValue]:
+        search_blocks = None
+        if block_path:
+            search_blocks = list(block_path)
+        else:
+            return_parent = getattr(return_op, "getParent", lambda: None)()
+            return_block = condition_tracker.get_block_by_hash(return_parent)
+            if return_block is None:
+                return []
+            search_blocks = [return_block]
+
+        target_storages = self._get_implicit_return_target_storages(current_function, tracer)
+        if not target_storages:
+            return []
+
+        tracked_values: List[_TrackedReturnValue] = []
+        for target_storage in target_storages:
+            candidate: Optional[_TrackedReturnValue] = None
+            for block_info in search_blocks:
+                for pcode_op in getattr(block_info, "pcode_ops", []) or []:
+                    if self._pcode_ops_match(pcode_op, return_op):
+                        break
+                    if not self._pcode_op_affects_tracked_storage(
+                        pcode_op,
+                        target_storage,
+                        tracer,
+                        current_function=current_function,
+                    ):
+                        continue
+                    candidate = self._make_tracked_return_value_from_affecting_op(
+                        pcode_op,
+                        target_storage,
+                        tracer,
+                    )
+            if candidate is not None:
+                tracked_values.append(candidate)
+
+        tracked_values = self._deduplicate_tracked_return_values(tracked_values)
+        if tracked_values and self.debug:
+            for tracked in tracked_values:
+                if tracked.producer_op is not None:
+                    self._debug_print(
+                        "Implicit return source matched to terminal producer "
+                        f"{self._pcode_op_debug_name(tracked.producer_op)}"
+                    )
+                elif tracked.varnode is not None:
+                    self._debug_print(
+                        f"Implicit return source matched to block-local output {tracked.varnode}"
+                    )
+        return tracked_values
 
     def _build_return_tracking_targets(
         self,
         return_op,
         *,
         tracer: Optional[PcodeTracer],
-        condition_tracker: Optional[ConditionTracker],
         current_function,
-        block_path=None,
-        path_conditions: Optional[List[Condition]] = None,
     ) -> List[_TrackedReturnValue]:
         tracked_values: List[_TrackedReturnValue] = []
 
@@ -1913,23 +2047,9 @@ class ReturnAnalyzer:
             except Exception:
                 pass
 
-        if not tracked_values and tracer is not None and condition_tracker is not None:
-            source_varnode = self._find_implicit_return_source_varnode(
-                return_op,
-                tracer,
-                condition_tracker,
-                current_function,
-                block_path=block_path,
-                path_conditions=path_conditions,
-            )
-            if source_varnode is not None:
-                tracked_values.append(
-                    self._make_tracked_return_value(source_varnode, tracer)
-                )
-
         if not tracked_values and tracer is not None:
             for storage in self._get_implicit_return_target_storages(current_function, tracer):
-                tracked_values.append(_TrackedReturnValue(varnode=None, storage=storage))
+                tracked_values.append(self._make_tracked_return_storage_value(storage))
 
         return self._deduplicate_tracked_return_values(tracked_values)
 
@@ -1948,10 +2068,7 @@ class ReturnAnalyzer:
         tracked_values = self._build_return_tracking_targets(
             return_op,
             tracer=tracer,
-            condition_tracker=condition_tracker,
             current_function=current_function,
-            block_path=block_path,
-            path_conditions=path_conditions,
         )
         if not tracked_values:
             if self.debug:
@@ -3948,23 +4065,18 @@ class ReturnAnalyzer:
         if path_recovered is not None:
             return path_recovered
 
-        source_varnode = self._find_implicit_return_source_varnode(
+        tracked_sources = self._resolve_implicit_return_tracked_values(
             return_op,
             tracer,
             condition_tracker,
             current_function,
         )
-        if source_varnode is None:
-            if self.debug:
-                self._debug_print(
-                    "Implicit return storage recovery did not find a matching source varnode"
-                )
-        else:
+        if tracked_sources:
             self._debug_print(
-                "RETURN has no explicit value; retrying via implicit return storage source"
+                "RETURN has no explicit value; retrying via object-centric return provenance"
             )
-            return self._analyze_return_value(
-                source_varnode,
+            recovered_results = self._recover_return_infos_from_tracked_sources(
+                tracked_sources,
                 address,
                 tracer,
                 condition_tracker,
@@ -3975,32 +4087,18 @@ class ReturnAnalyzer:
                 current_function=current_function,
                 site_metadata=site_metadata,
             )
+            if recovered_results is not None:
+                return recovered_results
+        elif self.debug:
+            self._debug_print(
+                "Implicit return storage recovery did not find a terminal producer"
+            )
 
-        terminal_call = self._find_terminal_call_before_return(
-            return_op,
-            condition_tracker,
-            tracer=tracer,
-            current_function=current_function,
-        )
-        if terminal_call is None:
-            if self.debug:
-                self._debug_print(
-                    "Implicit return call-wrapper recovery did not find a safe terminal CALL/CALLIND"
-                )
-            return None
-
-        return self._recover_implicit_return_from_terminal_call(
-            terminal_call,
-            address,
-            tracer,
-            condition_tracker,
-            path_conditions,
-            return_index,
-            all_path_conditions=all_path_conditions,
-            active_functions=active_functions,
-            current_function=current_function,
-            site_metadata=site_metadata,
-        )
+        if self.debug:
+            self._debug_print(
+                "Implicit return object-centric recovery did not find a materializable producer"
+            )
+        return None
 
     def _recover_implicit_return_from_block_paths(
         self,
@@ -4023,32 +4121,34 @@ class ReturnAnalyzer:
         unresolved_paths: List[int] = []
 
         for path_idx, (block_path, conditions) in enumerate(normalized_entries):
-            source_varnode = self._find_implicit_return_source_varnode(
+            tracked_sources = self._resolve_implicit_return_tracked_values(
                 return_op,
                 tracer,
                 condition_tracker,
                 current_function,
                 block_path=block_path,
-                path_conditions=conditions,
             )
-            if source_varnode is None:
+            if not tracked_sources:
                 unresolved_paths.append(path_idx)
                 continue
 
-            recovered_results.extend(
-                self._analyze_return_value(
-                    source_varnode,
-                    address,
-                    tracer,
-                    condition_tracker,
-                    list(conditions),
-                    return_index * 1000 + path_idx,
-                    all_path_conditions=[list(conditions)],
-                    active_functions=active_functions,
-                    current_function=current_function,
-                    site_metadata=site_metadata,
-                )
+            path_results = self._recover_return_infos_from_tracked_sources(
+                tracked_sources,
+                address,
+                tracer,
+                condition_tracker,
+                list(conditions),
+                return_index * 1000 + path_idx * 100,
+                all_path_conditions=[list(conditions)],
+                active_functions=active_functions,
+                current_function=current_function,
+                site_metadata=site_metadata,
             )
+            if not path_results:
+                unresolved_paths.append(path_idx)
+                continue
+
+            recovered_results.extend(path_results)
 
         if recovered_results and not unresolved_paths:
             if self.debug:
@@ -4059,65 +4159,88 @@ class ReturnAnalyzer:
 
         if self.debug and unresolved_paths:
             self._debug_print(
-                "Implicit return path recovery could not resolve source varnode on "
+                "Implicit return path recovery could not resolve terminal producer on "
                 f"path(s) {unresolved_paths}"
             )
         return None
 
-    def _find_implicit_return_source_varnode(
+    def _recover_return_infos_from_tracked_sources(
         self,
-        return_op,
+        tracked_sources: List[_TrackedReturnValue],
+        address: str,
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
+        path_conditions: List[Condition],
+        return_index_base: int,
+        all_path_conditions: Optional[List[List[Condition]]] = None,
+        active_functions: Optional[Set[str]] = None,
         current_function=None,
-        block_path=None,
-        path_conditions: Optional[List[Condition]] = None,
-    ):
-        """同一 basic block 内で返り値レジスタへ最後に書いた varnode を探す。"""
-        search_blocks = None
-        if block_path:
-            search_blocks = list(block_path)
-        else:
-            return_parent = getattr(return_op, "getParent", lambda: None)()
-            return_block = condition_tracker.get_block_by_hash(return_parent)
-            if return_block is None:
-                return None
-            search_blocks = [return_block]
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        recovered_results: List[ReturnInfo] = []
+        for tracked_index, tracked in enumerate(tracked_sources):
+            materialized = self._materialize_tracked_return_source(
+                tracked,
+                address,
+                tracer,
+                condition_tracker,
+                path_conditions,
+                return_index_base + tracked_index,
+                all_path_conditions=all_path_conditions,
+                active_functions=active_functions,
+                current_function=current_function,
+                site_metadata=site_metadata,
+            )
+            if materialized:
+                recovered_results.extend(materialized)
 
-        target_storages = self._get_implicit_return_target_storages(current_function, tracer)
-        if not target_storages:
+        if not recovered_results:
+            return None
+        return self._merge_equivalent_return_infos(recovered_results)
+
+    def _materialize_tracked_return_source(
+        self,
+        tracked: _TrackedReturnValue,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        path_conditions: List[Condition],
+        return_index: int,
+        all_path_conditions: Optional[List[List[Condition]]] = None,
+        active_functions: Optional[Set[str]] = None,
+        current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        producer_op = tracked.producer_op
+        if producer_op is not None and self._is_pcode_call_op(producer_op):
+            return self._recover_implicit_return_from_terminal_call(
+                producer_op,
+                address,
+                tracer,
+                condition_tracker,
+                path_conditions,
+                return_index,
+                all_path_conditions=all_path_conditions,
+                active_functions=active_functions,
+                current_function=current_function,
+                site_metadata=site_metadata,
+            )
+
+        if tracked.varnode is None:
             return None
 
-        candidate = None
-        for block_info in search_blocks:
-            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
-                if self._pcode_ops_match(pcode_op, return_op):
-                    break
-                output = getattr(pcode_op, "getOutput", lambda: None)()
-                if output is None:
-                    continue
-                output_storage = tracer._get_storage_info_from_varnode(output)
-                if output_storage is None:
-                    continue
-                if not any(
-                    self._storages_overlap_for_return_recovery(output_storage, target_storage)
-                    for target_storage in target_storages
-                ):
-                    continue
-                candidate = output
-
-        candidate = self._select_path_specific_return_source(
-            candidate,
-            block_path,
-            condition_tracker=condition_tracker,
-            path_conditions=path_conditions,
+        return self._analyze_return_value(
+            tracked.varnode,
+            address,
+            tracer,
+            condition_tracker,
+            path_conditions,
+            return_index,
+            all_path_conditions=all_path_conditions,
+            active_functions=active_functions,
+            current_function=current_function,
+            site_metadata=site_metadata,
         )
-
-        if candidate is not None and self.debug:
-            self._debug_print(
-                f"Implicit return source matched to block-local output {candidate}"
-            )
-        return candidate
 
     def _select_path_specific_return_source(
         self,
@@ -4321,118 +4444,6 @@ class ReturnAnalyzer:
         if lhs is rhs:
             return True
         return cls._varnode_location_key(lhs) == cls._varnode_location_key(rhs)
-
-    def _extract_return_target_varnodes(
-        self,
-        return_op,
-        tracer: Optional[PcodeTracer],
-        current_function,
-        condition_tracker: Optional[ConditionTracker] = None,
-        block_path=None,
-        path_conditions: Optional[List[Condition]] = None,
-    ):
-        if return_op is None:
-            return None
-
-        explicit_inputs = getattr(return_op, "getNumInputs", lambda: 0)()
-        if explicit_inputs >= 2:
-            return return_op.getInput(1)
-
-        if tracer is None or current_function is None or condition_tracker is None:
-            return None
-
-        return self._find_implicit_return_source_varnode(
-            return_op,
-            tracer,
-            condition_tracker,
-            current_function,
-            block_path=block_path,
-            path_conditions=path_conditions,
-        )
-
-    def _is_call_output_dominating_return_value(
-        self,
-        call_op,
-        return_op,
-        *,
-        tracer: Optional[PcodeTracer] = None,
-        condition_tracker: Optional[ConditionTracker] = None,
-        current_function=None,
-        block_path=None,
-        path_conditions: Optional[List[Condition]] = None,
-    ) -> bool:
-        if (
-            tracer is None
-            and condition_tracker is None
-            and current_function is None
-        ):
-            if self.debug:
-                self._debug_print(
-                    "Skipping call-output provenance proof due missing tracer/context"
-                )
-            return True
-
-        call_output = getattr(call_op, "getOutput", lambda: None)()
-        if call_output is None:
-            if self.debug:
-                self._debug_print(
-                    "Accepting terminal CALL/CALLIND wrapper without explicit output; "
-                    "context-based provenance proof is unavailable"
-                )
-            return True
-
-        return_target = self._extract_return_target_varnodes(
-            return_op,
-            tracer=tracer,
-            current_function=current_function,
-            condition_tracker=condition_tracker,
-            block_path=block_path,
-            path_conditions=path_conditions,
-        )
-        if return_target is None:
-            if self.debug:
-                self._debug_print(
-                    "Terminal CALL/CALLIND wrapper rejected: no return target varnode for provenance proof"
-                )
-            return False
-
-        return self._def_chain_reaches_call_output(return_target, call_output, limit=64)
-
-    def _def_chain_reaches_call_output(self, sink_varnode, source_varnode, limit: int = 64) -> bool:
-        if sink_varnode is None or source_varnode is None:
-            return False
-        if self._varnodes_may_alias(sink_varnode, source_varnode):
-            return True
-
-        frontier = [sink_varnode]
-        visited: Set[tuple] = set()
-
-        for _ in range(limit):
-            next_frontier = []
-            for node in frontier:
-                key = self._varnode_location_key(node)
-                trace_key = key if key is not None else ("id", id(node))
-                if trace_key in visited:
-                    continue
-                visited.add(trace_key)
-
-                def_op = getattr(node, "getDef", lambda: None)()
-                if def_op is None:
-                    continue
-
-                get_num_inputs = getattr(def_op, "getNumInputs", lambda: 0)
-                for index in range(get_num_inputs()):
-                    input_varnode = getattr(def_op, "getInput", lambda _index: None)(index)
-                    if input_varnode is None:
-                        continue
-                    if self._varnodes_may_alias(input_varnode, source_varnode):
-                        return True
-                    next_frontier.append(input_varnode)
-            frontier = next_frontier
-            if not frontier:
-                break
-
-        return False
 
     def _recover_implicit_return_from_terminal_call(
         self,
