@@ -45,7 +45,13 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     _call_argument_semantic_rank,
     EffectSummary,
 )
-from scripts.function_tracer_pcode.model import AddressValueRef, CallTargetRef, LocationBaseRef
+from scripts.function_tracer_pcode.model import (
+    AddressValueRef,
+    CallTargetRef,
+    LocationBaseRef,
+    ObservedMemoryReadRef,
+    PcodeOpRef,
+)
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch as PhiExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
@@ -53,6 +59,7 @@ from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer, Ty
 from scripts.function_tracer_pcode.equivalence.arch.mips64 import MIPS64Handler
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.param_semantics import ParameterSemanticHint
+from scripts.function_tracer_pcode.equivalence.normalize.core import normalize_expression
 from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.transform.expander import ExpressionExpander, ExpandedValue
@@ -110,6 +117,26 @@ def _loc(name: str, offset: int = 0, size: int = 0, steps=()):
         offset=offset,
         size=size,
         steps=steps,
+    )
+
+
+def _observed_read(
+    name: str,
+    *,
+    index: int,
+    size: int,
+    order_key: int,
+):
+    return ObservedMemoryReadRef(
+        order_key=order_key,
+        location=_loc(name, 0, size),
+        pcode_op_ref=PcodeOpRef(
+            address_offset=0x1000 + order_key,
+            seq_time=order_key,
+            seq_order=order_key & 0xFF,
+            block_index=index,
+            mnemonic="LOAD",
+        ),
     )
 
 
@@ -180,6 +207,45 @@ def test_enumerate_call_argument_variants_dedup_does_not_require_to_string(monke
     assert variants[0][1][0].structural_key(normalize_commutative=True) == shared.structural_key(
         normalize_commutative=True
     )
+
+
+def test_normalize_expression_preserves_memory_identity_metadata():
+    location = _loc("trace", 0, 4)
+    traced_load = Expression.memory(
+        Expression.parameter("trace", 0, size=8),
+        size=4,
+        read_order_key=42,
+        runtime_ref=location,
+    )
+    expr = Expression.binary_op("INT_ADD", traced_load, Expression.constant(1, 4))
+
+    normalized = normalize_expression(expr)
+    normalized_memory = next(
+        operand for operand in normalized.operands if operand.expr_type == ExpressionType.MEMORY
+    )
+
+    assert normalized_memory.read_order_key == 42
+    assert getattr(normalized_memory, "runtime_ref", None) == location
+
+
+def test_concretize_readonly_loads_preserves_unresolved_memory_identity_metadata():
+    location = _loc("trace", 0, 4)
+    expr = Expression.memory(
+        Expression.parameter("trace", 0, size=8),
+        size=4,
+        read_order_key=17,
+        runtime_ref=location,
+    )
+
+    rewritten = concretize_readonly_loads(
+        expr,
+        [],
+        [_param("trace", size=8, is_signed=False)],
+        lambda *_args: None,
+    )
+
+    assert rewritten.read_order_key == 17
+    assert getattr(rewritten, "runtime_ref", None) == location
 
 
 def test_additive_signature_does_not_require_to_string(monkeypatch):
@@ -4678,6 +4744,18 @@ def test_post_state_read_expression_for_location_can_build_symbolic_reads():
     assert getattr(expr, "runtime_ref", None) == _loc("trace", 4, 4)
 
 
+def test_post_state_read_expression_for_location_respects_nonsymbolic_mode():
+    expr = post_state_read_expression_for_location(
+        _loc("trace", 4, 4),
+        [_param("trace", size=8, is_signed=False)],
+        symbolic=False,
+    )
+
+    assert expr is not None
+    assert expr.expr_type == ExpressionType.MEMORY
+    assert getattr(expr, "runtime_ref", None) is None
+
+
 def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_until_smt_lowering():
     trace = Expression.parameter("trace", 0, size=8)
     start = Expression.parameter("start", 1, size=4)
@@ -4744,6 +4822,72 @@ def test_normalize_post_state_expression_preserves_symbolic_post_state_reads_unt
 
     assert normalized is not None
     assert expression_contains_post_state_reads(normalized)
+
+
+def test_normalize_post_state_expression_promotes_observed_loads_to_symbolic_post_state():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    params = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+    effects = [
+        StoreEffect(
+            location=_loc("param_1", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=_loc("param_2", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=11,
+        ),
+    ]
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+
+    normalized = normalize_post_state_expression(
+        expr,
+        [nonnull_a, nonnull_b],
+        effects,
+        params,
+        symbolic_post_state=True,
+    )
+
+    assert normalized is not None
+    assert expression_contains_post_state_reads(normalized)
+    assert getattr(normalized.operands[0], "runtime_ref", None) == _loc("param_1", 0, 4)
+    assert getattr(normalized.operands[1], "runtime_ref", None) == _loc("param_2", 0, 4)
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [nonnull_a, nonnull_b],
+        effects,
+        params,
+    )
+
+    assert lowered is not None
+    assert lowered.to_string() != expr.to_string()
+    assert expression_contains_post_state_reads(lowered) is False
+    assert lowered.operands[0].expr_type == ExpressionType.PHI
+    assert lowered.operands[1].expr_type == ExpressionType.PHI
 
 
 def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged_guards():
@@ -6855,6 +6999,60 @@ def test_expression_expander_rewrites_observed_loads_before_post_state_canonical
     assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
 
 
+def test_expression_expander_keeps_symbolic_post_state_identity_after_observed_load_rewrite():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=_loc("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        debug = False
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(expr, [nonnull_a, nonnull_b])
+
+    assert canonicalized is not None
+    assert expression_contains_post_state_reads(canonicalized)
+    assert getattr(canonicalized.operands[0], "runtime_ref", None) == _loc("a", 0, 4)
+    assert getattr(canonicalized.operands[1], "runtime_ref", None) == _loc("b", 0, 4)
+
+
 def test_expression_expander_keeps_canonical_memory_without_read_order_key_unchanged():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -7144,6 +7342,397 @@ def test_return_analyzer_collapses_even_iteration_wrapper_with_observed_step_loa
     assert normalized.to_string() == "(MEM[param_1] + MEM[(param_1 + 4)])"
 
 
+def test_return_analyzer_normalizes_observed_load_returns_to_symbolic_post_state():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+    effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    normalized = analyzer._normalize_return_value_with_effect_summary(
+        expr,
+        [nonnull_a, nonnull_b],
+        effect_summary,
+    )
+
+    assert normalized is not None
+    assert expression_contains_post_state_reads(normalized)
+    assert getattr(normalized.operands[0], "runtime_ref", None) == _loc("param_1", 0, 4)
+    assert getattr(normalized.operands[1], "runtime_ref", None) == _loc("param_2", 0, 4)
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [nonnull_a, nonnull_b],
+        effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered is not None
+    assert expression_contains_post_state_reads(lowered) is False
+    assert lowered.operands[0].expr_type == ExpressionType.PHI
+    assert lowered.operands[1].expr_type == ExpressionType.PHI
+
+
+def test_return_analyzer_splits_effect_sensitive_observed_load_returns_into_cases():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    results = analyzer._build_return_infos_from_expansions(
+        "00100000",
+        [ExpandedValue(expr, [nonnull_a, nonnull_b])],
+        return_index=0,
+    )
+
+    assert len(results) == 2
+    rendered = {
+        info.value.to_string(): " ".join(cond.to_string() for cond in info.conditions)
+        for info in results
+    }
+    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_2] - MEM[param_1])"}
+    assert "(param_1 != 0)" in rendered["(MEM[param_1] - MEM[param_2])"]
+    assert "(param_2 != 0)" in rendered["(MEM[param_1] - MEM[param_2])"]
+    assert "(not (MEM[param_2] < MEM[param_1]))" in rendered["(MEM[param_1] - MEM[param_2])"]
+    assert "(param_1 != 0)" in rendered["(MEM[param_2] - MEM[param_1])"]
+    assert "(param_2 != 0)" in rendered["(MEM[param_2] - MEM[param_1])"]
+    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_2] - MEM[param_1])"]
+
+
+def test_return_analyzer_keeps_already_split_observed_swap_case():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            b,
+            size=4,
+            runtime_ref=_observed_read("param_2", index=1, size=4, order_key=20),
+        ),
+        Expression.memory(
+            a,
+            size=4,
+            runtime_ref=_observed_read("param_1", index=0, size=4, order_key=21),
+        ),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    results = analyzer._build_return_infos_from_expansions(
+        "00100000",
+        [ExpandedValue(expr, [nonnull_a, nonnull_b, swap_taken])],
+        return_index=0,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "(MEM[param_2] - MEM[param_1])"
+    assert {cond.to_string() for cond in results[0].conditions} == {
+        "(param_1 != 0)",
+        "(param_2 != 0)",
+        "(MEM[param_2] < MEM[param_1])",
+    }
+
+
+def test_rewrite_observed_loads_uses_runtime_ref_provenance_when_read_order_key_is_missing():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            a,
+            size=4,
+            runtime_ref=_observed_read("param_1", index=0, size=4, order_key=20),
+        ),
+        Expression.memory(
+            b,
+            size=4,
+            runtime_ref=_observed_read("param_2", index=1, size=4, order_key=21),
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("param_1", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=_loc("param_2", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=11,
+        ),
+    ]
+
+    rewritten = rewrite_observed_loads_from_effects(
+        expr,
+        [nonnull_a, nonnull_b, swap_taken],
+        effects,
+        [_param("param_1", size=8, is_signed=False), _param("param_2", size=8, is_signed=False, index=1)],
+    )
+
+    assert rewritten is not None
+    assert rewritten.to_string() == "(MEM[param_2] - MEM[param_1])"
+
+
+def test_expression_expander_prefers_observed_rewrite_over_flat_raw_normalization(monkeypatch):
+    import scripts.function_tracer_pcode.transform.expander as expander_module
+
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            a,
+            size=4,
+            runtime_ref=_observed_read("a", index=0, size=4, order_key=20),
+        ),
+        Expression.memory(
+            b,
+            size=4,
+            runtime_ref=_observed_read("b", index=1, size=4, order_key=21),
+        ),
+    )
+    swapped = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(b, size=4),
+        Expression.memory(a, size=4),
+    )
+    flattened = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.memory(b, size=4),
+    )
+
+    class FakeTracer:
+        pass
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[
+                StoreEffect(
+                    location=_loc("a", 0, 4),
+                    value=Expression.memory(b, size=4),
+                    conditions=[swap_taken],
+                    order_key=10,
+                )
+            ],
+        ),
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    monkeypatch.setattr(
+        expander_module,
+        "rewrite_observed_loads_from_effects",
+        lambda expr, *_args, **_kwargs: swapped if expr is traced else expr,
+    )
+    monkeypatch.setattr(
+        expander_module,
+        "normalize_post_state_expression",
+        lambda expr, *_args, **_kwargs: flattened if expr is traced else expr,
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        traced,
+        [nonnull_a, nonnull_b],
+    )
+
+    assert canonicalized.to_string() == "(MEM[b] - MEM[a])"
+
+
+def test_return_analyzer_splits_effect_sensitive_canonical_memory_returns_without_observed_metadata():
+    a = Expression.parameter("param_1", 0, size=8)
+    b = Expression.parameter("param_2", 1, size=8)
+    nonnull_a = Condition(
+        Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_b = Condition(
+        Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)),
+        False,
+    )
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.memory(b, size=4),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("param_1", size=8, is_signed=False),
+        _param("param_2", size=8, is_signed=False, index=1),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["param_1", "param_2"],
+        effects=[
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    results = analyzer._build_return_infos_from_expansions(
+        "00100004",
+        [ExpandedValue(expr, [nonnull_a, nonnull_b])],
+        return_index=0,
+    )
+
+    assert len(results) == 2
+    rendered = {
+        info.value.to_string(): " ".join(cond.to_string() for cond in info.conditions)
+        for info in results
+    }
+    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_2] - MEM[param_1])"}
+    assert "(not (MEM[param_2] < MEM[param_1]))" in rendered["(MEM[param_1] - MEM[param_2])"]
+    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_2] - MEM[param_1])"]
+
+
 def test_return_analyzer_keeps_even_iteration_wrapper_when_definite_replay_would_change_meaning():
     trace = Expression.parameter("param_1", 0, size=8)
     start = Expression.parameter("param_2", 1, size=4)
@@ -7313,11 +7902,106 @@ def test_expression_expander_expands_observed_load_phi_difference_into_cases():
         depth=0,
     )
 
-    assert len(expanded) == 1
-    assert expanded[0].value.to_string() == "(MEM[a] - MEM[b])"
-    cond_text = " ".join(cond.to_string() for cond in expanded[0].conditions)
-    assert "(a != 0)" in cond_text
-    assert "(b != 0)" in cond_text
+    assert len(expanded) == 2
+    rendered = {ev.value.to_string(): " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded}
+    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"}
+    assert "(a != 0)" in rendered["(MEM[a] - MEM[b])"]
+    assert "(b != 0)" in rendered["(MEM[a] - MEM[b])"]
+    assert "(not (MEM[b] < MEM[a]))" in rendered["(MEM[a] - MEM[b])"]
+    assert "(a != 0)" in rendered["(MEM[b] - MEM[a])"]
+    assert "(b != 0)" in rendered["(MEM[b] - MEM[a])"]
+    assert "(MEM[b] < MEM[a])" in rendered["(MEM[b] - MEM[a])"]
+
+
+def test_expression_expander_multiequal_shortcut_defers_flattened_observed_load_rewrite(monkeypatch):
+    import scripts.function_tracer_pcode.transform.expander as expander_module
+
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4, read_order_key=20),
+        Expression.memory(b, size=4, read_order_key=21),
+    )
+    flattened = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(a, size=4),
+        Expression.memory(b, size=4),
+    )
+    rewritten_phi = Expression.binary_op(
+        "INT_SUB",
+        Expression.phi(
+            [
+                (swap_taken, Expression.memory(b, size=4)),
+                (None, Expression.memory(a, size=4)),
+            ]
+        ),
+        Expression.phi(
+            [
+                (swap_taken, Expression.memory(a, size=4)),
+                (None, Expression.memory(b, size=4)),
+            ]
+        ),
+    )
+    rewritten_phi.operands[0].size = 4
+    rewritten_phi.operands[1].size = 4
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=_loc("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, depth=0, use_cache=False):
+            return traced
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    monkeypatch.setattr(
+        expander,
+        "_canonicalize_traced_expression",
+        lambda _expr, _conditions: flattened,
+    )
+    monkeypatch.setattr(
+        expander_module,
+        "rewrite_observed_loads_from_effects",
+        lambda _expr, _conditions, _effects, _parameters: rewritten_phi,
+    )
+
+    result = expander._trace_and_canonicalize_input_value(
+        object(),
+        [nonnull_a, nonnull_b],
+        depth=0,
+    )
+
+    assert result is None
 
 
 def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_location():

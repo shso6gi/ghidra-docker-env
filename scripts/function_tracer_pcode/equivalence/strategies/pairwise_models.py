@@ -20,6 +20,7 @@ class ReturnCase:
         conditions: List[Condition],
         value_expr,
         return_info: ReturnInfo,
+        normalized_value_expr=None,
         return_type: Optional[str] = None,
         return_type_obj=None,
         source_indices: Optional[List[int]] = None,
@@ -30,6 +31,7 @@ class ReturnCase:
         self.index = index
         self.conditions = conditions
         self.value_expr = value_expr
+        self.normalized_value_expr = normalized_value_expr if normalized_value_expr is not None else value_expr
         self.return_info = return_info
         self.return_type = return_type
         self.return_type_obj = return_type_obj

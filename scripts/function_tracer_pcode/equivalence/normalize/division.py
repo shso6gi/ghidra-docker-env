@@ -74,11 +74,11 @@ def _normalize_negated_division(
         unwrapped = dividend.operands[0]
         reason = _get_safety_reason(unwrapped, context)
         
-        normalized = Expression(
+        normalized = expr.clone_with(
             expr_type=ExpressionType.BINARY_OP,
             operator="INT_SDIV",
             operands=[unwrapped, divisor],
-            size=expr.size
+            size=expr.size,
         )
         
         context.record_rule(
@@ -95,11 +95,11 @@ def _normalize_negated_division(
         unwrapped = divisor.operands[0]
         reason = _get_safety_reason(unwrapped, context)
         
-        normalized = Expression(
+        normalized = expr.clone_with(
             expr_type=ExpressionType.BINARY_OP,
             operator="INT_SDIV",
             operands=[dividend, unwrapped],
-            size=expr.size
+            size=expr.size,
         )
         
         context.record_rule(
@@ -143,11 +143,11 @@ def _normalize_double_negated_division(
         reason1 = _get_safety_reason(unwrapped_dividend, context)
         reason2 = _get_safety_reason(unwrapped_divisor, context)
         
-        normalized = Expression(
+        normalized = expr.clone_with(
             expr_type=ExpressionType.BINARY_OP,
             operator="INT_SDIV",
             operands=[unwrapped_dividend, unwrapped_divisor],
-            size=expr.size
+            size=expr.size,
         )
         
         context.record_rule(

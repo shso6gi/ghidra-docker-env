@@ -265,6 +265,73 @@ class CanonicalLocation:
 
 
 @dataclass(frozen=True)
+class PcodeOpRef:
+    """Stable identity for a concrete Ghidra P-code operation."""
+
+    address_offset: Optional[int] = None
+    seq_time: Optional[int] = None
+    seq_order: Optional[int] = None
+    block_index: Optional[int] = None
+    mnemonic: Optional[str] = None
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "pcode_op",
+            None if self.address_offset is None else int(self.address_offset),
+            None if self.seq_time is None else int(self.seq_time),
+            None if self.seq_order is None else int(self.seq_order),
+            None if self.block_index is None else int(self.block_index),
+            self.mnemonic,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "pcode_op",
+            "address_offset": self.address_offset,
+            "seq_time": self.seq_time,
+            "seq_order": self.seq_order,
+            "block_index": self.block_index,
+            "mnemonic": self.mnemonic,
+        }
+
+
+@dataclass(frozen=True)
+class ObservedMemoryReadRef:
+    """Structured provenance for an observed LOAD-derived memory read."""
+
+    order_key: Optional[int] = None
+    location: Optional[CanonicalLocation] = None
+    pcode_op_ref: Optional[PcodeOpRef] = None
+    source: str = "ghidra_load"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "observed_memory_read",
+            None if self.order_key is None else int(self.order_key),
+            self.location.stable_key() if self.location is not None else None,
+            self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
+            self.source,
+        )
+
+    def with_location(self, location: Optional[CanonicalLocation]) -> "ObservedMemoryReadRef":
+        return ObservedMemoryReadRef(
+            order_key=self.order_key,
+            location=location,
+            pcode_op_ref=self.pcode_op_ref,
+            source=self.source,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "observed_memory_read",
+            "order_key": self.order_key,
+            "location": self.location.to_dict() if self.location is not None else None,
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
 

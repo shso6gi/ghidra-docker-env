@@ -7,7 +7,15 @@
 
 from .storage import StorageInfo
 from .call_target import CallTargetRef, coerce_call_target_ref
-from .runtime_refs import AddressValueRef, CanonicalLocation, LocationBaseRef, LocationStep, UnknownValueRef
+from .runtime_refs import (
+    AddressValueRef,
+    CanonicalLocation,
+    LocationBaseRef,
+    LocationStep,
+    ObservedMemoryReadRef,
+    PcodeOpRef,
+    UnknownValueRef,
+)
 from .analysis import (
     ComparisonSurface,
     DeferredCallInfo,
@@ -44,6 +52,8 @@ __all__ = [
     "CanonicalLocation",
     "LocationBaseRef",
     "LocationStep",
+    "ObservedMemoryReadRef",
+    "PcodeOpRef",
     "UnknownValueRef",
     "DeferredCallInfo",
     "ComparisonSurface",

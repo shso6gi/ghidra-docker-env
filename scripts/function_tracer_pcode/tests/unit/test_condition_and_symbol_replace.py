@@ -3,7 +3,7 @@
 
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.model import CanonicalLocation, Condition, Expression
 
 
 class _DummyRuntimeRef:
@@ -66,6 +66,22 @@ def test_condition_equality_ignores_nonsemantic_runtime_ref_by_default():
 
     assert cond1 == cond2
     assert cond1.structural_key() == cond2.structural_key()
+
+
+def test_condition_equality_distinguishes_semantic_runtime_ref_by_default():
+    addr = Expression.parameter("trace", 0, size=8)
+    pre_state = Expression.memory(addr, size=4)
+    post_state = Expression.memory(
+        Expression.parameter("trace", 0, size=8),
+        size=4,
+        runtime_ref=CanonicalLocation("trace", 0, 4),
+    )
+
+    cond1 = Condition(Expression.binary_op("INT_EQUAL", pre_state, Expression.constant(1, 4)))
+    cond2 = Condition(Expression.binary_op("INT_EQUAL", post_state, Expression.constant(1, 4)))
+
+    assert cond1 != cond2
+    assert cond1.structural_key() != cond2.structural_key()
 
 
 def test_symbol_replacer_handles_ast_and_string_without_collision():

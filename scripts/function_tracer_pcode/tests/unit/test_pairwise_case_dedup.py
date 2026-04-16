@@ -310,6 +310,7 @@ def test_return_case_value_smt_lowers_object_centric_post_state_memory_with_effe
     value_expr = post_state_read_expression_for_location(
         CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=0, size=4),
         params,
+        symbolic=True,
     )
     effects = [
         StoreEffect(
@@ -350,6 +351,77 @@ def test_return_case_value_smt_lowers_object_centric_post_state_memory_with_effe
     assert "__locread__" not in smt
     assert "ite" in smt
     assert "bvneg start" in smt
+
+
+def test_extract_return_cases_preserves_original_object_centric_value_for_smt_lowering():
+    param_1 = _param("param_1")
+    param_2 = _param("param_2")
+    nonnull_1 = _cond("INT_NOTEQUAL", param_1, _const(0))
+    nonnull_2 = _cond("INT_NOTEQUAL", param_2, _const(0))
+    swap_taken = _cond(
+        "INT_SLESS",
+        Expression.memory(param_2, size=4),
+        Expression.memory(param_1, size=4),
+    )
+
+    params = [
+        {"name": "param_1", "index": 0, "size": 8},
+        {"name": "param_2", "index": 1, "size": 8},
+    ]
+    value_expr = Expression.binary_op(
+        "INT_SUB",
+        post_state_read_expression_for_location(
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=4),
+            params,
+            symbolic=True,
+        ),
+        post_state_read_expression_for_location(
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("param_2", index=1), offset=0, size=4),
+            params,
+            symbolic=True,
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=4),
+            value=Expression.memory(param_2, size=4),
+            conditions=[swap_taken],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("param_2", index=1), offset=0, size=4),
+            value=Expression.memory(param_1, size=4),
+            conditions=[swap_taken],
+            order_key=11,
+        ),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1004",
+                value=value_expr,
+                conditions=[nonnull_1, nonnull_2, swap_taken],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["param_1", "param_2"],
+            effects=effects,
+        ),
+    )
+
+    cases = extract_return_cases(analysis)
+
+    assert len(cases) == 1
+    assert cases[0].value_expr.operator == "INT_SUB"
+    assert cases[0].normalized_value_expr.operator == "INT_ADD"
+    smt = cases[0].get_value_smt(lambda expr: expr)
+    assert "(select mem32 param_2)" in smt
+    assert "(select mem32 param_1)" in smt
+    assert "(bvsub (select mem32 param_1) (select mem32 param_2))" not in smt
 
 
 def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effect_summary():
@@ -533,6 +605,45 @@ def test_return_analyzer_does_not_collapse_complementary_symbolic_post_state_cas
             value=symbolic_value,
             conditions=[nonzero],
         ),
+    ]
+
+    merged = ReturnAnalyzer(program=None, debug=False)._merge_equivalent_return_infos(infos)
+
+    assert len(merged) == 2
+
+
+def test_return_analyzer_keeps_pre_and_post_state_values_separate_even_when_rendering_matches():
+    params = [
+        {"name": "a", "index": 0, "size": 8},
+        {"name": "b", "index": 1, "size": 8},
+    ]
+    nonnull = _cond("INT_NOTEQUAL", _param("a"), _const(0))
+    null = nonnull.negate()
+
+    pre_state = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(_param("a"), size=4),
+        Expression.memory(_param("b"), size=4),
+    )
+    post_state = Expression.binary_op(
+        "INT_SUB",
+        post_state_read_expression_for_location(
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("a", index=0), offset=0, size=4),
+            params,
+            symbolic=True,
+        ),
+        post_state_read_expression_for_location(
+            CanonicalLocation(base_ref=LocationBaseRef.parameter("b", index=1), offset=0, size=4),
+            params,
+            symbolic=True,
+        ),
+    )
+
+    assert pre_state.to_string() == post_state.to_string()
+
+    infos = [
+        ReturnInfo(address="0x1001", value=pre_state, conditions=[nonnull]),
+        ReturnInfo(address="0x1001", value=post_state, conditions=[null]),
     ]
 
     merged = ReturnAnalyzer(program=None, debug=False)._merge_equivalent_return_infos(infos)

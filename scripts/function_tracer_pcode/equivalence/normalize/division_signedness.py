@@ -43,11 +43,11 @@ def normalize_division_signedness(
     
     if safe:
         # UDIV -> SDIV に変換
-        normalized = Expression(
+        normalized = expr.clone_with(
             expr_type=ExpressionType.BINARY_OP,
             operator="INT_SDIV",
             operands=[dividend, divisor],
-            size=expr.size
+            size=expr.size,
         )
         
         context.record_rule(

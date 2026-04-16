@@ -106,7 +106,7 @@ def _rewrite_expr(
             debug,
             True,
         )
-        candidate = Expression.memory(rewritten_addr, expr.size)
+        candidate = expr.clone_with(operands=[rewritten_addr])
         split_phi = _split_memory_address_phi(candidate)
         if split_phi is not None:
             return _rewrite_expr(
@@ -154,18 +154,7 @@ def _rewrite_expr(
         ]
         if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
             return expr
-        rebuilt = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=rewritten_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-        )
+        rebuilt = expr.clone_with(operands=rewritten_operands)
         return rebuilt
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -233,7 +222,7 @@ def _split_memory_address_phi(expr: Expression) -> Optional[Expression]:
 
     branches = []
     for cond, branch_addr in addr.value:
-        branches.append((cond, Expression.memory(branch_addr, expr.size)))
+        branches.append((cond, expr.clone_with(operands=[branch_addr])))
 
     split = Expression.phi(branches)
     split.size = expr.size
@@ -252,16 +241,17 @@ def _split_conditional_offset_load(expr: Expression) -> Optional[Expression]:
     branches = [
         (
             Condition(cond_expr, False),
-            Expression.memory(
-                Expression.binary_op(
-                    "INT_ADD",
-                    base_addr,
-                    Expression.constant(offset_value, max(1, base_addr.size or 8)),
-                ),
-                expr.size,
+            expr.clone_with(
+                operands=[
+                    Expression.binary_op(
+                        "INT_ADD",
+                        base_addr,
+                        Expression.constant(offset_value, max(1, base_addr.size or 8)),
+                    )
+                ],
             ),
         ),
-        (None, Expression.memory(base_addr, expr.size)),
+        (None, expr.clone_with(operands=[base_addr])),
     ]
     split = Expression.phi(branches)
     split.size = expr.size

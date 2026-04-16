@@ -1038,6 +1038,22 @@ class ExpressionExpander:
         canonicalized = self._canonicalize_traced_expression(traced, conditions)
         if (
             traced is not None
+            and not expression_contains_post_state_reads(canonicalized)
+        ):
+            rewritten_observed = rewrite_observed_loads_from_effects(
+                traced,
+                conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            if (
+                rewritten_observed is not None
+                and not _expressions_equivalent(rewritten_observed, traced)
+                and self._expression_contains_phi(rewritten_observed)
+            ):
+                return None
+        if (
+            traced is not None
             and canonicalized is traced
             and traced.expr_type == ExpressionType.MEMORY
         ):
@@ -1099,18 +1115,71 @@ class ExpressionExpander:
                     0,
                 )
             rewritten_base = rewritten_observed if rewritten_observed is not None else expr
+            rewrite_retains_phi = self._expression_contains_phi(rewritten_base)
             normalized = normalize_post_state_expression(
                 rewritten_base,
                 conditions,
                 self.effect_summary.effects,
                 self.parameters,
+                symbolic_post_state=True,
             )
+            normalized_original = normalize_post_state_expression(
+                expr,
+                conditions,
+                self.effect_summary.effects,
+                self.parameters,
+                symbolic_post_state=True,
+            )
+            if (
+                rewrite_retains_phi
+                and normalized_original is not None
+                and expression_contains_post_state_reads(normalized_original)
+                and not self._expression_contains_phi(normalized_original)
+            ):
+                return normalized_original
+            if normalized is not None and expression_contains_post_state_reads(normalized):
+                return normalized
+            if rewrite_retains_phi:
+                if (
+                    normalized_original is not None
+                    and expression_contains_post_state_reads(normalized_original)
+                ):
+                    return normalized_original
+                if (
+                    normalized_original is not None
+                    and normalized is not None
+                    and self._expression_contains_phi(normalized)
+                    and not self._expression_contains_phi(normalized_original)
+                ):
+                    return normalized_original
+                if normalized is not None and self._expression_contains_phi(normalized):
+                    return normalized
+                return rewritten_base
+            if (
+                normalized_original is not None
+                and expression_contains_post_state_reads(normalized_original)
+            ):
+                return normalized_original
+            if (
+                normalized is not None
+                and not self._expression_contains_phi(normalized)
+                and not _expressions_equivalent(normalized, expr)
+            ):
+                return normalized
+            if (
+                normalized is not None
+                and normalized_original is not None
+                and self._expression_contains_phi(normalized)
+                and not self._expression_contains_phi(normalized_original)
+            ):
+                return normalized_original
             return normalized if normalized is not None else rewritten_base
         canonicalized = canonicalize_post_state_subexpressions(
             expr,
             conditions,
             self.effect_summary.effects,
             self.parameters,
+            symbolic_post_state=True,
             allow_memory_leaf_collapse=True,
         )
         rewrite_target = canonicalized if canonicalized is not None else expr
@@ -1359,6 +1428,26 @@ class ExpressionExpander:
         except Exception:
             return None
 
+        branch_sensitive_observed = None
+        if (
+            traced is not None
+            and self.effect_summary is not None
+            and getattr(self.effect_summary, "effects", None)
+            and self.parameters
+        ):
+            rewritten_observed = rewrite_observed_loads_from_effects(
+                traced,
+                conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            if (
+                rewritten_observed is not None
+                and not _expressions_equivalent(rewritten_observed, traced)
+                and self._expression_contains_phi(rewritten_observed)
+            ):
+                branch_sensitive_observed = rewritten_observed
+
         canonicalized = self._canonicalize_traced_expression(traced, conditions)
         if (
             traced is not None
@@ -1377,6 +1466,11 @@ class ExpressionExpander:
             if collapsed is not None:
                 reduced = _reduce_expression_under_conditions(collapsed, conditions)
                 canonicalized = reduced if reduced is not None else collapsed
+        if (
+            branch_sensitive_observed is not None
+            and not self._expression_contains_phi(canonicalized)
+        ):
+            return branch_sensitive_observed
         if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
             canonicalized.size = output_size
         return canonicalized

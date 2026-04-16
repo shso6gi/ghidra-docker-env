@@ -695,7 +695,11 @@ class PairwiseStrategy(CheckStrategy):
                 continue
 
             case.conditions = ConditionSimplifier.simplify_conditions(rewritten_conditions)
-            case.value_expr = normalize_expression(rewritten_value, NormalizationContext())
+            case.value_expr = rewritten_value
+            case.normalized_value_expr = normalize_expression(
+                rewritten_value,
+                NormalizationContext(),
+            )
             case.conditions_smt = None
             case._value_smt_cache.clear()
 

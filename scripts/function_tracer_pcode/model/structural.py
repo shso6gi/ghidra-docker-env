@@ -83,6 +83,66 @@ def _atom_key(value: Any) -> StructuralKey:
     return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
 
 
+def _semantic_runtime_ref_key(value: Any) -> Optional[StructuralKey]:
+    """Return a stable key only for runtime refs that expose semantic identity.
+
+    We intentionally ignore arbitrary object attributes here. Debug-only or
+    incidental runtime objects should not perturb structural equality unless
+    they provide an explicit stable semantic key.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return ("bool", int(value))
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, tuple):
+        items = []
+        for item in value:
+            item_key = _semantic_runtime_ref_key(item)
+            if item_key is None:
+                return None
+            items.append(item_key)
+        return ("tuple", tuple(items))
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            item_key = _semantic_runtime_ref_key(item)
+            if item_key is None:
+                return None
+            items.append(item_key)
+        return ("list", tuple(items))
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            key_key = _semantic_runtime_ref_key(key)
+            item_key = _semantic_runtime_ref_key(item)
+            if key_key is None or item_key is None:
+                return None
+            items.append((key_key, item_key))
+        items.sort()
+        return ("dict", tuple(items))
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            return ("stable_runtime_ref", _atom_key(stable_key()))
+        except Exception:
+            return None
+    return None
+
+
+def _expression_runtime_metadata(expr: Expression) -> tuple[StructuralKey, ...]:
+    runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+    if runtime_key is None:
+        return ()
+    return (("runtime_ref", runtime_key),)
+
+
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
     if expr is None or size <= 0 or expr.expr_type != ExpressionType.CONSTANT:
         return False
@@ -101,6 +161,7 @@ def expression_key(
     strip_width_adapters: bool = False,
     collapse_full_masks: bool = False,
     include_memory_read_order: bool = True,
+    include_semantic_runtime_refs: bool = True,
 ) -> StructuralKey:
     """Return a stable, hashable structural key for an expression tree."""
 
@@ -173,13 +234,28 @@ def expression_key(
                     remaining,
                 )
 
-            if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.UNKNOWN}:
+            if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
                 return (
                     (
                         expr_type.name.lower(),
                         current.name or "",
                         _atom_key(current.value),
                         int(current.size or 0),
+                    ),
+                    remaining,
+                )
+
+            if expr_type == ExpressionType.UNKNOWN:
+                runtime_metadata = (
+                    _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
+                )
+                return (
+                    (
+                        "unknown",
+                        current.name or "",
+                        _atom_key(current.value),
+                        int(current.size or 0),
+                        *runtime_metadata,
                     ),
                     remaining,
                 )
@@ -219,12 +295,21 @@ def expression_key(
             if expr_type == ExpressionType.MEMORY:
                 address = current.operands[0] if current.operands else None
                 address_key, remaining = _build(address, remaining)
+                runtime_metadata = (
+                    _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
+                )
                 return (
                     (
                         "memory",
                         int(current.size or 0),
                         address_key,
-                        int(current.read_order_key or 0) if include_memory_read_order else 0,
+                        (
+                            "read_order",
+                            int(current.read_order_key),
+                        )
+                        if include_memory_read_order and current.read_order_key is not None
+                        else ("read_order", None),
+                        *runtime_metadata,
                     ),
                     remaining,
                 )
@@ -325,6 +410,7 @@ def expression_key_safe(
     strip_width_adapters: bool = False,
     collapse_full_masks: bool = False,
     include_memory_read_order: bool = True,
+    include_semantic_runtime_refs: bool = True,
 ) -> Optional[StructuralKey]:
     """Return structural key only when it is safe for semantic equality.
 
@@ -339,6 +425,7 @@ def expression_key_safe(
         strip_width_adapters=strip_width_adapters,
         collapse_full_masks=collapse_full_masks,
         include_memory_read_order=include_memory_read_order,
+        include_semantic_runtime_refs=include_semantic_runtime_refs,
     )
     if not key_is_comparable(key):
         return None
@@ -353,6 +440,7 @@ def expression_key_or_identity(
     strip_width_adapters: bool = False,
     collapse_full_masks: bool = False,
     include_memory_read_order: bool = True,
+    include_semantic_runtime_refs: bool = True,
 ) -> StructuralKey:
     """Safe structural key with identity fallback for non-comparable inputs.
 
@@ -366,6 +454,7 @@ def expression_key_or_identity(
         strip_width_adapters=strip_width_adapters,
         collapse_full_masks=collapse_full_masks,
         include_memory_read_order=include_memory_read_order,
+        include_semantic_runtime_refs=include_semantic_runtime_refs,
     )
     if safe is not None:
         return safe

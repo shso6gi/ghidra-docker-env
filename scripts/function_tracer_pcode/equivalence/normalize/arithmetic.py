@@ -54,8 +54,11 @@ def _rewrite_sub_as_add_neg(expr: Expression) -> Expression:
     neg_right = Expression.unary_op("INT_2COMP", right)
     neg_right.size = right.size
 
-    rewritten = Expression.binary_op("INT_ADD", left, neg_right)
-    rewritten.size = expr.size
+    rewritten = expr.clone_with(
+        operator="INT_ADD",
+        operands=[left, neg_right],
+        size=expr.size,
+    )
     return rewritten
 
 
@@ -71,17 +74,7 @@ def _canonicalize_add(expr: Expression) -> Expression:
 
     if len(terms) == 1:
         only = terms[0]
-        return Expression(
-            expr_type=only.expr_type,
-            value=only.value,
-            operator=only.operator,
-            operands=only.operands,
-            size=only.size or expr.size,
-            name=only.name,
-            data_type=only.data_type,
-            data_type_obj=getattr(only, "data_type_obj", None),
-            storage_info=only.storage_info,
-        )
+        return only.clone_with(size=only.size or expr.size)
 
     sorted_terms = sorted(terms, key=_term_sort_key)
     if sorted_terms == original_terms and len(sorted_terms) == 2:

@@ -7,7 +7,7 @@ from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.call_target import CallTargetRef, coerce_call_target_ref
-from ..model.structural import StructuralKey
+from ..model.structural import StructuralKey, expression_key_safe
 from ..model.storage import StorageInfo
 from ..model.analysis import (
     ComparisonSurface,
@@ -44,6 +44,8 @@ from .effect_summary import (
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
+    rewrite_loads_from_effects,
+    rewrite_observed_loads_from_effects,
     summarize_store_effects,
     substitute_condition,
     substitute_expression,
@@ -80,6 +82,31 @@ class ReturnAnalyzer:
 
     def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
         return summarize_expression(expr, max_depth=max_depth)
+
+    def _debug_expr_identity_summary(
+        self,
+        expr: Optional[Expression],
+        max_depth: int = 3,
+    ) -> str:
+        if expr is None:
+            return "None"
+
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        read_order_key = getattr(expr, "read_order_key", None)
+        runtime_tag = type(runtime_ref).__name__ if runtime_ref is not None else "None"
+        try:
+            structural_key = expression_key_safe(
+                expr,
+                include_memory_read_order=True,
+            )
+        except Exception:
+            structural_key = None
+        return (
+            f"{summarize_expression(expr, max_depth=max_depth)} "
+            f"[type={expr.expr_type.name}, size={expr.size}, "
+            f"read_order={read_order_key}, runtime_ref={runtime_tag}:{runtime_ref}, "
+            f"structural={structural_key}]"
+        )
 
     def _coerce_optional_int(self, value: object) -> Optional[int]:
         if value is None or isinstance(value, bool):
@@ -2005,37 +2032,7 @@ class ReturnAnalyzer:
         }
 
     def _clone_expression(self, expr: Expression) -> Expression:
-        if expr.expr_type == ExpressionType.PARAMETER:
-            return Expression.parameter(
-                expr.name or "",
-                index=expr.value if isinstance(expr.value, int) else -1,
-                data_type=expr.data_type,
-                data_type_obj=getattr(expr, "data_type_obj", None),
-                size=expr.size or 4,
-                storage_info=expr.storage_info,
-                runtime_ref=getattr(expr, "runtime_ref", None),
-            )
-        if expr.expr_type == ExpressionType.VARIABLE:
-            return Expression.variable(
-                expr.name or "",
-                data_type=expr.data_type,
-                data_type_obj=getattr(expr, "data_type_obj", None),
-                size=expr.size or 4,
-                storage_info=expr.storage_info,
-                runtime_ref=getattr(expr, "runtime_ref", None),
-            )
-        return Expression(
-            expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=[self._clone_expression(op) for op in expr.operands],
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-        )
+        return expr.clone_with(operands=[self._clone_expression(op) for op in expr.operands])
 
     def _build_effect_summary(
         self,
@@ -4082,37 +4079,343 @@ class ReturnAnalyzer:
                 continue
 
             simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
-            normalized_value = self._normalize_expanded_return_value(
-                ev.value,
-                simplified_conds,
-            )
-            resolved_value = self._concretize_readonly_loads(
-                normalized_value,
-                simplified_conds,
-                self._current_parameters,
-            )
-
             if self.debug:
                 cond_strs = [
                     ConditionSimplifier.get_simplified_condition_string(c)
                     for c in simplified_conds
                 ]
                 self._debug_print(
-                    f"Expansion {i}: value={self._debug_expr_summary(resolved_value)}"
+                    f"Expansion {i}: raw={self._debug_expr_identity_summary(ev.value)}"
                 )
-                self._debug_print(f"  conditions={cond_strs}")
-
-            results.append(
-                self._make_return_info(
-                    address=address,
-                    value=resolved_value,
-                    conditions=simplified_conds,
-                    branch_index=return_index * 100 + i,
-                    site_metadata=site_metadata,
-                )
+                self._debug_print(f"  raw_conditions={cond_strs}")
+            split_cases = self._split_effect_sensitive_return_case(
+                ev.value,
+                simplified_conds,
             )
+            branch_base = return_index * 100 + i
+            for split_index, (split_value, split_conditions) in enumerate(split_cases):
+                if self.debug:
+                    split_cond_strs = [
+                        ConditionSimplifier.get_simplified_condition_string(c)
+                        for c in split_conditions
+                    ]
+                    self._debug_print(
+                        f"Expansion {i}.{split_index}: split={self._debug_expr_identity_summary(split_value)}"
+                    )
+                    self._debug_print(f"  split_conditions={split_cond_strs}")
+                normalized_value = self._normalize_expanded_return_value(
+                    split_value,
+                    split_conditions,
+                )
+                if self.debug and normalized_value is not split_value:
+                    self._debug_print(
+                        "  normalized="
+                        f"{self._debug_expr_identity_summary(normalized_value)}"
+                    )
+                resolved_value = self._concretize_readonly_loads(
+                    normalized_value,
+                    split_conditions,
+                    self._current_parameters,
+                )
+                if self.debug and resolved_value is not normalized_value:
+                    self._debug_print(
+                        "  concretized="
+                        f"{self._debug_expr_identity_summary(resolved_value)}"
+                    )
+
+                if self.debug:
+                    cond_strs = [
+                        ConditionSimplifier.get_simplified_condition_string(c)
+                        for c in split_conditions
+                    ]
+                    self._debug_print(
+                        f"Expansion {i}.{split_index}: value={self._debug_expr_summary(resolved_value)}"
+                    )
+                    self._debug_print(f"  conditions={cond_strs}")
+
+                results.append(
+                    self._make_return_info(
+                        address=address,
+                        value=resolved_value,
+                        conditions=split_conditions,
+                        branch_index=(
+                            branch_base
+                            if len(split_cases) == 1
+                            else branch_base * 10 + split_index
+                        ),
+                        site_metadata=site_metadata,
+                    )
+                )
         pruned = self._prune_less_precise_return_infos(results)
         return self._merge_equivalent_return_infos(pruned)
+
+    def _split_effect_sensitive_return_case(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+    ) -> List[Tuple[Expression, List[Condition]]]:
+        effect_summary = self._current_effect_summary
+        if effect_summary is None or not effect_summary.effects:
+            return [(value, conditions)]
+
+        rewritten = self._rewrite_effect_sensitive_return_value(
+            value,
+            conditions,
+            effect_summary,
+        )
+        if self.debug and rewritten is not None and not _expressions_equivalent(rewritten, value):
+            self._debug_print(
+                "Effect-sensitive rewrite candidate: "
+                f"{self._debug_expr_identity_summary(value)} -> "
+                f"{self._debug_expr_identity_summary(rewritten)}"
+            )
+        if rewritten is None or _expressions_equivalent(rewritten, value):
+            return [(value, conditions)]
+
+        expanded = self._expand_object_centric_expression_cases(
+            rewritten,
+            conditions,
+        )
+        if not expanded:
+            return [(value, conditions)]
+
+        deduplicated = self._deduplicate_expression_cases(expanded)
+        if self.debug and deduplicated:
+            for case_index, (case_value, case_conditions) in enumerate(deduplicated):
+                cond_dump = [
+                    ConditionSimplifier.get_simplified_condition_string(cond)
+                    for cond in case_conditions
+                ]
+                self._debug_print(
+                    "  effect-sensitive case "
+                    f"[{case_index}]: {self._debug_expr_identity_summary(case_value)}"
+                )
+                self._debug_print(f"    conditions={cond_dump}")
+        if (
+            len(deduplicated) == 1
+            and _expressions_equivalent(deduplicated[0][0], value)
+            and self._condition_lists_equivalent(deduplicated[0][1], conditions)
+        ):
+            return [(value, conditions)]
+
+        if self.debug and len(deduplicated) > 1:
+            self._debug_print(
+                "Split effect-sensitive expanded return into "
+                f"{len(deduplicated)} object-centric cases: "
+                f"{self._debug_expr_summary(value)} -> {self._debug_expr_summary(rewritten)}"
+            )
+        return deduplicated
+
+    def _rewrite_effect_sensitive_return_value(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        rewritten_observed = None
+        if self._expression_contains_observed_loads(value):
+            rewritten_observed = rewrite_observed_loads_from_effects(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if self._accept_effect_sensitive_rewrite(
+                value,
+                rewritten_observed,
+                rewrite_kind="observed-load",
+            ):
+                return rewritten_observed
+
+        rewritten_generic = rewrite_loads_from_effects(
+            value,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        if self._accept_effect_sensitive_rewrite(
+            value,
+            rewritten_generic,
+            rewrite_kind="generic effect-sensitive",
+        ):
+            return rewritten_generic
+
+        return value
+
+    def _accept_effect_sensitive_rewrite(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+        *,
+        rewrite_kind: str,
+    ) -> bool:
+        if rewritten is None or original is None:
+            return False
+        if _expressions_equivalent(rewritten, original):
+            return False
+
+        original_rank = self._effect_sensitive_rewrite_rank(original)
+        rewritten_rank = self._effect_sensitive_rewrite_rank(rewritten)
+        accepted = rewritten_rank > original_rank
+
+        if self.debug and not accepted:
+            self._debug_print(
+                f"Rejected {rewrite_kind} rewrite without object-centric precision gain: "
+                f"{self._debug_expr_identity_summary(original)} -> "
+                f"{self._debug_expr_identity_summary(rewritten)} "
+                f"rank {original_rank} -> {rewritten_rank}"
+            )
+
+        return accepted
+
+    def _effect_sensitive_rewrite_rank(
+        self,
+        expr: Optional[Expression],
+    ) -> Tuple[int, int, int, int, int]:
+        if expr is None:
+            return (0, 0, 0, 0, 0)
+        return (
+            1 if expression_contains_synthetic_location_reads(expr) else 0,
+            1 if expression_contains_post_state_reads(expr) else 0,
+            1 if self._expression_contains_phi(expr) else 0,
+            1 if self._expression_contains_observed_loads(expr) else 0,
+            self._count_memory_reads(expr),
+        )
+
+    def _expand_object_centric_expression_cases(
+        self,
+        expr: Optional[Expression],
+        base_conditions: List[Condition],
+    ) -> List[Tuple[Expression, List[Condition]]]:
+        if expr is None:
+            return []
+
+        simplified_base = ConditionSimplifier.simplify_conditions(base_conditions)
+        if ConditionSimplifier.is_contradiction(simplified_base):
+            return []
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            expanded: List[Tuple[Expression, List[Condition]]] = []
+            prior_guards: List[Condition] = []
+            for cond, value in expr.value:
+                combined_conditions = list(simplified_base)
+                for prior in prior_guards:
+                    combined_conditions.append(prior.negate())
+                if cond is not None:
+                    combined_conditions.append(cond)
+                    prior_guards.append(cond)
+                nested_conditions = ConditionSimplifier.simplify_conditions(combined_conditions)
+                if ConditionSimplifier.is_contradiction(nested_conditions):
+                    continue
+                expanded.extend(
+                    self._expand_object_centric_expression_cases(
+                        value,
+                        nested_conditions,
+                    )
+                )
+            return self._deduplicate_expression_cases(expanded)
+
+        if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+            address_cases = self._expand_object_centric_expression_cases(
+                expr.operands[0],
+                simplified_base,
+            )
+            if not address_cases:
+                return [(expr, simplified_base)]
+            expanded = [
+                (expr.clone_with(operands=[address]), case_conditions)
+                for address, case_conditions in address_cases
+                if not ConditionSimplifier.is_contradiction(case_conditions)
+            ]
+            return self._deduplicate_expression_cases(expanded)
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            operand_cases = self._expand_object_centric_expression_cases(
+                expr.operands[0],
+                simplified_base,
+            )
+            if not operand_cases:
+                return [(expr, simplified_base)]
+            expanded = [
+                (expr.clone_with(operands=[operand]), case_conditions)
+                for operand, case_conditions in operand_cases
+                if not ConditionSimplifier.is_contradiction(case_conditions)
+            ]
+            return self._deduplicate_expression_cases(expanded)
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left_cases = self._expand_object_centric_expression_cases(
+                expr.operands[0],
+                simplified_base,
+            )
+            right_cases = self._expand_object_centric_expression_cases(
+                expr.operands[1],
+                simplified_base,
+            )
+            if not left_cases:
+                left_cases = [(expr.operands[0], simplified_base)]
+            if not right_cases:
+                right_cases = [(expr.operands[1], simplified_base)]
+
+            expanded: List[Tuple[Expression, List[Condition]]] = []
+            for left_value, left_conditions in left_cases:
+                for right_value, right_conditions in right_cases:
+                    combined_conditions = ConditionSimplifier.simplify_conditions(
+                        list(left_conditions) + list(right_conditions)
+                    )
+                    if ConditionSimplifier.is_contradiction(combined_conditions):
+                        continue
+                    expanded.append(
+                        (
+                            expr.clone_with(operands=[left_value, right_value]),
+                            combined_conditions,
+                        )
+                    )
+            return self._deduplicate_expression_cases(expanded)
+
+        return [(expr, simplified_base)]
+
+    def _deduplicate_expression_cases(
+        self,
+        cases: List[Tuple[Expression, List[Condition]]],
+    ) -> List[Tuple[Expression, List[Condition]]]:
+        deduplicated: List[Tuple[Expression, List[Condition]]] = []
+        for value, conditions in cases:
+            simplified_conditions = ConditionSimplifier.simplify_conditions(conditions)
+            if ConditionSimplifier.is_contradiction(simplified_conditions):
+                continue
+            duplicate = False
+            for existing_value, existing_conditions in deduplicated:
+                if (
+                    _expressions_equivalent(existing_value, value)
+                    and self._condition_lists_equivalent(existing_conditions, simplified_conditions)
+                ):
+                    duplicate = True
+                    break
+            if not duplicate:
+                deduplicated.append((value, simplified_conditions))
+        return deduplicated
+
+    def _condition_lists_equivalent(
+        self,
+        left: List[Condition],
+        right: List[Condition],
+    ) -> bool:
+        if len(left) != len(right):
+            return False
+        unmatched = list(right)
+        for left_condition in left:
+            matched_index = next(
+                (
+                    index for index, right_condition in enumerate(unmatched)
+                    if ConditionNormalizer.are_equivalent(left_condition, right_condition)
+                ),
+                None,
+            )
+            if matched_index is None:
+                return False
+            unmatched.pop(matched_index)
+        return not unmatched
 
     def _prune_less_precise_return_infos(
         self,
@@ -4525,7 +4828,10 @@ class ReturnAnalyzer:
             effect_summary.effects,
             self._current_parameters,
         )
-        comparison_target = original
+        if lowered_roundtrip is None:
+            return True
+
+        comparison_targets = [original]
         if original.expr_type == ExpressionType.MEMORY:
             expected_roundtrip = materialize_definite_post_state_expression(
                 original,
@@ -4535,12 +4841,58 @@ class ReturnAnalyzer:
                 preserve_composite_location_wrappers=True,
             )
             if expected_roundtrip is not None:
-                comparison_target = expected_roundtrip
-        return lowered_roundtrip is None or not _expressions_equivalent_under_conditions(
-            lowered_roundtrip,
-            comparison_target,
-            conditions,
-            self._current_parameters,
+                comparison_targets.insert(0, expected_roundtrip)
+        if self._expression_contains_observed_loads(original):
+            observed_rewritten = rewrite_observed_loads_from_effects(
+                original,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if observed_rewritten is not None:
+                comparison_targets.append(observed_rewritten)
+            observed_roundtrip = normalize_post_state_expression(
+                original,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                prefer_canonical_post_state=False,
+                preserve_composite_location_wrappers=True,
+            )
+            if observed_roundtrip is not None:
+                comparison_targets.append(observed_roundtrip)
+
+        for comparison_target in comparison_targets:
+            if _expressions_equivalent_under_conditions(
+                lowered_roundtrip,
+                comparison_target,
+                conditions,
+                self._current_parameters,
+            ):
+                return False
+        return True
+
+    def _expression_contains_observed_loads(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        observed_order_key = getattr(runtime_ref, "order_key", None)
+        if expr.expr_type == ExpressionType.MEMORY and (
+            getattr(expr, "read_order_key", None) is not None
+            or observed_order_key is not None
+        ):
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None and self._expression_contains_observed_loads(cond_expr):
+                    return True
+                if self._expression_contains_observed_loads(value):
+                    return True
+            return False
+        return any(
+            self._expression_contains_observed_loads(operand)
+            for operand in getattr(expr, "operands", []) or []
         )
 
     def _expression_contains_unresolved_value(self, expr: Optional[Expression]) -> bool:

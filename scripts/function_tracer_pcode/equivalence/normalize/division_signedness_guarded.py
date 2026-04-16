@@ -42,19 +42,8 @@ def normalize_udiv_with_guard(
             )
             for op in expr.operands
         ]
-        
-        expr = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=normalized_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-        )
+
+        expr = expr.clone_with(operands=normalized_operands)
     
     # トップレベルの変換を試行
     return _try_convert_udiv_to_sdiv(
@@ -159,12 +148,7 @@ def _try_convert_udiv_to_sdiv(
         return expr
     
     # 両方証明できた → 変換を適用
-    normalized = Expression(
-        expr_type=ExpressionType.BINARY_OP,
-        operator="INT_SDIV",
-        operands=[dividend, divisor],
-        size=expr.size
-    )
+    normalized = expr.clone_with(operator="INT_SDIV", operands=[dividend, divisor])
     
     reason = f"Guards proven via SMT: dividend>=0, divisor>0"
     

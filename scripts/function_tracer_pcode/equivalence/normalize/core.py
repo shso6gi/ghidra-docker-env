@@ -47,6 +47,8 @@ def normalize_expression(
     # 子要素を先に正規化（ボトムアップ処理）
     if expr.expr_type == ExpressionType.PHI and expr.value:
         original_size = expr.size
+        original_read_order_key = expr.read_order_key
+        original_runtime_ref = getattr(expr, "runtime_ref", None)
         normalized_branches = []
         for condition, branch_expr in expr.value:
             normalized_branch_expr = normalize_expression(branch_expr, context)
@@ -62,22 +64,13 @@ def normalize_expression(
             )
         expr = Expression.phi(normalized_branches)
         expr.size = original_size
+        expr.read_order_key = original_read_order_key
+        expr.runtime_ref = original_runtime_ref
     elif expr.operands:
         normalized_operands = [normalize_expression(op, context) for op in expr.operands]
-        
+
         # 新しい Expression インスタンスを作成（元の式は変更しない）
-        expr = Expression(
-            expr_type=expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=normalized_operands,
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-        )
+        expr = expr.clone_with(operands=normalized_operands)
     
     # トップレベルの正規化（順序重要）
     # 1. 二重否定の除去（最も基本的な変形、常に安全）

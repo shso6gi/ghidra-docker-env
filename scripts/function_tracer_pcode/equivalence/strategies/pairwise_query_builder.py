@@ -32,7 +32,8 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
         case = ReturnCase(
             index=index,
             conditions=simplified_conditions,
-            value_expr=normalized_value,
+            value_expr=ret_info.value,
+            normalized_value_expr=normalized_value,
             return_info=ret_info,
             return_type=analysis.get_comparison_type_name(),
             return_type_obj=analysis.get_comparison_type_obj(),
@@ -55,7 +56,8 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
 def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
     cond_key = ConditionSimplifier.build_constraint_set(case.conditions).signature()
-    value_key = ConditionNormalizer.expression_signature(case.value_expr)
+    key_expr = getattr(case, "normalized_value_expr", None) or case.value_expr
+    value_key = ConditionNormalizer.expression_signature(key_expr)
     return cond_key, value_key
 
 

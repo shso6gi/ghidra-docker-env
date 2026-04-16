@@ -21,6 +21,9 @@ from .variable_collection import (
 )
 
 
+_EXPR_UNSET = object()
+
+
 class ExpressionType(Enum):
     """式の種類"""
     CONSTANT = auto()
@@ -303,6 +306,38 @@ class Expression:
     
     def _get_python_operator(self, operator: Optional[str]) -> str:
         return get_python_operator(operator)
+
+    def clone_with(
+        self,
+        *,
+        expr_type: Any = _EXPR_UNSET,
+        value: Any = _EXPR_UNSET,
+        operator: Any = _EXPR_UNSET,
+        operands: Any = _EXPR_UNSET,
+        size: Any = _EXPR_UNSET,
+        name: Any = _EXPR_UNSET,
+        data_type: Any = _EXPR_UNSET,
+        data_type_obj: Any = _EXPR_UNSET,
+        storage_info: Any = _EXPR_UNSET,
+        read_order_key: Any = _EXPR_UNSET,
+        runtime_ref: Any = _EXPR_UNSET,
+    ) -> 'Expression':
+        """Clone an expression while preserving semantic metadata by default."""
+
+        resolved_operands = self.operands if operands is _EXPR_UNSET else operands
+        return Expression(
+            expr_type=self.expr_type if expr_type is _EXPR_UNSET else expr_type,
+            value=self.value if value is _EXPR_UNSET else value,
+            operator=self.operator if operator is _EXPR_UNSET else operator,
+            operands=list(resolved_operands or []),
+            size=self.size if size is _EXPR_UNSET else size,
+            name=self.name if name is _EXPR_UNSET else name,
+            data_type=self.data_type if data_type is _EXPR_UNSET else data_type,
+            data_type_obj=getattr(self, "data_type_obj", None) if data_type_obj is _EXPR_UNSET else data_type_obj,
+            storage_info=self.storage_info if storage_info is _EXPR_UNSET else storage_info,
+            read_order_key=self.read_order_key if read_order_key is _EXPR_UNSET else read_order_key,
+            runtime_ref=getattr(self, "runtime_ref", None) if runtime_ref is _EXPR_UNSET else runtime_ref,
+        )
     
     def equals(self, other: 'Expression') -> bool:
         """式が等価かどうかを判定"""
@@ -315,6 +350,10 @@ class Expression:
         if self.value != other.value:
             return False
         if self.name != other.name:
+            return False
+        if self.size != other.size:
+            return False
+        if self.read_order_key != other.read_order_key:
             return False
         if self.runtime_ref != other.runtime_ref:
             return False
@@ -333,6 +372,7 @@ class Expression:
         strip_width_adapters: bool = False,
         collapse_full_masks: bool = False,
         include_memory_read_order: bool = True,
+        include_semantic_runtime_refs: bool = True,
     ):
         """Hashable structural key for AST/P-code based comparisons."""
         from .structural import expression_key
@@ -344,6 +384,7 @@ class Expression:
             strip_width_adapters=strip_width_adapters,
             collapse_full_masks=collapse_full_masks,
             include_memory_read_order=include_memory_read_order,
+            include_semantic_runtime_refs=include_semantic_runtime_refs,
         )
     
     def to_smt(

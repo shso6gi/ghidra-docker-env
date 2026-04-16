@@ -12,6 +12,8 @@ from ..model import (
     UnknownValueRef,
     AddressValueRef,
     LocationBaseRef,
+    ObservedMemoryReadRef,
+    PcodeOpRef,
 )
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
@@ -313,6 +315,62 @@ class PcodeTracer:
             return None
         target = seq.getTarget()
         return (target.getOffset() << 8) | seq.getOrder()
+
+    def _make_pcode_op_ref(self, pcode_op) -> Optional[PcodeOpRef]:
+        if pcode_op is None:
+            return None
+
+        address_offset = None
+        seq_time = None
+        seq_order = None
+        block_index = None
+        mnemonic = None
+
+        try:
+            mnemonic = pcode_op.getMnemonic()
+        except Exception:
+            mnemonic = None
+
+        try:
+            seq = pcode_op.getSeqnum()
+        except Exception:
+            seq = None
+        if seq is not None:
+            try:
+                target = seq.getTarget()
+            except Exception:
+                target = None
+            if target is not None:
+                try:
+                    address_offset = int(target.getOffset())
+                except Exception:
+                    address_offset = None
+            try:
+                seq_time = int(seq.getTime())
+            except Exception:
+                seq_time = None
+            try:
+                seq_order = int(seq.getOrder())
+            except Exception:
+                seq_order = None
+
+        try:
+            parent = pcode_op.getParent()
+        except Exception:
+            parent = None
+        if parent is not None:
+            try:
+                block_index = int(parent.getIndex())
+            except Exception:
+                block_index = None
+
+        return PcodeOpRef(
+            address_offset=address_offset,
+            seq_time=seq_time,
+            seq_order=seq_order,
+            block_index=block_index,
+            mnemonic=mnemonic,
+        )
     
     def _collect_debug_info(self):
         """デバッグ用の情報を収集"""
@@ -747,10 +805,15 @@ class PcodeTracer:
                 addr = self.trace_varnode(inputs[1], depth, use_cache)
                 output = pcode_op.getOutput()
                 size = output.getSize() if output else 4
+                order_key = self._get_op_order_key(pcode_op)
                 return Expression.memory(
                     addr,
                     size,
-                    read_order_key=self._get_op_order_key(pcode_op),
+                    read_order_key=order_key,
+                    runtime_ref=ObservedMemoryReadRef(
+                        order_key=order_key,
+                        pcode_op_ref=self._make_pcode_op_ref(pcode_op),
+                    ),
                 )
             return Expression.unknown("load_insufficient_inputs")
         
