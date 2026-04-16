@@ -6195,8 +6195,152 @@ def test_expression_expander_uses_multiequal_canonical_location_per_branch():
     }
     assert observed == {
         ("MEM[b]", (no_swap.to_string(),)),
-        ("MEM[a]", (swap_taken.to_string(),)),
+        ("MEM[b]", (swap_taken.to_string(),)),
     }
+
+
+def test_expression_expander_keeps_multiequal_location_leaf_when_outer_update_reuses_it():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+    negate_nonzero = negate_zero.negate()
+    effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[negate_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[negate_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    pred_zero = object()
+    pred_nonzero = object()
+
+    class FakeInputVarnode:
+        def __init__(self, expr=None, def_op=None, size=4):
+            self.expr = expr
+            self._def_op = def_op
+            self._size = size
+
+        def getDef(self):
+            return self._def_op
+
+        def getSize(self):
+            return self._size
+
+        def getHigh(self):
+            return None
+
+    class FakeParent:
+        def getInSize(self):
+            return 2
+
+        def getIn(self, index):
+            return [pred_zero, pred_nonzero][index]
+
+    class FakeMultiequalOp:
+        def getParent(self):
+            return FakeParent()
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return [
+                FakeInputVarnode(Expression.memory(value, size=4)),
+                FakeInputVarnode(Expression.memory(value, size=4)),
+            ][index]
+
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    phi = FakeMultiequalOp()
+
+    class FakeOutput:
+        def getSize(self):
+            return 4
+
+    class FakeAddOp:
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return [
+                FakeInputVarnode(def_op=phi, size=4),
+                FakeInputVarnode(expr=delta, size=4),
+            ][index]
+
+        def getOutput(self):
+            return FakeOutput()
+
+    class FakeBlockInfo:
+        def __init__(self, index):
+            self.index = index
+
+    class FakeConditionTracker:
+        def get_block_by_hash(self, block):
+            if block is pred_zero:
+                return FakeBlockInfo(3)
+            if block is pred_nonzero:
+                return FakeBlockInfo(4)
+            return None
+
+        def get_all_valid_paths_to_block(self, target_block):
+            return [[]]
+
+    class FakeTracer:
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            return varnode.expr
+
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            raise AssertionError("recursive multiequal expansion should handle this case")
+
+        def _get_op_order_key(self, _op):
+            return 10
+
+        def _get_stable_op_key(self, op):
+            return f"fake-op-{id(op)}"
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=FakeConditionTracker(),
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[
+            _param("value", size=8, is_signed=False),
+            _param("delta", size=4, index=1),
+            _param("negate", size=4, index=2),
+        ],
+    )
+    expander._get_edge_condition = lambda from_block_info, to_block: (
+        negate_zero if from_block_info.index == 3 else negate_nonzero
+    )
+
+    expanded = expander._expand_input_operation(
+        FakeAddOp(),
+        [],
+        depth=0,
+    )
+
+    assert len(expanded) == 1
+    assert expanded[0].conditions == []
+    assert expanded[0].value.to_string() == "(MEM[value] + delta)"
 
 
 def test_return_analyzer_keeps_canonical_post_state_return_unchanged():
@@ -7408,6 +7552,128 @@ def test_return_analyzer_normalizes_observed_load_returns_to_symbolic_post_state
     assert expression_contains_post_state_reads(lowered) is False
     assert lowered.operands[0].expr_type == ExpressionType.PHI
     assert lowered.operands[1].expr_type == ExpressionType.PHI
+
+
+def test_return_analyzer_normalizes_single_arithmetic_update_rhs_to_post_state():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+    negate_nonzero = negate_zero.negate()
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[value_nonnull, negate_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[value_nonnull, negate_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    normalized_zero = analyzer._normalize_expanded_return_value(
+        Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+        [value_nonnull, negate_zero],
+    )
+    normalized_nonzero = analyzer._normalize_expanded_return_value(
+        Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+        [value_nonnull, negate_nonzero],
+    )
+
+    assert normalized_zero.to_string() == "MEM[value]"
+    assert normalized_nonzero.to_string() == "MEM[value]"
+    assert getattr(normalized_zero, "runtime_ref", None) == _loc("value", 0, 4)
+    assert getattr(normalized_nonzero, "runtime_ref", None) == _loc("value", 0, 4)
+
+    lowered_zero = lower_post_state_expression_for_smt(
+        normalized_zero,
+        [value_nonnull, negate_zero],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+    lowered_nonzero = lower_post_state_expression_for_smt(
+        normalized_nonzero,
+        [value_nonnull, negate_nonzero],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered_zero.to_string() == "(MEM[value] + delta)"
+    assert lowered_nonzero.to_string() == "(delta - MEM[value])"
+
+
+def test_return_analyzer_effect_sensitive_rewrite_does_not_double_apply_outer_delta():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+    negate_nonzero = negate_zero.negate()
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[value_nonnull, negate_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[value_nonnull, negate_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    results = analyzer._build_return_infos_from_expansions(
+        "00100000",
+        [
+            ExpandedValue(
+                Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                [value_nonnull, negate_nonzero],
+            )
+        ],
+        return_index=0,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "(delta - MEM[value])"
 
 
 def test_return_analyzer_splits_effect_sensitive_observed_load_returns_into_cases():

@@ -297,25 +297,43 @@ class FunctionReturnAnalysis:
                     return True
         return False
 
-    def _expression_contains_symbolic_post_state_reads(self, expr) -> bool:
-        """式木に synthetic post-state read が残っているか。"""
-        if expr is None:
-            return False
-
+    def _retains_post_state_reads_after_lowering(self, expr, conditions) -> bool:
+        """effect summary を使っても object-centric post-state read が残るか。"""
         from ..analysis.effect_summary import (
-            expression_contains_synthetic_location_reads,
+            expression_contains_post_state_reads,
+            lower_post_state_expression_for_smt_if_needed,
         )
 
-        return expression_contains_synthetic_location_reads(expr)
+        if not expression_contains_post_state_reads(expr):
+            return False
+
+        effect_summary = getattr(self, "effect_summary", None)
+        effects = getattr(effect_summary, "effects", None) if effect_summary is not None else None
+        if not effects:
+            return True
+
+        try:
+            lowered = lower_post_state_expression_for_smt_if_needed(
+                expr,
+                conditions,
+                effects,
+                self.parameters,
+            )
+        except Exception:
+            return True
+        return expression_contains_post_state_reads(lowered)
 
     def has_symbolic_post_state_reads(self) -> bool:
-        """戻り値・ガードに __locread__ 由来の symbolic post-state read が残っているか。"""
+        """戻り値・ガードに SMT lowering 不能な object-centric post-state read が残っているか。"""
         for ret in self.returns:
-            if self._expression_contains_symbolic_post_state_reads(ret.value):
+            if self._retains_post_state_reads_after_lowering(ret.value, ret.conditions):
                 return True
             for cond in ret.conditions:
                 cond_expr = getattr(cond, "expression", None)
-                if cond_expr is not None and self._expression_contains_symbolic_post_state_reads(cond_expr):
+                if cond_expr is not None and self._retains_post_state_reads_after_lowering(
+                    cond_expr,
+                    ret.conditions,
+                ):
                     return True
         return False
 

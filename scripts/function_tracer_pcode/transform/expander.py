@@ -2,7 +2,7 @@
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Set, Dict, Tuple, Any, Hashable
+from typing import Callable, Hashable, Iterable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
@@ -16,6 +16,7 @@ from ..analysis.effect_summary import (
     _recover_call_argument_expressions,
     _resolve_call_argument_expression,
     _expression_maps_to_parameter,
+    canonicalize_expr_read_location,
     resolve_call_targets,
     _expressions_equivalent,
     canonicalize_location,
@@ -24,6 +25,7 @@ from ..analysis.effect_summary import (
     collapse_post_state_expr_to_canonical_memory,
     expression_contains_post_state_reads,
     expression_contains_synthetic_location_reads,
+    locations_match,
     memory_expression_for_location,
     normalize_post_state_expression,
     rewrite_loads_from_effects,
@@ -63,8 +65,6 @@ class MultiequalBranchObservation:
 
     value: Expression
     conditions: Tuple[Condition, ...]
-    predecessor_index: int
-    input_object_key: Optional[Hashable]
     observed_location: Optional[CanonicalLocation]
 
 
@@ -367,10 +367,7 @@ class ExpressionExpander:
         """
         MULTIEQUAL展開の内部処理（網羅性改善版）
         
-        各MULTIEQUAL入力について、前任ブロックへの全有効パスを列挙し、
-        それぞれを別の展開値として扱う。
-        
-        重要：値だけでなく条件も含めて重複排除を行う。
+        各入力エッジの有効パスを条件付きの別ケースとして展開する。
         """
         phi_parent = multiequal_op.getParent()
         if not phi_parent:
@@ -412,59 +409,38 @@ class ExpressionExpander:
             
             self._debug_print(f"  pred_block: index={in_block_info.index}", depth + 1)
             
-            # 値をトレース（デバッグ用）
-            try:
-                input_conditions = []
-                traced_value = self.tracer.trace_varnode(input_varnode, depth + 1, use_cache=False)
-                traced_value = self._canonicalize_traced_expression(traced_value, input_conditions)
-                self._debug_expr("  traced_value: ", traced_value, depth + 1)
-                
-                # SMT表現も取得（エラー時はスキップ）
-                try:
-                    smt_str = traced_value.to_smt()
-                    if len(smt_str) > 100:
-                        smt_str = smt_str[:100] + "..."
-                    self._debug_print(f"  traced_smt: {smt_str}", depth + 1)
-                except Exception as e:
-                    self._debug_print(f"  traced_smt: (error: {e})", depth + 1)
-            except Exception as e:
-                self._debug_print(f"  traced_value: (error: {e})", depth + 1)
-            
-            # ★★★ 改善点：全有効パスを取得 ★★★
+            self._debug_multiequal_input_trace(input_varnode, depth + 1)
+
             all_valid_paths = self.condition_tracker.get_all_valid_paths_to_block(
                 target_block=in_block_info
             )
-            
+
             self._debug_print(f"  valid_paths: {len(all_valid_paths)}", depth + 1)
-            
-            # エッジ条件を取得（共通）
+
             edge_cond = self._get_edge_condition(in_block_info, phi_parent)
             if edge_cond:
                 edge_str = ConditionNormalizer.get_simplified_string(edge_cond)
                 self._debug_print(f"  edge_condition: {edge_str}", depth + 1)
-            
-            # 各パスについて展開
+
             cases_emitted = 0
             for path_idx, path_conditions in enumerate(all_valid_paths):
-                # パス条件 + エッジ条件を結合
-                input_conditions = list(base_conditions) + path_conditions.copy()
-                if edge_cond:
-                    input_conditions.append(edge_cond)
-                input_conditions = self._normalize_expansion_conditions(input_conditions)
-                
+                input_conditions = self._build_multiequal_path_conditions(
+                    base_conditions,
+                    path_conditions,
+                    edge_cond,
+                )
                 if self.debug:
                     self._debug_print(f"  Path[{path_idx}]: {len(path_conditions)} condition(s)", depth + 1)
                     for pc in path_conditions:
                         pc_str = ConditionNormalizer.get_simplified_string(pc)
                         self._debug_print(f"    - {pc_str}", depth + 2)
-                
-                # 矛盾チェック
                 if ConditionSimplifier.is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
 
                 if canonical_multiequal_location is not None:
-                    canonical_value = self._resolve_canonical_location_under_conditions(
+                    canonical_value = self._resolve_canonical_location_under_branch_expression(
+                        input_varnode,
                         canonical_multiequal_location,
                         input_conditions,
                         depth + 1,
@@ -534,6 +510,36 @@ class ExpressionExpander:
         self._debug_print(f"MULTIEQUAL -> 0 branches (no valid branches)", depth)
         self._debug_print("=" * 50, depth)
         return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
+
+    def _debug_multiequal_input_trace(
+        self,
+        input_varnode,
+        depth: int,
+    ) -> None:
+        try:
+            traced_value = self.tracer.trace_varnode(input_varnode, depth, use_cache=False)
+            traced_value = self._canonicalize_traced_expression(traced_value, [])
+            self._debug_expr("  traced_value: ", traced_value, depth)
+            try:
+                smt_str = traced_value.to_smt()
+                if len(smt_str) > 100:
+                    smt_str = smt_str[:100] + "..."
+                self._debug_print(f"  traced_smt: {smt_str}", depth)
+            except Exception as exc:
+                self._debug_print(f"  traced_smt: (error: {exc})", depth)
+        except Exception as exc:
+            self._debug_print(f"  traced_value: (error: {exc})", depth)
+
+    def _build_multiequal_path_conditions(
+        self,
+        base_conditions: List[Condition],
+        path_conditions: Iterable[Condition],
+        edge_cond: Optional[Condition],
+    ) -> List[Condition]:
+        combined_conditions = list(base_conditions) + list(path_conditions)
+        if edge_cond is not None:
+            combined_conditions.append(edge_cond)
+        return self._normalize_expansion_conditions(combined_conditions)
     
     def _deduplicate_expanded_values(
         self,
@@ -622,8 +628,76 @@ class ExpressionExpander:
                 )
         return inferred
 
-    def _resolve_canonical_location_under_conditions(
+    def _canonicalize_expression_to_location_leaf(
         self,
+        expr: Expression,
+        location: CanonicalLocation,
+        conditions: List[Condition],
+    ) -> Optional[Expression]:
+        if not self.parameters:
+            return expr
+
+        candidate = memory_expression_for_location(location, self.parameters)
+        if candidate is None:
+            return expr
+
+        expr_location = canonicalize_expr_read_location(expr, self.parameters)
+        if expr_location is not None and locations_match(expr_location, location, conditions):
+            return candidate
+        if expr_location is not None and self.effect_summary is not None:
+            expected = rewrite_loads_from_effects(
+                candidate,
+                conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            reduced_expr = _reduce_expression_under_conditions(expr, conditions)
+            reduced_expected = _reduce_expression_under_conditions(expected, conditions)
+            if _expressions_equivalent(
+                reduced_expr if reduced_expr is not None else expr,
+                reduced_expected if reduced_expected is not None else expected,
+            ):
+                return candidate
+
+        if expr.expr_type == ExpressionType.MEMORY and not expr.operands:
+            return expr
+
+        if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+            rewritten_operands = [
+                self._canonicalize_expression_to_location_leaf(operand, location, conditions)
+                for operand in expr.operands
+            ]
+            if any(operand is None for operand in rewritten_operands):
+                return expr
+            if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+                return expr
+            return expr.clone_with(operands=rewritten_operands)
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            changed = False
+            branches = []
+            for cond, value in expr.value:
+                combined_conditions = list(conditions)
+                if cond is not None:
+                    combined_conditions.append(cond)
+                rewritten_value = self._canonicalize_expression_to_location_leaf(
+                    value,
+                    location,
+                    combined_conditions,
+                )
+                branches.append((cond, rewritten_value))
+                changed = changed or (rewritten_value is not value)
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        return expr
+
+    def _resolve_canonical_location_under_branch_expression(
+        self,
+        input_varnode,
         location,
         conditions: List[Condition],
         depth: int,
@@ -637,14 +711,22 @@ class ExpressionExpander:
         if candidate is None:
             return None
 
-        rewritten = rewrite_loads_from_effects(
-            candidate,
-            conditions,
-            self.effect_summary.effects,
-            self.parameters,
+        try:
+            branch_expr = self.tracer.trace_varnode(input_varnode, depth, use_cache=False)
+        except Exception:
+            branch_expr = None
+
+        rewritten_branch = (
+            self._canonicalize_expression_to_location_leaf(branch_expr, location, conditions)
+            if branch_expr is not None
+            else None
         )
-        reduced = _reduce_expression_under_conditions(rewritten, conditions)
-        resolved = reduced if reduced is not None else rewritten
+        reduced = (
+            _reduce_expression_under_conditions(rewritten_branch, conditions)
+            if rewritten_branch is not None
+            else None
+        )
+        resolved = reduced if reduced is not None else (rewritten_branch if rewritten_branch is not None else candidate)
         if self._expression_contains_unknown_or_call(resolved):
             return None
         if self._expression_contains_phi(resolved):
@@ -799,15 +881,8 @@ class ExpressionExpander:
         if candidate is None:
             return None
 
-        assert self.effect_summary is not None
-        rewritten = rewrite_loads_from_effects(
-            candidate,
-            current_conditions,
-            self.effect_summary.effects,
-            self.parameters,
-        )
-        reduced = _reduce_expression_under_conditions(rewritten, current_conditions)
-        resolved = reduced if reduced is not None else rewritten
+        reduced = _reduce_expression_under_conditions(candidate, current_conditions)
+        resolved = reduced if reduced is not None else candidate
         if self.debug:
             self._debug_print(
                 "Resolved nested MULTIEQUAL via effect summary: "
@@ -876,8 +951,6 @@ class ExpressionExpander:
                     MultiequalBranchObservation(
                         value=branch_value,
                         conditions=tuple(branch_conditions),
-                        predecessor_index=getattr(in_block_info, "index", -1),
-                        input_object_key=self._stable_multiequal_input_object_key(input_varnode),
                         observed_location=self._observed_location_for_expression(branch_value),
                     )
                 )
@@ -905,8 +978,6 @@ class ExpressionExpander:
                 MultiequalBranchObservation(
                     value=value,
                     conditions=conditions,
-                    predecessor_index=-1,
-                    input_object_key=None,
                     observed_location=self._observed_location_for_expression(value),
                 )
             )
@@ -966,41 +1037,6 @@ class ExpressionExpander:
                 return location
 
         return None
-
-    def _stable_multiequal_input_object_key(self, varnode) -> Optional[Hashable]:
-        if varnode is None:
-            return None
-        try:
-            high_var = varnode.getHigh()
-        except Exception:
-            high_var = None
-        if high_var is not None:
-            try:
-                representative = high_var.getRepresentative()
-            except Exception:
-                representative = None
-            try:
-                symbol = high_var.getSymbol()
-                symbol_name = symbol.getName() if symbol is not None else None
-            except Exception:
-                symbol_name = None
-            if representative is not None:
-                try:
-                    rep_addr = representative.getAddress()
-                    rep_space = rep_addr.getAddressSpace().getName() if rep_addr is not None else "?"
-                    rep_offset = representative.getOffset()
-                    rep_size = representative.getSize()
-                    return ("high", symbol_name, rep_space, rep_offset, rep_size)
-                except Exception:
-                    return ("high", symbol_name, id(representative))
-            return ("high", symbol_name, id(high_var))
-
-        try:
-            addr = varnode.getAddress()
-            space = addr.getAddressSpace().getName() if addr is not None else "?"
-            return ("varnode", space, varnode.getOffset(), varnode.getSize())
-        except Exception:
-            return None
 
     def _observed_location_for_expression(
         self,

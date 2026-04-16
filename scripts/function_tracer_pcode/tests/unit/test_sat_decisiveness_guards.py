@@ -4,6 +4,8 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
+    EffectSummary,
+    StoreEffect,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilderResult
@@ -15,6 +17,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
     ReturnCase,
 )
 from scripts.function_tracer_pcode.model import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
+from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 
@@ -57,6 +60,51 @@ def test_function_return_analysis_marks_symbolic_post_state_reads_as_sat_unsafe(
 
     assert analysis.has_symbolic_post_state_reads() is True
     assert "symbolic_post_state_reads" in analysis.get_decisive_sat_unsafety_reasons()
+
+
+def test_function_return_analysis_treats_lowerable_post_state_reads_as_sat_safe():
+    params = [
+        _param("trace", index=0, size=8, data_type="int *"),
+        _param("delta", index=1, size=4, data_type="int"),
+    ]
+    trace = Expression.parameter("trace", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("trace", index=0),
+        offset=0,
+        size=4,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="lowerable",
+        entry_point="0x1000",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=post_state_read_expression_for_location(
+                    location,
+                    params,
+                    symbolic=True,
+                ),
+                conditions=[],
+            )
+        ],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["trace", "delta"],
+            effects=[
+                StoreEffect(
+                    location=location,
+                    value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), delta),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        ),
+    )
+
+    assert analysis.has_symbolic_post_state_reads() is False
+    assert "symbolic_post_state_reads" not in analysis.get_decisive_sat_unsafety_reasons()
 
 
 def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_state_reads(monkeypatch):

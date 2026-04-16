@@ -38,10 +38,11 @@ from .effect_summary import (
     _enumerate_constant_expression_branches,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
+    _find_matching_effect_value,
     _resolve_call_target_ref,
     _reduce_expression_under_conditions,
+    canonicalize_expr_read_location,
     expression_contains_post_state_reads,
-    expression_contains_synthetic_location_reads,
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
@@ -4788,6 +4789,18 @@ class ReturnAnalyzer:
         )
         if not expanded:
             return [(value, conditions)]
+        expanded = [
+            (
+                self._collapse_effect_sensitive_case_wrapper(
+                    value,
+                    case_value,
+                    case_conditions,
+                    effect_summary,
+                ),
+                case_conditions,
+            )
+            for case_value, case_conditions in expanded
+        ]
 
         deduplicated = self._deduplicate_expression_cases(expanded)
         if self.debug and deduplicated:
@@ -4822,35 +4835,97 @@ class ReturnAnalyzer:
         conditions: List[Condition],
         effect_summary: EffectSummary,
     ) -> Optional[Expression]:
-        rewritten_observed = None
+        for rewrite_kind, rewritten in self._iter_effect_sensitive_rewrite_candidates(
+            value,
+            conditions,
+            effect_summary,
+        ):
+            if self._accept_effect_sensitive_rewrite(
+                value,
+                rewritten,
+                rewrite_kind=rewrite_kind,
+            ):
+                return rewritten
+        return value
+
+    def _iter_effect_sensitive_rewrite_candidates(
+        self,
+        value: Expression,
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Iterable[Tuple[str, Optional[Expression]]]:
         if self._expression_contains_observed_loads(value):
-            rewritten_observed = rewrite_observed_loads_from_effects(
+            yield (
+                "observed-load",
+                rewrite_observed_loads_from_effects(
+                    value,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                ),
+            )
+        yield (
+            "generic effect-sensitive",
+            rewrite_loads_from_effects(
                 value,
                 conditions,
                 effect_summary.effects,
                 self._current_parameters,
-            )
-            if self._accept_effect_sensitive_rewrite(
-                value,
-                rewritten_observed,
-                rewrite_kind="observed-load",
-            ):
-                return rewritten_observed
-
-        rewritten_generic = rewrite_loads_from_effects(
-            value,
-            conditions,
-            effect_summary.effects,
-            self._current_parameters,
+            ),
         )
-        if self._accept_effect_sensitive_rewrite(
-            value,
-            rewritten_generic,
-            rewrite_kind="generic effect-sensitive",
-        ):
-            return rewritten_generic
 
-        return value
+    def _collapse_effect_sensitive_case_wrapper(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        if original is None or rewritten is None:
+            return rewritten
+        if (
+            original.expr_type != ExpressionType.BINARY_OP
+            or rewritten.expr_type != ExpressionType.BINARY_OP
+            or original.operator != rewritten.operator
+            or len(original.operands) != 2
+            or len(rewritten.operands) != 2
+        ):
+            return rewritten
+
+        original_operands = list(original.operands)
+        rewritten_operands = list(rewritten.operands)
+        for original_index, original_operand in enumerate(original_operands):
+            location = canonicalize_expr_read_location(
+                original_operand,
+                self._current_parameters,
+            )
+            if location is None:
+                continue
+            shared_original = original_operands[1 - original_index]
+            for rewritten_index, rewritten_operand in enumerate(rewritten_operands):
+                shared_rewritten = rewritten_operands[1 - rewritten_index]
+                if not _expressions_equivalent(shared_rewritten, shared_original):
+                    continue
+                if (
+                    _find_matching_effect_value(
+                        rewritten_operand,
+                        location,
+                        conditions,
+                        effect_summary.effects,
+                        self._current_parameters,
+                    )
+                    is None
+                ):
+                    continue
+                if self.debug:
+                    self._debug_print(
+                        "Collapsed duplicate effect-sensitive binary wrapper: "
+                        f"{self._debug_expr_identity_summary(rewritten)} -> "
+                        f"{self._debug_expr_identity_summary(rewritten_operand)}"
+                    )
+                return rewritten_operand
+
+        return rewritten
 
     def _accept_effect_sensitive_rewrite(
         self,
@@ -4881,11 +4956,10 @@ class ReturnAnalyzer:
     def _effect_sensitive_rewrite_rank(
         self,
         expr: Optional[Expression],
-    ) -> Tuple[int, int, int, int, int]:
+    ) -> Tuple[int, int, int, int]:
         if expr is None:
-            return (0, 0, 0, 0, 0)
+            return (0, 0, 0, 0)
         return (
-            1 if expression_contains_synthetic_location_reads(expr) else 0,
             1 if expression_contains_post_state_reads(expr) else 0,
             1 if self._expression_contains_phi(expr) else 0,
             1 if self._expression_contains_observed_loads(expr) else 0,
@@ -5359,6 +5433,12 @@ class ReturnAnalyzer:
             prefer_canonical_post_state=True,
             symbolic_post_state=True,
         )
+        canonicalized = self._collapse_effect_sensitive_case_wrapper(
+            value,
+            canonicalized,
+            conditions,
+            effect_summary,
+        )
         if self._should_replay_canonicalized_return(canonicalized, value):
             replayed = normalize_post_state_expression(
                 canonicalized,
@@ -5420,7 +5500,7 @@ class ReturnAnalyzer:
     ) -> bool:
         if canonicalized is None or _expressions_equivalent(canonicalized, original):
             return False
-        if not expression_contains_synthetic_location_reads(canonicalized):
+        if not expression_contains_post_state_reads(canonicalized):
             return False
         lowered_roundtrip = lower_post_state_expression_for_smt(
             canonicalized,
