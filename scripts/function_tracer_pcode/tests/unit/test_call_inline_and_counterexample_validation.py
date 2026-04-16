@@ -182,25 +182,354 @@ def test_return_analyzer_allows_safe_call_summary_despite_incomplete_control_flo
     assert expanded[0].value.to_string() == "(arg0 + 2)"
 
 
-def test_return_analyzer_accepts_pure_passthrough_ops_after_terminal_call():
+def test_return_analyzer_ignores_irrelevant_outputs_after_terminal_call():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    current_function = Mock()
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
 
     class _FakeOp:
-        def __init__(self, mnemonic):
+        def __init__(self, mnemonic, output=None, inputs=None):
             self._mnemonic = mnemonic
+            self._output = output
+            self._inputs = list(inputs or [])
 
         def getMnemonic(self):
             return self._mnemonic
 
-    call_op = _FakeOp("CALL")
-    copy_op = _FakeOp("COPY")
-    subpiece_op = _FakeOp("SUBPIECE")
-    return_op = _FakeOp("RETURN")
-    block_info = Mock(pcode_ops=[call_op, copy_op, subpiece_op, return_op])
+        def getOutput(self):
+            return self._output
 
-    terminal = analyzer._find_terminal_call_on_block_path([block_info], return_op)
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+    return_varnode = Mock(name="return_varnode")
+    unrelated_output = Mock(name="unrelated_output")
+    unrelated_input = Mock(name="unrelated_input")
+    call_op = _FakeOp("CALL")
+    copy_op = _FakeOp("COPY", output=unrelated_output, inputs=[unrelated_input])
+    return_op = _FakeOp("RETURN")
+    block_info = Mock(index=0, pcode_ops=[call_op, copy_op, return_op])
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: {
+        return_varnode: _FakeStorage("v0", "v0", 64, 0),
+        unrelated_output: _FakeStorage("s0", "s0", 64, 0),
+        unrelated_input: _FakeStorage("s1", "s1", 64, 0),
+    }.get(vn)
+
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    terminal = analyzer._find_terminal_call_on_block_path(
+        [block_info],
+        return_op,
+        tracer=tracer,
+        condition_tracker=Mock(),
+        current_function=current_function,
+    )
 
     assert terminal is call_op
+
+
+def test_return_analyzer_accepts_indirect_placeholder_after_terminal_call():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    current_function = Mock()
+    condition_tracker = Mock()
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def isConstantAddress(self):
+            return True
+
+        def getOffset(self):
+            return self._offset
+
+    class _FakeVarnode:
+        def __init__(self, name, *, offset=0, is_constant=False):
+            self._name = name
+            self._offset = offset
+            self._is_constant = is_constant
+
+        def isConstant(self):
+            return self._is_constant
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddress(self):
+            return _FakeAddress(self._offset)
+
+        def __repr__(self):
+            return self._name
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None, inputs=None):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._inputs = list(inputs or [])
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+    return_varnode = Mock(name="return_varnode")
+    indirect_output = Mock(name="indirect_output")
+    zero_input = _FakeVarnode("zero", offset=0, is_constant=True)
+    iop_input = _FakeVarnode("iop_ref", offset=74, is_constant=False)
+
+    call_op = _FakeOp("CALL")
+    indirect_op = _FakeOp("INDIRECT", output=indirect_output, inputs=[zero_input, iop_input])
+    return_op = _FakeOp("RETURN")
+    block_info = Mock(index=0, pcode_ops=[call_op, indirect_op, return_op])
+    condition_tracker.get_block_by_hash.return_value = block_info
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: {
+        return_varnode: _FakeStorage("v0", "v0", 64, 0),
+        indirect_output: _FakeStorage("v0", "v0", 64, 0),
+    }.get(vn)
+
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    terminal = analyzer._find_terminal_call_on_block_path(
+        [block_info],
+        return_op,
+        tracer=tracer,
+        condition_tracker=condition_tracker,
+        current_function=current_function,
+    )
+
+    assert terminal is call_op
+
+
+def test_return_analyzer_matches_return_site_across_distinct_pcode_objects():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    current_function = Mock()
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeAddressSpace:
+        def __init__(self, name="ram"):
+            self._name = name
+
+        def getName(self):
+            return self._name
+
+    class _FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space = _FakeAddressSpace(space_name)
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self._space
+
+        def __str__(self):
+            return f"{self._space.getName()}:{self._offset:x}"
+
+    class _FakeSeqnum:
+        def __init__(self, target, time, order=0):
+            self._target = _FakeAddress(target)
+            self._time = time
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getTime(self):
+            return self._time
+
+        def getOrder(self):
+            return self._order
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None, inputs=None, *, target=0x1000, time=0, order=0):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._inputs = list(inputs or [])
+            self._seqnum = _FakeSeqnum(target, time, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    return_varnode = Mock(name="return_varnode")
+    unrelated_output = Mock(name="unrelated_output")
+    unrelated_input = Mock(name="unrelated_input")
+    call_op = _FakeOp("CALL", target=0x401020, time=10)
+    copy_op = _FakeOp(
+        "COPY",
+        output=unrelated_output,
+        inputs=[unrelated_input],
+        target=0x401028,
+        time=11,
+    )
+    block_return_op = _FakeOp("RETURN", target=0x401030, time=12, order=3)
+    queried_return_op = _FakeOp("RETURN", target=0x401030, time=12, order=3)
+    block_info = Mock(index=0, pcode_ops=[call_op, copy_op, block_return_op])
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: {
+        return_varnode: _FakeStorage("v0", "v0", 64, 0),
+        unrelated_output: _FakeStorage("s0", "s0", 64, 0),
+        unrelated_input: _FakeStorage("s1", "s1", 64, 0),
+    }.get(vn)
+
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    terminal = analyzer._find_terminal_call_on_block_path(
+        [block_info],
+        queried_return_op,
+        tracer=tracer,
+        condition_tracker=Mock(),
+        current_function=current_function,
+    )
+
+    assert terminal is call_op
+
+
+def test_return_analyzer_rejects_non_passthrough_rewrite_after_terminal_call():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    tracer = Mock()
+    current_function = Mock()
+    condition_tracker = Mock()
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
+
+    class _FakeOp:
+        def __init__(self, mnemonic, output=None, inputs=None):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._inputs = list(inputs or [])
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+    return_varnode = Mock(name="return_varnode")
+    rewritten_output = Mock(name="rewritten_output")
+    lhs = Mock(name="lhs")
+    rhs = Mock(name="rhs")
+    call_op = _FakeOp("CALL")
+    add_op = _FakeOp("INT_ADD", output=rewritten_output, inputs=[lhs, rhs])
+    return_op = _FakeOp("RETURN")
+    block_info = Mock(index=0, pcode_ops=[call_op, add_op, return_op])
+    condition_tracker.get_block_by_hash.return_value = block_info
+
+    tracer._get_storage_info_from_varnode.side_effect = lambda vn: {
+        return_varnode: _FakeStorage("v0", "v0", 64, 0),
+        rewritten_output: _FakeStorage("v0", "v0", 64, 0),
+        lhs: _FakeStorage("a0", "a0", 64, 0),
+        rhs: _FakeStorage("a1", "a1", 64, 0),
+    }.get(vn)
+
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
+
+    terminal = analyzer._find_terminal_call_on_block_path(
+        [block_info],
+        return_op,
+        tracer=tracer,
+        condition_tracker=condition_tracker,
+        current_function=current_function,
+    )
+
+    assert terminal is None
 
 
 def test_expression_expander_inlines_direct_call_results():
@@ -2035,15 +2364,36 @@ def test_return_analyzer_uses_last_terminal_call_for_implicit_return_wrapper():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()
     condition_tracker = Mock()
+    current_function = Mock()
     return_op = Mock()
     call_op_1 = Mock()
     call_op_2 = Mock()
+    return_varnode = Mock(name="return_varnode")
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
 
     call_op_1.getMnemonic.return_value = "CALL"
     call_op_1.getOutput.return_value = None
     call_op_2.getMnemonic.return_value = "CALL"
     call_op_2.getOutput.return_value = None
     return_op.getParent.return_value = Mock()
+    tracer._get_storage_info_from_varnode.return_value = _FakeStorage("x0", "x0", 64, 0)
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
 
     block_info = Mock()
     block_info.pcode_ops = [call_op_1, call_op_2, return_op]
@@ -2066,7 +2416,7 @@ def test_return_analyzer_uses_last_terminal_call_for_implicit_return_wrapper():
                 0,
                 all_path_conditions=[[]],
                 active_functions=set(),
-                current_function=Mock(),
+                current_function=current_function,
             )
 
     assert result == recovered
@@ -2078,6 +2428,24 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     tracer = Mock()
     condition_tracker = Mock()
     current_function = Mock()
+    return_varnode = Mock(name="return_varnode")
+
+    class _FakeStorage:
+        def __init__(self, register_name, base_register_name, size_bits, bit_offset_in_base):
+            self.is_register = True
+            self.register_name = register_name
+            self.base_register_name = base_register_name
+            self.size_bits = size_bits
+            self.size = size_bits // 8
+            self.bit_offset_in_base = bit_offset_in_base
+
+        def shares_base_register_with(self, other):
+            return self.base_register_name == other.base_register_name
+
+        def bit_range_overlaps_with(self, other):
+            self_high = self.bit_offset_in_base + self.size_bits
+            other_high = other.bit_offset_in_base + other.size_bits
+            return not (self_high <= other.bit_offset_in_base or other_high <= self.bit_offset_in_base)
 
     analysis = FunctionReturnAnalysis(
         function_name="ptr_select_path",
@@ -2102,6 +2470,12 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
         def getSeqnum(self):
             return self._seqnum()
 
+        def getNumInputs(self):
+            return 1
+
+        def getOutput(self):
+            return None
+
     call_then = _FakeOp("CALL")
     call_else = _FakeOp("CALL")
     branch = _FakeOp("BRANCH")
@@ -2120,6 +2494,8 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
         ([then_block, return_block], [cond_then]),
         ([else_block, return_block], [cond_else]),
     ]
+    tracer._get_storage_info_from_varnode.return_value = _FakeStorage("v0", "v0", 64, 0)
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [return_varnode]
 
     recovered_then = [
         ReturnInfo(

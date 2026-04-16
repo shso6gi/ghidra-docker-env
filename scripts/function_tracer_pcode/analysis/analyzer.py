@@ -2,6 +2,7 @@
 """Return解析メインモジュール（符号性検出統合版）"""
 
 import re
+from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
 
@@ -54,6 +55,53 @@ from .memory_resolver import concretize_readonly_loads
 from .recurrence_summary import StructuralRecurrenceSummarizer
 
 
+_PCODE_OPCODE_BY_MNEMONIC = {
+    "COPY": 1,
+    "LOAD": 2,
+    "STORE": 3,
+    "BRANCH": 4,
+    "CBRANCH": 5,
+    "BRANCHIND": 6,
+    "CALL": 7,
+    "CALLIND": 8,
+    "RETURN": 10,
+    "INT_ZEXT": 17,
+    "INT_SEXT": 18,
+    "MULTIEQUAL": 60,
+    "INDIRECT": 61,
+    "PIECE": 62,
+    "SUBPIECE": 63,
+    "CAST": 64,
+}
+
+_PCODE_CALL_OPCODES = {
+    _PCODE_OPCODE_BY_MNEMONIC["CALL"],
+    _PCODE_OPCODE_BY_MNEMONIC["CALLIND"],
+}
+
+_PCODE_BRANCHLIKE_OPCODES = {
+    _PCODE_OPCODE_BY_MNEMONIC["BRANCH"],
+    _PCODE_OPCODE_BY_MNEMONIC["CBRANCH"],
+    _PCODE_OPCODE_BY_MNEMONIC["BRANCHIND"],
+}
+
+_PCODE_VALUE_PASSTHROUGH_OPCODES = {
+    _PCODE_OPCODE_BY_MNEMONIC["COPY"],
+    _PCODE_OPCODE_BY_MNEMONIC["CAST"],
+    _PCODE_OPCODE_BY_MNEMONIC["INT_ZEXT"],
+    _PCODE_OPCODE_BY_MNEMONIC["INT_SEXT"],
+    _PCODE_OPCODE_BY_MNEMONIC["SUBPIECE"],
+}
+
+
+@dataclass
+class _TrackedReturnValue:
+    """RETURN provenance の逆追跡対象。"""
+
+    varnode: Optional[Any] = None
+    storage: Optional[StorageInfo] = None
+
+
 class ReturnAnalyzer:
     """関数のReturn値を解析"""
 
@@ -74,6 +122,7 @@ class ReturnAnalyzer:
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
         self._last_function_lookup_error: Optional[str] = None
+        self._current_function_prototype = None
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -157,6 +206,42 @@ class ReturnAnalyzer:
             "pcode_time": pcode_time,
         }
 
+    def _pcode_op_identity_key(self, pcode_op) -> Optional[Tuple[Any, ...]]:
+        if pcode_op is None:
+            return None
+
+        site = self._describe_pcode_site(pcode_op)
+        output = getattr(pcode_op, "getOutput", lambda: None)()
+        output_key = self._varnode_location_key(output)
+        if output_key is None and output is not None:
+            output_key = ("id", id(output))
+
+        mnemonic = None
+        try:
+            mnemonic = str(pcode_op.getMnemonic())
+        except Exception:
+            mnemonic = None
+
+        identity = (
+            site.get("address"),
+            site.get("pcode_time"),
+            site.get("pcode_order"),
+            mnemonic,
+            output_key,
+        )
+        if identity[0] is None and identity[1] is None and identity[2] is None and identity[3] is None:
+            return None
+        return identity
+
+    def _pcode_ops_match(self, lhs, rhs) -> bool:
+        if lhs is rhs:
+            return True
+        lhs_key = self._pcode_op_identity_key(lhs)
+        rhs_key = self._pcode_op_identity_key(rhs)
+        if lhs_key is None or rhs_key is None:
+            return False
+        return lhs_key == rhs_key
+
     def _return_site_key(self, ret_info: ReturnInfo) -> str:
         return ret_info.site_key()
 
@@ -201,20 +286,28 @@ class ReturnAnalyzer:
         return False
 
     @contextmanager
-    def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary]):
+    def _analysis_context(
+        self,
+        parameters: List[Dict],
+        effect_summary: Optional[EffectSummary],
+        function_prototype=None,
+    ):
         """Temporarily bind per-analysis state and restore the parent context on exit."""
         previous_parameters = self._current_parameters
         previous_effect_summary = self._current_effect_summary
         previous_deferred_calls = self._current_deferred_calls
+        previous_function_prototype = self._current_function_prototype
         self._current_parameters = parameters
         self._current_effect_summary = effect_summary
         self._current_deferred_calls = {}
+        self._current_function_prototype = function_prototype
         try:
             yield
         finally:
             self._current_parameters = previous_parameters
             self._current_effect_summary = previous_effect_summary
             self._current_deferred_calls = previous_deferred_calls
+            self._current_function_prototype = previous_function_prototype
     
     def _get_decompiler(self):
         if self._decompiler is None:
@@ -531,7 +624,13 @@ class ReturnAnalyzer:
             tracer,
             active_functions,
         )
-        with self._analysis_context(parameters, None):
+        function_prototype = None
+        try:
+            function_prototype = high_function.getFunctionPrototype()
+        except Exception:
+            function_prototype = None
+
+        with self._analysis_context(parameters, None, function_prototype=function_prototype):
             # Step 2: condition_tracker作成（まだビルドしない）
             condition_tracker = ConditionTracker(tracer)
 
@@ -1646,58 +1745,502 @@ class ReturnAnalyzer:
         current_function=None,
         path_conditions: Optional[List[Condition]] = None,
     ):
-        """block path 上で RETURN に至る直前の wrapper 候補 CALL/CALLIND を探す。"""
-        linear_ops = []
-        for block_info in block_path:
-            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
-                linear_ops.append(pcode_op)
-                if pcode_op is return_op:
-                    break
-            if linear_ops and linear_ops[-1] is return_op:
-                break
-
-        if not linear_ops or linear_ops[-1] is not return_op:
+        """block path 上で RETURN 値 provenance を満たす wrapper 候補 CALL/CALLIND を探す。"""
+        linear_ops = self._collect_linear_ops_to_return(block_path, return_op)
+        if not linear_ops:
             return None
-
-        terminal_index = None
-        for index, pcode_op in enumerate(linear_ops[:-1]):
-            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}:
-                terminal_index = index
-
-        if terminal_index is None:
-            return None
-
-        for pcode_op in linear_ops[terminal_index + 1:-1]:
-            if not self._is_wrapper_passthrough_pcode_op(pcode_op):
-                return None
-
-        if not self._is_call_output_dominating_return_value(
-            linear_ops[terminal_index],
+        return self._find_terminal_call_from_linear_ops(
+            linear_ops,
             return_op,
             tracer=tracer,
             condition_tracker=condition_tracker,
             current_function=current_function,
             block_path=block_path,
             path_conditions=path_conditions,
+        )
+
+    def _collect_linear_ops_to_return(
+        self,
+        block_path: List[Any],
+        return_op,
+    ) -> Optional[List[Any]]:
+        linear_ops = []
+        for block_info in block_path:
+            for pcode_op in getattr(block_info, "pcode_ops", []) or []:
+                linear_ops.append(pcode_op)
+                if self._pcode_ops_match(pcode_op, return_op):
+                    break
+            if linear_ops and self._pcode_ops_match(linear_ops[-1], return_op):
+                break
+
+        if not linear_ops or not self._pcode_ops_match(linear_ops[-1], return_op):
+            return None
+        return linear_ops
+
+    def _find_terminal_call_from_linear_ops(
+        self,
+        linear_ops: List[Any],
+        return_op,
+        *,
+        tracer: Optional[PcodeTracer] = None,
+        condition_tracker: Optional[ConditionTracker] = None,
+        current_function=None,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        for index in range(len(linear_ops) - 2, -1, -1):
+            pcode_op = linear_ops[index]
+            if not self._is_pcode_call_op(pcode_op):
+                continue
+            if self._call_output_proves_wrapper_return(
+                linear_ops,
+                index,
+                return_op,
+                tracer=tracer,
+                condition_tracker=condition_tracker,
+                current_function=current_function,
+                block_path=block_path,
+                path_conditions=path_conditions,
+            ):
+                if self.debug:
+                    self._debug_print(
+                        "Wrapper provenance selected terminal "
+                        f"{self._pcode_op_debug_name(pcode_op)} before RETURN"
+                    )
+                return pcode_op
+        return None
+
+    def _get_pcode_opcode(self, pcode_op) -> Optional[int]:
+        if pcode_op is None:
+            return None
+        get_opcode = getattr(pcode_op, "getOpcode", None)
+        if callable(get_opcode):
+            try:
+                return int(get_opcode())
+            except Exception:
+                pass
+        get_mnemonic = getattr(pcode_op, "getMnemonic", None)
+        if callable(get_mnemonic):
+            try:
+                mnemonic = str(get_mnemonic())
+            except Exception:
+                mnemonic = ""
+            return _PCODE_OPCODE_BY_MNEMONIC.get(mnemonic)
+        return None
+
+    def _pcode_op_debug_name(self, pcode_op) -> str:
+        if pcode_op is None:
+            return "<none>"
+        get_mnemonic = getattr(pcode_op, "getMnemonic", None)
+        if callable(get_mnemonic):
+            try:
+                return str(get_mnemonic())
+            except Exception:
+                return "<pcode>"
+        return "<pcode>"
+
+    def _is_pcode_call_op(self, pcode_op) -> bool:
+        opcode = self._get_pcode_opcode(pcode_op)
+        return opcode in _PCODE_CALL_OPCODES
+
+    def _tracked_return_value_key(self, tracked: _TrackedReturnValue) -> Tuple[Any, ...]:
+        varnode_key = self._varnode_location_key(tracked.varnode)
+        if varnode_key is None and tracked.varnode is not None:
+            varnode_key = ("id", id(tracked.varnode))
+        storage = tracked.storage
+        storage_key = None
+        if storage is not None:
+            storage_key = (
+                bool(getattr(storage, "is_register", False)),
+                getattr(storage, "space_name", None),
+                getattr(storage, "offset", None),
+                getattr(storage, "size", None),
+                getattr(storage, "size_bits", None),
+                getattr(storage, "register_name", None),
+                getattr(storage, "base_register_name", None),
+                getattr(storage, "bit_offset_in_base", None),
+            )
+        return (varnode_key, storage_key)
+
+    def _deduplicate_tracked_return_values(
+        self,
+        tracked_values: List[_TrackedReturnValue],
+    ) -> List[_TrackedReturnValue]:
+        deduped: List[_TrackedReturnValue] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        for tracked in tracked_values:
+            key = self._tracked_return_value_key(tracked)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(tracked)
+        return deduped
+
+    def _make_tracked_return_value(
+        self,
+        varnode,
+        tracer: Optional[PcodeTracer],
+    ) -> _TrackedReturnValue:
+        storage = None
+        if tracer is not None and varnode is not None:
+            try:
+                storage = tracer._get_storage_info_from_varnode(varnode)
+            except Exception:
+                storage = None
+        return _TrackedReturnValue(varnode=varnode, storage=storage)
+
+    def _build_return_tracking_targets(
+        self,
+        return_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        current_function,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
+    ) -> List[_TrackedReturnValue]:
+        tracked_values: List[_TrackedReturnValue] = []
+
+        explicit_inputs = self._coerce_optional_int(
+            getattr(return_op, "getNumInputs", lambda: 0)()
+        )
+        explicit_inputs = explicit_inputs if explicit_inputs is not None else 0
+        if explicit_inputs >= 2:
+            try:
+                tracked_values.append(
+                    self._make_tracked_return_value(return_op.getInput(1), tracer)
+                )
+            except Exception:
+                pass
+
+        if not tracked_values and tracer is not None and condition_tracker is not None:
+            source_varnode = self._find_implicit_return_source_varnode(
+                return_op,
+                tracer,
+                condition_tracker,
+                current_function,
+                block_path=block_path,
+                path_conditions=path_conditions,
+            )
+            if source_varnode is not None:
+                tracked_values.append(
+                    self._make_tracked_return_value(source_varnode, tracer)
+                )
+
+        if not tracked_values and tracer is not None:
+            for storage in self._get_implicit_return_target_storages(current_function, tracer):
+                tracked_values.append(_TrackedReturnValue(varnode=None, storage=storage))
+
+        return self._deduplicate_tracked_return_values(tracked_values)
+
+    def _call_output_proves_wrapper_return(
+        self,
+        linear_ops: List[Any],
+        candidate_index: int,
+        return_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        current_function,
+        block_path=None,
+        path_conditions: Optional[List[Condition]] = None,
+    ) -> bool:
+        tracked_values = self._build_return_tracking_targets(
+            return_op,
+            tracer=tracer,
+            condition_tracker=condition_tracker,
+            current_function=current_function,
+            block_path=block_path,
+            path_conditions=path_conditions,
+        )
+        if not tracked_values:
+            if self.debug:
+                self._debug_print(
+                    "Wrapper provenance failed: no return tracking targets were available"
+                )
+            return False
+
+        for pcode_op in reversed(linear_ops[candidate_index + 1:-1]):
+            tracked_values = self._rewrite_tracked_return_values_for_op(
+                tracked_values,
+                pcode_op,
+                tracer=tracer,
+                condition_tracker=condition_tracker,
+                path_conditions=path_conditions,
+                current_function=current_function,
+            )
+            if not tracked_values:
+                if self.debug:
+                    self._debug_print(
+                        "Wrapper provenance rejected due to intervening op "
+                        f"{self._pcode_op_debug_name(pcode_op)}"
+                    )
+                return False
+
+        return self._tracked_values_match_call_output(
+            tracked_values,
+            linear_ops[candidate_index],
+            tracer=tracer,
+            current_function=current_function,
+        )
+
+    def _rewrite_tracked_return_values_for_op(
+        self,
+        tracked_values: List[_TrackedReturnValue],
+        pcode_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        path_conditions: Optional[List[Condition]] = None,
+        current_function=None,
+    ) -> Optional[List[_TrackedReturnValue]]:
+        rewritten: List[_TrackedReturnValue] = []
+        for tracked in tracked_values:
+            updated = self._rewrite_single_tracked_return_value_for_op(
+                tracked,
+                pcode_op,
+                tracer=tracer,
+                condition_tracker=condition_tracker,
+                path_conditions=path_conditions,
+                current_function=current_function,
+            )
+            if updated is None:
+                return None
+            rewritten.extend(updated)
+        return self._deduplicate_tracked_return_values(rewritten)
+
+    def _rewrite_single_tracked_return_value_for_op(
+        self,
+        tracked: _TrackedReturnValue,
+        pcode_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        path_conditions: Optional[List[Condition]] = None,
+        current_function=None,
+    ) -> Optional[List[_TrackedReturnValue]]:
+        if not self._tracked_return_value_is_affected_by_op(
+            tracked,
+            pcode_op,
+            tracer=tracer,
+            current_function=current_function,
         ):
+            return [tracked]
+
+        opcode = self._get_pcode_opcode(pcode_op)
+        if opcode in _PCODE_CALL_OPCODES:
             return None
 
-        return linear_ops[terminal_index]
+        if opcode in _PCODE_VALUE_PASSTHROUGH_OPCODES:
+            propagated = self._propagate_passthrough_input_from_op(pcode_op, tracer)
+            return propagated if propagated else None
 
-    def _is_wrapper_passthrough_pcode_op(self, pcode_op) -> bool:
-        """terminal CALL の後ろに許容できる op だけを通す。"""
-        mnemonic = pcode_op.getMnemonic()
-        return mnemonic in {
-            "BRANCH",
-            "CBRANCH",
-            "BRANCHIND",
-            "MULTIEQUAL",
-            "COPY",
-            "CAST",
-            "INT_ZEXT",
-            "INT_SEXT",
-            "SUBPIECE",
-        }
+        if opcode == _PCODE_OPCODE_BY_MNEMONIC["MULTIEQUAL"]:
+            propagated = self._propagate_multiequal_input_for_return_path(
+                pcode_op,
+                tracer=tracer,
+                condition_tracker=condition_tracker,
+                path_conditions=path_conditions,
+            )
+            return propagated if propagated else None
+
+        if opcode == _PCODE_OPCODE_BY_MNEMONIC["INDIRECT"]:
+            propagated = self._propagate_indirect_return_effect(
+                tracked,
+                pcode_op,
+                tracer=tracer,
+            )
+            return propagated if propagated else None
+
+        return None
+
+    def _tracked_return_value_is_affected_by_op(
+        self,
+        tracked: _TrackedReturnValue,
+        pcode_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        current_function=None,
+    ) -> bool:
+        output = getattr(pcode_op, "getOutput", lambda: None)()
+        output_storage = None
+        if tracer is not None and output is not None:
+            try:
+                output_storage = tracer._get_storage_info_from_varnode(output)
+            except Exception:
+                output_storage = None
+
+        if tracked.varnode is not None and output is not None and self._varnodes_may_alias(tracked.varnode, output):
+            return True
+
+        tracked_storage = tracked.storage
+        if tracked_storage is None and tracked.varnode is not None and tracer is not None:
+            try:
+                tracked_storage = tracer._get_storage_info_from_varnode(tracked.varnode)
+            except Exception:
+                tracked_storage = None
+
+        if tracked_storage is not None and output_storage is not None:
+            if self._storages_overlap_for_return_recovery(tracked_storage, output_storage):
+                return True
+
+        if output is None and self._is_pcode_call_op(pcode_op) and tracked_storage is not None and tracer is not None:
+            for return_storage in self._get_implicit_return_target_storages(current_function, tracer):
+                if self._storages_overlap_for_return_recovery(tracked_storage, return_storage):
+                    return True
+        return False
+
+    def _propagate_passthrough_input_from_op(
+        self,
+        pcode_op,
+        tracer: Optional[PcodeTracer],
+    ) -> List[_TrackedReturnValue]:
+        input_varnode = getattr(pcode_op, "getInput", lambda _idx: None)(0)
+        if input_varnode is None:
+            return []
+        return [self._make_tracked_return_value(input_varnode, tracer)]
+
+    def _propagate_multiequal_input_for_return_path(
+        self,
+        pcode_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        path_conditions: Optional[List[Condition]] = None,
+    ) -> List[_TrackedReturnValue]:
+        if condition_tracker is None:
+            return []
+        parent = getattr(pcode_op, "getParent", lambda: None)()
+        predecessor = None
+        normalized_conditions = list(path_conditions or [])
+        if parent is not None:
+            get_in_size = getattr(parent, "getInSize", None)
+            get_in = getattr(parent, "getIn", None)
+            if callable(get_in_size) and callable(get_in):
+                current_keys = self._build_condition_signature_set(normalized_conditions)
+                best_score = None
+                try:
+                    for index in range(int(get_in_size())):
+                        incoming = get_in(index)
+                        score = self._score_multiequal_incoming_for_return_path(
+                            incoming,
+                            None,
+                            condition_tracker,
+                            current_keys,
+                        )
+                        if best_score is None or score > best_score[0]:
+                            best_score = (score, incoming)
+                except Exception:
+                    best_score = None
+                if best_score is not None:
+                    predecessor = best_score[1]
+
+        selected = self._select_multiequal_input_for_return_path(
+            multiequal_op=pcode_op,
+            predecessor=predecessor,
+            condition_tracker=condition_tracker,
+            path_conditions=normalized_conditions,
+        )
+        if selected is None:
+            try:
+                selected = pcode_op.getInput(0)
+            except Exception:
+                selected = None
+        if selected is None:
+            return []
+        return [self._make_tracked_return_value(selected, tracer)]
+
+    def _is_zero_constant_varnode(self, varnode) -> bool:
+        if varnode is None:
+            return False
+        is_constant = getattr(varnode, "isConstant", None)
+        if callable(is_constant):
+            try:
+                if bool(is_constant()):
+                    return int(varnode.getOffset()) == 0
+            except Exception:
+                pass
+        address = getattr(varnode, "getAddress", lambda: None)()
+        if address is not None:
+            is_constant_address = getattr(address, "isConstantAddress", None)
+            if callable(is_constant_address):
+                try:
+                    if bool(is_constant_address()):
+                        return int(address.getOffset()) == 0
+                except Exception:
+                    pass
+        return False
+
+    def _propagate_indirect_return_effect(
+        self,
+        tracked: _TrackedReturnValue,
+        pcode_op,
+        tracer: Optional[PcodeTracer],
+    ) -> List[_TrackedReturnValue]:
+        try:
+            base_input = pcode_op.getInput(0)
+        except Exception:
+            return []
+
+        # Ghidra の INDIRECT は input0 が 0 の場合、
+        # 出力が「副作用 op によってのみ生成された値」であることを表す。
+        # この場合は return storage 自体を追跡し続ける。
+        if self._is_zero_constant_varnode(base_input):
+            return [tracked]
+
+        if base_input is None:
+            return []
+        return [self._make_tracked_return_value(base_input, tracer)]
+
+    def _tracked_values_match_call_output(
+        self,
+        tracked_values: List[_TrackedReturnValue],
+        call_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        current_function=None,
+    ) -> bool:
+        call_output = getattr(call_op, "getOutput", lambda: None)()
+        call_output_storage = None
+        if tracer is not None and call_output is not None:
+            try:
+                call_output_storage = tracer._get_storage_info_from_varnode(call_output)
+            except Exception:
+                call_output_storage = None
+
+        if call_output is None:
+            if tracer is None:
+                return False
+            return_storages = self._get_implicit_return_target_storages(current_function, tracer)
+            for tracked in tracked_values:
+                tracked_storage = tracked.storage
+                if tracked_storage is None and tracked.varnode is not None:
+                    try:
+                        tracked_storage = tracer._get_storage_info_from_varnode(tracked.varnode)
+                    except Exception:
+                        tracked_storage = None
+                if tracked_storage is None:
+                    continue
+                if any(
+                    self._storages_overlap_for_return_recovery(tracked_storage, return_storage)
+                    for return_storage in return_storages
+                ):
+                    return True
+            return False
+
+        for tracked in tracked_values:
+            if tracked.varnode is not None and self._varnodes_may_alias(tracked.varnode, call_output):
+                return True
+            tracked_storage = tracked.storage
+            if tracked_storage is None and tracked.varnode is not None and tracer is not None:
+                try:
+                    tracked_storage = tracer._get_storage_info_from_varnode(tracked.varnode)
+                except Exception:
+                    tracked_storage = None
+            if tracked_storage is not None and call_output_storage is not None:
+                if self._storages_overlap_for_return_recovery(tracked_storage, call_output_storage):
+                    return True
+        return False
 
     def _parameter_storages_overlap_for_passthrough(
         self,
@@ -2669,6 +3212,22 @@ class ReturnAnalyzer:
             return []
         return []
 
+    def _get_current_prototype_return_varnodes(self) -> List[Any]:
+        prototype = self._current_function_prototype
+        if prototype is None:
+            return []
+        try:
+            storage = prototype.getReturnStorage()
+            if storage is None:
+                return []
+            get_varnodes = getattr(storage, "getVarnodes", None)
+            if callable(get_varnodes):
+                raw_varnodes = cast(Iterable[Any], get_varnodes())
+                return [vn for vn in raw_varnodes if vn is not None]
+        except Exception:
+            return []
+        return []
+
     def _infer_abi_return_storages(self) -> List[StorageInfo]:
         """関数シグネチャが void に潰れていても使える保守的な返り値レジスタ候補。"""
         try:
@@ -2715,13 +3274,17 @@ class ReturnAnalyzer:
         tracer: PcodeTracer,
     ) -> List[StorageInfo]:
         target_storages: List[StorageInfo] = []
+        for return_varnode in self._get_current_prototype_return_varnodes():
+            storage = tracer._get_storage_info_from_varnode(return_varnode)
+            if storage is not None:
+                target_storages.append(storage)
         for return_varnode in self._get_function_return_varnodes(function):
             storage = tracer._get_storage_info_from_varnode(return_varnode)
             if storage is not None:
                 target_storages.append(storage)
 
         if target_storages:
-            return target_storages
+            return self._deduplicate_storage_infos(target_storages)
 
         fallback = self._infer_abi_return_storages()
         if self.debug and fallback:
@@ -2730,6 +3293,29 @@ class ReturnAnalyzer:
                 f"Using ABI fallback return storages: {names}"
             )
         return fallback
+
+    def _deduplicate_storage_infos(
+        self,
+        storages: List[StorageInfo],
+    ) -> List[StorageInfo]:
+        deduped: List[StorageInfo] = []
+        seen: Set[Tuple[Any, ...]] = set()
+        for storage in storages:
+            key = (
+                bool(getattr(storage, "is_register", False)),
+                getattr(storage, "space_name", None),
+                getattr(storage, "offset", None),
+                getattr(storage, "size", None),
+                getattr(storage, "size_bits", None),
+                getattr(storage, "register_name", None),
+                getattr(storage, "base_register_name", None),
+                getattr(storage, "bit_offset_in_base", None),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(storage)
+        return deduped
 
     def _get_instruction_with_fallback(self, addr):
         listing = self.program.getListing()
@@ -3211,7 +3797,7 @@ class ReturnAnalyzer:
     ) -> bool:
         for block_info in block_path:
             for pcode_op in getattr(block_info, "pcode_ops", []) or []:
-                if pcode_op is return_op:
+                if self._pcode_ops_match(pcode_op, return_op):
                     return False
                 if self._is_noreturn_call_op(pcode_op, tracer):
                     return True
@@ -3505,7 +4091,7 @@ class ReturnAnalyzer:
         candidate = None
         for block_info in search_blocks:
             for pcode_op in getattr(block_info, "pcode_ops", []) or []:
-                if pcode_op is return_op:
+                if self._pcode_ops_match(pcode_op, return_op):
                     break
                 output = getattr(pcode_op, "getOutput", lambda: None)()
                 if output is None:
@@ -3700,48 +4286,18 @@ class ReturnAnalyzer:
         if return_block is None:
             return None
 
-        ops_before_return = []
-        for pcode_op in return_block.pcode_ops:
-            if pcode_op is return_op:
-                break
-            ops_before_return.append(pcode_op)
-
-        candidate = None
-        candidate_index = -1
-        for index in range(len(ops_before_return) - 1, -1, -1):
-            pcode_op = ops_before_return[index]
-            if pcode_op.getMnemonic() in {"CALL", "CALLIND"}:
-                candidate = pcode_op
-                candidate_index = index
-                break
-
-        if candidate is None:
+        linear_ops = self._collect_linear_ops_to_return([return_block], return_op)
+        if not linear_ops:
             return None
-
-        for later_op in ops_before_return[candidate_index + 1:]:
-            mnemonic = later_op.getMnemonic()
-            output = getattr(later_op, "getOutput", lambda: None)()
-            if mnemonic in {"CALL", "CALLIND", "STORE", "BRANCH", "CBRANCH", "BRANCHIND"}:
-                return None
-            if output is not None:
-                return None
-
-        if not self._is_call_output_dominating_return_value(
-            candidate,
+        return self._find_terminal_call_from_linear_ops(
+            linear_ops,
             return_op,
             tracer=tracer,
             condition_tracker=condition_tracker,
             current_function=current_function,
-            block_path=None,
+            block_path=[return_block],
             path_conditions=None,
-        ):
-            return None
-
-        if self.debug:
-            self._debug_print(
-                f"Implicit return wrapper recovery selected terminal {candidate.getMnemonic()} before RETURN"
-            )
-        return candidate
+        )
 
     @staticmethod
     def _varnode_location_key(varnode) -> Optional[Tuple[str, int, int]]:
