@@ -36,6 +36,7 @@ from .effect_summary import (
     EffectSummary,
     _build_parameter_replacements,
     _enumerate_constant_expression_branches,
+    _iter_expression_nodes,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _find_matching_effect_value,
@@ -46,6 +47,8 @@ from .effect_summary import (
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
+    promote_effect_value_match_to_post_state_read,
+    resolve_definite_post_state_read_for_location,
     resolve_call_targets,
     rewrite_loads_from_effects,
     rewrite_observed_loads_from_effects,
@@ -4714,9 +4717,18 @@ class ReturnAnalyzer:
                         f"Expansion {i}.{split_index}: split={self._debug_expr_identity_summary(split_value)}"
                     )
                     self._debug_print(f"  split_conditions={split_cond_strs}")
-                normalized_value = self._normalize_expanded_return_value(
-                    split_value,
-                    split_conditions,
+                preserve_split_value = (
+                    not _expressions_equivalent(split_value, ev.value)
+                    and not expression_contains_post_state_reads(split_value)
+                    and not self._expression_contains_observed_loads(split_value)
+                )
+                normalized_value = (
+                    split_value
+                    if preserve_split_value
+                    else self._normalize_expanded_return_value(
+                        split_value,
+                        split_conditions,
+                    )
                 )
                 if self.debug and normalized_value is not split_value:
                     self._debug_print(
@@ -4840,13 +4852,100 @@ class ReturnAnalyzer:
             conditions,
             effect_summary,
         ):
-            if self._accept_effect_sensitive_rewrite(
+            accepted = self._accept_effect_sensitive_rewrite(
                 value,
                 rewritten,
                 rewrite_kind=rewrite_kind,
+            )
+            if (
+                not accepted
+                and self._accept_effect_rewrite_without_rank_gain(
+                    value,
+                    rewritten,
+                    conditions,
+                    effect_summary,
+                )
             ):
+                accepted = True
+            if accepted:
                 return rewritten
         return value
+
+    def _accept_effect_rewrite_without_rank_gain(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> bool:
+        if original is None or rewritten is None:
+            return False
+        if _expressions_equivalent(original, rewritten):
+            return False
+        if self._expression_contains_observed_loads(original):
+            return False
+        if expression_contains_post_state_reads(rewritten):
+            return True
+        original_effect_locations = self._matched_effect_locations(
+            original,
+            conditions,
+            effect_summary,
+        )
+        rewritten_effect_locations = self._matched_effect_locations(
+            rewritten,
+            conditions,
+            effect_summary,
+        )
+        if rewritten_effect_locations > original_effect_locations:
+            return True
+
+        location = canonicalize_expr_read_location(
+            original,
+            self._current_parameters,
+        )
+        if location is None:
+            return False
+
+        original_match = _find_matching_effect_value(
+            original,
+            location,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        rewritten_match = _find_matching_effect_value(
+            rewritten,
+            location,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        return original_match is None and rewritten_match is not None
+
+    def _matched_effect_locations(
+        self,
+        expr: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> set[tuple]:
+        matched_locations: set[tuple] = set()
+        if expr is None:
+            return matched_locations
+
+        for current in _iter_expression_nodes(expr, include_phi_conditions=False):
+            location = canonicalize_expr_read_location(current, self._current_parameters)
+            if location is None:
+                continue
+            if _find_matching_effect_value(
+                current,
+                location,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            ) is None:
+                continue
+            matched_locations.add(location.stable_key())
+        return matched_locations
 
     def _iter_effect_sensitive_rewrite_candidates(
         self,
@@ -4854,6 +4953,26 @@ class ReturnAnalyzer:
         conditions: List[Condition],
         effect_summary: EffectSummary,
     ) -> Iterable[Tuple[str, Optional[Expression]]]:
+        expr_location = canonicalize_expr_read_location(
+            value,
+            self._current_parameters,
+        )
+        if expr_location is not None:
+            post_state_read = resolve_definite_post_state_read_for_location(
+                expr_location,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                symbolic_post_state=True,
+            )
+            if post_state_read is not None:
+                yield ("final object-state concrete", lower_post_state_expression_for_smt(
+                    post_state_read,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                ))
+                yield ("final object-state symbolic", post_state_read)
         if self._expression_contains_observed_loads(value):
             yield (
                 "observed-load",
@@ -4917,13 +5036,21 @@ class ReturnAnalyzer:
                     is None
                 ):
                     continue
+                post_state_read = promote_effect_value_match_to_post_state_read(
+                    rewritten_operand,
+                    location,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    symbolic_post_state=True,
+                )
                 if self.debug:
                     self._debug_print(
                         "Collapsed duplicate effect-sensitive binary wrapper: "
                         f"{self._debug_expr_identity_summary(rewritten)} -> "
-                        f"{self._debug_expr_identity_summary(rewritten_operand)}"
+                        f"{self._debug_expr_identity_summary(post_state_read or rewritten_operand)}"
                     )
-                return rewritten_operand
+                return post_state_read or rewritten_operand
 
         return rewritten
 
@@ -5550,7 +5677,39 @@ class ReturnAnalyzer:
                 self._current_parameters,
             ):
                 return False
+        if self._expression_contains_stale_effect_value_for_post_state(
+            original,
+            canonicalized,
+            conditions,
+            effect_summary,
+        ):
+            return False
         return True
+
+    def _expression_contains_stale_effect_value_for_post_state(
+        self,
+        expr: Optional[Expression],
+        target_post_state: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> bool:
+        if expr is None or target_post_state is None:
+            return False
+
+        for current in _iter_expression_nodes(expr, include_phi_conditions=False):
+            location = canonicalize_expr_read_location(current, self._current_parameters)
+            if location is not None:
+                promoted = promote_effect_value_match_to_post_state_read(
+                    current,
+                    location,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                    symbolic_post_state=True,
+                )
+                if promoted is not None and _expressions_equivalent(promoted, target_post_state):
+                    return True
+        return False
 
     def _expression_contains_observed_loads(self, expr: Optional[Expression]) -> bool:
         if expr is None:

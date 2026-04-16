@@ -16,15 +16,17 @@ from ..analysis.effect_summary import (
     _recover_call_argument_expressions,
     _resolve_call_argument_expression,
     _expression_maps_to_parameter,
+    _expression_contains_observed_loads,
     canonicalize_expr_read_location,
     resolve_call_targets,
     _expressions_equivalent,
     canonicalize_location,
     canonicalize_param_location,
     canonicalize_post_state_subexpressions,
+    collapse_post_state_expr_to_canonical_read,
     collapse_post_state_expr_to_canonical_memory,
+    expression_contains_complex_location_reads,
     expression_contains_post_state_reads,
-    expression_contains_synthetic_location_reads,
     locations_match,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -1216,7 +1218,7 @@ class ExpressionExpander:
             self.effect_summary.effects,
             self.parameters,
             symbolic_post_state=True,
-            allow_memory_leaf_collapse=True,
+            allow_memory_leaf_collapse=(expr.expr_type == ExpressionType.MEMORY),
         )
         rewrite_target = canonicalized if canonicalized is not None else expr
         rewritten_post_state = (
@@ -1227,7 +1229,7 @@ class ExpressionExpander:
                 self.parameters,
             )
             if (
-                expression_contains_synthetic_location_reads(rewrite_target)
+                expression_contains_complex_location_reads(rewrite_target, self.parameters)
                 and not expression_contains_post_state_reads(rewrite_target)
             )
             else rewrite_target
@@ -1237,6 +1239,16 @@ class ExpressionExpander:
             conditions,
         )
         resolved = reduced if reduced is not None else expr
+        if not _expression_contains_observed_loads(resolved):
+            collapsed_reduced = collapse_post_state_expr_to_canonical_read(
+                resolved,
+                self.effect_summary.effects,
+                self.parameters,
+                return_conditions=conditions,
+                symbolic_post_state=True,
+            )
+            if collapsed_reduced is not None:
+                resolved = collapsed_reduced
         if self.read_memory_value is not None and self.parameters:
             concretized = concretize_readonly_loads(
                 resolved,

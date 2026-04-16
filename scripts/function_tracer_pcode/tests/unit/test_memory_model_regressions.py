@@ -1302,7 +1302,8 @@ def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering(
 
     normalized = analyzer._normalize_expanded_return_value(expr, [])
 
-    assert "__locread__" in normalized.to_string()
+    assert expression_contains_post_state_reads(normalized)
+    assert "__locread__" not in normalized.to_string()
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -1312,6 +1313,341 @@ def test_return_analyzer_preserves_symbolic_post_state_reads_until_smt_lowering(
     )
 
     assert lowered.to_string() == "((param_1 - param_2) + ((param_1 + param_2) * 4))"
+
+
+def test_return_analyzer_promotes_stale_effect_value_wrapper_to_object_centric_post_state():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", dst, src),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("delta", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["dst", "src", "delta"],
+        effects=[
+            StoreEffect(
+                location=_loc("dst", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+                conditions=[dst_nonnull, src_nonnull],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("src", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(src, size=4),
+                    Expression.constant(4294967295, 4),
+                ),
+                conditions=[dst_nonnull, src_nonnull],
+                order_key=20,
+            ),
+        ],
+    )
+
+    original = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(dst, size=4),
+        Expression.constant(0, 4),
+    )
+    rewritten = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+        Expression.constant(0, 4),
+    )
+
+    collapsed = analyzer._collapse_effect_sensitive_case_wrapper(
+        original,
+        rewritten,
+        [dst_nonnull, src_nonnull, alias_cond],
+        analyzer._current_effect_summary,
+    )
+
+    assert collapsed is not None
+    assert expression_contains_post_state_reads(collapsed)
+    assert collapsed.to_string() == "MEM[dst]"
+
+
+def test_return_analyzer_keeps_stale_effect_value_wrapper_when_alias_is_not_definite():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", dst, src),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("delta", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["dst", "src", "delta"],
+        effects=[
+            StoreEffect(
+                location=_loc("dst", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+                conditions=[dst_nonnull, src_nonnull, alias_cond],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("src", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(src, size=4),
+                    Expression.constant(4294967295, 4),
+                ),
+                conditions=[dst_nonnull, src_nonnull, alias_cond],
+                order_key=20,
+            ),
+        ],
+    )
+
+    original = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(dst, size=4),
+        Expression.constant(0, 4),
+    )
+    rewritten = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", Expression.memory(dst, size=4), delta),
+        Expression.constant(0, 4),
+    )
+
+    collapsed = analyzer._collapse_effect_sensitive_case_wrapper(
+        original,
+        rewritten,
+        [dst_nonnull, src_nonnull],
+        analyzer._current_effect_summary,
+    )
+
+    assert collapsed is not None
+    assert not expression_contains_post_state_reads(collapsed)
+    assert collapsed.to_string() == "(MEM[dst] + delta)"
+
+
+def test_return_analyzer_keeps_object_centric_post_state_for_observed_stale_wrapper():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    alias = Expression.parameter("alias", 1, size=8)
+    delta = Expression.parameter("delta", 2, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+    alias_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", alias, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", ptr, alias),
+        False,
+    )
+    observed = Expression.memory(ptr, size=4, read_order_key=42)
+    wrapped = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", observed, delta),
+        Expression.constant(0, 4),
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("ptr", size=8, is_signed=False),
+        _param("alias", size=8, is_signed=False, index=1),
+        _param("delta", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["ptr", "alias", "delta"],
+        effects=[
+            StoreEffect(
+                location=_loc("ptr", 0, 4),
+                value=Expression.binary_op("INT_ADD", observed, delta),
+                conditions=[ptr_nonnull, alias_nonnull, alias_cond],
+                order_key=10,
+            ),
+        ],
+    )
+
+    normalized = analyzer._normalize_expanded_return_value(
+        wrapped,
+        [ptr_nonnull, alias_nonnull, alias_cond],
+    )
+
+    assert normalized is not None
+    assert expression_contains_post_state_reads(normalized)
+    assert normalized.to_string() == "MEM[ptr]"
+
+
+def test_canonicalize_post_state_subexpressions_does_not_promote_memory_address_parameter():
+    param_1 = Expression.parameter("param_1", 0, size=8)
+    param_2 = Expression.parameter("param_2", 1, size=8)
+    param_3 = Expression.parameter("param_3", 2, size=4)
+    nonnull_1 = Condition(
+        Expression.binary_op("INT_NOTEQUAL", param_1, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_2 = Condition(
+        Expression.binary_op("INT_NOTEQUAL", param_2, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", param_1, param_2),
+        False,
+    )
+    observed_1 = Expression.memory(
+        param_1,
+        size=4,
+        read_order_key=100,
+        runtime_ref=ObservedMemoryReadRef(
+            order_key=100,
+            location=_loc("param_1", 0, 4),
+            source="ghidra_load",
+        ),
+    )
+    observed_2 = Expression.memory(
+        param_2,
+        size=4,
+        read_order_key=101,
+        runtime_ref=ObservedMemoryReadRef(
+            order_key=101,
+            location=_loc("param_2", 0, 4),
+            source="ghidra_load",
+        ),
+    )
+
+    normalized = canonicalize_post_state_subexpressions(
+        observed_1,
+        [nonnull_1, nonnull_2, alias_cond],
+        [
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.binary_op("INT_ADD", observed_1, param_3),
+                conditions=[nonnull_1, nonnull_2],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    observed_2,
+                    Expression.constant(4294967295, 4),
+                ),
+                conditions=[nonnull_1, nonnull_2],
+                order_key=20,
+            ),
+        ],
+        [
+            _param("param_1", size=8, is_signed=False),
+            _param("param_2", size=8, is_signed=False, index=1),
+            _param("param_3", size=4, index=2),
+        ],
+        symbolic_post_state=True,
+        allow_memory_leaf_collapse=False,
+    )
+
+    assert normalized is not None
+    assert normalized.to_string() == "MEM[param_1]"
+
+
+def test_normalize_post_state_expression_promotes_observed_alias_wrapper_with_interdependent_effects():
+    param_1 = Expression.parameter("param_1", 0, size=8)
+    param_2 = Expression.parameter("param_2", 1, size=8)
+    param_3 = Expression.parameter("param_3", 2, size=4)
+    nonnull_1 = Condition(
+        Expression.binary_op("INT_NOTEQUAL", param_1, Expression.constant(0, 8)),
+        False,
+    )
+    nonnull_2 = Condition(
+        Expression.binary_op("INT_NOTEQUAL", param_2, Expression.constant(0, 8)),
+        False,
+    )
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", param_1, param_2),
+        False,
+    )
+    observed_1 = Expression.memory(
+        param_1,
+        size=4,
+        read_order_key=100,
+        runtime_ref=ObservedMemoryReadRef(
+            order_key=100,
+            location=_loc("param_1", 0, 4),
+            source="ghidra_load",
+        ),
+    )
+    observed_2 = Expression.memory(
+        param_2,
+        size=4,
+        read_order_key=101,
+        runtime_ref=ObservedMemoryReadRef(
+            order_key=101,
+            location=_loc("param_2", 0, 4),
+            source="ghidra_load",
+        ),
+    )
+    wrapped = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op("INT_ADD", observed_1, param_3),
+        Expression.constant(0, 4),
+    )
+
+    normalized = normalize_post_state_expression(
+        wrapped,
+        [nonnull_1, nonnull_2, alias_cond],
+        [
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=Expression.binary_op("INT_ADD", observed_1, param_3),
+                conditions=[nonnull_1, nonnull_2],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("param_2", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    observed_2,
+                    Expression.constant(4294967295, 4),
+                ),
+                conditions=[nonnull_1, nonnull_2],
+                order_key=20,
+            ),
+        ],
+        [
+            _param("param_1", size=8, is_signed=False),
+            _param("param_2", size=8, is_signed=False, index=1),
+            _param("param_3", size=4, index=2),
+        ],
+        prefer_canonical_post_state=True,
+        symbolic_post_state=True,
+    )
+
+    assert normalized is not None
+    assert expression_contains_post_state_reads(normalized)
+    assert normalized.to_string() == "MEM[param_1]"
 
 
 def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_read():
@@ -4480,6 +4816,48 @@ def test_expression_expander_canonicalizes_multiequal_branch_memory_leaf_using_e
     assert canonicalized.to_string() == "MEM[b]"
 
 
+def test_collapse_post_state_read_preserves_root_object_identity():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=1,
+        ),
+        StoreEffect(
+            location=_loc("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=2,
+        ),
+    ]
+    params = [
+        _param("a", size=8, is_signed=False),
+        _param("b", size=8, is_signed=False, index=1),
+    ]
+    post_state_b = post_state_read_expression_for_location(
+        _loc("b", 0, 4),
+        params,
+        symbolic=True,
+    )
+
+    collapsed = collapse_post_state_expr_to_canonical_memory(
+        post_state_b,
+        effects,
+        params,
+        return_conditions=[swap_taken],
+    )
+
+    assert collapsed is not None
+    assert collapsed.to_string() == "MEM[b]"
+
+
 def test_effect_summary_treats_composite_guard_as_implied_by_split_active_conditions():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -6025,6 +6403,54 @@ def test_expression_expander_prefers_canonical_post_state_memory_after_observed_
     )
 
     assert canonicalized.to_string() == "MEM[value]"
+
+
+def test_expression_expander_keeps_root_composite_observed_effect_value_until_return_normalization():
+    value = Expression.parameter("value", 0, size=8)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    observed = Expression.memory(
+        value,
+        size=4,
+        read_order_key=19,
+        runtime_ref=_observed_read("value", index=0, size=4, order_key=19),
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["value"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(value, size=4),
+                    Expression.constant(4294967295, 4),
+                ),
+                conditions=[value_nonnull],
+                order_key=21,
+            ),
+        ],
+    )
+
+    expander = ExpressionExpander(
+        tracer=None,
+        condition_tracker=None,
+        debug=False,
+        effect_summary=effect_summary,
+        parameters=[_param("value", size=8, is_signed=False)],
+    )
+
+    canonicalized = expander._canonicalize_traced_expression(
+        Expression.binary_op(
+            "INT_ADD",
+            observed,
+            Expression.constant(4294967295, 4),
+        ),
+        [value_nonnull],
+    )
+
+    assert canonicalized.to_string() == "(MEM[value] + 4294967295)"
 
 
 def test_expression_expander_collapses_nested_multiequal_after_phi_handler_prunes_to_memory_leaf():

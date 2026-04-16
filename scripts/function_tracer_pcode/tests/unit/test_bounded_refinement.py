@@ -5,7 +5,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
-    expression_contains_synthetic_location_reads,
+    expression_contains_post_state_reads,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.model import (
@@ -323,6 +323,6 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
 
     assert changed is True
     assert all(
-        not expression_contains_synthetic_location_reads(ret.value)
+        not expression_contains_post_state_reads(ret.value)
         for ret in caller.returns
     )

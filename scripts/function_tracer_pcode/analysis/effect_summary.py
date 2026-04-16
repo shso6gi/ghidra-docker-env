@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import binascii
 from dataclasses import dataclass, field
 from itertools import product
 import re
-from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, overload
+from typing import Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, overload
 
 from ..model import (
     AddressValueRef,
@@ -216,137 +215,102 @@ def _memory_expr_with_runtime_location(
     )
 
 
-def _serialize_location(location: CanonicalLocation) -> str:
+def _post_state_read_name(location: CanonicalLocation) -> str:
     normalized = _normalize_canonical_location(location)
-    step_tokens = []
+    tokens = [
+        "poststate",
+        re.sub(r"[^0-9A-Za-z_]", "_", normalized.base_ref.display_name() or "loc").strip("_") or "loc",
+    ]
     for step in normalized.steps:
-        prefix = "o" if step.kind == "offset" else "d"
-        token = _encode_signed_token(step.value) if step.kind == "offset" else str(int(step.value))
-        step_tokens.append(f"{prefix}:{token}")
-    return "|".join(
-        [
-            normalized.base_param,
-            ";".join(step_tokens),
-            _encode_signed_token(normalized.offset),
-            str(max(1, int(normalized.size or 0))),
-        ]
-    )
+        prefix = "off" if step.kind == "offset" else "deref"
+        tokens.append(f"{prefix}_{_encode_signed_token(step.value)}")
+    if normalized.offset != 0:
+        tokens.append(f"tail_{_encode_signed_token(normalized.offset)}")
+    tokens.append(f"size_{max(1, int(normalized.size or 0))}")
+    return "_".join(tokens)
 
 
-def _synthetic_location_read_name(location: CanonicalLocation) -> str:
-    payload = _serialize_location(location)
-    encoded = binascii.hexlify(payload.encode("utf-8")).decode("ascii")
-    return f"__locread__{encoded}"
+def _iter_expression_nodes(
+    expr: Optional[Expression],
+    *,
+    include_phi_conditions: bool = True,
+) -> Iterator[Expression]:
+    if expr is None:
+        return
+
+    pending: List[Expression] = [expr]
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        yield current
+        if current.expr_type == ExpressionType.PHI and current.value:
+            for cond, value in reversed(current.value):
+                if value is not None:
+                    pending.append(value)
+                if include_phi_conditions and cond is not None and cond.expression is not None:
+                    pending.append(cond.expression)
+            continue
+        operands = getattr(current, "operands", None) or []
+        pending.extend(reversed([operand for operand in operands if operand is not None]))
 
 
 def expression_contains_post_state_reads(expr: Optional[Expression]) -> bool:
-    if expr is None:
-        return False
-    if _expression_location_ref(expr) is not None:
-        return True
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        for cond, value in expr.value:
-            if cond is not None and expression_contains_post_state_reads(cond.expression):
-                return True
-            if expression_contains_post_state_reads(value):
-                return True
-        return False
-    for operand in getattr(expr, "operands", []) or []:
-        if expression_contains_post_state_reads(operand):
+    for node in _iter_expression_nodes(expr):
+        if _expression_location_ref(node) is not None:
             return True
     return False
-
-
-def expression_contains_synthetic_location_reads(expr: Optional[Expression]) -> bool:
-    """Backward-compatible alias for object-centric post-state read detection."""
-    return expression_contains_post_state_reads(expr)
 
 
 def expression_contains_complex_location_reads(
     expr: Optional[Expression],
     parameters: Sequence[Dict],
 ) -> bool:
-    if expr is None:
-        return False
-    synthetic_location = _expression_location_ref(expr)
-    if synthetic_location is not None:
-        return True
-    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
-        location = canonicalize_location(expr.operands[0], parameters, size=expr.size)
-        if location is not None and getattr(location, "steps", ()):
+    for node in _iter_expression_nodes(expr):
+        location_ref = _expression_location_ref(node)
+        if location_ref is not None:
             return True
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        for cond, value in expr.value:
-            if cond is not None and expression_contains_complex_location_reads(cond.expression, parameters):
-                return True
-            if expression_contains_complex_location_reads(value, parameters):
-                return True
-        return False
-    for operand in getattr(expr, "operands", []) or []:
-        if expression_contains_complex_location_reads(operand, parameters):
+        if node.expr_type != ExpressionType.MEMORY or not node.operands:
+            continue
+        location = canonicalize_location(node.operands[0], parameters, size=node.size)
+        if location is not None and getattr(location, "steps", ()):
             return True
     return False
 
 
 def _expression_contains_observed_loads(expr: Optional[Expression]) -> bool:
-    if expr is None:
-        return False
-    if expr.expr_type == ExpressionType.MEMORY and _expression_observed_order_key(expr) is not None:
-        return True
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        for cond, value in expr.value:
-            if cond is not None and _expression_contains_observed_loads(cond.expression):
-                return True
-            if _expression_contains_observed_loads(value):
-                return True
-        return False
-    for operand in getattr(expr, "operands", []) or []:
-        if _expression_contains_observed_loads(operand):
+    for node in _iter_expression_nodes(expr):
+        if node.expr_type == ExpressionType.MEMORY and _expression_observed_order_key(node) is not None:
+            return True
+    return False
+
+
+def _expression_contains_value_reads(expr: Optional[Expression]) -> bool:
+    for node in _iter_expression_nodes(expr):
+        if _expression_location_ref(node) is not None:
+            return True
+        if node.expr_type == ExpressionType.MEMORY and node.operands:
             return True
     return False
 
 
 def _expression_contains_phi(expr: Optional[Expression]) -> bool:
-    if expr is None:
-        return False
-    if expr.expr_type == ExpressionType.PHI:
-        return True
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        return True
-    for operand in getattr(expr, "operands", []) or []:
-        if _expression_contains_phi(operand):
+    for node in _iter_expression_nodes(expr, include_phi_conditions=False):
+        if node.expr_type == ExpressionType.PHI:
             return True
     return False
 
 
 def _count_object_centric_location_reads(expr: Optional[Expression]) -> int:
-    if expr is None:
-        return 0
-    count = 1 if _expression_location_ref(expr) is not None else 0
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        for cond, value in expr.value:
-            if cond is not None:
-                count += _count_object_centric_location_reads(cond.expression)
-            count += _count_object_centric_location_reads(value)
-        return count
-    for operand in getattr(expr, "operands", []) or []:
-        count += _count_object_centric_location_reads(operand)
-    return count
+    return sum(
+        1
+        for node in _iter_expression_nodes(expr)
+        if _expression_location_ref(node) is not None
+    )
 
 
 def _expression_node_count(expr: Optional[Expression]) -> int:
-    if expr is None:
-        return 0
-    count = 1
-    if expr.expr_type == ExpressionType.PHI and expr.value:
-        for cond, value in expr.value:
-            if cond is not None:
-                count += _expression_node_count(cond.expression)
-            count += _expression_node_count(value)
-        return count
-    for operand in getattr(expr, "operands", []) or []:
-        count += _expression_node_count(operand)
-    return count
+    return sum(1 for _ in _iter_expression_nodes(expr))
 
 
 def summarize_store_effects(
@@ -2713,6 +2677,127 @@ def _find_matching_effect_value(
     return None
 
 
+def resolve_definite_post_state_read_for_location(
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    active_effects = _collect_definite_active_effects(normalized_return_conditions, effects)
+    tracked_locations = sorted(
+        {location, *[effect.location for effect in active_effects]},
+        key=_location_sort_key,
+    )
+    alias_representatives = _build_alias_representative_map(
+        tracked_locations,
+        normalized_return_conditions,
+    )
+    if not alias_representatives:
+        return None
+
+    target_rep = _resolve_alias_representative(
+        location,
+        alias_representatives,
+        normalized_return_conditions,
+    )
+    if target_rep is None:
+        return None
+
+    replayed = _replay_definite_active_effects_for_location(
+        target_rep,
+        normalized_return_conditions,
+        active_effects,
+        parameters,
+    )
+    if replayed is None:
+        return None
+
+    return post_state_read_expression_for_location(
+        target_rep,
+        parameters,
+        symbolic=symbolic_post_state,
+    )
+
+
+def promote_effect_value_match_to_post_state_read(
+    expr: Optional[Expression],
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
+        return None
+
+    matched_definite_effect = False
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if effect.location.size != location.size:
+            continue
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        if not locations_match(
+            location,
+            effect.location,
+            normalized_return_conditions + normalized_effect_conditions,
+        ):
+            continue
+        residual = subtract_implied_conditions(
+            normalized_effect_conditions,
+            normalized_return_conditions,
+        )
+        if residual:
+            continue
+        if _expression_matches_value_under_conditions(
+            expr,
+            effect.value,
+            normalized_return_conditions + normalized_effect_conditions,
+            parameters,
+        ):
+            matched_definite_effect = True
+            break
+
+    if not matched_definite_effect:
+        return None
+
+    post_state_read = resolve_definite_post_state_read_for_location(
+        location,
+        normalized_return_conditions,
+        effects,
+        parameters,
+        symbolic_post_state=symbolic_post_state,
+    )
+    if post_state_read is None:
+        return None
+
+    lowered_post_state_read = lower_post_state_expression_for_smt(
+        post_state_read,
+        normalized_return_conditions,
+        effects,
+        parameters,
+    )
+    if lowered_post_state_read is None:
+        return None
+    if _expressions_equivalent_under_conditions(
+        lowered_post_state_read,
+        expr,
+        normalized_return_conditions,
+        parameters,
+    ):
+        return None
+
+    return post_state_read
+
+
 def _expression_matches_value_under_conditions(
     expr: Expression,
     value: Expression,
@@ -3121,8 +3206,22 @@ def collapse_post_state_expr_to_canonical_read(
 ) -> Optional[Expression]:
     if expr is None or not effects or not parameters:
         return None
+    if not _expression_contains_value_reads(expr):
+        return None
 
     active_conditions = list(return_conditions or [])
+    root_location = _expression_location_ref(expr)
+    if root_location is not None:
+        resolved_root = resolve_definite_post_state_read_for_location(
+            root_location,
+            active_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+        )
+        if resolved_root is not None:
+            return resolved_root
+
     expr_is_memory = expr.expr_type == ExpressionType.MEMORY and bool(expr.operands)
     normalized_expr = expr
     candidate_effects = list(effects)
@@ -3243,6 +3342,218 @@ def collapse_post_state_expr_to_canonical_read(
     return None
 
 
+def promote_effect_subexpressions_to_post_state_reads(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+    _address_context: bool = False,
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = promote_effect_subexpressions_to_post_state_reads(
+            expr.operands[0],
+            return_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+            _address_context=True,
+        )
+        rebuilt_memory = expr
+        if rewritten_addr is not expr.operands[0]:
+            rebuilt_memory = _memory_expr_with_runtime_location(
+                rewritten_addr if rewritten_addr is not None else expr.operands[0],
+                expr.size,
+                read_order_key=expr.read_order_key,
+                runtime_location=_expression_location_ref(expr),
+                runtime_ref=getattr(expr, "runtime_ref", None),
+            )
+        if _address_context:
+            return rebuilt_memory
+        location = canonicalize_expr_read_location(rebuilt_memory, parameters)
+        if location is None:
+            return rebuilt_memory
+        promoted = promote_effect_value_match_to_post_state_read(
+            rebuilt_memory,
+            location,
+            return_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+        )
+        return promoted if promoted is not None else rebuilt_memory
+
+    if expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        rewritten_operands = [
+            promote_effect_subexpressions_to_post_state_reads(
+                operand,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                _address_context=_address_context,
+            )
+            for operand in expr.operands
+        ]
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
+        )
+        current = rebuilt if rebuilt is not None else expr
+        if _address_context:
+            return current
+        location = canonicalize_expr_read_location(current, parameters)
+        if location is None:
+            return current
+        promoted = promote_effect_value_match_to_post_state_read(
+            current,
+            location,
+            return_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+        )
+        return promoted if promoted is not None else current
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = promote_effect_subexpressions_to_post_state_reads(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                _address_context=_address_context,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
+
+
+def collapse_equivalent_post_state_subexpressions(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+    _address_context: bool = False,
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = collapse_equivalent_post_state_subexpressions(
+            expr.operands[0],
+            return_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+            _address_context=True,
+        )
+        rebuilt_memory = expr
+        if rewritten_addr is not expr.operands[0]:
+            rebuilt_memory = _memory_expr_with_runtime_location(
+                rewritten_addr if rewritten_addr is not None else expr.operands[0],
+                expr.size,
+                read_order_key=expr.read_order_key,
+                runtime_location=_expression_location_ref(expr),
+                runtime_ref=getattr(expr, "runtime_ref", None),
+            )
+        if _address_context:
+            return rebuilt_memory
+        current = rebuilt_memory
+    elif expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        rewritten_operands = [
+            collapse_equivalent_post_state_subexpressions(
+                operand,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                _address_context=_address_context,
+            )
+            for operand in expr.operands
+        ]
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
+        )
+        current = rebuilt if rebuilt is not None else expr
+        if _address_context:
+            return current
+    elif expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = collapse_equivalent_post_state_subexpressions(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                _address_context=_address_context,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+    else:
+        return expr
+
+    location = canonicalize_expr_read_location(current, parameters)
+    if location is None:
+        return current
+    post_state_read = resolve_definite_post_state_read_for_location(
+        location,
+        return_conditions,
+        effects,
+        parameters,
+        symbolic_post_state=symbolic_post_state,
+    )
+    if post_state_read is None:
+        return current
+    if _expressions_equivalent_under_conditions(
+        current,
+        post_state_read,
+        return_conditions,
+        parameters,
+    ):
+        return post_state_read
+    return current
+
+
 @overload
 def collapse_pruned_post_state_memory_leaf_to_canonical_memory(
     expr: Expression,
@@ -3318,11 +3629,14 @@ def canonicalize_post_state_subexpressions(
     *,
     symbolic_post_state: bool = False,
     allow_memory_leaf_collapse: bool = False,
+    _collapse_current: bool = False,
 ) -> Optional[Expression]:
     if expr is None:
         return None
 
-    if expr.expr_type != ExpressionType.MEMORY or allow_memory_leaf_collapse:
+    if allow_memory_leaf_collapse or (
+        _collapse_current and expr.expr_type != ExpressionType.MEMORY
+    ):
         collapsed = collapse_post_state_expr_to_canonical_read(
             expr,
             effects,
@@ -3342,6 +3656,7 @@ def canonicalize_post_state_subexpressions(
                 parameters,
                 symbolic_post_state=symbolic_post_state,
                 allow_memory_leaf_collapse=False,
+                _collapse_current=True,
             )
             for op in expr.operands
         ]
@@ -3366,6 +3681,7 @@ def canonicalize_post_state_subexpressions(
                 parameters,
                 symbolic_post_state=symbolic_post_state,
                 allow_memory_leaf_collapse=False,
+                _collapse_current=True,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -3444,24 +3760,71 @@ def normalize_post_state_expression(
             if canonicalized is not None:
                 normalized = canonicalized
 
+            promoted = promote_effect_subexpressions_to_post_state_reads(
+                normalized,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+            )
+            if promoted is not None:
+                normalized = promoted
+
+            collapsed_equivalent = collapse_equivalent_post_state_subexpressions(
+                normalized,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+            )
+            if collapsed_equivalent is not None:
+                normalized = collapsed_equivalent
+
         post_state_promoted = (
             expression_contains_post_state_reads(normalized)
             and not expression_contains_post_state_reads(candidate_expr)
+        )
+        candidate_location = canonicalize_expr_read_location(candidate_expr, parameters)
+        candidate_is_stale_effect_carrier = False
+        if candidate_location is not None and candidate_expr.expr_type in (
+            ExpressionType.BINARY_OP,
+            ExpressionType.UNARY_OP,
+            ExpressionType.CALL,
+        ):
+            candidate_is_stale_effect_carrier = (
+                promote_effect_value_match_to_post_state_read(
+                    candidate_expr,
+                    candidate_location,
+                    return_conditions,
+                    effects,
+                    parameters,
+                    symbolic_post_state=symbolic_post_state,
+                )
+                is not None
+            )
+        candidate_is_composite_observed = (
+            candidate_expr.expr_type in (
+                ExpressionType.BINARY_OP,
+                ExpressionType.UNARY_OP,
+                ExpressionType.CALL,
+            )
+            and _expression_contains_observed_loads(candidate_expr)
         )
 
         if not prefer_canonical_post_state or (
             _expressions_equivalent(normalized, candidate_expr)
             and not post_state_promoted
         ):
-            rewritten_definite = _rewrite_definite_post_state_subexpressions(
-                normalized,
-                return_conditions,
-                effects,
-                parameters,
-                preserve_composite_location_wrappers=preserve_composite_location_wrappers,
-            )
-            if rewritten_definite is not None:
-                normalized = rewritten_definite
+            if not candidate_is_stale_effect_carrier and not candidate_is_composite_observed:
+                rewritten_definite = _rewrite_definite_post_state_subexpressions(
+                    normalized,
+                    return_conditions,
+                    effects,
+                    parameters,
+                    preserve_composite_location_wrappers=preserve_composite_location_wrappers,
+                )
+                if rewritten_definite is not None:
+                    normalized = rewritten_definite
 
         if (
             expression_contains_complex_location_reads(normalized, parameters)
@@ -3510,7 +3873,12 @@ def normalize_post_state_expression(
         )
         if observed_rank > normalized_rank:
             return observed_normalized
-        if observed_rank == normalized_rank and not _expressions_equivalent(observed_normalized, expr):
+        if (
+            observed_rank == normalized_rank
+            and not _expressions_equivalent(observed_normalized, expr)
+            and not _expression_contains_observed_loads(normalized)
+            and not _expression_contains_observed_loads(expr)
+        ):
             return observed_normalized
 
     return normalized
@@ -4009,7 +4377,7 @@ def memory_expression_for_location(
     )
     if param is None:
         return Expression.variable(
-            _synthetic_location_read_name(location),
+            _post_state_read_name(location),
             size=max(1, location.size),
             runtime_ref=location,
         )
@@ -4078,11 +4446,12 @@ def post_state_read_expression_for_location(
         )
     if not symbolic:
         return Expression.variable(
-            _synthetic_location_read_name(location),
+            _post_state_read_name(location),
             size=max(1, location.size),
+            runtime_ref=location,
         )
     return Expression.variable(
-        _synthetic_location_read_name(location),
+        _post_state_read_name(location),
         size=max(1, location.size),
         runtime_ref=location,
     )
