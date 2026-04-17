@@ -26,6 +26,14 @@ def _safe_close_context(manager) -> None:
 
 def run_equivalence_check(args):
     """等価性判定を実行する。"""
+    def _get_bool_arg(name: str, default: bool = False) -> bool:
+        value = getattr(args, name, default)
+        return value if isinstance(value, bool) else default
+
+    def _get_choice_arg(name: str, allowed: set[str], default: str) -> str:
+        value = getattr(args, name, default)
+        return value if isinstance(value, str) and value in allowed else default
+
     runtime_env = apply_runtime_environment()
     pyghidra = load_pyghidra()
 
@@ -53,6 +61,15 @@ def run_equivalence_check(args):
         print(f"  Function 1: {func_name1}")
         print(f"  Function 2: {func_name2}")
         print(f"  Strategy: {strategy}")
+        print(f"  Normalize mode: {_get_choice_arg('normalize_mode', {'off', 'safe', 'full'}, 'safe')}")
+        print(
+            "  Fact normalization: "
+            f"{'enabled' if _get_bool_arg('enable_fact_normalization', False) else 'disabled'}"
+        )
+        print(
+            "  Template abstraction: "
+            f"{'enabled' if _get_bool_arg('enable_template_abstraction', False) else 'disabled'}"
+        )
         print(f"  Timeout: {args.equiv_timeout}秒")
         print(
             f"  Recovery phases: {'disabled' if getattr(args, 'no_retry_phases', False) else 'enabled'}"
@@ -74,6 +91,9 @@ def run_equivalence_check(args):
     pairwise_timeout = getattr(args, "pairwise_timeout", 5)
     pairwise_timeout_hard = getattr(args, "pairwise_timeout_hard", 30)
     pairwise_save_unknown = getattr(args, "pairwise_save_unknown", False)
+    normalization_mode = _get_choice_arg("normalize_mode", {"off", "safe", "full"}, "safe")
+    enable_fact_normalization = _get_bool_arg("enable_fact_normalization", False)
+    enable_template_abstraction = _get_bool_arg("enable_template_abstraction", False)
 
     checker = EquivalenceChecker(
         timeout=args.equiv_timeout,
@@ -85,6 +105,9 @@ def run_equivalence_check(args):
         pairwise_timeout=pairwise_timeout,
         pairwise_timeout_hard=pairwise_timeout_hard,
         pairwise_save_unknown=pairwise_save_unknown,
+        normalization_mode=normalization_mode,
+        enable_fact_normalization=enable_fact_normalization,
+        enable_template_abstraction=enable_template_abstraction,
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

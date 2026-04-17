@@ -19,6 +19,7 @@ from ..transform.rewrite import ExpressionRewriter, rewrite_analysis_returns
 from .strategies.pairwise import PairwiseStrategy
 from .strategies.loop_template import LoopTemplatePairwiseStrategy
 from .strategies.monolithic import MonolithicStrategy
+from .normalize import NormalizationSettings
 from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
@@ -48,7 +49,6 @@ class StageSpec:
 # デフォルトの Stage plan
 DEFAULT_STAGE_PLAN: List[StageSpec] = [
     StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
-    StageSpec(StageID.S_LOOP_TEMPLATE_ABSTRACTION, "Exact loop-template abstraction fallback (UNKNOWN only)", strategy="loop_template_pairwise"),
     StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
     StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
 ]
@@ -67,7 +67,10 @@ class EquivalenceChecker:
         strategy: str = "pairwise",
         pairwise_timeout: int = 5,
         pairwise_timeout_hard: int = 30,
-        pairwise_save_unknown: bool = False
+        pairwise_save_unknown: bool = False,
+        normalization_mode: str = "safe",
+        enable_fact_normalization: bool = False,
+        enable_template_abstraction: bool = False,
     ):
         """
         Args:
@@ -84,23 +87,39 @@ class EquivalenceChecker:
         self.enable_rewrite = enable_rewrite
         self.rewrite_direction = rewrite_direction
         self.strategy_name = strategy
+        self.normalization_mode = normalization_mode
+        self.enable_fact_normalization = enable_fact_normalization
+        self.enable_template_abstraction = enable_template_abstraction
+        self.normalization_settings = self._build_normalization_settings(
+            normalization_mode,
+            enable_fact_normalization,
+        )
         self.formula_builder = FormulaBuilder(debug=debug)
         self.solver_runner = ParallelSolverRunner(timeout=timeout, debug=debug)
         self.phase_handler = PhaseHandler(self.type_fixer_config, debug=debug)
         
         # 各 strategy の準備
         self.pairwise_strategy = PairwiseStrategy(
-            self.formula_builder, self.solver_runner, debug=debug
+            self.formula_builder,
+            self.solver_runner,
+            debug=debug,
+            normalization_settings=self.normalization_settings,
         )
         self.pairwise_strategy.per_query_timeout = pairwise_timeout
         self.pairwise_strategy.per_query_timeout_hard = pairwise_timeout_hard
         self.pairwise_strategy.save_unknown_queries = pairwise_save_unknown
         
         self.monolithic_strategy = MonolithicStrategy(
-            self.formula_builder, self.solver_runner, debug=debug
+            self.formula_builder,
+            self.solver_runner,
+            debug=debug,
+            normalization_settings=self.normalization_settings,
         )
         self.loop_template_strategy = LoopTemplatePairwiseStrategy(
-            self.formula_builder, self.solver_runner, debug=debug
+            self.formula_builder,
+            self.solver_runner,
+            debug=debug,
+            normalization_settings=self.normalization_settings,
         )
         self.loop_template_strategy.per_query_timeout = pairwise_timeout
         self.loop_template_strategy.per_query_timeout_hard = pairwise_timeout_hard
@@ -110,10 +129,18 @@ class EquivalenceChecker:
         if strategy == "pairwise":
             self.stage_plan = [
                 StageSpec(StageID.S_PAIRWISE, "Pairwise strategy", strategy="pairwise"),
-                StageSpec(StageID.S_LOOP_TEMPLATE_ABSTRACTION, "Exact loop-template abstraction fallback (UNKNOWN only)", strategy="loop_template_pairwise"),
                 StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "Recursive abstraction fallback (UNKNOWN only)", strategy="abstract_pairwise"),
                 StageSpec(StageID.S_MONOLITHIC_FALLBACK, "Monolithic fallback (UNKNOWN only)", strategy="monolithic"),
             ]
+            if self.enable_template_abstraction:
+                self.stage_plan.insert(
+                    1,
+                    StageSpec(
+                        StageID.S_LOOP_TEMPLATE_ABSTRACTION,
+                        "Exact loop-template abstraction fallback (UNKNOWN only)",
+                        strategy="loop_template_pairwise",
+                    ),
+                )
             self.check_strategy = self.pairwise_strategy
         elif strategy == "monolithic":
             self.stage_plan = [
@@ -126,6 +153,21 @@ class EquivalenceChecker:
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[EquivalenceChecker] {msg}")
+
+    def _build_normalization_settings(
+        self,
+        normalization_mode: str,
+        enable_fact_normalization: bool,
+    ) -> NormalizationSettings:
+        if normalization_mode == "off":
+            return NormalizationSettings.off()
+        if normalization_mode == "safe":
+            return NormalizationSettings.safe()
+        if normalization_mode == "full":
+            return NormalizationSettings.full(
+                enable_fact_simplifications=enable_fact_normalization
+            )
+        raise ValueError(f"Unknown normalization mode: {normalization_mode}")
 
     def _create_type_fixer(self, program):
         """TypeFixer の生成を 1 箇所に集約する。"""

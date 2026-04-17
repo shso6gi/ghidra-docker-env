@@ -10,6 +10,59 @@ from ...model import Expression, StructuralKey, expression_key_or_identity
 ExpressionAuditValue = Optional[Union[str, Expression]]
 
 
+@dataclass(frozen=True)
+class NormalizationSettings:
+    """Controls which normalization families are enabled."""
+
+    enable_core_identities: bool = True
+    enable_width_simplification: bool = True
+    enable_modulo_canonicalization: bool = False
+    enable_fact_simplifications: bool = False
+    enable_shift_normalization: bool = False
+    enable_abs_normalization: bool = False
+    enable_division_normalization: bool = False
+    enable_series_normalization: bool = False
+
+    @classmethod
+    def off(cls) -> "NormalizationSettings":
+        return cls(
+            enable_core_identities=False,
+            enable_width_simplification=False,
+            enable_modulo_canonicalization=False,
+            enable_fact_simplifications=False,
+            enable_shift_normalization=False,
+            enable_abs_normalization=False,
+            enable_division_normalization=False,
+            enable_series_normalization=False,
+        )
+
+    @classmethod
+    def safe(cls) -> "NormalizationSettings":
+        return cls(
+            enable_core_identities=True,
+            enable_width_simplification=True,
+            enable_modulo_canonicalization=False,
+            enable_fact_simplifications=False,
+            enable_shift_normalization=False,
+            enable_abs_normalization=False,
+            enable_division_normalization=False,
+            enable_series_normalization=False,
+        )
+
+    @classmethod
+    def full(cls, *, enable_fact_simplifications: bool = True) -> "NormalizationSettings":
+        return cls(
+            enable_core_identities=True,
+            enable_width_simplification=True,
+            enable_modulo_canonicalization=True,
+            enable_fact_simplifications=enable_fact_simplifications,
+            enable_shift_normalization=enable_fact_simplifications,
+            enable_abs_normalization=enable_fact_simplifications,
+            enable_division_normalization=True,
+            enable_series_normalization=True,
+        )
+
+
 @dataclass
 class RuleApplication:
     """正規化ルール適用記録"""
@@ -38,6 +91,7 @@ class NormalizationContext:
     nonzero_exprs: Set[StructuralKey] = field(default_factory=set)
     upper_bounds: Dict[str, int] = field(default_factory=dict)
     allow_unsafe: bool = False
+    settings: NormalizationSettings = field(default_factory=NormalizationSettings.full)
     
     # ★ 新規追加: 適用されたルールを記録
     applied_rules: List[RuleApplication] = field(default_factory=list)

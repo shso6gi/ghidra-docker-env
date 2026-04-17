@@ -28,10 +28,19 @@ def try_normalization_equivalence(
     normalization_stats = getattr(strategy, "_active_normalization_stats", None)
     value1_orig = case1.value_expr
     value2_orig = case2.value_expr
+    norm_settings = getattr(strategy, "normalization_settings", None)
 
     header_lines = base_ctx.get("header_lines", [])
-    min_excluded_smt = extract_min_excluded_params_fn(header_lines, debug=strategy.debug)
-    upper_bounds_smt = extract_upper_bound_facts_fn(header_lines, debug=strategy.debug)
+    if norm_settings is not None and not norm_settings.enable_division_normalization:
+        min_excluded_smt = set()
+    else:
+        min_excluded_smt = extract_min_excluded_params_fn(header_lines, debug=strategy.debug)
+    if norm_settings is not None and not (
+        norm_settings.enable_fact_simplifications or norm_settings.enable_shift_normalization
+    ):
+        upper_bounds_smt = {}
+    else:
+        upper_bounds_smt = extract_upper_bound_facts_fn(header_lines, debug=strategy.debug)
     if strategy.debug and min_excluded_smt:
         strategy._debug_print(f"MIN-excluded SMT vars: {min_excluded_smt}")
     if strategy.debug and upper_bounds_smt:
@@ -62,11 +71,17 @@ def try_normalization_equivalence(
     if strategy.debug:
         strategy._debug_print("  Extracting sign facts from conditions...")
 
-    facts1 = extract_sign_facts_fn(case1.conditions, debug=strategy.debug)
-    facts2 = extract_sign_facts_fn(case2.conditions, debug=strategy.debug)
     combined_facts = sign_facts_cls()
-    combined_facts.merge(facts1)
-    combined_facts.merge(facts2)
+    if norm_settings is None or (
+        norm_settings.enable_fact_simplifications
+        or norm_settings.enable_shift_normalization
+        or norm_settings.enable_abs_normalization
+        or norm_settings.enable_division_normalization
+    ):
+        facts1 = extract_sign_facts_fn(case1.conditions, debug=strategy.debug)
+        facts2 = extract_sign_facts_fn(case2.conditions, debug=strategy.debug)
+        combined_facts.merge(facts1)
+        combined_facts.merge(facts2)
 
     nonneg_original = _translate_fact_names(combined_facts.nonneg_vars, smt_to_original)
     pos_original = _translate_fact_names(combined_facts.pos_vars, smt_to_original)
@@ -110,6 +125,7 @@ def try_normalization_equivalence(
         nonzero_exprs=nonzero_exprs,
         upper_bounds=upper_bounds_original,
         allow_unsafe=False,
+        settings=norm_settings,
     )
 
     if strategy.debug:

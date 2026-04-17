@@ -48,6 +48,12 @@ CLI_EPILOG = """
 
   # リライトを無効にして実行
   python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f modulo --no-rewrite
+
+  # 正規化を安全な bit-vector 恒等式のみに制限
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --normalize-mode safe
+
+  # facts 依存の正規化や template abstraction を明示的に有効化
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --normalize-mode full --enable-fact-normalization --enable-template-abstraction
 """
 
 
@@ -181,6 +187,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--pairwise-save-unknown",
         action="store_true",
         help="Pairwise戦略でUNKNOWNになったクエリを/tmpに保存する",
+    )
+    parser.add_argument(
+        "--normalize-mode",
+        choices=["off", "safe", "full"],
+        default="safe",
+        help="等価性判定内の normalize 方針 (off: 無効, safe: 明白な bit-vector 恒等式のみ, full: 追加の opt-in 正規化を許可)",
+    )
+    parser.add_argument(
+        "--enable-fact-normalization",
+        action="store_true",
+        help="条件 facts に依存する normalize を有効にする（デフォルト: 無効）",
+    )
+    parser.add_argument(
+        "--enable-template-abstraction",
+        action="store_true",
+        help="loop-template abstraction fallback を有効にする（デフォルト: 無効）",
     )
     return parser
 

@@ -2,7 +2,7 @@
 """式正規化モジュール（意味論保存変形）"""
 
 from .core import normalize_expression
-from .context import NormalizationContext, RuleApplication
+from .context import NormalizationContext, NormalizationSettings, RuleApplication
 from .policy import extract_min_excluded_params, extract_upper_bound_facts
 from .facts import extract_sign_facts
 from .fact_types import SignFacts
@@ -12,6 +12,7 @@ from .structural import are_structurally_equivalent, get_structural_summary
 __all__ = [
     'normalize_expression',
     'NormalizationContext',
+    'NormalizationSettings',
     'RuleApplication',
     'extract_min_excluded_params',
     'extract_upper_bound_facts',

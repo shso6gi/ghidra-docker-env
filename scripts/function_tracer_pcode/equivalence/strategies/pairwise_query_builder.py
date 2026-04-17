@@ -7,17 +7,21 @@ from typing import Any, Dict, List, Tuple
 from ...model import FunctionReturnAnalysis
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.normalizer import ConditionNormalizer
-from ..normalize import normalize_expression, NormalizationContext
+from ..normalize import normalize_expression, NormalizationContext, NormalizationSettings
 from ..formula.returns import (
     coerce_value_to_bitvec_width,
 )
 from .pairwise_models import ReturnCase
 
 
-def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
+def extract_return_cases(
+    analysis: FunctionReturnAnalysis,
+    normalization_settings: NormalizationSettings | None = None,
+) -> List[ReturnCase]:
     """FunctionReturnAnalysis から ReturnCase を抽出"""
     cases = []
     merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
+    settings = normalization_settings or NormalizationSettings.safe()
 
     for index, ret_info in enumerate(analysis.returns):
         condition_set = ConditionSimplifier.build_constraint_set(ret_info.conditions)
@@ -26,7 +30,7 @@ def extract_return_cases(analysis: FunctionReturnAnalysis) -> List[ReturnCase]:
         simplified_conditions = condition_set.simplified_conditions()
         normalized_value = normalize_expression(
             ret_info.value,
-            NormalizationContext(),
+            NormalizationContext(settings=settings),
         )
 
         case = ReturnCase(

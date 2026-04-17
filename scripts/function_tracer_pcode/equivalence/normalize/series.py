@@ -11,12 +11,8 @@ def normalize_series_patterns(
     expr: Expression,
     context: NormalizationContext,
 ) -> Expression:
-    """Canonicalize equivalent quadratic closed forms for simple arithmetic series."""
+    """Canonicalize only series shapes that are exact in bit-vector arithmetic."""
     canonical = _match_exact_triangular_phi(expr)
-    if canonical is expr:
-        canonical = _match_sum_to_triangular(expr)
-    if canonical is expr:
-        canonical = _match_triangular_with_affine_completion(expr)
     if canonical is expr:
         return expr
 

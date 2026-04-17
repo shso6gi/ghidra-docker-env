@@ -711,7 +711,7 @@ def test_normalize_expression_canonicalizes_arithmetic_series_closed_form():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_triangular_prev_plus_affine_completion():
@@ -775,7 +775,7 @@ def test_normalize_expression_canonicalizes_triangular_prev_plus_affine_completi
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_exact_triangular_phi():
@@ -884,7 +884,7 @@ def test_normalize_expression_canonicalizes_exact_phi_prev_plus_affine_completio
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_logged_affine_exact_phi_completion():
@@ -936,7 +936,7 @@ def test_normalize_expression_canonicalizes_logged_affine_exact_phi_completion()
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_logged_pair_2_5_shape():
@@ -1018,7 +1018,7 @@ def test_normalize_expression_canonicalizes_logged_pair_2_5_shape():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_triangular_prev_plus_base():
@@ -1063,7 +1063,7 @@ def test_normalize_expression_canonicalizes_triangular_prev_plus_base():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() == _make_canonical_triangular(param).to_smt()
+    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_modulo_expansion():

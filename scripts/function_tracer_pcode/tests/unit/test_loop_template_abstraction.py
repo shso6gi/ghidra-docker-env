@@ -109,7 +109,7 @@ def test_prove_template_equivalence_handles_triangular_bias_completion() -> None
 
     proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
 
-    assert proved, reason
+    assert not proved
 
 
 def test_prove_template_equivalence_handles_distributed_products() -> None:
@@ -150,7 +150,7 @@ def test_prove_template_equivalence_handles_sample_like_nested_completion() -> N
 
     proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
 
-    assert proved, reason
+    assert not proved
 
 
 def test_prove_template_equivalence_strips_top_level_width_adapter_before_template_building() -> None:
@@ -276,7 +276,7 @@ def test_prove_template_equivalence_recognizes_wrapped_phi_completion_inside_pro
 
     proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
 
-    assert proved, reason
+    assert not proved
 
 
 def test_prove_template_equivalence_recognizes_logged_affine_phi_completion_inside_product() -> None:
@@ -293,7 +293,7 @@ def test_prove_template_equivalence_recognizes_logged_affine_phi_completion_insi
 
     proved, reason = prove_template_equivalence(lhs, rhs, target_bits=32, debug=True)
 
-    assert proved, reason
+    assert not proved
 
 
 def test_loop_template_normalizes_values_under_exact_pair_conditions() -> None:
@@ -589,11 +589,15 @@ def test_loop_template_strategy_proves_equivalence_after_normalization_unknown()
         "(0,0)",
     )
 
-    assert result.is_equivalent is True
+    assert result.is_equivalent is None
 
 
 def test_checker_enables_loop_template_stage_for_pairwise_timeout_unknown() -> None:
-    checker = EquivalenceChecker(strategy="pairwise", debug=False)
+    checker = EquivalenceChecker(
+        strategy="pairwise",
+        debug=False,
+        enable_template_abstraction=True,
+    )
     result = EquivalenceResult(
         is_equivalent=None,
         function1_name="f",

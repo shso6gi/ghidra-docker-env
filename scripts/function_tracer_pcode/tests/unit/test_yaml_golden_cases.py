@@ -164,7 +164,10 @@ class TestYAMLGoldenCases:
             f"Case {case['id']}: required_stage_path must have at least one stage"
         
         # ★ [P2追加] 実際に checker を実行して stage_path を検証
-        checker = EquivalenceChecker(debug=True)
+        checker_kwargs = {"debug": True}
+        if "S_LOOP_TEMPLATE_ABSTRACTION" in required_stage_path:
+            checker_kwargs["enable_template_abstraction"] = True
+        checker = EquivalenceChecker(**checker_kwargs)
         
         mock_analysis = create_mock_analysis(
             function_name="test_func",
@@ -401,22 +404,33 @@ class TestMonolithicStrategyBackwardCompatibility:
         assert result.return_var2 == "return_2"
         assert result.constrained_fragments == ["param_2_hi"]
     
-    def test_pairwise_strategy_uses_four_stages(self):
-        """strategy="pairwise" なら pairwise -> loop-template -> abstraction -> monolithic を使う"""
+    def test_pairwise_strategy_defaults_to_three_stages(self):
+        """strategy="pairwise" の既定は pairwise -> abstraction -> monolithic"""
         from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
         
         # pairwise strategy で初期化
         checker = EquivalenceChecker(strategy="pairwise", debug=True)
         
-        # stage_plan が 4 つの stage を含むことを確認
-        assert len(checker.stage_plan) == 4
+        assert len(checker.stage_plan) == 3
         assert checker.stage_plan[0].stage_id.value == "S_PAIRWISE"
         assert checker.stage_plan[0].strategy == "pairwise"
+        assert checker.stage_plan[1].stage_id.value == "S_ABSTRACT_RECURSIVE_SUMMARY"
+        assert checker.stage_plan[1].strategy == "abstract_pairwise"
+        assert checker.stage_plan[2].stage_id.value == "S_MONOLITHIC_FALLBACK"
+        assert checker.stage_plan[2].strategy == "monolithic"
+
+        print("\n[PAIRWISE STRATEGY] default 3-stage plan (pairwise -> abstraction -> monolithic fallback) is configured")
+
+    def test_pairwise_strategy_can_enable_loop_template_stage(self):
+        """template abstraction は opt-in でだけ stage plan に入る"""
+        from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
+
+        checker = EquivalenceChecker(
+            strategy="pairwise",
+            debug=True,
+            enable_template_abstraction=True,
+        )
+
+        assert len(checker.stage_plan) == 4
         assert checker.stage_plan[1].stage_id.value == "S_LOOP_TEMPLATE_ABSTRACTION"
         assert checker.stage_plan[1].strategy == "loop_template_pairwise"
-        assert checker.stage_plan[2].stage_id.value == "S_ABSTRACT_RECURSIVE_SUMMARY"
-        assert checker.stage_plan[2].strategy == "abstract_pairwise"
-        assert checker.stage_plan[3].stage_id.value == "S_MONOLITHIC_FALLBACK"
-        assert checker.stage_plan[3].strategy == "monolithic"
-
-        print("\n[PAIRWISE STRATEGY] 4-stage plan (pairwise -> loop-template -> abstraction -> monolithic fallback) is configured")

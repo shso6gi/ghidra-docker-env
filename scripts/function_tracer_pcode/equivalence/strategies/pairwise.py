@@ -29,6 +29,7 @@ from ..normalize import (
     SignFacts,
     normalize_expression,
     NormalizationContext,
+    NormalizationSettings,
     extract_min_excluded_params,
     extract_upper_bound_facts,
     extract_sign_facts,
@@ -52,12 +53,19 @@ class PairwiseStrategy(CheckStrategy):
     3. Stage 3: 正規化 fallback
     """
 
-    def __init__(self, formula_builder, solver_runner, debug: bool = False):
+    def __init__(
+        self,
+        formula_builder,
+        solver_runner,
+        debug: bool = False,
+        normalization_settings: Optional[NormalizationSettings] = None,
+    ):
         super().__init__(formula_builder, solver_runner, debug)
         self.per_query_timeout = 5
         self.per_query_timeout_hard = 30
         self.save_unknown_queries = False
         self.unknown_query_dir = "/tmp"
+        self.normalization_settings = normalization_settings or NormalizationSettings.safe()
 
     def check(
         self,
@@ -419,7 +427,10 @@ class PairwiseStrategy(CheckStrategy):
         self,
         analysis: FunctionReturnAnalysis
     ) -> List[ReturnCase]:
-        return extract_return_cases(analysis)
+        return extract_return_cases(
+            analysis,
+            normalization_settings=self.normalization_settings,
+        )
 
     def _build_single_case_condition_query(
         self,
@@ -698,7 +709,7 @@ class PairwiseStrategy(CheckStrategy):
             case.value_expr = rewritten_value
             case.normalized_value_expr = normalize_expression(
                 rewritten_value,
-                NormalizationContext(),
+                NormalizationContext(settings=self.normalization_settings),
             )
             case.conditions_smt = None
             case._value_smt_cache.clear()

@@ -10,7 +10,7 @@ from .shift import normalize_shift_amounts
 from .abs import normalize_bitwise_abs
 from .division import normalize_division_signs
 from .division_signedness import normalize_division_signedness
-from .context import NormalizationContext
+from .context import NormalizationContext, NormalizationSettings
 from .width import normalize_width_adapters
 from .bitmask import normalize_fact_mask_patterns
 from .series import normalize_series_patterns
@@ -42,7 +42,7 @@ def normalize_expression(
     """
     # コンテキストがない場合はデフォルトを作成
     if context is None:
-        context = NormalizationContext()
+        context = NormalizationContext(settings=NormalizationSettings.full())
     
     # 子要素を先に正規化（ボトムアップ処理）
     if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -73,55 +73,69 @@ def normalize_expression(
         expr = expr.clone_with(operands=normalized_operands)
     
     # トップレベルの正規化（順序重要）
-    # 1. 二重否定の除去（最も基本的な変形、常に安全）
-    expr_before = expr
-    expr = normalize_double_negation(expr)
-    if expr is not expr_before:
-        context.record_rule(
-            rule_name="double_negation",
-            reason="Removed double negation"
-        )
+    if context.settings.enable_core_identities:
+        # 1. 二重否定の除去（最も基本的な変形、常に安全）
+        expr_before = expr
+        expr = normalize_double_negation(expr)
+        if expr is not expr_before:
+            context.record_rule(
+                rule_name="double_negation",
+                reason="Removed double negation"
+            )
 
     # 2. 幅アダプタの簡約
-    expr_before = expr
-    expr = normalize_width_adapters(expr, context)
+    if context.settings.enable_width_simplification:
+        expr_before = expr
+        expr = normalize_width_adapters(expr, context)
 
     # 3. fact-aware mask / constant folding
-    expr_before = expr
-    expr = normalize_fact_mask_patterns(expr, context)
+    if context.settings.enable_fact_simplifications:
+        expr_before = expr
+        expr = normalize_fact_mask_patterns(expr, context)
 
     # 4. bitmask/byte reconstruction が新しい幅アダプタを作ることがあるので再度簡約
-    expr_before = expr
-    expr = normalize_width_adapters(expr, context)
+    if (
+        context.settings.enable_fact_simplifications
+        and context.settings.enable_width_simplification
+    ):
+        expr_before = expr
+        expr = normalize_width_adapters(expr, context)
 
     # 5. arithmetic-series の閉形式正規化
-    expr_before = expr
-    expr = normalize_series_patterns(expr, context)
+    if context.settings.enable_series_normalization:
+        expr_before = expr
+        expr = normalize_series_patterns(expr, context)
 
     # 6. 剰余展開の正規化
-    expr_before = expr
-    expr = normalize_modulo_patterns(expr, context)
+    if context.settings.enable_modulo_canonicalization:
+        expr_before = expr
+        expr = normalize_modulo_patterns(expr, context)
 
     # 7. 加算・減算の正規形化
-    expr_before = expr
-    expr = normalize_arithmetic(expr, context)
+    if context.settings.enable_core_identities:
+        expr_before = expr
+        expr = normalize_arithmetic(expr, context)
 
     # 8. shift amount の正規化
-    expr_before = expr
-    expr = normalize_shift_amounts(expr, context)
+    if context.settings.enable_shift_normalization:
+        expr_before = expr
+        expr = normalize_shift_amounts(expr, context)
 
     # 9. abs ビットハックの簡約
-    expr_before = expr
-    expr = normalize_bitwise_abs(expr, context)
+    if context.settings.enable_abs_normalization:
+        expr_before = expr
+        expr = normalize_bitwise_abs(expr, context)
 
     # 10. 除算の符号正規化（安全性チェック付き）
-    expr_before = expr
-    expr = normalize_division_signs(expr, context)
-    # ルール記録はnormalize_division_signs内で行われる
+    if context.settings.enable_division_normalization:
+        expr_before = expr
+        expr = normalize_division_signs(expr, context)
+        # ルール記録はnormalize_division_signs内で行われる
     
     # 11. 除算の符号性正規化（UDIV/SDIV統一、条件付き）
-    expr_before = expr
-    expr = normalize_division_signedness(expr, context)
-    # ルール記録はnormalize_division_signedness内で行われる
+    if context.settings.enable_division_normalization:
+        expr_before = expr
+        expr = normalize_division_signedness(expr, context)
+        # ルール記録はnormalize_division_signedness内で行われる
     
     return expr

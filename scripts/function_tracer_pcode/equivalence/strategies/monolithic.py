@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from ...model import FunctionReturnAnalysis
 from ...smt import ParallelResult
 from ..formula.symbol_replace import build_symbol_replacer
+from ..normalize import NormalizationSettings
 from ..param_semantics import infer_parameter_semantics
 from ..semantic_width import normalize_analysis_semantic_width
 from .base import CheckStrategy, StrategyResult
@@ -17,6 +18,16 @@ from .pairwise_query_executor import validate_counterexample_globally
 
 class MonolithicStrategy(CheckStrategy):
     """Monolithic戦略（全条件を一度に検証）"""
+
+    def __init__(
+        self,
+        formula_builder,
+        solver_runner,
+        debug: bool = False,
+        normalization_settings: Optional[NormalizationSettings] = None,
+    ):
+        super().__init__(formula_builder, solver_runner, debug)
+        self.normalization_settings = normalization_settings or NormalizationSettings.safe()
 
     def _counterexample_is_decisive_across_case_split(
         self,
@@ -43,8 +54,8 @@ class MonolithicStrategy(CheckStrategy):
             base_ctx.get("extra_vars2", []),
         )
 
-        cases1 = extract_return_cases(analysis1)
-        cases2 = extract_return_cases(analysis2)
+        cases1 = extract_return_cases(analysis1, self.normalization_settings)
+        cases2 = extract_return_cases(analysis2, self.normalization_settings)
         if not cases1 or not cases2:
             self._debug_print(
                 "Monolithic SAT counterexample rejected: no return cases available for validation"
@@ -127,8 +138,8 @@ class MonolithicStrategy(CheckStrategy):
                     hints2,
                     base_ctx.get("extra_vars2", []),
                 )
-                cases1 = extract_return_cases(normalized1)
-                cases2 = extract_return_cases(normalized2)
+                cases1 = extract_return_cases(normalized1, self.normalization_settings)
+                cases2 = extract_return_cases(normalized2, self.normalization_settings)
                 replace1 = build_symbol_replacer(
                     base_ctx["params1"],
                     base_ctx.get("extra_vars1", []),

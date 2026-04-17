@@ -23,7 +23,7 @@ from ..model import (
     StructuralKey,
     expression_key_or_identity,
 )
-from .normalize import NormalizationContext, normalize_expression
+from .normalize import NormalizationContext, NormalizationSettings, normalize_expression
 from .normalize.series import (
     _match_expr_plus_const,
     _match_half_product,
@@ -32,6 +32,7 @@ from .normalize.series import (
 
 
 MAX_TEMPLATE_TERMS = 256
+SAFE_NORMALIZATION_SETTINGS = NormalizationSettings.safe()
 
 
 @dataclass(frozen=True, order=True)
@@ -70,8 +71,8 @@ def prove_template_equivalence(
     debug: bool = False,
 ) -> Tuple[bool, str]:
     """Try to prove equality via exact algebraic template abstraction."""
-    normalized1 = normalize_expression(expr1, NormalizationContext())
-    normalized2 = normalize_expression(expr2, NormalizationContext())
+    normalized1 = normalize_expression(expr1, NormalizationContext(settings=SAFE_NORMALIZATION_SETTINGS))
+    normalized2 = normalize_expression(expr2, NormalizationContext(settings=SAFE_NORMALIZATION_SETTINGS))
 
     poly1 = _build_template(normalized1, target_bits)
     poly2 = _build_template(normalized2, target_bits)
@@ -161,7 +162,10 @@ def _build_template(expr: Expression, width_bits: int) -> Optional[TemplateBuild
         if tri_poly is not None:
             return tri_poly
 
-        canonical = normalize_expression(_normalize_expression_for_width(expr_node, width_bits), NormalizationContext())
+        canonical = normalize_expression(
+            _normalize_expression_for_width(expr_node, width_bits),
+            NormalizationContext(settings=SAFE_NORMALIZATION_SETTINGS),
+        )
         if not _same_expression_key(canonical, expr_node):
             return build(canonical)
 
@@ -242,18 +246,9 @@ def _build_triangular_poly(
     if lower_bias == 0:
         return tri_poly
 
-    # tri(x + k) = tri(x) + k*x + k*(k+1)/2
-    linear_coeff = lower_bias
-    const_term = (lower_bias * (lower_bias + 1)) // 2
-
-    linear_poly = mul_poly(const_poly(linear_coeff), atom_poly(base_atom))
-    if linear_poly is None:
-        return None
-
-    with_linear = add_poly(tri_poly, linear_poly)
-    if with_linear is None:
-        return None
-    return add_poly(with_linear, const_poly(const_term))
+    # Adjacent half-products shifted away from the canonical tri(base) shape are
+    # not exact under bit-vector wraparound, so keep them as opaque atoms.
+    return atom_poly(_half_product_atom(left, right, width_bits))
 
 
 def _const_value_for_template(expr: Expression, width_bits: int) -> Optional[int]:
@@ -385,7 +380,10 @@ def _generic_atom(expr: Expression, width_bits: int) -> TemplateAtom:
 
 
 def _expr_key(expr: Expression, width_bits: int) -> StructuralKey:
-    normalized = normalize_expression(_normalize_expression_for_width(expr, width_bits), NormalizationContext())
+    normalized = normalize_expression(
+        _normalize_expression_for_width(expr, width_bits),
+        NormalizationContext(settings=SAFE_NORMALIZATION_SETTINGS),
+    )
     return expression_key_or_identity(
         normalized,
         normalize_commutative=True,
