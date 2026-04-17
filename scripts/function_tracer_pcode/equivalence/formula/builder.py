@@ -4,6 +4,7 @@
 from typing import List, Dict, Optional, Tuple, Set, Any
 
 from ...model import FunctionReturnAnalysis
+from ...model.render_smt import collect_unknown_smt_declarations
 from .params import (
     build_fragment_backed_parameter_constraint,
     collect_fragment_infos_by_param_index,
@@ -208,6 +209,7 @@ class FormulaBuilder:
         param_pairs = self._build_parameter_pairs(params1, params2)
         (
             header_lines,
+            runtime_unknown_declarations,
             constrained_fragments,
             param_fragment_constrained,
         ) = self._build_base_header_lines(
@@ -235,6 +237,7 @@ class FormulaBuilder:
             return_size1=return_size1,
             return_size2=return_size2,
             header_lines=header_lines,
+            runtime_unknown_declarations=runtime_unknown_declarations,
             constrained_fragments=constrained_fragments,
             param_fragment_constrained=param_fragment_constrained,
         )
@@ -264,7 +267,7 @@ class FormulaBuilder:
         param_pairs: List[ParameterPair],
         func1_suffix: str,
         func2_suffix: str
-    ) -> Tuple[List[str], List[str], List[str]]:
+    ) -> Tuple[List[str], List[Tuple[str, int]], List[str], List[str]]:
         """共通の宣言・制約セクションを組み立てる"""
         lines: List[str] = []
 
@@ -285,6 +288,13 @@ class FormulaBuilder:
             lines.extend(
                 self._build_extra_var_declarations(analysis2.function_name, extra_vars2)
             )
+
+        runtime_unknown_decls = self._collect_runtime_unknown_declarations(
+            analysis1,
+            analysis2,
+        )
+        if runtime_unknown_decls:
+            lines.extend(self._build_runtime_unknown_declarations(runtime_unknown_decls))
 
         semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
         if semantic_lines:
@@ -325,7 +335,7 @@ class FormulaBuilder:
             if ub_lines:
                 lines.extend(ub_lines)
 
-        return lines, constrained_fragments, param_fragment_constrained
+        return lines, runtime_unknown_decls, constrained_fragments, param_fragment_constrained
     
     # ============================================
     # NEW: UB制約セクション構築
@@ -498,6 +508,59 @@ class FormulaBuilder:
             lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width})){comment}")
         lines.append("")
         return lines
+
+    def _build_runtime_unknown_declarations(
+        self,
+        declarations: List[Tuple[str, int]],
+    ) -> List[str]:
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Runtime UNKNOWN objects")
+        lines.append("; Structured runtime identities lowered as deterministic SMT symbols")
+        lines.append("; " + "-" * 40)
+        for symbol_name, bit_width in declarations:
+            lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
+        lines.append("")
+        return lines
+
+    def _collect_runtime_unknown_declarations(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[Tuple[str, int]]:
+        declarations: List[Tuple[str, int]] = []
+        seen = set()
+
+        def extend_from_expression(expr) -> None:
+            for decl in collect_unknown_smt_declarations(expr):
+                if decl in seen:
+                    continue
+                seen.add(decl)
+                declarations.append(decl)
+
+        def extend_from_conditions(conditions) -> None:
+            for condition in conditions or []:
+                extend_from_expression(getattr(condition, "expression", None))
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for ret in getattr(analysis, "returns", []) or []:
+                extend_from_expression(getattr(ret, "value", None))
+                extend_from_conditions(getattr(ret, "conditions", None))
+
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                extend_from_expression(getattr(effect_summary, "synthetic_expr", None))
+                for effect in getattr(effect_summary, "effects", []) or []:
+                    extend_from_expression(getattr(effect, "value", None))
+                    extend_from_conditions(getattr(effect, "conditions", None))
+
+            for deferred in (getattr(analysis, "deferred_calls", None) or {}).values():
+                extend_from_expression(getattr(deferred, "call_target_expr", None))
+                for arg in getattr(deferred, "arguments", []) or []:
+                    extend_from_expression(arg)
+
+        return declarations
     
     def _build_param_constraints_section(
         self,
@@ -881,6 +944,7 @@ class FormulaBuilder:
             'params2': context.params2,
             'extra_vars1': context.extra_vars1,
             'extra_vars2': context.extra_vars2,
+            'runtime_unknown_declarations': context.runtime_unknown_declarations,
             'constrained_fragments': context.constrained_fragments,
             'return_size1': context.return_size1,
             'return_size2': context.return_size2,

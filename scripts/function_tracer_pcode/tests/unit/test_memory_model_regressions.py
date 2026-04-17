@@ -1451,6 +1451,48 @@ def test_return_analyzer_keeps_stale_effect_value_wrapper_when_alias_is_not_defi
     assert collapsed.to_string() == "(MEM[dst] + delta)"
 
 
+def test_return_analyzer_rejects_no_rank_rewrite_that_drops_composite_location_wrapper():
+    ptr = Expression.parameter("ptr", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    ptr_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", ptr, Expression.constant(0, 8)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("ptr", size=8, is_signed=False, index=0),
+        _param("delta", size=4, index=1),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["ptr", "delta"],
+        effects=[
+            StoreEffect(
+                location=_loc("ptr", 0, 4),
+                value=Expression.memory(ptr, size=4),
+                conditions=[ptr_nonnull],
+                order_key=10,
+            ),
+        ],
+    )
+
+    original = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(ptr, size=4),
+        delta,
+    )
+    rewritten = Expression.memory(ptr, size=4)
+
+    accepted = analyzer._accept_effect_rewrite_without_rank_gain(
+        original,
+        rewritten,
+        [ptr_nonnull],
+        analyzer._current_effect_summary,
+    )
+
+    assert accepted is False
+
+
 def test_return_analyzer_keeps_object_centric_post_state_for_observed_stale_wrapper():
     ptr = Expression.parameter("ptr", 0, size=8)
     alias = Expression.parameter("alias", 1, size=8)
@@ -3171,6 +3213,202 @@ def test_summarize_store_effects_recovers_direct_call_store_values_from_call_exp
     assert len(summary.effects) == 1
     assert summary.effects[0].location == _loc("slot", 0, 4)
     assert summary.effects[0].value.to_string() == "(lhs + rhs)"
+
+
+def test_summarize_store_effects_expands_nested_copy_and_arithmetic_store_values_object_centrically():
+    class FakeAddress:
+        def __init__(self, offset):
+            self._offset = offset
+
+        def getOffset(self):
+            return self._offset
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, key, size, def_op=None):
+            self.key = key
+            self._size = size
+            self._def_op = def_op
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return self._def_op
+
+        def getHigh(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+            self._output = FakeVarnode("ret", 4, def_op=self)
+            self._seqnum = FakeSeqnum(0x401180, 2)
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeCopyOp:
+        def __init__(self, source):
+            self._inputs = [source]
+            self._output = FakeVarnode("copied", 4, def_op=self)
+            self._seqnum = FakeSeqnum(0x401184, 3)
+
+        def getMnemonic(self):
+            return "COPY"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeAddOp:
+        def __init__(self, lhs, rhs):
+            self._inputs = [lhs, rhs]
+            self._output = FakeVarnode("sum", 4, def_op=self)
+            self._seqnum = FakeSeqnum(0x401188, 4)
+
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return self._output
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeStoreOp:
+        def __init__(self, value_varnode):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                value_varnode,
+            ]
+            self._seqnum = FakeSeqnum(0x401190, 5)
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getOutput(self):
+            return None
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlockInfo:
+        def __init__(self, *ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return [[]]
+
+    class FakeTracer:
+        def _get_function_name(self, varnode):
+            if getattr(varnode, "key", None) == "target":
+                return "fc_add"
+            return "UNKNOWN_FUNC"
+
+        def _trace_pcode_op(self, pcode_op, depth=0, use_cache=False):
+            mnemonic = pcode_op.getMnemonic()
+            if mnemonic == "INT_ADD":
+                return Expression.binary_op(
+                    "INT_ADD",
+                    self.trace_varnode(pcode_op.getInput(0), use_cache=False),
+                    self.trace_varnode(pcode_op.getInput(1), use_cache=False),
+                )
+            raise AssertionError(f"unexpected traced op: {mnemonic}")
+
+        def trace_varnode(self, varnode, depth=0, use_cache=False):
+            if varnode.key == "addr":
+                return Expression.parameter("slot", 0, size=8)
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 1, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 2, size=4)
+            if varnode.key == "copied":
+                return Expression.unknown("copied_call_value")
+            if varnode.key == "ret":
+                return Expression.unknown("call_out_of_scope:fc_add")
+            if varnode.key == "sum":
+                return Expression.unknown("nested_sum")
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+        def _get_op_order_key(self, pcode_op):
+            return pcode_op.getSeqnum().getOrder()
+
+    call_op = FakeCallOp()
+    copy_op = FakeCopyOp(call_op.getOutput())
+    add_op = FakeAddOp(copy_op.getOutput(), FakeVarnode("rhs", 4))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op, copy_op, add_op, FakeStoreOp(add_op.getOutput()))],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("slot", size=8, is_signed=False, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+            _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
+        ],
+        direct_call_expander=lambda _target_ref, args: [
+            ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
+        ],
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("a", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
+            _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+
+    assert summary.has_unsupported_call is False
+    assert len(summary.effects) == 1
+    assert summary.effects[0].location == _loc("slot", 0, 4)
+    assert summary.effects[0].value.to_string() == "((lhs + rhs) + rhs)"
 
 
 def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_summary():

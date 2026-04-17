@@ -340,6 +340,8 @@ def summarize_store_effects(
     direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]] = None,
     direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
     debug: bool = False,
 ) -> EffectSummary:
     parameter_names = _collect_named_parameter_names(parameters)
@@ -362,9 +364,12 @@ def summarize_store_effects(
                 value_effects = _resolve_store_value_effects(
                     op,
                     tracer,
+                    condition_tracker,
                     parameters,
                     direct_call_expander=direct_call_expander,
                     resolve_callee_parameters=resolve_callee_parameters,
+                    read_memory_value=read_memory_value,
+                    image_base=image_base,
                 )
                 for path_conditions in path_sets:
                     for value_expr, value_conditions in value_effects:
@@ -530,12 +535,27 @@ def summarize_store_effects(
 def _resolve_store_value_effects(
     store_op,
     tracer,
+    condition_tracker,
     parameters: Sequence[Dict],
     *,
     direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     value_varnode = store_op.getInput(2)
+    object_centric = _resolve_object_centric_store_value_effects(
+        value_varnode,
+        tracer,
+        condition_tracker,
+        parameters,
+        direct_call_expander=direct_call_expander,
+        resolve_callee_parameters=resolve_callee_parameters,
+        read_memory_value=read_memory_value,
+        image_base=image_base,
+    )
+    if object_centric:
+        return object_centric
     resolved = _resolve_direct_call_value_effects(
         value_varnode,
         tracer,
@@ -546,6 +566,62 @@ def _resolve_store_value_effects(
     if resolved:
         return resolved
     return [(tracer.trace_varnode(value_varnode, use_cache=False), [])]
+
+
+def _resolve_object_centric_store_value_effects(
+    value_varnode,
+    tracer,
+    condition_tracker,
+    parameters: Sequence[Dict],
+    *,
+    direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
+) -> List[Tuple[Expression, List[Condition]]]:
+    if value_varnode is None or condition_tracker is None:
+        return []
+
+    from ..transform.expander import ExpressionExpander
+
+    expander = ExpressionExpander(
+        tracer,
+        condition_tracker,
+        debug=False,
+        call_resolver=direct_call_expander,
+        parameters=list(parameters or []),
+        resolve_callee_parameters=resolve_callee_parameters,
+        read_memory_value=read_memory_value,
+        image_base=image_base,
+        record_deferred_call=getattr(tracer, "record_deferred_call", None),
+    )
+
+    try:
+        expanded = expander.expand_from_varnode(value_varnode, [])
+    except Exception:
+        return []
+
+    resolved: List[Tuple[Expression, List[Condition]]] = []
+    seen = set()
+    for item in expanded or []:
+        value = getattr(item, "value", None)
+        conditions = getattr(item, "conditions", None)
+        if not isinstance(value, Expression):
+            continue
+        normalized_conditions = ConditionSimplifier.simplify_conditions(list(conditions or []))
+        if ConditionSimplifier.is_contradiction(normalized_conditions):
+            continue
+        reduced_value = _reduce_expression_under_conditions(value, normalized_conditions)
+        normalized_value = reduced_value if reduced_value is not None else value
+        key = (
+            _runtime_expression_signature(normalized_value),
+            _runtime_conditions_signature(normalized_conditions),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append((normalized_value, normalized_conditions))
+    return resolved
 
 
 def _resolve_direct_call_value_effects(

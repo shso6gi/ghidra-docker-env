@@ -81,15 +81,6 @@ def prove_guard_condition(
         for solver_result in result.results:
             if solver_result.status == SolverStatus.ERROR:
                 error_msg = solver_result.error_message or "Unknown error"
-                
-                # パースエラーの詳細を抽出
-                if "unknown constant" in error_msg:
-                    import re
-                    match = re.search(r'unknown constant (\w+)', error_msg)
-                    if match:
-                        unknown_sym = match.group(1)
-                        error_msg = f"Parse error: unknown constant '{unknown_sym}' - symbol not replaced?"
-                
                 if debug:
                     print(f"[GuardProver] ERROR: {error_msg}")
                 

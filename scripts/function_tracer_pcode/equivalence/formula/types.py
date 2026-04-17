@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .variable import ExtraVariableAnalysis
 
@@ -83,5 +83,6 @@ class FormulaBuildContext:
     return_size1: int
     return_size2: int
     header_lines: List[str]
+    runtime_unknown_declarations: List[Tuple[str, int]]
     constrained_fragments: List[str]
     param_fragment_constrained: List[str]

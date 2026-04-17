@@ -450,6 +450,8 @@ def _iter_declared_symbols(base_ctx: Dict[str, Any]) -> Iterable[Tuple[str, int]
         yield extra.smt_name, extra.bit_width
     for extra in base_ctx.get("extra_vars2", []):
         yield extra.smt_name, extra.bit_width
+    for symbol_name, bit_width in base_ctx.get("runtime_unknown_declarations", []):
+        yield symbol_name, bit_width
 
 
 def _log_solver_errors(strategy, query: str, solver_results) -> None:
@@ -462,28 +464,3 @@ def _log_solver_errors(strategy, query: str, solver_results) -> None:
 
         error_msg = solver_result.error_message or ""
         strategy._debug_print(f"  Solver error: {error_msg}")
-        if "unknown constant" not in error_msg:
-            continue
-
-        import re
-
-        match = re.search(r"unknown constant (\w+)", error_msg)
-        if not match:
-            continue
-
-        unknown_sym = match.group(1)
-        strategy._debug_print(f"  !!! Unknown symbol detected: '{unknown_sym}'")
-        strategy._debug_print("  This symbol should have been replaced during symbol mapping.")
-        if not strategy.debug:
-            continue
-
-        lines = query.split("\n")
-        for index, line in enumerate(lines):
-            if unknown_sym not in line:
-                continue
-            start = max(0, index - 2)
-            end = min(len(lines), index + 3)
-            strategy._debug_print(f"  Context (lines {start}-{end}):")
-            for context_index in range(start, end):
-                marker = " >>> " if context_index == index else "     "
-                strategy._debug_print(f"{marker}{lines[context_index]}")

@@ -12,6 +12,7 @@ from .render_python import (
     get_python_operator,
 )
 from .render_smt import expression_to_smt, get_smt_operator
+from .runtime_refs import UnknownValueRef
 from .variable_collection import (
     collect_variables,
     collect_variables_into,
@@ -213,6 +214,11 @@ class Expression:
     
     @classmethod
     def unknown(cls, description: str = "unknown", runtime_ref: Any = None) -> 'Expression':
+        if runtime_ref is None:
+            runtime_ref = UnknownValueRef.opaque(
+                reason=description,
+                display_hint=description,
+            )
         return cls(expr_type=ExpressionType.UNKNOWN, name=description, runtime_ref=runtime_ref)
     
     def get_bit_width(self) -> int:

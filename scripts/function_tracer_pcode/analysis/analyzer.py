@@ -33,8 +33,10 @@ from .condition import ConditionTracker, ConditionSimplifier, ConditionNormalize
 from .debug import summarize_expression
 from .signedness import SignednessDetector
 from .effect_summary import (
+    CanonicalLocation,
     EffectSummary,
     _build_parameter_replacements,
+    _expression_location_ref,
     _enumerate_constant_expression_branches,
     _expression_contains_observed_loads,
     _iter_expression_nodes,
@@ -48,6 +50,7 @@ from .effect_summary import (
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
+    locations_match,
     promote_effect_value_match_to_post_state_read,
     resolve_definite_post_state_read_for_location,
     resolve_call_targets,
@@ -107,6 +110,17 @@ class _TrackedReturnValue:
     varnode: Optional[Any] = None
     storage: Optional[StorageInfo] = None
     producer_op: Optional[Any] = None
+
+
+@dataclass(frozen=True)
+class _EffectRewritePrecision:
+    matched_effect_locations: int
+    post_state_reads: int
+    object_centric_unknowns: int
+    opaque_unknowns: int
+    downstream_unresolved_values: int
+    observed_loads: int
+    phi_nodes: int
 
 
 class ReturnAnalyzer:
@@ -625,6 +639,7 @@ class ReturnAnalyzer:
         # implicit passthrough parameter recovery でも CALLIND target を追跡するため、
         # PhiHandler が有効な状態で tracer を使えるようにしておく。
         tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        tracer.record_deferred_call = self._make_deferred_call_recorder(function)
         condition_tracker = ConditionTracker(tracer)
         from .phi_resolver import PhiHandler
 
@@ -2797,6 +2812,7 @@ class ReturnAnalyzer:
                 return None
 
             callee_tracer = PcodeTracer(self.program, callee_high, debug=self.debug)
+            callee_tracer.record_deferred_call = self._make_deferred_call_recorder(callee)
             callee_tracker = ConditionTracker(callee_tracer)
             from .phi_resolver import PhiHandler
 
@@ -2835,6 +2851,11 @@ class ReturnAnalyzer:
 
         current_target = CallTargetRef.from_function(function)
         current_active_key = self._target_active_key(current_target)
+        image_base = None
+        try:
+            image_base = self.program.getImageBase().getOffset()
+        except Exception:
+            image_base = None
         summary = summarize_store_effects(
             condition_tracker.block_by_index.values(),
             tracer,
@@ -2846,6 +2867,8 @@ class ReturnAnalyzer:
                 function,
             ),
             resolve_callee_parameters=resolve_callee_parameters,
+            read_memory_value=self._read_memory_value,
+            image_base=image_base,
             debug=self.debug,
         )
         self._effect_summary_cache[cache_key] = summary
@@ -2905,7 +2928,17 @@ class ReturnAnalyzer:
 
         expanded = []
         for ret in specialized.returns:
-            if not self._call_summary_is_safe(ret.value, ret.conditions, args):
+            simplified_conditions = ConditionSimplifier.simplify_conditions(ret.conditions)
+            if ConditionSimplifier.is_contradiction(simplified_conditions):
+                continue
+
+            reduced_value = _reduce_expression_under_conditions(
+                ret.value,
+                simplified_conditions,
+            )
+            effective_value = reduced_value if reduced_value is not None else ret.value
+
+            if not self._call_summary_is_safe(effective_value, simplified_conditions, args):
                 self._debug_print(
                     f"Call expansion rejected for '{target_label}': "
                     "summary not safe enough for inlining"
@@ -2914,8 +2947,8 @@ class ReturnAnalyzer:
 
             expanded.append(
                 ExpandedValue(
-                    value=ret.value,
-                    conditions=ConditionSimplifier.simplify_conditions(ret.conditions),
+                    value=effective_value,
+                    conditions=simplified_conditions,
                 )
             )
 
@@ -3001,6 +3034,7 @@ class ReturnAnalyzer:
             return None
 
         tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        tracer.record_deferred_call = self._make_deferred_call_recorder(containing)
         expanded = self._expand_linear_code_target(addr, tracer, containing)
         self._local_target_cache[address_value] = expanded
         return expanded
@@ -5100,6 +5134,8 @@ class ReturnAnalyzer:
             accepted = self._accept_effect_sensitive_rewrite(
                 value,
                 rewritten,
+                conditions,
+                effect_summary,
                 rewrite_kind=rewrite_kind,
             )
             if (
@@ -5128,6 +5164,8 @@ class ReturnAnalyzer:
         if _expressions_equivalent(original, rewritten):
             return False
         if _expression_contains_observed_loads(original):
+            return False
+        if self._rewrite_drops_composite_location_wrapper(original, rewritten, conditions):
             return False
         if expression_contains_post_state_reads(rewritten):
             return True
@@ -5166,6 +5204,79 @@ class ReturnAnalyzer:
             self._current_parameters,
         )
         return original_match is None and rewritten_match is not None
+
+    def _rewrite_drops_composite_location_wrapper(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+        conditions: List[Condition],
+    ) -> bool:
+        if original is None or rewritten is None:
+            return False
+        if original.expr_type not in {
+            ExpressionType.BINARY_OP,
+            ExpressionType.UNARY_OP,
+            ExpressionType.CALL,
+        }:
+            return False
+
+        original_location = canonicalize_expr_read_location(
+            original,
+            self._current_parameters,
+        )
+        rewritten_location = canonicalize_expr_read_location(
+            rewritten,
+            self._current_parameters,
+        )
+        if (
+            original_location is None
+            or rewritten_location is None
+            or not locations_match(original_location, rewritten_location, conditions)
+        ):
+            return False
+        if not self._is_direct_location_carrier(rewritten):
+            return False
+        return self._expression_has_nontrivial_location_wrapper(
+            original,
+            original_location,
+        )
+
+    def _is_direct_location_carrier(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if _expression_location_ref(expr) is not None:
+            return True
+        return expr.expr_type == ExpressionType.MEMORY and bool(expr.operands)
+
+    def _expression_has_nontrivial_location_wrapper(
+        self,
+        expr: Optional[Expression],
+        location: CanonicalLocation,
+    ) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            for index, operand in enumerate(expr.operands):
+                operand_location = canonicalize_expr_read_location(
+                    operand,
+                    self._current_parameters,
+                )
+                if operand_location is None or operand_location != location:
+                    continue
+                other_operand = expr.operands[1 - index]
+                if self._wrapper_preserves_collapsed_operand(
+                    expr.operator,
+                    other_operand,
+                    kept_operand_index=index,
+                ):
+                    return False
+                return True
+            return False
+        if expr.expr_type == ExpressionType.UNARY_OP:
+            return True
+        if expr.expr_type == ExpressionType.CALL:
+            return True
+        return False
 
     def _matched_effect_locations(
         self,
@@ -5270,6 +5381,12 @@ class ReturnAnalyzer:
                 shared_rewritten = rewritten_operands[1 - rewritten_index]
                 if not _expressions_equivalent(shared_rewritten, shared_original):
                     continue
+                if not self._wrapper_preserves_collapsed_operand(
+                    original.operator,
+                    shared_original,
+                    kept_operand_index=rewritten_index,
+                ):
+                    continue
                 if (
                     _find_matching_effect_value(
                         rewritten_operand,
@@ -5299,10 +5416,41 @@ class ReturnAnalyzer:
 
         return rewritten
 
+    def _wrapper_preserves_collapsed_operand(
+        self,
+        operator: Optional[str],
+        shared_operand: Optional[Expression],
+        *,
+        kept_operand_index: int,
+    ) -> bool:
+        if shared_operand is None or shared_operand.expr_type != ExpressionType.CONSTANT:
+            return False
+
+        try:
+            shared_value = int(shared_operand.value)
+        except Exception:
+            return False
+
+        bit_width = max(1, int(shared_operand.get_bit_width() or 0))
+        mask = (1 << bit_width) - 1
+        normalized = shared_value & mask
+
+        if operator in {"INT_ADD", "INT_OR", "INT_XOR"}:
+            return normalized == 0
+        if operator == "INT_AND":
+            return normalized == mask
+        if operator in {"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}:
+            return kept_operand_index == 0 and normalized == 0
+        if operator == "INT_SUB":
+            return kept_operand_index == 0 and normalized == 0
+        return False
+
     def _accept_effect_sensitive_rewrite(
         self,
         original: Optional[Expression],
         rewritten: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
         *,
         rewrite_kind: str,
     ) -> bool:
@@ -5311,19 +5459,76 @@ class ReturnAnalyzer:
         if _expressions_equivalent(rewritten, original):
             return False
 
-        original_rank = self._effect_sensitive_rewrite_rank(original)
-        rewritten_rank = self._effect_sensitive_rewrite_rank(rewritten)
-        accepted = rewritten_rank > original_rank
+        original_precision = self._effect_sensitive_rewrite_precision(
+            original,
+            conditions,
+            effect_summary,
+        )
+        rewritten_precision = self._effect_sensitive_rewrite_precision(
+            rewritten,
+            conditions,
+            effect_summary,
+        )
+        accepted = (
+            rewritten_precision.opaque_unknowns < original_precision.opaque_unknowns
+            or rewritten_precision.downstream_unresolved_values < original_precision.downstream_unresolved_values
+            or rewritten_precision.matched_effect_locations > original_precision.matched_effect_locations
+            or rewritten_precision.post_state_reads > original_precision.post_state_reads
+            or (
+                rewritten_precision.object_centric_unknowns > original_precision.object_centric_unknowns
+                and rewritten_precision.downstream_unresolved_values
+                <= original_precision.downstream_unresolved_values
+            )
+        )
+        if not accepted:
+            original_rank = self._effect_sensitive_rewrite_rank(original)
+            rewritten_rank = self._effect_sensitive_rewrite_rank(rewritten)
+            accepted = rewritten_rank > original_rank
+        else:
+            original_rank = self._effect_sensitive_rewrite_rank(original)
+            rewritten_rank = self._effect_sensitive_rewrite_rank(rewritten)
 
         if self.debug and not accepted:
             self._debug_print(
                 f"Rejected {rewrite_kind} rewrite without object-centric precision gain: "
                 f"{self._debug_expr_identity_summary(original)} -> "
                 f"{self._debug_expr_identity_summary(rewritten)} "
-                f"rank {original_rank} -> {rewritten_rank}"
+                f"rank {original_rank} -> {rewritten_rank} "
+                f"precision {original_precision} -> {rewritten_precision}"
             )
 
         return accepted
+
+    def _effect_sensitive_rewrite_precision(
+        self,
+        expr: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> _EffectRewritePrecision:
+        matched_locations = len(
+            self._matched_effect_locations(expr, conditions, effect_summary)
+        )
+        post_state_reads = 1 if expression_contains_post_state_reads(expr) else 0
+        lowered = expr
+        if expr is not None and effect_summary is not None and getattr(effect_summary, "effects", None):
+            lowered_candidate = lower_post_state_expression_for_smt(
+                expr,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if lowered_candidate is not None:
+                lowered = lowered_candidate
+
+        return _EffectRewritePrecision(
+            matched_effect_locations=matched_locations,
+            post_state_reads=post_state_reads,
+            object_centric_unknowns=self._count_object_centric_unknowns(expr),
+            opaque_unknowns=self._count_opaque_unknowns(expr),
+            downstream_unresolved_values=self._count_unresolved_value_nodes(lowered),
+            observed_loads=self._count_observed_loads(expr),
+            phi_nodes=self._count_phi_nodes(expr),
+        )
 
     def _effect_sensitive_rewrite_rank(
         self,
@@ -5337,6 +5542,62 @@ class ReturnAnalyzer:
             1 if _expression_contains_observed_loads(expr) else 0,
             self._count_memory_reads(expr),
         )
+
+    def _count_unresolved_value_nodes(self, expr: Optional[Expression]) -> int:
+        if expr is None:
+            return 1
+        count = 1 if expr.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL} else 0
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None:
+                    count += self._count_unresolved_value_nodes(cond_expr)
+                count += self._count_unresolved_value_nodes(value)
+            return count
+        for operand in getattr(expr, "operands", []) or []:
+            count += self._count_unresolved_value_nodes(operand)
+        return count
+
+    def _count_object_centric_unknowns(self, expr: Optional[Expression]) -> int:
+        count = 0
+        for current in _iter_expression_nodes(expr):
+            if getattr(current, "expr_type", None) != ExpressionType.UNKNOWN:
+                continue
+            runtime_ref = getattr(current, "runtime_ref", None)
+            stable_key = getattr(runtime_ref, "stable_key", None)
+            if callable(stable_key):
+                try:
+                    if stable_key() is not None:
+                        count += 1
+                except Exception:
+                    continue
+        return count
+
+    def _count_opaque_unknowns(self, expr: Optional[Expression]) -> int:
+        count = 0
+        for current in _iter_expression_nodes(expr):
+            if getattr(current, "expr_type", None) != ExpressionType.UNKNOWN:
+                continue
+            runtime_ref = getattr(current, "runtime_ref", None)
+            kind = getattr(runtime_ref, "kind", None)
+            stable_key = getattr(runtime_ref, "stable_key", None)
+            if kind == "opaque_unknown" or not callable(stable_key):
+                count += 1
+        return count
+
+    def _count_observed_loads(self, expr: Optional[Expression]) -> int:
+        count = 0
+        for current in _iter_expression_nodes(expr, include_phi_conditions=False):
+            if _expression_contains_observed_loads(current):
+                count += 1
+        return count
+
+    def _count_phi_nodes(self, expr: Optional[Expression]) -> int:
+        count = 0
+        for current in _iter_expression_nodes(expr):
+            if getattr(current, "expr_type", None) == ExpressionType.PHI:
+                count += 1
+        return count
 
     def _expand_object_centric_expression_cases(
         self,

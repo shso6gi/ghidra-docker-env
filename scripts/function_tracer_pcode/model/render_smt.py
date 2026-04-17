@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """SMT-LIB rendering helpers for Expression."""
 
-from typing import Mapping, Optional
+import hashlib
+from typing import Any, List, Mapping, Optional, Tuple
 
 from .signature import get_declared_type_signedness
 from .runtime_refs import AddressValueRef
@@ -204,6 +205,24 @@ def expression_contains_unsupported_smt_ops(expr) -> bool:
     return False
 
 
+def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
+    """Collect deterministic SMT declarations needed for UNKNOWN runtime objects."""
+    declarations: List[Tuple[str, int]] = []
+    seen = set()
+    for node in _iter_expression_nodes(expr):
+        if node is None or getattr(node, "expr_type", None) is None:
+            continue
+        expr_kind = node.expr_type.__class__
+        if node.expr_type != expr_kind.UNKNOWN:
+            continue
+        decl = _unknown_smt_declaration(node)
+        if decl in seen:
+            continue
+        seen.add(decl)
+        declarations.append(decl)
+    return declarations
+
+
 def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     """Bool sort の式を 0/1 の bitvector へ変換する。"""
     if bits <= 0 or not expression_returns_bool(expr):
@@ -342,6 +361,64 @@ def _expr_prefers_signed_extension(expr) -> bool:
     return any(_expr_prefers_signed_extension(operand) for operand in operands)
 
 
+def _iter_expression_nodes(expr) -> List[Any]:
+    if expr is None:
+        return []
+
+    nodes: List[Any] = []
+    pending: List[Any] = [expr]
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        nodes.append(current)
+
+        expr_type = getattr(current, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is not None and expr_kind is not None and expr_type == expr_kind.PHI and current.value:
+            for cond, value in reversed(current.value):
+                if value is not None:
+                    pending.append(value)
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None:
+                    pending.append(cond_expr)
+            continue
+
+        operands = getattr(current, "operands", None) or []
+        pending.extend(reversed([operand for operand in operands if operand is not None]))
+
+    return nodes
+
+
+def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    stable_key = getattr(runtime_ref, "stable_key", None)
+    if callable(stable_key):
+        try:
+            identity = stable_key()
+        except Exception:
+            identity = None
+        if identity is not None:
+            return ("runtime_ref", identity)
+    return (
+        "expression_unknown",
+        getattr(expr, "name", None),
+        int(expression_smt_bit_width(expr) or 1),
+    )
+
+
+def _unknown_smt_symbol_name(expr) -> str:
+    identity = _unknown_runtime_identity_key(expr)
+    bits = max(1, int(expression_smt_bit_width(expr) or 1))
+    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    return f"rtunk_{digest}_{bits}"
+
+
+def _unknown_smt_declaration(expr) -> Tuple[str, int]:
+    bits = max(1, int(expression_smt_bit_width(expr) or 1))
+    return (_unknown_smt_symbol_name(expr), bits)
+
+
 def _to_smt_internal(
     expr,
     prefer_signed_arithmetic: bool = False,
@@ -374,6 +451,9 @@ def _to_smt_internal(
         if symbol_name_mapping is None:
             return name
         return symbol_name_mapping.get(name, name)
+
+    if expr_type == expr_kind.UNKNOWN:
+        return _unknown_smt_symbol_name(expr)
 
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0]

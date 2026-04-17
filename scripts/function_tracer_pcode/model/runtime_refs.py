@@ -452,6 +452,20 @@ class UnknownValueRef:
             display_hint=reason,
         )
 
+    @classmethod
+    def opaque(
+        cls,
+        *,
+        reason: Optional[str] = None,
+        display_hint: Optional[str] = None,
+    ) -> "UnknownValueRef":
+        normalized_reason = reason or "unknown"
+        return cls(
+            kind="opaque_unknown",
+            reason=normalized_reason,
+            display_hint=display_hint or normalized_reason,
+        )
+
     def stable_key(self) -> Tuple[Any, ...]:
         target_key = self.target_ref.stable_key() if self.target_ref is not None else None
         return (

@@ -2,7 +2,7 @@
 """P-codeトレースロジック"""
 
 from __future__ import annotations
-from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
 from ..model import (
     Expression,
     ExpressionType,
@@ -69,6 +69,9 @@ class PcodeTracer:
         self.program = program
         self.high_function = high_function
         self.debug = debug
+        self.record_deferred_call: Optional[
+            Callable[[Any, List[Expression], Optional[Expression]], Any]
+        ] = None
         self._debug_message_limit = 4000
         self._debug_message_count = 0
         self._debug_suppressed = False
@@ -88,6 +91,83 @@ class PcodeTracer:
         self.phi_handler: Optional['PhiHandler'] = None
         
         self._collect_debug_info()
+
+    def _recover_call_argument_expressions(
+        self,
+        pcode_op,
+        depth: int,
+        use_cache: bool,
+    ) -> List[Expression]:
+        recovered: List[Expression] = []
+        if pcode_op is None:
+            return recovered
+        for index in range(1, pcode_op.getNumInputs()):
+            try:
+                recovered.append(
+                    self.trace_varnode(pcode_op.getInput(index), depth + 1, use_cache)
+                )
+            except Exception:
+                recovered.append(Expression.unknown(f"call_arg_{index}_unknown"))
+        return recovered
+
+    def _recover_call_target_expression(
+        self,
+        pcode_op,
+        depth: int,
+        use_cache: bool,
+    ) -> Optional[Expression]:
+        if pcode_op is None or pcode_op.getNumInputs() < 1:
+            return None
+        try:
+            return self.trace_varnode(pcode_op.getInput(0), depth + 1, use_cache)
+        except Exception:
+            return None
+
+    def _build_unresolved_call_unknown(
+        self,
+        pcode_op,
+        depth: int,
+        use_cache: bool,
+        *,
+        reason: str,
+        target_ref: CallTargetRef,
+    ) -> Expression:
+        target_label = target_ref.display_name()
+        runtime_ref = None
+        display_name = None
+
+        if self.record_deferred_call is not None:
+            deferred_args = self._recover_call_argument_expressions(pcode_op, depth, use_cache)
+            deferred_target_expr = self._recover_call_target_expression(
+                pcode_op,
+                depth,
+                use_cache,
+            )
+            try:
+                recorded = self.record_deferred_call(
+                    target_ref,
+                    deferred_args,
+                    deferred_target_expr,
+                )
+            except Exception:
+                recorded = None
+            if isinstance(recorded, str):
+                display_name = recorded
+            else:
+                runtime_ref = recorded
+                if hasattr(recorded, "display_name"):
+                    display_name = recorded.display_name()
+
+        if runtime_ref is None:
+            runtime_ref = UnknownValueRef.out_of_scope_call(
+                reason=reason,
+                target_ref=target_ref,
+                display_hint=target_label,
+            )
+        if display_name is None:
+            display_name = runtime_ref.display_name() if hasattr(runtime_ref, "display_name") else f"{reason}:{target_label}"
+
+        return Expression.unknown(display_name, runtime_ref=runtime_ref)
 
     def _debug_print(self, msg: str) -> None:
         if not self.debug:
@@ -855,13 +935,12 @@ class PcodeTracer:
                     depth=depth,
                     note=f"CALL target={func_name}",
                 )
-                return Expression.unknown(
-                    f"call_out_of_scope:{func_name}",
-                    runtime_ref=UnknownValueRef.out_of_scope_call(
-                        reason="call_out_of_scope",
-                        target_ref=target_ref,
-                        display_hint=func_name,
-                    ),
+                return self._build_unresolved_call_unknown(
+                    pcode_op,
+                    depth,
+                    use_cache,
+                    reason="call_out_of_scope",
+                    target_ref=target_ref,
                 )
             return Expression.unknown("call_no_target")
 
@@ -881,13 +960,12 @@ class PcodeTracer:
                     depth=depth,
                     note=f"CALLIND target={target_name}",
                 )
-                return Expression.unknown(
-                    f"callind_out_of_scope:{target_name}",
-                    runtime_ref=UnknownValueRef.out_of_scope_call(
-                        reason="callind_out_of_scope",
-                        target_ref=target_ref,
-                        display_hint=target_name,
-                    ),
+                return self._build_unresolved_call_unknown(
+                    pcode_op,
+                    depth,
+                    use_cache,
+                    reason="callind_out_of_scope",
+                    target_ref=target_ref,
                 )
             return Expression.unknown("callind_no_target")
         
