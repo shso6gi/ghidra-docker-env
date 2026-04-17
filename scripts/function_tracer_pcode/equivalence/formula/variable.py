@@ -147,7 +147,10 @@ class VariableAnalyzer:
             print(f"[VariableAnalyzer] {msg}")
 
     def _is_symbolic_location_read_expr(self, expr: Optional[Expression]) -> bool:
-        return isinstance(getattr(expr, "runtime_ref", None), CanonicalLocation)
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, CanonicalLocation):
+            return True
+        return isinstance(getattr(runtime_ref, "location", None), CanonicalLocation)
 
     def _is_concrete_address_expr(self, expr: Optional[Expression]) -> bool:
         runtime_ref = getattr(expr, "runtime_ref", None)

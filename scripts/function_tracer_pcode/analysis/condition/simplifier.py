@@ -82,8 +82,8 @@ class ConditionConstraintSet:
         formula_overlap = ConditionSimplifier._formula_is_unsat(
             list(self.conditions) + list(other_set.conditions)
         )
-        if formula_overlap is not None:
-            return not formula_overlap
+        if formula_overlap is True:
+            return False
         combined = list(self.conditions) + list(other_set.conditions)
         return not ConditionConstraintSet.from_conditions(combined).is_contradictory
 
@@ -872,15 +872,21 @@ class ConditionSimplifier:
         context_conditions: Optional[List[Condition]] = None,
         implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
     ) -> bool:
+        formula_result: Optional[bool] = None
         if context_conditions:
             formula_result = cls._formula_implies(context_conditions, condition)
-            if formula_result is not None:
-                return formula_result
+            if formula_result is True:
+                return True
 
         implied_conditions = implied_conditions or set()
         normalized = ConditionNormalizer.normalize_for_contradiction(condition)
         if normalized in implied_conditions:
             return True
+
+        scalar_fact = cls._extract_scalar_constraint(condition)
+        if scalar_fact is not None and context_conditions:
+            if cls._scalar_constraint_is_implied(scalar_fact, list(context_conditions or [])):
+                return True
 
         expr = condition.expression
         if (
@@ -906,7 +912,173 @@ class ConditionSimplifier:
                     return False
             return True
 
+        return formula_result is True
+
+    @classmethod
+    def _collect_scalar_context(
+        cls,
+        conditions: List[Condition],
+    ) -> Dict[Tuple[object, int], Dict[str, object]]:
+        context: Dict[Tuple[object, int], Dict[str, object]] = {}
+        for cond in cls.build_constraint_set(list(conditions or [])).conditions:
+            fact = cls._extract_scalar_constraint(cond)
+            if fact is None:
+                continue
+            entry = context.setdefault(
+                fact.key,
+                {
+                    "eq_raw_values": set(),
+                    "ne_raw_values": set(),
+                    "lower": {False: None, True: None},
+                    "upper": {False: None, True: None},
+                },
+            )
+
+            if fact.kind == "eq":
+                entry["eq_raw_values"].add(fact.raw_value)
+                continue
+            if fact.kind == "ne":
+                entry["ne_raw_values"].add(fact.raw_value)
+                continue
+            if fact.value is None or fact.inclusive is None:
+                continue
+
+            candidate = (fact.value, fact.inclusive, 0)
+            if fact.kind == "lower":
+                entry["lower"][fact.signed] = cls._select_stronger_lower(
+                    entry["lower"][fact.signed],
+                    candidate,
+                )
+            else:
+                entry["upper"][fact.signed] = cls._select_stronger_upper(
+                    entry["upper"][fact.signed],
+                    candidate,
+                )
+        return context
+
+    @classmethod
+    def _scalar_constraint_is_implied(
+        cls,
+        fact: ScalarConstraint,
+        context_conditions: List[Condition],
+    ) -> bool:
+        context = cls._collect_scalar_context(context_conditions)
+        entry = context.get(fact.key)
+        if entry is None:
+            return False
+
+        bits = fact.key[1]
+        eq_raw_values = entry["eq_raw_values"]
+        ne_raw_values = entry["ne_raw_values"]
+        lower = entry["lower"][fact.signed]
+        upper = entry["upper"][fact.signed]
+
+        if len(eq_raw_values) == 1:
+            eq_raw = next(iter(eq_raw_values))
+            eq_value = cls._to_signed_value(eq_raw, bits) if fact.signed else eq_raw
+            if fact.kind == "eq":
+                return eq_raw == fact.raw_value
+            if fact.kind == "ne":
+                return eq_raw != fact.raw_value
+            if fact.kind == "lower":
+                required = cls._effective_lower_bound(
+                    fact.value,
+                    bool(fact.inclusive),
+                    fact.signed,
+                    bits,
+                )
+                return eq_value >= required
+            if fact.kind == "upper":
+                required = cls._effective_upper_bound(
+                    fact.value,
+                    bool(fact.inclusive),
+                    fact.signed,
+                    bits,
+                )
+                return eq_value <= required
+
+        if fact.kind == "eq":
+            if lower is None or upper is None:
+                return False
+            lower_effective = cls._effective_lower_bound(lower[0], lower[1], fact.signed, bits)
+            upper_effective = cls._effective_upper_bound(upper[0], upper[1], fact.signed, bits)
+            if lower_effective != upper_effective:
+                return False
+            collapsed_raw = cls._normalize_raw_value(lower_effective, bits)
+            return collapsed_raw == fact.raw_value and collapsed_raw not in ne_raw_values
+
+        if fact.kind == "ne":
+            if fact.raw_value in ne_raw_values:
+                return True
+            fact_value = cls._to_signed_value(fact.raw_value, bits) if fact.signed else fact.raw_value
+            if lower is not None:
+                lower_effective = cls._effective_lower_bound(lower[0], lower[1], fact.signed, bits)
+                if fact_value < lower_effective:
+                    return True
+            if upper is not None:
+                upper_effective = cls._effective_upper_bound(upper[0], upper[1], fact.signed, bits)
+                if fact_value > upper_effective:
+                    return True
+            return False
+
+        if fact.kind == "lower":
+            if lower is None:
+                return False
+            current_effective = cls._effective_lower_bound(lower[0], lower[1], fact.signed, bits)
+            required_effective = cls._effective_lower_bound(
+                fact.value,
+                bool(fact.inclusive),
+                fact.signed,
+                bits,
+            )
+            return current_effective >= required_effective
+
+        if fact.kind == "upper":
+            if upper is None:
+                return False
+            current_effective = cls._effective_upper_bound(upper[0], upper[1], fact.signed, bits)
+            required_effective = cls._effective_upper_bound(
+                fact.value,
+                bool(fact.inclusive),
+                fact.signed,
+                bits,
+            )
+            return current_effective <= required_effective
+
         return False
+
+    @classmethod
+    def _expression_can_collapse_to_boolean_constant(
+        cls,
+        expr: Expression,
+    ) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == ExpressionType.BINARY_OP:
+            return expr.operator in {
+                "INT_EQUAL",
+                "INT_NOTEQUAL",
+                "INT_LESS",
+                "INT_LESSEQUAL",
+                "INT_SLESS",
+                "INT_SLESSEQUAL",
+                "BOOL_AND",
+                "BOOL_OR",
+                "BOOL_XOR",
+            }
+        return expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "BOOL_NEGATE"
+
+    @classmethod
+    def _constant_expression_from_eval(
+        cls,
+        expr: Expression,
+        raw_value: int,
+        bits: int,
+    ) -> Expression:
+        size_bytes = int(getattr(expr, "size", 0) or 0)
+        if size_bytes <= 0:
+            size_bytes = max(1, (bits + 7) // 8)
+        return Expression.constant(raw_value, size=size_bytes)
 
     @classmethod
     def _condition_is_contradicted(
@@ -916,8 +1088,8 @@ class ConditionSimplifier:
         implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
     ) -> bool:
         formula_result = cls._formula_is_unsat(list(context_conditions) + [condition])
-        if formula_result is not None:
-            return formula_result
+        if formula_result is True:
+            return True
         implied = implied_conditions if implied_conditions is not None else cls._collect_implied_condition_norms(context_conditions)
         if cls._condition_is_implied(condition.negate(), context_conditions, implied):
             return True
@@ -934,6 +1106,14 @@ class ConditionSimplifier:
     ) -> Expression:
         if expr is None:
             return expr
+
+        if cls._expression_can_collapse_to_boolean_constant(expr):
+            constraint_set = cls.build_constraint_set(conditions or [])
+            true_condition = Condition(expr, False)
+            if constraint_set.implies_condition(true_condition):
+                return cls._constant_expression_from_eval(expr, 1, max(1, expr.get_bit_width()))
+            if constraint_set.implies_condition(true_condition.negate()):
+                return cls._constant_expression_from_eval(expr, 0, max(1, expr.get_bit_width()))
 
         if expr.expr_type == ExpressionType.PHI and expr.value:
             implied = cls._collect_implied_condition_norms(conditions)
@@ -981,21 +1161,26 @@ class ConditionSimplifier:
         ):
             new_operands = [cls._reduce_expression_under_conditions(op, conditions) for op in expr.operands]
             if all(new is old for new, old in zip(new_operands, expr.operands)):
-                return expr
-            rebuilt = Expression(
-                expr_type=expr.expr_type,
-                value=expr.value,
-                operator=expr.operator,
-                operands=new_operands,
-                size=expr.size,
-                name=expr.name,
-                data_type=expr.data_type,
-                data_type_obj=getattr(expr, "data_type_obj", None),
-                storage_info=expr.storage_info,
-                read_order_key=expr.read_order_key,
-                runtime_ref=getattr(expr, "runtime_ref", None),
-                opcode=getattr(expr, "opcode", None),
-            )
+                rebuilt = expr
+            else:
+                rebuilt = Expression(
+                    expr_type=expr.expr_type,
+                    value=expr.value,
+                    operator=expr.operator,
+                    operands=new_operands,
+                    size=expr.size,
+                    name=expr.name,
+                    data_type=expr.data_type,
+                    data_type_obj=getattr(expr, "data_type_obj", None),
+                    storage_info=expr.storage_info,
+                    read_order_key=expr.read_order_key,
+                    runtime_ref=getattr(expr, "runtime_ref", None),
+                    opcode=getattr(expr, "opcode", None),
+                )
+            evaluated = cls._eval_constant_raw(rebuilt)
+            if evaluated is not None:
+                raw_value, bits = evaluated
+                return cls._constant_expression_from_eval(rebuilt, raw_value, bits)
             return rebuilt
 
         return expr
@@ -1008,6 +1193,12 @@ class ConditionSimplifier:
             changed = False
             for index, cond in enumerate(current):
                 context = current[:index] + current[index + 1:]
+                if any(
+                    cls.are_equivalent_conditions(cond, other)
+                    for other in context
+                ):
+                    reduced.append(cond)
+                    continue
                 reduced_expr = cls._reduce_expression_under_conditions(cond.expression, context)
                 rewritten = Condition(reduced_expr, cond.negated)
                 flattened = cls.flatten_condition(rewritten)
@@ -1040,7 +1231,25 @@ class ConditionSimplifier:
                 continue
             flattened.extend(cls.flatten_condition(cond))
 
+        original_flattened = list(flattened)
         flattened = cls._contextually_reduce_conditions(flattened)
+        if (
+            len(original_flattened) > 1
+            and any(cls.evaluate_condition_truth(cond) is False for cond in flattened)
+        ):
+            preserve_direct_witness = False
+            for i in range(len(original_flattened)):
+                for j in range(i + 1, len(original_flattened)):
+                    if ConditionNormalizer.are_contradictory(
+                        original_flattened[i],
+                        original_flattened[j],
+                    ):
+                        preserve_direct_witness = True
+                        break
+                if preserve_direct_witness:
+                    break
+            if preserve_direct_witness:
+                flattened = original_flattened
 
         unique_conditions: List[Condition] = []
         unique_canonicals: Dict[Tuple[str, str, str, bool], int] = {}
@@ -1254,6 +1463,15 @@ class ConditionSimplifier:
     def simplify_conditions(cls, conditions: List[Condition]) -> List[Condition]:
         """条件リストを object-centric に簡略化する。"""
         return cls.build_constraint_set(conditions).simplified_conditions()
+
+    @classmethod
+    def reduce_expression_under_conditions(
+        cls,
+        expr: Expression,
+        conditions: Iterable[Condition],
+    ) -> Expression:
+        """式を条件文脈の下で object-centric に簡約する。"""
+        return cls._reduce_expression_under_conditions(expr, list(conditions or []))
     
     @classmethod
     def get_simplified_condition_string(cls, condition: Condition) -> str:

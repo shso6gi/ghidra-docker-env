@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     memory_expression_for_location,
     normalize_post_state_expression,
     post_state_read_expression_for_location,
+    promote_observed_loads_to_post_state_reads,
     rewrite_loads_from_effects,
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
@@ -50,6 +51,8 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     LocationBaseRef,
     ObservedMemoryReadRef,
+    PostStateReadRef,
+    PostStateSnapshotRef,
     PostStateValueRef,
     PcodeOpRef,
 )
@@ -77,6 +80,18 @@ def _param(
     if storage is not None:
         result["storage"] = storage
     return result
+
+
+def _runtime_location(expr):
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, CanonicalLocation):
+        return runtime_ref
+    return getattr(runtime_ref, "location", None)
+
+
+def _runtime_snapshot(expr):
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    return getattr(runtime_ref, "snapshot_ref", None)
 
 
 _LEGACY_TEST_PARAM_INDEX = {
@@ -5474,7 +5489,8 @@ def test_post_state_read_expression_for_location_can_build_symbolic_reads():
 
     assert expr is not None
     assert expr.expr_type == ExpressionType.MEMORY
-    assert getattr(expr, "runtime_ref", None) == _loc("trace", 4, 4)
+    assert _runtime_location(expr) == _loc("trace", 4, 4)
+    assert isinstance(getattr(expr, "runtime_ref", None), PostStateReadRef)
 
 
 def test_post_state_read_expression_for_location_respects_nonsymbolic_mode():
@@ -5606,8 +5622,8 @@ def test_normalize_post_state_expression_promotes_observed_loads_to_symbolic_pos
 
     assert normalized is not None
     assert expression_contains_post_state_reads(normalized)
-    assert getattr(normalized.operands[0], "runtime_ref", None) == _loc("param_1", 0, 4)
-    assert getattr(normalized.operands[1], "runtime_ref", None) == _loc("param_2", 0, 4)
+    assert expression_contains_post_state_reads(normalized.operands[0])
+    assert expression_contains_post_state_reads(normalized.operands[1])
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -6577,7 +6593,7 @@ def test_normalize_post_state_expression_promotes_raw_memory_leaf_to_symbolic_po
 
     assert normalized is not None
     assert normalized.expr_type == ExpressionType.MEMORY
-    assert getattr(normalized, "runtime_ref", None) == _loc("ptr", 0, 4)
+    assert _runtime_location(normalized) == _loc("ptr", 0, 4)
 
 
 def test_normalize_post_state_expression_replays_definite_simple_store_then_read():
@@ -7489,7 +7505,7 @@ def test_return_analyzer_keeps_symbolic_root_post_state_read_when_roundtrip_matc
 
     assert normalized is not None
     assert normalized.expr_type == ExpressionType.MEMORY
-    assert getattr(normalized, "runtime_ref", None) == _loc("param_1", 0, 4)
+    assert _runtime_location(normalized) == _loc("param_1", 0, 4)
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -7974,8 +7990,76 @@ def test_expression_expander_keeps_symbolic_post_state_identity_after_observed_l
 
     assert canonicalized is not None
     assert expression_contains_post_state_reads(canonicalized)
-    assert getattr(canonicalized.operands[0], "runtime_ref", None) == _loc("a", 0, 4)
-    assert getattr(canonicalized.operands[1], "runtime_ref", None) == _loc("b", 0, 4)
+    assert _runtime_location(canonicalized.operands[0]) == _loc("a", 0, 4)
+    assert _runtime_location(canonicalized.operands[1]) == _loc("b", 0, 4)
+    assert _runtime_snapshot(canonicalized.operands[0]) == _runtime_snapshot(canonicalized.operands[1])
+
+
+def test_promote_observed_loads_to_post_state_reads_shares_snapshot_for_swap_pair():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            a,
+            size=4,
+            read_order_key=20,
+            runtime_ref=ObservedMemoryReadRef(order_key=20, location=_loc("a", 0, 4)),
+        ),
+        Expression.memory(
+            b,
+            size=4,
+            read_order_key=21,
+            runtime_ref=ObservedMemoryReadRef(order_key=21, location=_loc("b", 0, 4)),
+        ),
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("a", 0, 4),
+            value=Expression.memory(b, size=4),
+            conditions=[swap_taken],
+            order_key=10,
+        ),
+        StoreEffect(
+            location=_loc("b", 0, 4),
+            value=Expression.memory(a, size=4),
+            conditions=[swap_taken],
+            order_key=11,
+        ),
+    ]
+
+    promoted = promote_observed_loads_to_post_state_reads(
+        expr,
+        [nonnull_a, nonnull_b],
+        effects,
+        [_param("a", size=8, is_signed=False), _param("b", size=8, is_signed=False, index=1)],
+        symbolic_post_state=True,
+    )
+
+    assert promoted is not None
+    assert expression_contains_post_state_reads(promoted)
+    assert isinstance(getattr(promoted.operands[0], "runtime_ref", None), PostStateReadRef)
+    assert isinstance(getattr(promoted.operands[1], "runtime_ref", None), PostStateReadRef)
+    assert _runtime_location(promoted.operands[0]) == _loc("a", 0, 4)
+    assert _runtime_location(promoted.operands[1]) == _loc("b", 0, 4)
+    assert isinstance(_runtime_snapshot(promoted.operands[0]), PostStateSnapshotRef)
+    assert _runtime_snapshot(promoted.operands[0]) == _runtime_snapshot(promoted.operands[1])
+
+    lowered = lower_post_state_expression_for_smt(
+        promoted,
+        [nonnull_a, nonnull_b],
+        effects,
+        [_param("a", size=8, is_signed=False), _param("b", size=8, is_signed=False, index=1)],
+    )
+
+    assert lowered is not None
+    assert expression_contains_post_state_reads(lowered) is False
 
 
 def test_expression_expander_keeps_canonical_memory_without_read_order_key_unchanged():
@@ -8319,8 +8403,8 @@ def test_return_analyzer_normalizes_observed_load_returns_to_symbolic_post_state
 
     assert normalized is not None
     assert expression_contains_post_state_reads(normalized)
-    assert getattr(normalized.operands[0], "runtime_ref", None) == _loc("param_1", 0, 4)
-    assert getattr(normalized.operands[1], "runtime_ref", None) == _loc("param_2", 0, 4)
+    assert expression_contains_post_state_reads(normalized.operands[0])
+    assert expression_contains_post_state_reads(normalized.operands[1])
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -8384,8 +8468,8 @@ def test_return_analyzer_normalizes_single_arithmetic_update_rhs_to_post_state()
 
     assert normalized_zero.to_string() == "MEM[value]"
     assert normalized_nonzero.to_string() == "MEM[value]"
-    assert getattr(normalized_zero, "runtime_ref", None) == _loc("value", 0, 4)
-    assert getattr(normalized_nonzero, "runtime_ref", None) == _loc("value", 0, 4)
+    assert _runtime_location(normalized_zero) == _loc("value", 0, 4)
+    assert _runtime_location(normalized_nonzero) == _loc("value", 0, 4)
 
     lowered_zero = lower_post_state_expression_for_smt(
         normalized_zero,
@@ -8402,6 +8486,71 @@ def test_return_analyzer_normalizes_single_arithmetic_update_rhs_to_post_state()
 
     assert lowered_zero.to_string() == "(MEM[value] + delta)"
     assert lowered_nonzero.to_string() == "(delta - MEM[value])"
+
+
+def test_return_analyzer_accepts_semantically_lossless_swap_snapshot_rewrite():
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    original = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            a,
+            size=4,
+            read_order_key=20,
+            runtime_ref=ObservedMemoryReadRef(order_key=20, location=_loc("a", 0, 4)),
+        ),
+        Expression.memory(
+            b,
+            size=4,
+            read_order_key=21,
+            runtime_ref=ObservedMemoryReadRef(order_key=21, location=_loc("b", 0, 4)),
+        ),
+    )
+    effect_summary = EffectSummary(
+        parameter_names=["a", "b"],
+        effects=[
+            StoreEffect(
+                location=_loc("a", 0, 4),
+                value=Expression.memory(b, size=4),
+                conditions=[swap_taken],
+                order_key=10,
+            ),
+            StoreEffect(
+                location=_loc("b", 0, 4),
+                value=Expression.memory(a, size=4),
+                conditions=[swap_taken],
+                order_key=11,
+            ),
+        ],
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("a", size=8, is_signed=False),
+        _param("b", size=8, is_signed=False, index=1),
+    ]
+    rewritten = promote_observed_loads_to_post_state_reads(
+        original,
+        [nonnull_a, nonnull_b],
+        effect_summary.effects,
+        analyzer._current_parameters,
+        symbolic_post_state=True,
+    )
+
+    assert rewritten is not None
+    assert analyzer._accept_effect_sensitive_rewrite(
+        original,
+        rewritten,
+        [nonnull_a, nonnull_b],
+        effect_summary,
+        rewrite_kind="observed-load",
+    ) is True
 
 
 def test_return_analyzer_effect_sensitive_rewrite_does_not_double_apply_outer_delta():
@@ -8935,6 +9084,103 @@ def test_expression_expander_prefers_observed_rewrite_over_flat_raw_normalizatio
     )
 
     assert canonicalized.to_string() == "(MEM[b] - MEM[a])"
+
+
+def test_expression_expander_uses_whole_operation_shortcut_before_recursive_cartesian_combine(monkeypatch):
+    a = Expression.parameter("a", 0, size=8)
+    b = Expression.parameter("b", 1, size=8)
+    nonnull_a = Condition(Expression.binary_op("INT_NOTEQUAL", a, Expression.constant(0, 8)), False)
+    nonnull_b = Condition(Expression.binary_op("INT_NOTEQUAL", b, Expression.constant(0, 8)), False)
+    swap_taken = Condition(
+        Expression.binary_op("INT_SLESS", Expression.memory(b, size=4), Expression.memory(a, size=4)),
+        False,
+    )
+    traced = Expression.binary_op(
+        "INT_SUB",
+        Expression.memory(
+            a,
+            size=4,
+            runtime_ref=_observed_read("a", index=0, size=4, order_key=20),
+        ),
+        Expression.memory(
+            b,
+            size=4,
+            runtime_ref=_observed_read("b", index=1, size=4, order_key=21),
+        ),
+    )
+
+    class FakeDef:
+        def getMnemonic(self):
+            return "MULTIEQUAL"
+
+    class FakeInput:
+        def getDef(self):
+            return FakeDef()
+
+    class FakeTracer:
+        debug = False
+
+        def _trace_pcode_op(self, _op, depth=0, use_cache=False):
+            return traced
+
+    class FakeOp:
+        def getMnemonic(self):
+            return "INT_SUB"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return FakeInput()
+
+        def getOutput(self):
+            class Out:
+                def getSize(self):
+                    return 4
+            return Out()
+
+    expander = ExpressionExpander(
+        FakeTracer(),
+        condition_tracker=None,
+        debug=False,
+        effect_summary=EffectSummary(
+            parameter_names=["a", "b"],
+            effects=[
+                StoreEffect(
+                    location=_loc("a", 0, 4),
+                    value=Expression.memory(b, size=4),
+                    conditions=[swap_taken],
+                    order_key=10,
+                ),
+                StoreEffect(
+                    location=_loc("b", 0, 4),
+                    value=Expression.memory(a, size=4),
+                    conditions=[swap_taken],
+                    order_key=11,
+                ),
+            ],
+        ),
+        parameters=[
+            _param("a", size=8, is_signed=False),
+            _param("b", size=8, is_signed=False, index=1),
+        ],
+    )
+
+    monkeypatch.setattr(
+        expander,
+        "_expand_input_varnode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("recursive combine should not run")),
+    )
+
+    expanded = expander._expand_input_operation(
+        FakeOp(),
+        [nonnull_a, nonnull_b],
+        depth=0,
+    )
+
+    assert len(expanded) == 2
+    rendered = {ev.value.to_string(): " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded}
+    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"}
 
 
 def test_return_analyzer_splits_effect_sensitive_canonical_memory_returns_without_observed_metadata():

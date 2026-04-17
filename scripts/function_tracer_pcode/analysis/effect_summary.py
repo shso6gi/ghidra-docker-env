@@ -18,6 +18,8 @@ from ..model import (
     LocationBaseRef,
     LocationStep,
     ObservedMemoryReadRef,
+    PostStateReadRef,
+    PostStateSnapshotRef,
     PostStateValueRef,
     StorageInfo,
     coerce_call_target_ref,
@@ -68,6 +70,10 @@ class EffectSummary:
 
 
 _MAX_CALL_ARGUMENT_VARIANTS = 16
+
+
+def default_post_state_snapshot_ref() -> PostStateSnapshotRef:
+    return PostStateSnapshotRef.function_return()
 
 
 def _runtime_expression_signature(expr: Optional[Expression]):
@@ -197,7 +203,7 @@ def _strip_symbolic_post_state_runtime_refs(
         return None
 
     runtime_ref = getattr(expr, "runtime_ref", None)
-    stripped_runtime_ref = None if isinstance(runtime_ref, CanonicalLocation) else runtime_ref
+    stripped_runtime_ref = None if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)) else runtime_ref
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
         changed = stripped_runtime_ref != runtime_ref
@@ -346,6 +352,8 @@ def _expression_location_ref(expr: Optional[Expression]) -> Optional[CanonicalLo
     runtime_ref = getattr(expr, "runtime_ref", None)
     if isinstance(runtime_ref, PostStateValueRef):
         return runtime_ref.location
+    if isinstance(runtime_ref, PostStateReadRef):
+        return runtime_ref.location
     if isinstance(runtime_ref, CanonicalLocation):
         return runtime_ref
     if isinstance(runtime_ref, ObservedMemoryReadRef):
@@ -371,6 +379,15 @@ def _expression_post_state_value_ref(expr: Optional[Expression]) -> Optional[Pos
     return None
 
 
+def _expression_post_state_read_ref(expr: Optional[Expression]) -> Optional[PostStateReadRef]:
+    if expr is None:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateReadRef):
+        return runtime_ref
+    return None
+
+
 def _expression_is_materialized_post_state_value(expr: Optional[Expression]) -> bool:
     return _expression_post_state_value_ref(expr) is not None
 
@@ -381,8 +398,25 @@ def _expression_symbolic_post_state_location_ref(
     if expr is None:
         return None
     runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateReadRef):
+        return runtime_ref.location
     if isinstance(runtime_ref, CanonicalLocation):
         return runtime_ref
+    return None
+
+
+def _expression_post_state_snapshot_ref(
+    expr: Optional[Expression],
+) -> Optional[PostStateSnapshotRef]:
+    if expr is None:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateValueRef):
+        return runtime_ref.snapshot_ref
+    if isinstance(runtime_ref, PostStateReadRef):
+        return runtime_ref.snapshot_ref
+    if isinstance(runtime_ref, ObservedMemoryReadRef):
+        return runtime_ref.snapshot_ref
     return None
 
 
@@ -401,11 +435,26 @@ def _expression_observed_order_key(expr: Optional[Expression]) -> Optional[int]:
 def _merge_memory_runtime_ref(
     runtime_ref: Any,
     runtime_location: Optional[CanonicalLocation],
+    runtime_snapshot: Optional[PostStateSnapshotRef] = None,
 ) -> Any:
     if isinstance(runtime_ref, ObservedMemoryReadRef):
-        if runtime_location is None or runtime_ref.location == runtime_location:
+        if (
+            (runtime_location is None or runtime_ref.location == runtime_location)
+            and runtime_snapshot == runtime_ref.snapshot_ref
+        ):
             return runtime_ref
-        return runtime_ref.with_location(runtime_location)
+        return runtime_ref.with_location(runtime_location, snapshot_ref=runtime_snapshot)
+    if isinstance(runtime_ref, PostStateReadRef):
+        location = runtime_location if runtime_location is not None else runtime_ref.location
+        snapshot = runtime_snapshot if runtime_snapshot is not None else runtime_ref.snapshot_ref
+        if location == runtime_ref.location and snapshot == runtime_ref.snapshot_ref:
+            return runtime_ref
+        return runtime_ref.with_location(location).with_snapshot(snapshot)
+    if runtime_location is not None and runtime_snapshot is not None:
+        return PostStateReadRef(
+            location=runtime_location,
+            snapshot_ref=runtime_snapshot,
+        )
     if runtime_location is not None:
         return runtime_location
     return runtime_ref
@@ -417,33 +466,42 @@ def _memory_expr_with_runtime_location(
     *,
     read_order_key: Optional[int] = None,
     runtime_location: Optional[CanonicalLocation] = None,
+    runtime_snapshot: Optional[PostStateSnapshotRef] = None,
     runtime_ref: Any = None,
 ) -> Expression:
     return Expression.memory(
         address,
         size=max(1, int(size or 0)),
         read_order_key=read_order_key,
-        runtime_ref=_merge_memory_runtime_ref(runtime_ref, runtime_location),
+        runtime_ref=_merge_memory_runtime_ref(runtime_ref, runtime_location, runtime_snapshot),
     )
 
 
 def _attach_materialized_post_state_value_ref(
     expr: Optional[Expression],
     location: Optional[CanonicalLocation],
+    snapshot_ref: Optional[PostStateSnapshotRef] = None,
 ) -> Optional[Expression]:
     if expr is None or location is None:
         return expr
     normalized_location = _normalize_canonical_location(location)
+    if snapshot_ref is None:
+        snapshot_ref = _expression_post_state_snapshot_ref(expr)
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
-        return _memory_expr_with_runtime_location(
+        return Expression.memory(
             expr.operands[0],
-            expr.size,
+            size=max(1, int(expr.size or 0)),
             read_order_key=expr.read_order_key,
-            runtime_location=normalized_location,
-            runtime_ref=getattr(expr, "runtime_ref", None),
+            runtime_ref=PostStateValueRef(
+                location=normalized_location,
+                snapshot_ref=snapshot_ref,
+            ),
         )
     runtime_ref = getattr(expr, "runtime_ref", None)
-    desired_ref = PostStateValueRef(location=normalized_location)
+    desired_ref = PostStateValueRef(
+        location=normalized_location,
+        snapshot_ref=snapshot_ref,
+    )
     if runtime_ref == desired_ref:
         return expr
     return expr.clone_with(runtime_ref=desired_ref)
@@ -517,6 +575,14 @@ def _expression_contains_observed_loads(expr: Optional[Expression]) -> bool:
         if node.expr_type == ExpressionType.MEMORY and _expression_observed_order_key(node) is not None:
             return True
     return False
+
+
+def _count_observed_loads(expr: Optional[Expression]) -> int:
+    count = 0
+    for node in _iter_expression_nodes(expr):
+        if node.expr_type == ExpressionType.MEMORY and _expression_observed_order_key(node) is not None:
+            count += 1
+    return count
 
 
 def should_attempt_root_post_state_collapse(expr: Optional[Expression]) -> bool:
@@ -2136,9 +2202,10 @@ def _parameter_identity_keys_from_expression(
         base_key = _parameter_identity_key_from_base_ref(runtime_ref)
         if base_key is not None:
             keys.add(base_key)
-    elif isinstance(runtime_ref, CanonicalLocation):
-        base_key = _parameter_identity_key_from_base_ref(runtime_ref.base_ref)
-        if base_key is not None and not runtime_ref.steps and int(runtime_ref.offset) == 0:
+    elif isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
+        location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
+        base_key = _parameter_identity_key_from_base_ref(location_ref.base_ref)
+        if base_key is not None and not location_ref.steps and int(location_ref.offset) == 0:
             keys.add(base_key)
 
     if expr.expr_type == ExpressionType.PARAMETER:
@@ -2286,9 +2353,10 @@ def _parameter_base_ref_from_expression(expr: Optional[Expression]) -> Optional[
     runtime_ref = getattr(expr, "runtime_ref", None)
     if isinstance(runtime_ref, LocationBaseRef) and runtime_ref.is_parameter():
         return runtime_ref
-    if isinstance(runtime_ref, CanonicalLocation) and runtime_ref.base_ref.is_parameter():
-        if not runtime_ref.steps and int(runtime_ref.offset) == 0:
-            return runtime_ref.base_ref
+    if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
+        location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
+        if location_ref.base_ref.is_parameter() and not location_ref.steps and int(location_ref.offset) == 0:
+            return location_ref.base_ref
 
     if expr.expr_type == ExpressionType.PARAMETER:
         return _parameter_base_ref(name=expr.name, index=expr.value)
@@ -3075,6 +3143,123 @@ def rewrite_observed_loads_from_effects(
                 combined_conditions,
                 effects,
                 parameters,
+            )
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    return expr
+
+
+def promote_observed_loads_to_post_state_reads(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+    snapshot_ref: Optional[PostStateSnapshotRef] = None,
+    _address_context: bool = False,
+) -> Optional[Expression]:
+    """Rewrite observed LOAD leaves into shared post-state read objects.
+
+    This is intentionally object-centric: every promoted leaf is rebound to the
+    same post-state snapshot so later passes can reason about correlations
+    across multiple reads from the same state, rather than treating each LOAD
+    as an unrelated arithmetic leaf.
+    """
+    if expr is None:
+        return None
+
+    shared_snapshot = snapshot_ref or _expression_post_state_snapshot_ref(expr) or default_post_state_snapshot_ref()
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        rewritten_addr = promote_observed_loads_to_post_state_reads(
+            expr.operands[0],
+            return_conditions,
+            effects,
+            parameters,
+            symbolic_post_state=symbolic_post_state,
+            snapshot_ref=shared_snapshot,
+            _address_context=True,
+        )
+        current = expr
+        if rewritten_addr is not expr.operands[0]:
+            current = _memory_expr_with_runtime_location(
+                rewritten_addr if rewritten_addr is not None else expr.operands[0],
+                expr.size,
+                read_order_key=expr.read_order_key,
+                runtime_location=_expression_location_ref(expr),
+                runtime_snapshot=_expression_post_state_snapshot_ref(expr) or shared_snapshot,
+                runtime_ref=getattr(expr, "runtime_ref", None),
+            )
+        if _address_context:
+            return current
+        if _expression_observed_order_key(current) is None:
+            return current
+        location = canonicalize_expr_read_location(current, parameters)
+        if location is None:
+            return current
+        promoted = post_state_read_expression_for_location(
+            location,
+            parameters,
+            symbolic=symbolic_post_state,
+            snapshot_ref=shared_snapshot,
+        )
+        if symbolic_post_state:
+            return promoted
+        lowered = lower_post_state_expression_for_smt(
+            promoted,
+            return_conditions,
+            effects,
+            parameters,
+        )
+        return lowered if lowered is not None else promoted
+
+    if expr.expr_type in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
+    ):
+        rewritten_operands = [
+            promote_observed_loads_to_post_state_reads(
+                operand,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                snapshot_ref=shared_snapshot,
+                _address_context=_address_context,
+            )
+            for operand in expr.operands
+        ]
+        rebuilt = _rebuild_expression_from_optional_operands(
+            expr,
+            rewritten_operands,
+            fallback=expr,
+        )
+        return rebuilt if rebuilt is not None else expr
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for cond, value in expr.value:
+            combined_conditions = list(return_conditions)
+            if cond is not None:
+                combined_conditions.append(cond)
+            new_value = promote_observed_loads_to_post_state_reads(
+                value,
+                combined_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+                snapshot_ref=shared_snapshot,
+                _address_context=_address_context,
             )
             branches.append((cond, new_value))
             changed = changed or (new_value is not value)
@@ -4286,7 +4471,27 @@ def normalize_post_state_expression(
     if expr is None:
         return None
 
+    shared_snapshot = _expression_post_state_snapshot_ref(expr) or default_post_state_snapshot_ref()
+    allow_observed_snapshot_promotion = _count_observed_loads(expr) >= 2
+
     def _normalize_candidate(candidate_expr: Expression) -> Expression:
+        if (
+            allow_observed_snapshot_promotion
+            and prefer_canonical_post_state
+            and symbolic_post_state
+            and _expression_contains_observed_loads(candidate_expr)
+        ):
+            promoted_observed = promote_observed_loads_to_post_state_reads(
+                candidate_expr,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=True,
+                snapshot_ref=shared_snapshot,
+            )
+            if promoted_observed is not None:
+                candidate_expr = promoted_observed
+
         early_materialized = _materialize_existing_effect_value_carrier(
             candidate_expr,
             return_conditions,
@@ -4412,13 +4617,22 @@ def normalize_post_state_expression(
         return reduced if reduced is not None else normalized
 
     observed_normalized = None
-    if _expression_contains_observed_loads(expr):
-        rewritten_observed = rewrite_observed_loads_from_effects(
+    if allow_observed_snapshot_promotion and _expression_contains_observed_loads(expr):
+        rewritten_observed = promote_observed_loads_to_post_state_reads(
             expr,
             return_conditions,
             effects,
             parameters,
+            symbolic_post_state=symbolic_post_state,
+            snapshot_ref=shared_snapshot,
         )
+        if rewritten_observed is None or _expressions_equivalent(rewritten_observed, expr):
+            rewritten_observed = rewrite_observed_loads_from_effects(
+                expr,
+                return_conditions,
+                effects,
+                parameters,
+            )
         if (
             rewritten_observed is not None
             and not _expressions_equivalent(rewritten_observed, expr)
@@ -5027,9 +5241,11 @@ def post_state_read_expression_for_location(
     parameters: Sequence[Dict],
     *,
     symbolic: bool = False,
+    snapshot_ref: Optional[PostStateSnapshotRef] = None,
 ) -> Expression:
     location = _normalize_canonical_location(location)
     location = _bind_location_to_parameter_identity(location, parameters)
+    snapshot_ref = snapshot_ref or default_post_state_snapshot_ref()
     concrete_expr = memory_expression_for_location(location, parameters)
     if concrete_expr is not None and concrete_expr.expr_type == ExpressionType.MEMORY and concrete_expr.operands:
         if not symbolic:
@@ -5039,6 +5255,11 @@ def post_state_read_expression_for_location(
             concrete_expr.size,
             read_order_key=concrete_expr.read_order_key,
             runtime_location=location,
+            runtime_snapshot=snapshot_ref,
+            runtime_ref=PostStateReadRef(
+                location=location,
+                snapshot_ref=snapshot_ref,
+            ),
         )
     if not symbolic:
         return Expression.variable(
@@ -5049,7 +5270,10 @@ def post_state_read_expression_for_location(
     return Expression.variable(
         _post_state_read_name(location),
         size=max(1, location.size),
-        runtime_ref=location,
+        runtime_ref=PostStateReadRef(
+            location=location,
+            snapshot_ref=snapshot_ref,
+        ),
     )
 
 
@@ -5469,8 +5693,9 @@ def _parameter_like_identity(expr: Optional[Expression]) -> Optional[Tuple[objec
     runtime_ref = getattr(current, "runtime_ref", None)
     if isinstance(runtime_ref, LocationBaseRef):
         return _parameter_identity_key_from_base_ref(runtime_ref)
-    if isinstance(runtime_ref, CanonicalLocation):
-        return _parameter_identity_key_from_base_ref(runtime_ref.base_ref)
+    if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
+        location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
+        return _parameter_identity_key_from_base_ref(location_ref.base_ref)
     return None
 
 

@@ -8,6 +8,8 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     DeferredCallInfo,
     LocationBaseRef,
+    PostStateReadRef,
+    PostStateSnapshotRef,
     StorageInfo,
     coerce_call_target_ref,
 )
@@ -89,4 +91,6 @@ def test_post_state_symbolic_locations_bind_parameter_indices():
     )
 
     runtime_ref = expr.runtime_ref
-    assert runtime_ref.base_ref == LocationBaseRef.parameter("trace", index=0)
+    assert isinstance(runtime_ref, PostStateReadRef)
+    assert runtime_ref.location.base_ref == LocationBaseRef.parameter("trace", index=0)
+    assert runtime_ref.snapshot_ref == PostStateSnapshotRef.function_return()

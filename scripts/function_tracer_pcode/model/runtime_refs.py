@@ -277,6 +277,7 @@ class PostStateValueRef:
     """Structured identity for a fully materialized final object-state value."""
 
     location: CanonicalLocation
+    snapshot_ref: Optional["PostStateSnapshotRef"] = None
     source: str = "effect_summary"
     state_kind: str = "materialized_final_value"
 
@@ -284,6 +285,7 @@ class PostStateValueRef:
         return (
             "post_state_value",
             self.location.stable_key(),
+            self.snapshot_ref.stable_key() if self.snapshot_ref is not None else None,
             self.source,
             self.state_kind,
         )
@@ -292,8 +294,40 @@ class PostStateValueRef:
         return {
             "kind": "post_state_value",
             "location": self.location.to_dict(),
+            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
             "source": self.source,
             "state_kind": self.state_kind,
+        }
+
+
+@dataclass(frozen=True)
+class PostStateSnapshotRef:
+    """Structured identity for a shared post-state memory snapshot."""
+
+    scope: str = "function_return"
+    source: str = "effect_summary"
+    epoch: str = "post_effects"
+    pcode_op_ref: Optional["PcodeOpRef"] = None
+
+    @classmethod
+    def function_return(cls) -> "PostStateSnapshotRef":
+        return cls()
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "post_state_snapshot",
+            self.scope,
+            self.source,
+            self.epoch,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "post_state_snapshot",
+            "scope": self.scope,
+            "source": self.source,
+            "epoch": self.epoch,
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
         }
 
 
@@ -325,6 +359,50 @@ class PcodeOpRef:
             "seq_order": self.seq_order,
             "block_index": self.block_index,
             "mnemonic": self.mnemonic,
+        }
+
+
+@dataclass(frozen=True)
+class PostStateReadRef:
+    """Structured identity for a symbolic read from a shared post-state snapshot."""
+
+    location: CanonicalLocation
+    snapshot_ref: Optional[PostStateSnapshotRef] = None
+    source: str = "effect_summary"
+    state_kind: str = "symbolic_post_state_read"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "post_state_read",
+            self.location.stable_key(),
+            self.snapshot_ref.stable_key() if self.snapshot_ref is not None else None,
+            self.source,
+            self.state_kind,
+        )
+
+    def with_location(self, location: CanonicalLocation) -> "PostStateReadRef":
+        return PostStateReadRef(
+            location=location,
+            snapshot_ref=self.snapshot_ref,
+            source=self.source,
+            state_kind=self.state_kind,
+        )
+
+    def with_snapshot(self, snapshot_ref: Optional[PostStateSnapshotRef]) -> "PostStateReadRef":
+        return PostStateReadRef(
+            location=self.location,
+            snapshot_ref=snapshot_ref,
+            source=self.source,
+            state_kind=self.state_kind,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "post_state_read",
+            "location": self.location.to_dict(),
+            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
+            "source": self.source,
+            "state_kind": self.state_kind,
         }
 
 
@@ -375,6 +453,7 @@ class ObservedMemoryReadRef:
 
     order_key: Optional[int] = None
     location: Optional[CanonicalLocation] = None
+    snapshot_ref: Optional[PostStateSnapshotRef] = None
     pcode_op_ref: Optional[PcodeOpRef] = None
     source: str = "ghidra_load"
 
@@ -383,14 +462,33 @@ class ObservedMemoryReadRef:
             "observed_memory_read",
             None if self.order_key is None else int(self.order_key),
             self.location.stable_key() if self.location is not None else None,
+            self.snapshot_ref.stable_key() if self.snapshot_ref is not None else None,
             self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
             self.source,
         )
 
-    def with_location(self, location: Optional[CanonicalLocation]) -> "ObservedMemoryReadRef":
+    def with_location(
+        self,
+        location: Optional[CanonicalLocation],
+        *,
+        snapshot_ref: Optional[PostStateSnapshotRef] = None,
+    ) -> "ObservedMemoryReadRef":
         return ObservedMemoryReadRef(
             order_key=self.order_key,
             location=location,
+            snapshot_ref=self.snapshot_ref if snapshot_ref is None else snapshot_ref,
+            pcode_op_ref=self.pcode_op_ref,
+            source=self.source,
+        )
+
+    def with_snapshot(
+        self,
+        snapshot_ref: Optional[PostStateSnapshotRef],
+    ) -> "ObservedMemoryReadRef":
+        return ObservedMemoryReadRef(
+            order_key=self.order_key,
+            location=self.location,
+            snapshot_ref=snapshot_ref,
             pcode_op_ref=self.pcode_op_ref,
             source=self.source,
         )
@@ -400,6 +498,7 @@ class ObservedMemoryReadRef:
             "kind": "observed_memory_read",
             "order_key": self.order_key,
             "location": self.location.to_dict() if self.location is not None else None,
+            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
             "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
             "source": self.source,
         }

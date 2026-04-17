@@ -1053,6 +1053,9 @@ class ExpressionExpander:
         runtime_ref = getattr(expr, "runtime_ref", None)
         if isinstance(runtime_ref, CanonicalLocation):
             return runtime_ref
+        location = getattr(runtime_ref, "location", None)
+        if isinstance(location, CanonicalLocation):
+            return location
         if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
             return None
         return canonicalize_param_location(
@@ -1580,6 +1583,17 @@ class ExpressionExpander:
 
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
+
+        if requires_recursive_expansion and self.effect_summary is not None and getattr(self.effect_summary, "effects", None) and self.parameters:
+            traced_shortcut = self._expand_whole_operation_object_centrically(
+                pcode_op,
+                conditions,
+                depth,
+                output_size=output_size,
+                context_label="input",
+            )
+            if traced_shortcut is not None:
+                return traced_shortcut
 
         if not requires_recursive_expansion:
             traced_value = self._trace_operation_expression(
@@ -2143,6 +2157,19 @@ class ExpressionExpander:
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
+        if requires_recursive_expansion and self.effect_summary is not None and getattr(self.effect_summary, "effects", None) and self.parameters:
+            output = pcode_op.getOutput()
+            output_size = output.getSize() if output else 0
+            traced_shortcut = self._expand_whole_operation_object_centrically(
+                pcode_op,
+                base_conditions,
+                depth,
+                output_size=output_size,
+                context_label="top-level",
+            )
+            if traced_shortcut is not None:
+                return traced_shortcut
+
         if not requires_recursive_expansion:
             traced_value = self._trace_operation_expression(
                 pcode_op,
@@ -2203,6 +2230,56 @@ class ExpressionExpander:
             base_conditions,
             depth,
             output_size=output_size,
+        )
+
+    def _expand_whole_operation_object_centrically(
+        self,
+        pcode_op,
+        base_conditions: List[Condition],
+        depth: int,
+        *,
+        output_size: int = 0,
+        context_label: str = "operation",
+    ) -> Optional[List[ExpandedValue]]:
+        """Prefer whole-operation traced expansion when it preserves correlated object-state reads.
+
+        Recursive operand-by-operand expansion can lose the correlation between multiple
+        reads that originate from the same post-state snapshot. Before we Cartesian-combine
+        child expansions, try to expand the traced operation as one object graph.
+        """
+        traced_value = self._trace_operation_expression(
+            pcode_op,
+            base_conditions,
+            depth,
+            output_size=output_size,
+        )
+        if traced_value is None or self._expression_contains_unknown_or_call(traced_value):
+            return None
+
+        if not (
+            self._expression_contains_phi(traced_value)
+            or expression_contains_post_state_reads(traced_value)
+            or _expression_contains_observed_loads(traced_value)
+        ):
+            return None
+
+        expanded_traced = self._expand_expression_cases(
+            traced_value,
+            base_conditions,
+            depth + 1,
+        )
+        if not expanded_traced:
+            return None
+
+        self._debug_print(
+            f"Using whole-{context_label} object-centric expansion shortcut: "
+            f"{self._debug_expr_summary(traced_value)} -> {len(expanded_traced)} case(s)",
+            depth,
+        )
+        return self._deduplicate_expanded_values(
+            expanded_traced,
+            depth,
+            label=f"{pcode_op.getMnemonic()} whole-{context_label} cases",
         )
     
     def _combine_input_expansions_with_conditions(
