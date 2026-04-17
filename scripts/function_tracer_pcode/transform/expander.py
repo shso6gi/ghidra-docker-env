@@ -33,6 +33,7 @@ from ..analysis.effect_summary import (
     rewrite_loads_from_effects,
     rewrite_location_read_from_effects,
     rewrite_observed_loads_from_effects,
+    should_attempt_root_post_state_collapse,
 )
 from ..analysis.memory_resolver import concretize_readonly_loads
 
@@ -98,7 +99,9 @@ class ExpressionExpander:
         resolve_callee_parameters: Optional[Callable[[CallTargetRef], List[Dict[str, Any]]]] = None,
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
-        record_deferred_call: Optional[Callable[[CallTargetRef, List[Expression]], Any]] = None,
+        record_deferred_call: Optional[
+            Callable[[CallTargetRef, List[Expression], Optional[Expression]], Any]
+        ] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -1239,16 +1242,7 @@ class ExpressionExpander:
             conditions,
         )
         resolved = reduced if reduced is not None else expr
-        if not _expression_contains_observed_loads(resolved):
-            collapsed_reduced = collapse_post_state_expr_to_canonical_read(
-                resolved,
-                self.effect_summary.effects,
-                self.parameters,
-                return_conditions=conditions,
-                symbolic_post_state=True,
-            )
-            if collapsed_reduced is not None:
-                resolved = collapsed_reduced
+        resolved = self._collapse_root_object_state_if_safe(resolved, conditions)
         if self.read_memory_value is not None and self.parameters:
             concretized = concretize_readonly_loads(
                 resolved,
@@ -1261,6 +1255,22 @@ class ExpressionExpander:
             if concretized is not None:
                 resolved = concretized
         return resolved
+
+    def _collapse_root_object_state_if_safe(
+        self,
+        expr: Expression,
+        conditions: List[Condition],
+    ) -> Expression:
+        if not should_attempt_root_post_state_collapse(expr):
+            return expr
+        collapsed = collapse_post_state_expr_to_canonical_read(
+            expr,
+            self.effect_summary.effects,
+            self.parameters,
+            return_conditions=conditions,
+            symbolic_post_state=True,
+        )
+        return collapsed if collapsed is not None else expr
 
     def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
         if expr is None:
@@ -1668,7 +1678,9 @@ class ExpressionExpander:
 
         if not resolved_targets or self.call_resolver is None:
             target_ref = _resolve_call_target_ref(self.tracer, pcode_op)
-            target_label = target_ref.display_name() if target_ref is not None else "UNKNOWN_FUNC"
+            record_target_ref = target_ref or CallTargetRef.unknown()
+            target_label = record_target_ref.display_name()
+            deferred_target_expr = self._recover_deferred_call_target_expression(pcode_op)
             explicit_args = [
                 _resolve_call_argument_expression(
                     pcode_op.getInput(index),
@@ -1679,14 +1691,18 @@ class ExpressionExpander:
             ]
             deferred_unknown_ref = None
             deferred_unknown_label = None
-            if self.record_deferred_call is not None and target_ref is not None:
+            if self.record_deferred_call is not None:
                 deferred_args = self._recover_deferred_call_arguments(
                     pcode_op,
-                    target_ref,
+                    record_target_ref,
                     explicit_args,
                 )
                 try:
-                    deferred_unknown = self.record_deferred_call(target_ref, deferred_args)
+                    deferred_unknown = self.record_deferred_call(
+                        record_target_ref,
+                        deferred_args,
+                        deferred_target_expr,
+                    )
                     if isinstance(deferred_unknown, str):
                         deferred_unknown_label = deferred_unknown
                     else:
@@ -1852,6 +1868,7 @@ class ExpressionExpander:
         deferred_unknown_ref = None
         deferred_unknown_label = None
         if self.record_deferred_call is not None:
+            deferred_target_expr = self._recover_deferred_call_target_expression(pcode_op)
             deferred_args = fallback_args_by_target.get(fallback_target)
             if deferred_args is None:
                 recovered_seed_args = [arg for arg in (canonical_explicit_args or []) if arg is not None]
@@ -1861,7 +1878,11 @@ class ExpressionExpander:
                     recovered_seed_args,
                 )
             try:
-                deferred_unknown = self.record_deferred_call(fallback_target, deferred_args)
+                deferred_unknown = self.record_deferred_call(
+                    fallback_target,
+                    deferred_args,
+                    deferred_target_expr,
+                )
                 if isinstance(deferred_unknown, str):
                     deferred_unknown_label = deferred_unknown
                 else:
@@ -1932,6 +1953,23 @@ class ExpressionExpander:
         if recovered:
             return recovered
         return deferred_args
+
+    def _recover_deferred_call_target_expression(
+        self,
+        pcode_op,
+    ) -> Optional[Expression]:
+        if pcode_op is None or pcode_op.getNumInputs() < 1:
+            return None
+        try:
+            target_varnode = pcode_op.getInput(0)
+        except Exception:
+            return None
+        if target_varnode is None:
+            return None
+        try:
+            return self.tracer.trace_varnode(target_varnode, use_cache=False)
+        except Exception:
+            return None
 
     def _infer_indirect_output_location(
         self,

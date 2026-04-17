@@ -15,11 +15,13 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     CanonicalLocation,
     Condition,
+    DeferredCallInfo,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
     LocationBaseRef,
     ReturnInfo,
+    UnknownValueRef,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
@@ -1229,8 +1231,12 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
         def _get_storage_info_from_varnode(self, _varnode):
             return None
 
-    def _record_deferred_call(target_ref, args):
-        recorded["call"] = (target_ref, [arg.to_string() for arg in args])
+    def _record_deferred_call(target_ref, args, call_target_expr=None):
+        recorded["call"] = (
+            target_ref,
+            [arg.to_string() for arg in args],
+            None if call_target_expr is None else call_target_expr.to_string(),
+        )
         return "call_out_of_scope:callee#0"
 
     expander = ExpressionExpander(
@@ -1261,6 +1267,7 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
     assert len(expanded) == 1
     assert recorded["call"][0] == CallTargetRef.from_name("callee")
     assert recorded["call"][1] == ["param_1", "param_2", "param_3"]
+    assert recorded["call"][2] == "4198400"
     assert expanded[0].value.to_string() == "call_out_of_scope:callee#0"
 
 
@@ -3335,13 +3342,23 @@ def test_return_analyzer_declines_higher_order_call_summary_without_safe_pcode_m
     assert expanded is None
 
 
-def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe_pcode_model():
+def test_return_analyzer_specializes_higher_order_wrapper_from_object_targets():
     functions = [
         _FakeFunction("ptr_apply_callback", 0x402000),
         _FakeFunction("ptr_op_add", 0x401100),
         _FakeFunction("ptr_op_xor", 0x401200),
     ]
     analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
+    deferred_info = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:UNKNOWN_FUNC#0",
+        target_ref=CallTargetRef.unknown(),
+        arguments=[
+            Expression.parameter("param_2", 1, size=4),
+            Expression.parameter("param_3", 2, size=4),
+        ],
+        call_target_expr=Expression.parameter("param_1", 0, size=8),
+        sequence=0,
+    )
 
     ptr_apply_analysis = FunctionReturnAnalysis(
         function_name="ptr_apply_callback",
@@ -3354,7 +3371,15 @@ def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe
         returns=[
             ReturnInfo(
                 address="0x402010",
-                value=Expression.unknown("call_out_of_scope:UNKNOWN_FUNC"),
+                value=Expression.unknown(
+                    deferred_info.placeholder_name,
+                    runtime_ref=UnknownValueRef.deferred_call(
+                        placeholder_name=deferred_info.placeholder_name,
+                        target_ref=deferred_info.target_ref,
+                        sequence=deferred_info.sequence,
+                        deferred_key=deferred_info.identity_key(),
+                    ),
+                ),
                 conditions=[_cond_ne(Expression.parameter("param_1", 0, size=8), Expression.constant(0, 8))],
                 branch_index=0,
             ),
@@ -3368,6 +3393,7 @@ def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe
         return_type="undefined8",
         unknown_event_reasons=["call_out_of_scope"],
         unknown_event_count=1,
+        deferred_calls={deferred_info.placeholder_name: deferred_info},
     )
 
     selector = Expression.parameter("param_1", 0, size=4)
@@ -3398,7 +3424,57 @@ def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe
         ]
     )
 
-    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=ptr_apply_analysis):
+    def _analysis_side_effect(target, _active_functions):
+        target_ref = target if isinstance(target, CallTargetRef) else CallTargetRef.from_name(str(target))
+        if target_ref.function_name == "ptr_apply_callback":
+            return ptr_apply_analysis
+        if target_ref.function_name == "ptr_op_add" or target_ref.address_offset == 0x401100:
+            return FunctionReturnAnalysis(
+                function_name="ptr_op_add",
+                entry_point="0x401100",
+                parameters=[
+                    {"name": "a", "size": 4, "index": 0},
+                    {"name": "b", "size": 4, "index": 1},
+                ],
+                returns=[
+                    ReturnInfo(
+                        address="0x401110",
+                        value=Expression.binary_op(
+                            "INT_ADD",
+                            Expression.parameter("a", 0, size=4),
+                            Expression.parameter("b", 1, size=4),
+                        ),
+                        conditions=[],
+                        branch_index=0,
+                    )
+                ],
+                return_type="int",
+            )
+        if target_ref.function_name == "ptr_op_xor" or target_ref.address_offset == 0x401200:
+            return FunctionReturnAnalysis(
+                function_name="ptr_op_xor",
+                entry_point="0x401200",
+                parameters=[
+                    {"name": "a", "size": 4, "index": 0},
+                    {"name": "b", "size": 4, "index": 1},
+                ],
+                returns=[
+                    ReturnInfo(
+                        address="0x401210",
+                        value=Expression.binary_op(
+                            "INT_XOR",
+                            Expression.parameter("a", 0, size=4),
+                            Expression.parameter("b", 1, size=4),
+                        ),
+                        conditions=[],
+                        branch_index=0,
+                    )
+                ],
+                return_type="int",
+            )
+        return None
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", side_effect=_analysis_side_effect):
         expanded = analyzer._resolve_call_expansions(
             "ptr_apply_callback",
             [
@@ -3409,7 +3485,18 @@ def test_return_analyzer_declines_early_return_higher_order_wrapper_without_safe
             set(),
         )
 
-    assert expanded is None
+    assert expanded is not None
+    value_strings = [ev.value.to_string() for ev in expanded]
+    assert "(param_2 + param_3)" in value_strings
+    assert "(param_2 ^ param_3)" in value_strings
+    assert any(value.isdigit() for value in value_strings)
+    nonnull_branches = [
+        tuple(cond.to_string() for cond in ev.conditions)
+        for ev in expanded
+        if ev.value.to_string() in {"(param_2 + param_3)", "(param_2 ^ param_3)"}
+    ]
+    assert len(nonnull_branches) == 2
+    assert all(conds for conds in nonnull_branches)
 
 
 def test_return_analyzer_declines_pointer_bound_dispatch_without_safe_pcode_summary():

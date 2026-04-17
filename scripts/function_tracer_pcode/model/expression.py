@@ -85,8 +85,18 @@ class Expression:
         cls._hex_threshold = threshold
     
     @classmethod
-    def constant(cls, value: int, size: int = 4) -> 'Expression':
-        return cls(expr_type=ExpressionType.CONSTANT, value=value, size=size)
+    def constant(
+        cls,
+        value: int,
+        size: int = 4,
+        runtime_ref: Any = None,
+    ) -> 'Expression':
+        return cls(
+            expr_type=ExpressionType.CONSTANT,
+            value=value,
+            size=size,
+            runtime_ref=runtime_ref,
+        )
     
     @classmethod
     def parameter(

@@ -17,7 +17,7 @@ from ..model.analysis import (
     FunctionReturnAnalysis,
     SignednessResult,
 )
-from ..model.runtime_refs import UnknownValueRef
+from ..model.runtime_refs import AddressValueRef, UnknownValueRef
 from ..model.signature import (
     get_declared_type_signedness,
     is_void_data_type,
@@ -36,6 +36,7 @@ from .effect_summary import (
     EffectSummary,
     _build_parameter_replacements,
     _enumerate_constant_expression_branches,
+    _expression_contains_observed_loads,
     _iter_expression_nodes,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
@@ -621,8 +622,16 @@ class ReturnAnalyzer:
             self._debug_print("HighFunction is None!")
             return None
         
-        # Step 1: tracer作成
+        # Step 1: tracer / CFG infrastructure を先に構築する。
+        # implicit passthrough parameter recovery でも CALLIND target を追跡するため、
+        # PhiHandler が有効な状態で tracer を使えるようにしておく。
         tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        condition_tracker = ConditionTracker(tracer)
+        from .phi_resolver import PhiHandler
+
+        phi_handler = PhiHandler(tracer, condition_tracker)
+        tracer.phi_handler = phi_handler
+        condition_tracker.build()
 
         parameters = self._collect_parameters(high_function)
         parameters = self._augment_parameters_with_implicit_passthrough(
@@ -637,17 +646,6 @@ class ReturnAnalyzer:
             function_prototype = None
 
         with self._analysis_context(parameters, None, function_prototype=function_prototype):
-            # Step 2: condition_tracker作成（まだビルドしない）
-            condition_tracker = ConditionTracker(tracer)
-
-            # Step 3: phi_handler作成 → tracerに注入
-            from .phi_resolver import PhiHandler
-            phi_handler = PhiHandler(tracer, condition_tracker)
-            tracer.phi_handler = phi_handler
-
-            # Step 4: ブロック情報構築（phi_handler準備後）
-            condition_tracker.build()
-
             self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
             image_base = None
             try:
@@ -1240,25 +1238,41 @@ class ReturnAnalyzer:
         analysis.incomplete_control_flow = bool(reasons)
 
     def _make_deferred_call_recorder(self, target_function_name: str):
-        def record_call(target, args: List[Expression]) -> UnknownValueRef:
+        def record_call(
+            target,
+            args: List[Expression],
+            call_target_expr: Optional[Expression] = None,
+        ) -> UnknownValueRef:
             target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
             target_label = target_ref.placeholder_name()
             sequence = self._deferred_call_counter
             placeholder_name = f"call_out_of_scope:{target_label}#{sequence}"
             self._deferred_call_counter += 1
             cloned_args = [self._clone_expression(arg) for arg in args]
+            cloned_target_expr = (
+                self._clone_expression(call_target_expr)
+                if call_target_expr is not None
+                else None
+            )
             info = DeferredCallInfo(
                 placeholder_name=placeholder_name,
                 target_ref=target_ref,
                 arguments=cloned_args,
+                call_target_expr=cloned_target_expr,
                 sequence=sequence,
             )
             self._current_deferred_calls[placeholder_name] = info
             if self.debug:
                 arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
+                target_expr_dump = (
+                    cloned_target_expr.to_string()
+                    if cloned_target_expr is not None
+                    else "<none>"
+                )
                 self._debug_print(
                     f"Recorded deferred call in '{target_function_name}': "
-                    f"{placeholder_name} -> {target_ref.display_name()}([{arg_dump}])"
+                    f"{placeholder_name} -> {target_ref.display_name()}([{arg_dump}]) "
+                    f"target_expr={target_expr_dump}"
                 )
             return info.unknown_ref
 
@@ -2510,6 +2524,8 @@ class ReturnAnalyzer:
             return target_ref.function_obj
         if target_ref.entry_offset is not None:
             return self._resolve_function_from_program_offset(target_ref.entry_offset)
+        if target_ref.address_offset is not None:
+            return self._resolve_function_from_program_offset(target_ref.address_offset)
         if target_ref.function_name:
             return self._find_function_by_name(target_ref.function_name)
         return None
@@ -2565,7 +2581,7 @@ class ReturnAnalyzer:
             if target_ref is None:
                 continue
             active_key = self._target_active_key(target_ref)
-            if target_ref.display_name() == "UNKNOWN_FUNC":
+            if target_ref.is_unknown():
                 continue
             if active_key is not None and active_key in active_functions:
                 continue
@@ -2863,12 +2879,6 @@ class ReturnAnalyzer:
         if analysis is None:
             self._debug_print(f"Call expansion skipped for '{target_label}': analysis unavailable")
             return None
-        if not self._is_call_return_summary_allowed(analysis, args):
-            self._debug_print(
-                f"Call expansion skipped for '{target_label}': "
-                "summary not safe enough for inlining"
-            )
-            return None
 
         if len(args) < len(analysis.parameters):
             self._debug_print(
@@ -2877,30 +2887,27 @@ class ReturnAnalyzer:
             )
             return None
 
-        replacements = _build_parameter_replacements(analysis.parameters, args)
-        allowed_names: Set[str] = set()
-        for arg in args:
-            allowed_names.update(arg.get_all_variables())
+        specialized = self._specialize_call_analysis(analysis, args)
+        if specialized.deferred_calls:
+            self._apply_bounded_call_refinement(
+                specialized,
+                active_functions,
+                analysis.function_name,
+            )
 
         expanded = []
-        for ret in analysis.returns:
-            value = substitute_expression(ret.value, replacements, analysis.parameters)
-            conditions = [
-                substitute_condition(cond, replacements, analysis.parameters)
-                for cond in ret.conditions
-            ]
-
-            if not self._call_summary_is_safe(value, conditions, allowed_names):
+        for ret in specialized.returns:
+            if not self._call_summary_is_safe(ret.value, ret.conditions, args):
                 self._debug_print(
                     f"Call expansion rejected for '{target_label}': "
-                    "callee summary references unresolved symbols"
+                    "summary not safe enough for inlining"
                 )
                 return None
 
             expanded.append(
                 ExpandedValue(
-                    value=value,
-                    conditions=ConditionSimplifier.simplify_conditions(conditions),
+                    value=ret.value,
+                    conditions=ConditionSimplifier.simplify_conditions(ret.conditions),
                 )
             )
 
@@ -3575,57 +3582,21 @@ class ReturnAnalyzer:
             return analysis
         return cached
 
-    def _is_call_return_summary_allowed(
-        self,
-        analysis: FunctionReturnAnalysis,
-        args: List[Expression],
-    ) -> bool:
-        if analysis is None or not analysis.returns:
-            return False
-        # 一時的な unknown event が残っていても、最終的な return summary が
-        # 完全に解決済みなら call 展開には利用できる。ここでは最終 summary の
-        # 安全性に直接効くシグナルだけを除外条件に使う。
-        if analysis.has_unknown_return() or analysis.has_overlapping_unconditional_returns():
-            return False
-
-        param_names = {
-            name
-            for param in analysis.parameters
-            for name in [param.get("name")]
-            if isinstance(name, str) and name
-        }
-        allowed_names: Set[str] = set()
-        for arg in args:
-            allowed_names.update(arg.get_all_variables())
-
-        for ret in analysis.returns:
-            if self._expression_contains_unknown_or_call(ret.value):
-                return False
-            if not self._expression_uses_only_allowed_names(ret.value, param_names, allowed_names):
-                return False
-            for cond in ret.conditions:
-                if self._expression_contains_unknown_or_call(cond.expression):
-                    return False
-                if not self._expression_uses_only_allowed_names(cond.expression, param_names, allowed_names):
-                    return False
-
-        return True
-
     def _call_summary_is_safe(
         self,
         value: Expression,
         conditions: List[Condition],
-        allowed_names: Set[str],
+        args: List[Expression],
     ) -> bool:
         if self._expression_contains_unknown_or_call(value):
             return False
-        if not self._expression_uses_only_allowed_names(value, set(), allowed_names):
+        if not self._expression_references_only_allowed_objects(value, args):
             return False
 
         for cond in conditions:
             if self._expression_contains_unknown_or_call(cond.expression):
                 return False
-            if not self._expression_uses_only_allowed_names(cond.expression, set(), allowed_names):
+            if not self._expression_references_only_allowed_objects(cond.expression, args):
                 return False
 
         return True
@@ -3661,16 +3632,282 @@ class ReturnAnalyzer:
                 return True
         return False
 
-    def _expression_uses_only_allowed_names(
+    def _specialize_call_analysis(
+        self,
+        analysis: FunctionReturnAnalysis,
+        args: List[Expression],
+    ) -> FunctionReturnAnalysis:
+        replacements = _build_parameter_replacements(analysis.parameters, args)
+        specialized_deferred_calls: Dict[str, DeferredCallInfo] = {}
+        original_to_specialized: Dict[Tuple[object, ...], DeferredCallInfo] = {}
+
+        for info in (analysis.deferred_calls or {}).values():
+            specialized_info = DeferredCallInfo(
+                placeholder_name=info.placeholder_name,
+                target_ref=info.target_ref,
+                arguments=[
+                    substitute_expression(arg, replacements, analysis.parameters)
+                    for arg in (info.arguments or [])
+                ],
+                call_target_expr=(
+                    substitute_expression(info.call_target_expr, replacements, analysis.parameters)
+                    if info.call_target_expr is not None
+                    else None
+                ),
+                sequence=info.sequence,
+            )
+            specialized_deferred_calls[info.placeholder_name] = specialized_info
+            original_to_specialized[info.identity_key()] = specialized_info
+
+        for info in specialized_deferred_calls.values():
+            info.arguments = [
+                self._rewrite_deferred_runtime_refs_in_expression(arg, original_to_specialized)
+                for arg in (info.arguments or [])
+            ]
+            if info.call_target_expr is not None:
+                rewritten_target_expr = self._rewrite_deferred_runtime_refs_in_expression(
+                    info.call_target_expr,
+                    original_to_specialized,
+                )
+                info.call_target_expr = self._normalize_call_target_expression(
+                    rewritten_target_expr,
+                )
+
+        specialized_returns: List[ReturnInfo] = []
+        for ret in analysis.returns:
+            specialized_value = substitute_expression(ret.value, replacements, analysis.parameters)
+            specialized_value = self._rewrite_deferred_runtime_refs_in_expression(
+                specialized_value,
+                original_to_specialized,
+            )
+            specialized_conditions = [
+                Condition(
+                    self._rewrite_deferred_runtime_refs_in_expression(
+                        substitute_condition(cond, replacements, analysis.parameters).expression,
+                        original_to_specialized,
+                    ),
+                    cond.negated,
+                )
+                for cond in ret.conditions
+            ]
+            specialized_returns.append(
+                ReturnInfo(
+                    address=ret.address,
+                    value=specialized_value,
+                    conditions=specialized_conditions,
+                    branch_index=ret.branch_index,
+                    pcode_identity=ret.pcode_identity,
+                    pcode_order=ret.pcode_order,
+                    pcode_time=ret.pcode_time,
+                )
+            )
+
+        return FunctionReturnAnalysis(
+            function_name=analysis.function_name,
+            entry_point=analysis.entry_point,
+            parameters=[dict(param) for param in (analysis.parameters or [])],
+            returns=specialized_returns,
+            return_type=analysis.return_type,
+            return_type_obj=analysis.return_type_obj,
+            signedness_result=analysis.signedness_result,
+            unknown_event_count=analysis.unknown_event_count,
+            unknown_event_reasons=list(analysis.unknown_event_reasons),
+            analysis_notes=list(analysis.analysis_notes),
+            recovered_from_decompiler=analysis.recovered_from_decompiler,
+            incomplete_control_flow=analysis.incomplete_control_flow,
+            deferred_calls=specialized_deferred_calls,
+            effect_summary=analysis.effect_summary,
+            signature_hypotheses=list(getattr(analysis, "signature_hypotheses", []) or []),
+            comparison_surface=analysis.comparison_surface,
+        )
+
+    def _normalize_call_target_expression(
         self,
         expr: Optional[Expression],
-        local_param_names: Set[str],
-        allowed_names: Set[str],
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            rebuilt_branches = []
+            changed = False
+            for cond, value in expr.value:
+                rewritten_value = self._normalize_call_target_expression(value)
+                changed = changed or (rewritten_value is not value)
+                rebuilt_branches.append((cond, rewritten_value))
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(rebuilt_branches)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if expr.expr_type == ExpressionType.CONSTANT:
+            try:
+                address_value = int(expr.value)
+            except Exception:
+                return expr
+
+            if self._resolve_function_from_program_offset(address_value) is not None:
+                return expr
+
+            try:
+                pointer_size = int(self.program.getDefaultPointerSize()) if self.program is not None else 0
+            except Exception:
+                pointer_size = int(expr.size or 0)
+            if pointer_size <= 0:
+                return expr
+
+            loaded_value = self._read_memory_value(address_value, pointer_size)
+            if loaded_value is None:
+                return expr
+
+            function = self._resolve_function_from_program_offset(loaded_value)
+            if function is None:
+                return expr
+
+            return Expression.constant(
+                loaded_value,
+                size=max(expr.size or 0, pointer_size),
+                runtime_ref=AddressValueRef(
+                    address_offset=loaded_value,
+                    source="readonly_call_target",
+                    display_hint=function.getName(),
+                    can_execute=True,
+                ),
+            )
+
+        if not expr.operands:
+            return expr
+
+        rewritten_operands = [
+            self._normalize_call_target_expression(operand)
+            for operand in expr.operands
+        ]
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        return expr.clone_with(operands=rewritten_operands)
+
+    def _rewrite_deferred_runtime_refs_in_expression(
+        self,
+        expr: Optional[Expression],
+        deferred_mapping: Dict[Tuple[object, ...], DeferredCallInfo],
+    ) -> Optional[Expression]:
+        if expr is None or not deferred_mapping:
+            return expr
+
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            deferred_key = getattr(runtime_ref, "deferred_key", None)
+            replacement_info = deferred_mapping.get(deferred_key)
+            if replacement_info is not None:
+                return expr.clone_with(runtime_ref=replacement_info.unknown_ref)
+            return expr
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            rebuilt_branches = []
+            changed = False
+            for cond, value in expr.value:
+                rewritten_cond = None
+                if cond is not None:
+                    rewritten_expr = self._rewrite_deferred_runtime_refs_in_expression(
+                        cond.expression,
+                        deferred_mapping,
+                    )
+                    rewritten_cond = cond if rewritten_expr is cond.expression else Condition(rewritten_expr, cond.negated)
+                    changed = changed or (rewritten_cond is not cond)
+                rewritten_value = self._rewrite_deferred_runtime_refs_in_expression(
+                    value,
+                    deferred_mapping,
+                )
+                changed = changed or (rewritten_value is not value)
+                rebuilt_branches.append((rewritten_cond, rewritten_value))
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(rebuilt_branches)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if not expr.operands:
+            return expr
+
+        rewritten_operands = [
+            self._rewrite_deferred_runtime_refs_in_expression(operand, deferred_mapping)
+            for operand in expr.operands
+        ]
+        if all(new is old for new, old in zip(rewritten_operands, expr.operands)):
+            return expr
+        return expr.clone_with(operands=rewritten_operands)
+
+    def _collect_expression_object_keys(
+        self,
+        expr: Optional[Expression],
+        out: Set[Tuple[object, ...]],
+    ) -> None:
+        if expr is None:
+            return
+        out.add(expression_key_safe(expr))
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None:
+                    self._collect_expression_object_keys(cond.expression, out)
+                self._collect_expression_object_keys(value, out)
+            return
+        for operand in expr.operands or []:
+            self._collect_expression_object_keys(operand, out)
+
+    def _expression_references_only_allowed_objects(
+        self,
+        expr: Optional[Expression],
+        args: List[Expression],
     ) -> bool:
         if expr is None:
             return True
-        referenced = expr.get_all_variables()
-        return referenced.issubset(local_param_names | allowed_names)
+
+        allowed_subtrees: Set[Tuple[object, ...]] = set()
+        for arg in args or []:
+            self._collect_expression_object_keys(arg, allowed_subtrees)
+        return self._expression_references_allowed_subtrees(expr, allowed_subtrees)
+
+    def _expression_references_allowed_subtrees(
+        self,
+        expr: Optional[Expression],
+        allowed_subtrees: Set[Tuple[object, ...]],
+    ) -> bool:
+        if expr is None:
+            return True
+        if self._expression_contains_unknown_or_call(expr):
+            return False
+
+        expr_key = expression_key_safe(expr)
+        if expr_key in allowed_subtrees:
+            return True
+
+        if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.LITERAL}:
+            return True
+
+        if expr.expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+            if getattr(expr, "runtime_ref", None) is not None:
+                return True
+            return False
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and not self._expression_references_allowed_subtrees(
+                    cond.expression,
+                    allowed_subtrees,
+                ):
+                    return False
+                if not self._expression_references_allowed_subtrees(value, allowed_subtrees):
+                    return False
+            return True
+
+        if expr.expr_type == ExpressionType.MEMORY and not expr.operands:
+            return getattr(expr, "runtime_ref", None) is not None
+
+        for operand in expr.operands or []:
+            if not self._expression_references_allowed_subtrees(operand, allowed_subtrees):
+                return False
+        return True
     
     def _detect_signedness(self, high_function) -> Optional[SignednessResult]:
         """
@@ -4720,7 +4957,7 @@ class ReturnAnalyzer:
                 preserve_split_value = (
                     not _expressions_equivalent(split_value, ev.value)
                     and not expression_contains_post_state_reads(split_value)
-                    and not self._expression_contains_observed_loads(split_value)
+                    and not _expression_contains_observed_loads(split_value)
                 )
                 normalized_value = (
                     split_value
@@ -4882,7 +5119,7 @@ class ReturnAnalyzer:
             return False
         if _expressions_equivalent(original, rewritten):
             return False
-        if self._expression_contains_observed_loads(original):
+        if _expression_contains_observed_loads(original):
             return False
         if expression_contains_post_state_reads(rewritten):
             return True
@@ -4973,7 +5210,7 @@ class ReturnAnalyzer:
                     self._current_parameters,
                 ))
                 yield ("final object-state symbolic", post_state_read)
-        if self._expression_contains_observed_loads(value):
+        if _expression_contains_observed_loads(value):
             yield (
                 "observed-load",
                 rewrite_observed_loads_from_effects(
@@ -5089,7 +5326,7 @@ class ReturnAnalyzer:
         return (
             1 if expression_contains_post_state_reads(expr) else 0,
             1 if self._expression_contains_phi(expr) else 0,
-            1 if self._expression_contains_observed_loads(expr) else 0,
+            1 if _expression_contains_observed_loads(expr) else 0,
             self._count_memory_reads(expr),
         )
 
@@ -5649,7 +5886,7 @@ class ReturnAnalyzer:
             )
             if expected_roundtrip is not None:
                 comparison_targets.insert(0, expected_roundtrip)
-        if self._expression_contains_observed_loads(original):
+        if _expression_contains_observed_loads(original):
             observed_rewritten = rewrite_observed_loads_from_effects(
                 original,
                 conditions,
@@ -5710,29 +5947,6 @@ class ReturnAnalyzer:
                 if promoted is not None and _expressions_equivalent(promoted, target_post_state):
                     return True
         return False
-
-    def _expression_contains_observed_loads(self, expr: Optional[Expression]) -> bool:
-        if expr is None:
-            return False
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        observed_order_key = getattr(runtime_ref, "order_key", None)
-        if expr.expr_type == ExpressionType.MEMORY and (
-            getattr(expr, "read_order_key", None) is not None
-            or observed_order_key is not None
-        ):
-            return True
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            for cond, value in expr.value:
-                cond_expr = getattr(cond, "expression", None) if cond is not None else None
-                if cond_expr is not None and self._expression_contains_observed_loads(cond_expr):
-                    return True
-                if self._expression_contains_observed_loads(value):
-                    return True
-            return False
-        return any(
-            self._expression_contains_observed_loads(operand)
-            for operand in getattr(expr, "operands", []) or []
-        )
 
     def _expression_contains_unresolved_value(self, expr: Optional[Expression]) -> bool:
         if expr is None:

@@ -27,14 +27,14 @@ def _const(value: int, size: int = 4):
     return Expression.constant(value, size=size)
 
 
-def _deferred_unknown(placeholder: str, target_name: str):
-    sequence = int(placeholder.rsplit("#", 1)[1]) if "#" in placeholder else 0
+def _deferred_unknown(info: DeferredCallInfo):
     return Expression.unknown(
-        placeholder,
+        info.placeholder_name,
         runtime_ref=UnknownValueRef.deferred_call(
-            placeholder_name=placeholder,
-            target_ref=CallTargetRef.from_name(target_name),
-            sequence=sequence,
+            placeholder_name=info.placeholder_name,
+            target_ref=info.target_ref,
+            sequence=info.sequence,
+            deferred_key=info.identity_key(),
         ),
     )
 
@@ -44,6 +44,18 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     n2 = _param("m", 0)
     placeholder1 = "call_out_of_scope:left#0"
     placeholder2 = "call_out_of_scope:right#0"
+    info1 = DeferredCallInfo(
+        placeholder1,
+        "left",
+        [Expression.binary_op("INT_SUB", n1, _const(1))],
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        placeholder2,
+        "right",
+        [Expression.binary_op("INT_SUB", n2, _const(1))],
+        sequence=0,
+    )
 
     analysis1 = create_mock_analysis(
         "left",
@@ -51,7 +63,7 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
         returns=[
             ReturnInfo(
                 address="0x1000",
-                value=Expression.binary_op("INT_ADD", _deferred_unknown(placeholder1, "left"), _const(1)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(info1), _const(1)),
                 conditions=[],
             )
         ],
@@ -62,16 +74,16 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
         returns=[
             ReturnInfo(
                 address="0x2000",
-                value=Expression.binary_op("INT_ADD", _deferred_unknown(placeholder2, "right"), _const(1)),
+                value=Expression.binary_op("INT_ADD", _deferred_unknown(info2), _const(1)),
                 conditions=[],
             )
         ],
     )
     analysis1.deferred_calls = {
-        placeholder1: DeferredCallInfo(placeholder1, "left", [Expression.binary_op("INT_SUB", n1, _const(1))])
+        placeholder1: info1
     }
     analysis2.deferred_calls = {
-        placeholder2: DeferredCallInfo(placeholder2, "right", [Expression.binary_op("INT_SUB", n2, _const(1))])
+        placeholder2: info2
     }
 
     result = abstract_recursive_calls(analysis1, analysis2, debug=False)
@@ -91,6 +103,18 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
     n2 = _param("m", 0)
     placeholder1 = "call_out_of_scope:left#0"
     placeholder2 = "call_out_of_scope:right#0"
+    info1 = DeferredCallInfo(
+        placeholder1,
+        "left",
+        [Expression.binary_op("INT_ADD", n1, _const(1))],
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        placeholder2,
+        "right",
+        [Expression.binary_op("INT_ADD", _const(1), n2)],
+        sequence=0,
+    )
 
     analysis1 = create_mock_analysis(
         "left",
@@ -98,7 +122,7 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
         returns=[
             ReturnInfo(
                 address="0x1000",
-                value=_deferred_unknown(placeholder1, "left"),
+                value=_deferred_unknown(info1),
                 conditions=[],
             )
         ],
@@ -109,24 +133,16 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
         returns=[
             ReturnInfo(
                 address="0x2000",
-                value=_deferred_unknown(placeholder2, "right"),
+                value=_deferred_unknown(info2),
                 conditions=[],
             )
         ],
     )
     analysis1.deferred_calls = {
-        placeholder1: DeferredCallInfo(
-            placeholder1,
-            "left",
-            [Expression.binary_op("INT_ADD", n1, _const(1))],
-        )
+        placeholder1: info1
     }
     analysis2.deferred_calls = {
-        placeholder2: DeferredCallInfo(
-            placeholder2,
-            "right",
-            [Expression.binary_op("INT_ADD", _const(1), n2)],
-        )
+        placeholder2: info2
     }
 
     result = abstract_recursive_calls(analysis1, analysis2, debug=False)

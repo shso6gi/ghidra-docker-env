@@ -338,6 +338,7 @@ class UnknownValueRef:
     kind: str
     reason: Optional[str] = None
     target_ref: Optional[CallTargetRef] = None
+    deferred_key: Optional[Tuple[Any, ...]] = None
     placeholder_name: Optional[str] = None
     sequence: Optional[int] = None
     display_hint: Optional[str] = None
@@ -350,6 +351,7 @@ class UnknownValueRef:
     def deferred_call(
         cls,
         *,
+        deferred_key: Optional[Tuple[Any, ...]] = None,
         placeholder_name: str,
         target_ref,
         sequence: Optional[int] = None,
@@ -359,6 +361,7 @@ class UnknownValueRef:
             kind="deferred_call",
             reason="call_out_of_scope",
             target_ref=normalized,
+            deferred_key=deferred_key,
             placeholder_name=placeholder_name,
             sequence=sequence,
             display_hint=placeholder_name,
@@ -399,6 +402,7 @@ class UnknownValueRef:
             self.kind,
             self.reason,
             target_key,
+            self.deferred_key,
             self.placeholder_name,
             self.sequence,
         )
@@ -419,6 +423,8 @@ class UnknownValueRef:
         }
         if self.reason is not None:
             result["reason"] = self.reason
+        if self.deferred_key is not None:
+            result["deferred_key"] = list(self.deferred_key)
         if self.placeholder_name is not None:
             result["placeholder_name"] = self.placeholder_name
         if self.sequence is not None:

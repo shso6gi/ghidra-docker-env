@@ -57,6 +57,7 @@ class DeferredCallInfo:
     placeholder_name: str
     target_ref: CallTargetRef
     arguments: List["Expression"] = field(default_factory=list)
+    call_target_expr: Optional["Expression"]
     sequence: Optional[int]
 
     def __init__(
@@ -64,12 +65,14 @@ class DeferredCallInfo:
         placeholder_name: str,
         target_ref,
         arguments: Optional[List["Expression"]] = None,
+        call_target_expr: Optional["Expression"] = None,
         sequence: Optional[int] = None,
     ) -> None:
         normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
         self.placeholder_name = placeholder_name
         self.target_ref = normalized
         self.arguments = list(arguments or [])
+        self.call_target_expr = call_target_expr
         self.sequence = sequence
 
     @property
@@ -80,22 +83,45 @@ class DeferredCallInfo:
     def target_key(self):
         return self.target_ref.analysis_key()
 
+    def identity_key(self):
+        target_key = self.target_ref.stable_key() if self.target_ref is not None else None
+        target_expr_key = (
+            self.call_target_expr.structural_key()
+            if self.call_target_expr is not None
+            else None
+        )
+        argument_key = tuple(
+            arg.structural_key() if arg is not None else ("none",)
+            for arg in (self.arguments or [])
+        )
+        return (
+            "deferred_call",
+            int(self.sequence) if self.sequence is not None else None,
+            target_key,
+            target_expr_key,
+            argument_key,
+        )
+
     @property
     def unknown_ref(self) -> UnknownValueRef:
         return UnknownValueRef.deferred_call(
+            deferred_key=self.identity_key(),
             placeholder_name=self.placeholder_name,
             target_ref=self.target_ref,
             sequence=self.sequence,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "placeholder_name": self.placeholder_name,
             "target_name": self.target_name,
             "target_ref": self.target_ref.to_dict(),
             "unknown_ref": self.unknown_ref.to_dict(),
             "arguments": [arg.to_dict() for arg in self.arguments],
         }
+        if self.call_target_expr is not None:
+            result["call_target_expr"] = self.call_target_expr.to_dict()
+        return result
 
 @dataclass
 class SignednessResult:

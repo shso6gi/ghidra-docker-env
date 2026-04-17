@@ -285,6 +285,15 @@ def _expression_contains_observed_loads(expr: Optional[Expression]) -> bool:
     return False
 
 
+def should_attempt_root_post_state_collapse(expr: Optional[Expression]) -> bool:
+    """
+    Root object-state collapse is only sound after we've left the observed-load
+    timeline behind. A traced observed read still denotes a concrete runtime
+    snapshot, so keep that shape until a later object-centric stage rewrites it.
+    """
+    return expr is not None and not _expression_contains_observed_loads(expr)
+
+
 def _expression_contains_value_reads(expr: Optional[Expression]) -> bool:
     for node in _iter_expression_nodes(expr):
         if _expression_location_ref(node) is not None:
@@ -1413,6 +1422,76 @@ def _resolve_function_ref_by_value(
     return _resolve_function_ref_from_address(tracer, addr, allow_containing=not exact)
 
 
+def _read_program_memory_value(
+    tracer,
+    address_value: int,
+    size_bytes: int,
+) -> Optional[int]:
+    if tracer is None or getattr(tracer, "program", None) is None:
+        return None
+    if not isinstance(address_value, int) or address_value < 0 or size_bytes <= 0:
+        return None
+    try:
+        program = tracer.program
+        memory = program.getMemory()
+        default_space = program.getAddressFactory().getDefaultAddressSpace()
+        addr = default_space.getAddress(address_value)
+        raw_bytes = []
+        for offset in range(size_bytes):
+            raw_bytes.append(int(memory.getByte(addr.add(offset))) & 0xFF)
+        ordered = raw_bytes if program.getLanguage().isBigEndian() else list(reversed(raw_bytes))
+        result = 0
+        for byte_val in ordered:
+            result = (result << 8) | byte_val
+        return result
+    except Exception:
+        return None
+
+
+def _materialize_function_pointer_argument(
+    expr: Expression,
+    tracer,
+    varnode,
+) -> Expression:
+    if expr is None or expr.expr_type != ExpressionType.CONSTANT:
+        return expr
+
+    try:
+        address_value = int(expr.value)
+    except Exception:
+        return expr
+
+    direct_target = _resolve_function_ref_by_value(tracer, address_value, exact=False)
+    if direct_target is not None:
+        return expr
+
+    try:
+        pointer_size = int(tracer.program.getDefaultPointerSize())
+    except Exception:
+        pointer_size = int(getattr(varnode, "getSize", lambda: 0)() or expr.size or 0)
+    if pointer_size <= 0:
+        return expr
+
+    loaded_value = _read_program_memory_value(tracer, address_value, pointer_size)
+    if loaded_value is None:
+        return expr
+
+    resolved_target = _resolve_function_ref_by_value(tracer, loaded_value, exact=False)
+    if resolved_target is None:
+        return expr
+
+    return Expression.constant(
+        loaded_value,
+        size=max(expr.size or 0, pointer_size),
+        runtime_ref=AddressValueRef(
+            address_offset=loaded_value,
+            source="readonly_function_pointer",
+            display_hint=resolved_target.display_name(),
+            can_execute=True,
+        ),
+    )
+
+
 def _resolve_call_argument_expression(
     varnode,
     tracer,
@@ -1426,6 +1505,7 @@ def _resolve_call_argument_expression(
         def_op = None
 
     expr = tracer.trace_varnode(varnode, use_cache=False)
+    expr = _materialize_function_pointer_argument(expr, tracer, varnode)
     if expr.expr_type == ExpressionType.PARAMETER:
         return expr
     if (
@@ -3210,17 +3290,15 @@ def collapse_post_state_expr_to_canonical_read(
         return None
 
     active_conditions = list(return_conditions or [])
-    root_location = _expression_location_ref(expr)
-    if root_location is not None:
-        resolved_root = resolve_definite_post_state_read_for_location(
-            root_location,
-            active_conditions,
-            effects,
-            parameters,
-            symbolic_post_state=symbolic_post_state,
-        )
-        if resolved_root is not None:
-            return resolved_root
+    resolved_root = _resolve_existing_root_post_state_read(
+        expr,
+        active_conditions,
+        effects,
+        parameters,
+        symbolic_post_state=symbolic_post_state,
+    )
+    if resolved_root is not None:
+        return resolved_root
 
     expr_is_memory = expr.expr_type == ExpressionType.MEMORY and bool(expr.operands)
     normalized_expr = expr
@@ -3340,6 +3418,26 @@ def collapse_post_state_expr_to_canonical_read(
     if same_location_fallback is not None:
         return same_location_fallback
     return None
+
+
+def _resolve_existing_root_post_state_read(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
+    root_location = _expression_location_ref(expr)
+    if root_location is None:
+        return None
+    return resolve_definite_post_state_read_for_location(
+        root_location,
+        return_conditions,
+        effects,
+        parameters,
+        symbolic_post_state=symbolic_post_state,
+    )
 
 
 def promote_effect_subexpressions_to_post_state_reads(

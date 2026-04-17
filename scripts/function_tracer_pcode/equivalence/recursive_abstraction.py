@@ -12,8 +12,8 @@ from ..model.runtime_refs import UnknownValueRef
 
 @dataclass(frozen=True)
 class AbstractedCallMatch:
-    placeholder1: str
-    placeholder2: str
+    deferred_key1: Tuple[object, ...]
+    deferred_key2: Tuple[object, ...]
     summary_name: str
     summary_index: int
 
@@ -63,8 +63,8 @@ def abstract_recursive_calls(
             summary_name = f"summary_rec_{next_summary_index}"
             matches.append(
                 AbstractedCallMatch(
-                    placeholder1=left_infos[pair_index].placeholder_name,
-                    placeholder2=right_infos[pair_index].placeholder_name,
+                    deferred_key1=left_infos[pair_index].identity_key(),
+                    deferred_key2=right_infos[pair_index].identity_key(),
                     summary_name=summary_name,
                     summary_index=next_summary_index,
                 )
@@ -74,8 +74,8 @@ def abstract_recursive_calls(
     if not matches:
         return RecursiveAbstractionResult(analysis1=analysis1, analysis2=analysis2, matches=[])
 
-    mapping1 = {match.placeholder1: match for match in matches}
-    mapping2 = {match.placeholder2: match for match in matches}
+    mapping1 = {match.deferred_key1: match for match in matches}
+    mapping2 = {match.deferred_key2: match for match in matches}
 
     transformed1 = _rewrite_analysis_with_abstract_calls(analysis1, mapping1, debug=debug)
     transformed2 = _rewrite_analysis_with_abstract_calls(analysis2, mapping2, debug=debug)
@@ -183,7 +183,7 @@ def _recursive_argument_key(expr: Optional[Expression]) -> Tuple[object, ...]:
 
 def _rewrite_analysis_with_abstract_calls(
     analysis: FunctionReturnAnalysis,
-    placeholder_mapping: Dict[str, AbstractedCallMatch],
+    placeholder_mapping: Dict[Tuple[object, ...], AbstractedCallMatch],
     *,
     debug: bool = False,
 ) -> FunctionReturnAnalysis:
@@ -252,23 +252,23 @@ def _rewrite_analysis_with_abstract_calls(
     cloned.deferred_calls = {
         name: info
         for name, info in cloned.deferred_calls.items()
-        if name not in placeholder_mapping
+        if info.identity_key() not in placeholder_mapping
     }
     return cloned
 
 
 def _rewrite_expression(
     expr: Optional[Expression],
-    placeholder_mapping: Dict[str, AbstractedCallMatch],
+    placeholder_mapping: Dict[Tuple[object, ...], AbstractedCallMatch],
 ) -> Optional[Expression]:
     if expr is None:
         return None
 
     if expr.expr_type == ExpressionType.UNKNOWN:
         runtime_ref = getattr(expr, "runtime_ref", None)
-        placeholder_name = getattr(runtime_ref, "placeholder_name", None)
-        if placeholder_name in placeholder_mapping:
-            match = placeholder_mapping[placeholder_name]
+        deferred_key = getattr(runtime_ref, "deferred_key", None)
+        if deferred_key in placeholder_mapping:
+            match = placeholder_mapping[deferred_key]
             size = expr.size or 4
             return Expression.parameter(
                 match.summary_name,

@@ -597,6 +597,21 @@ class PcodeTracer:
                     
                     if self._debug_available():
                         self._debug_print(f"  -> Variable (from symbol): {sym_name}")
+
+                    if (
+                        isinstance(runtime_ref, AddressValueRef)
+                        and runtime_ref.has_concrete_address()
+                        and varnode.isAddress()
+                    ):
+                        if self._debug_available():
+                            self._debug_print(
+                                "  -> Address-backed symbol; treating as concrete address object"
+                            )
+                        return Expression.constant(
+                            runtime_ref.address_offset,
+                            varnode.getSize(),
+                            runtime_ref=runtime_ref,
+                        )
                     
                     return Expression.variable(
                         sym_name, dtype, dtype_obj, varnode.getSize(),
@@ -612,6 +627,20 @@ class PcodeTracer:
                 )
                 if self._debug_available():
                     self._debug_print(f"  -> Variable (from high name): {name}")
+                if (
+                    isinstance(runtime_ref, AddressValueRef)
+                    and runtime_ref.has_concrete_address()
+                    and varnode.isAddress()
+                ):
+                    if self._debug_available():
+                        self._debug_print(
+                            "  -> Address-backed high variable; treating as concrete address object"
+                        )
+                    return Expression.constant(
+                        runtime_ref.address_offset,
+                        varnode.getSize(),
+                        runtime_ref=runtime_ref,
+                    )
                 return Expression.variable(
                     name, size=varnode.getSize(),
                     storage_info=storage_info,
@@ -637,11 +666,16 @@ class PcodeTracer:
         # 5. アドレス空間の変数（メモリ）
         if varnode.isAddress():
             addr = varnode.getAddress()
+            runtime_ref = self._make_address_runtime_ref(
+                display_name=str(addr) if addr is not None else None,
+                high_var=high_var,
+            )
             if self._debug_available():
                 self._debug_print(f"  -> Memory address: {addr}")
-            return Expression.memory(
-                Expression.constant(addr.getOffset(), 8),
-                varnode.getSize()
+            return Expression.constant(
+                addr.getOffset(),
+                varnode.getSize(),
+                runtime_ref=runtime_ref,
             )
         
         # 6. ユニーク変数

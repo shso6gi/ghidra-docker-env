@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..model import (
+    CallTargetRef,
     Condition,
     DeferredCallInfo,
     Expression,
@@ -17,6 +18,7 @@ from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     StoreEffect,
     _build_parameter_replacements,
+    _enumerate_constant_expression_branches,
     lower_post_state_expression_for_smt_if_needed,
     substitute_condition,
     substitute_expression,
@@ -103,7 +105,7 @@ class BoundedCallRefiner:
         ret: ReturnInfo,
         analysis: FunctionReturnAnalysis,
         fuel: int,
-        trail: Set[str],
+        trail: Set[Tuple[object, ...]],
     ) -> List[ReturnInfo]:
         condition_states = self._expand_conditions(ret.conditions, analysis, fuel, trail)
         value_states = self._expand_expression(ret.value, analysis, fuel, trail)
@@ -136,7 +138,7 @@ class BoundedCallRefiner:
         conditions: Sequence[Condition],
         analysis: FunctionReturnAnalysis,
         fuel: int,
-        trail: Set[str],
+        trail: Set[Tuple[object, ...]],
     ) -> List[List[Condition]]:
         states: List[List[Condition]] = [[]]
 
@@ -165,17 +167,18 @@ class BoundedCallRefiner:
         expr: Expression,
         analysis: FunctionReturnAnalysis,
         fuel: int,
-        trail: Set[str],
+        trail: Set[Tuple[object, ...]],
     ) -> List[ExpressionExpansion]:
         deferred = self._lookup_deferred_call(expr, analysis)
         if deferred is not None:
-            if fuel <= 0 or deferred.placeholder_name in trail:
+            deferred_key = deferred.identity_key()
+            if fuel <= 0 or deferred_key in trail:
                 return [(expr, [])]
             unfolded = self._expand_deferred_call(
                 deferred,
                 analysis,
                 fuel - 1,
-                trail | {deferred.placeholder_name},
+                trail | {deferred_key},
             )
             return unfolded or [(expr, [])]
 
@@ -230,76 +233,109 @@ class BoundedCallRefiner:
         deferred: DeferredCallInfo,
         caller_analysis: FunctionReturnAnalysis,
         fuel: int,
-        trail: Set[str],
+        trail: Set[Tuple[object, ...]],
     ) -> List[ExpressionExpansion]:
-        callee_analysis = self.analysis_provider(deferred.target_ref)
-        if callee_analysis is None or not callee_analysis.returns:
-            return []
-
-        if len(deferred.arguments) < len(callee_analysis.parameters):
-            self._debug(
-                f"Skipped deferred call '{deferred.placeholder_name}': expected "
-                f"{len(callee_analysis.parameters)} args, got {len(deferred.arguments)}"
-            )
-            return []
-
-        replacements = _build_parameter_replacements(
-            callee_analysis.parameters,
-            deferred.arguments,
-        )
         results: List[ExpressionExpansion] = []
-        substituted_effects = self._substitute_effects_for_deferred_call(
-            callee_analysis,
-            replacements,
-        )
+        for _target_ref, target_conditions, callee_analysis in self._resolve_deferred_call_candidates(
+            deferred
+        ):
+            if len(deferred.arguments) < len(callee_analysis.parameters):
+                self._debug(
+                    f"Skipped deferred call '{deferred.placeholder_name}': expected "
+                    f"{len(callee_analysis.parameters)} args, got {len(deferred.arguments)}"
+                )
+                continue
 
-        for ret in callee_analysis.returns:
-            substituted_value = substitute_expression(ret.value, replacements, callee_analysis.parameters)
-            substituted_conditions = [
-                substitute_condition(cond, replacements, callee_analysis.parameters)
-                for cond in ret.conditions
-            ]
-            substituted_value = self._lower_symbolic_post_state_after_substitution(
-                substituted_value,
-                substituted_conditions,
-                substituted_effects,
-                caller_analysis.parameters,
+            replacements = _build_parameter_replacements(
+                callee_analysis.parameters,
+                deferred.arguments,
             )
-            substituted_conditions = [
-                self._lower_symbolic_post_state_in_condition_after_substitution(
-                    cond,
+            substituted_effects = self._substitute_effects_for_deferred_call(
+                callee_analysis,
+                replacements,
+            )
+
+            for ret in callee_analysis.returns:
+                substituted_value = substitute_expression(ret.value, replacements, callee_analysis.parameters)
+                substituted_conditions = [
+                    substitute_condition(cond, replacements, callee_analysis.parameters)
+                    for cond in ret.conditions
+                ]
+                substituted_value = self._lower_symbolic_post_state_after_substitution(
+                    substituted_value,
                     substituted_conditions,
                     substituted_effects,
                     caller_analysis.parameters,
                 )
-                for cond in substituted_conditions
-            ]
-
-            condition_sets = self._expand_conditions(
-                substituted_conditions,
-                callee_analysis,
-                fuel,
-                trail,
-            )
-            value_states = self._expand_expression(
-                substituted_value,
-                callee_analysis,
-                fuel,
-                trail,
-            )
-
-            for conds in condition_sets or [[]]:
-                for value_expr, extra_conditions in value_states:
-                    merged_conditions = ConditionSimplifier.simplify_conditions(
-                        list(conds) + list(extra_conditions)
+                substituted_conditions = [
+                    self._lower_symbolic_post_state_in_condition_after_substitution(
+                        cond,
+                        substituted_conditions,
+                        substituted_effects,
+                        caller_analysis.parameters,
                     )
-                    if ConditionSimplifier.is_contradiction(merged_conditions):
-                        continue
-                    results.append((value_expr, merged_conditions))
-                    if len(results) >= self.max_cases:
-                        return results[: self.max_cases]
+                    for cond in substituted_conditions
+                ]
+
+                condition_sets = self._expand_conditions(
+                    substituted_conditions,
+                    callee_analysis,
+                    fuel,
+                    trail,
+                )
+                value_states = self._expand_expression(
+                    substituted_value,
+                    callee_analysis,
+                    fuel,
+                    trail,
+                )
+
+                for conds in condition_sets or [[]]:
+                    for value_expr, extra_conditions in value_states:
+                        merged_conditions = ConditionSimplifier.simplify_conditions(
+                            list(target_conditions) + list(conds) + list(extra_conditions)
+                        )
+                        if ConditionSimplifier.is_contradiction(merged_conditions):
+                            continue
+                        results.append((value_expr, merged_conditions))
+                        if len(results) >= self.max_cases:
+                            return results[: self.max_cases]
 
         return self._deduplicate_expression_expansions(results)
+
+    def _resolve_deferred_call_candidates(
+        self,
+        deferred: DeferredCallInfo,
+    ) -> List[Tuple[CallTargetRef, List[Condition], FunctionReturnAnalysis]]:
+        candidates: List[Tuple[CallTargetRef, List[Condition], FunctionReturnAnalysis]] = []
+        seen = set()
+
+        def add_candidate(target_ref: CallTargetRef, conditions: Sequence[Condition]) -> None:
+            callee_analysis = self.analysis_provider(target_ref)
+            if callee_analysis is None or not callee_analysis.returns:
+                return
+            key = (
+                target_ref.stable_key(),
+                _runtime_conditions_signature(conditions),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append((target_ref, list(conditions), callee_analysis))
+
+        if deferred.call_target_expr is not None:
+            for branch_conditions, address_value in _enumerate_constant_expression_branches(
+                deferred.call_target_expr
+            ):
+                add_candidate(
+                    CallTargetRef.from_code_address(address_value),
+                    ConditionSimplifier.simplify_conditions(branch_conditions),
+                )
+
+        if deferred.target_ref is not None and not deferred.target_ref.is_unknown():
+            add_candidate(deferred.target_ref, [])
+
+        return candidates
 
     def _substitute_effects_for_deferred_call(
         self,
@@ -365,9 +401,11 @@ class BoundedCallRefiner:
         if expr is None or expr.expr_type != ExpressionType.UNKNOWN:
             return None
         runtime_ref = getattr(expr, "runtime_ref", None)
-        placeholder_name = getattr(runtime_ref, "placeholder_name", None)
-        if placeholder_name:
-            return analysis.deferred_calls.get(placeholder_name)
+        deferred_key = getattr(runtime_ref, "deferred_key", None)
+        if deferred_key is not None:
+            for info in (analysis.deferred_calls or {}).values():
+                if info.identity_key() == deferred_key:
+                    return info
         return None
 
     def _clone_expression_with_operands(
@@ -450,16 +488,16 @@ class BoundedCallRefiner:
         self,
         analysis: FunctionReturnAnalysis,
     ) -> Dict[str, DeferredCallInfo]:
-        used: Set[str] = set()
+        used: Set[Tuple[object, ...]] = set()
 
         def visit_expression(expr: Optional[Expression]) -> None:
             if expr is None:
                 return
             if expr.expr_type == ExpressionType.UNKNOWN:
                 runtime_ref = getattr(expr, "runtime_ref", None)
-                placeholder_name = getattr(runtime_ref, "placeholder_name", None)
-                if placeholder_name in analysis.deferred_calls:
-                    used.add(placeholder_name)
+                deferred_key = getattr(runtime_ref, "deferred_key", None)
+                if deferred_key is not None:
+                    used.add(deferred_key)
                     return
                 return
             if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -479,5 +517,5 @@ class BoundedCallRefiner:
         return {
             name: info
             for name, info in analysis.deferred_calls.items()
-            if name in used
+            if info.identity_key() in used
         }
