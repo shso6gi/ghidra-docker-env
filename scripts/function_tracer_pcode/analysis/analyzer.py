@@ -40,6 +40,7 @@ from .effect_summary import (
     _enumerate_constant_expression_branches,
     _expression_contains_observed_loads,
     _iter_expression_nodes,
+    _materialize_existing_effect_value_carrier,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _find_matching_effect_value,
@@ -5126,6 +5127,20 @@ class ReturnAnalyzer:
         conditions: List[Condition],
         effect_summary: EffectSummary,
     ) -> Optional[Expression]:
+        precise_object_state_value = self._resolve_precise_object_state_value(
+            value,
+            conditions,
+            effect_summary,
+        )
+        if precise_object_state_value is not None and precise_object_state_value is not value:
+            if self.debug:
+                self._debug_print(
+                    "Resolved return to precise object-state carrier before generic rewrite: "
+                    f"{self._debug_expr_identity_summary(value)} -> "
+                    f"{self._debug_expr_identity_summary(precise_object_state_value)}"
+                )
+            return precise_object_state_value
+
         for rewrite_kind, rewritten in self._iter_effect_sensitive_rewrite_candidates(
             value,
             conditions,
@@ -5150,6 +5165,48 @@ class ReturnAnalyzer:
                 accepted = True
             if accepted:
                 return rewritten
+        return value
+
+    def _resolve_precise_object_state_value(
+        self,
+        value: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        if value is None:
+            return None
+
+        candidates: List[Expression] = [value]
+        if _expression_contains_observed_loads(value):
+            observed_rewritten = rewrite_observed_loads_from_effects(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if observed_rewritten is not None:
+                candidates.append(observed_rewritten)
+
+        for candidate in candidates:
+            materialized = _materialize_existing_effect_value_carrier(
+                candidate,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
+            if materialized is None or materialized is candidate:
+                continue
+            if expression_contains_post_state_reads(materialized):
+                continue
+            if not _expressions_equivalent_under_conditions(
+                materialized,
+                value,
+                conditions,
+                self._current_parameters,
+            ):
+                continue
+            return materialized
+
         return value
 
     def _accept_effect_rewrite_without_rank_gain(
@@ -6072,6 +6129,18 @@ class ReturnAnalyzer:
             conditions,
             effect_summary,
         )
+        canonicalized = _materialize_existing_effect_value_carrier(
+            canonicalized,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        canonicalized = self._prefer_lossless_materialized_post_state_roundtrip(
+            canonicalized,
+            value,
+            conditions,
+            effect_summary,
+        )
         if self._should_replay_canonicalized_return(canonicalized, value):
             replayed = normalize_post_state_expression(
                 canonicalized,
@@ -6111,6 +6180,43 @@ class ReturnAnalyzer:
             return fallback_replayed if fallback_replayed is not None else value
 
         return canonicalized
+
+    def _prefer_lossless_materialized_post_state_roundtrip(
+        self,
+        canonicalized: Optional[Expression],
+        original: Expression,
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        if canonicalized is None:
+            return None
+        if original.expr_type == ExpressionType.MEMORY:
+            return canonicalized
+        if _expression_contains_observed_loads(original):
+            return canonicalized
+        if canonicalized.expr_type == ExpressionType.MEMORY:
+            return canonicalized
+        if not expression_contains_post_state_reads(canonicalized):
+            return canonicalized
+
+        lowered_roundtrip = lower_post_state_expression_for_smt(
+            canonicalized,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        )
+        if lowered_roundtrip is None:
+            return canonicalized
+        if expression_contains_post_state_reads(lowered_roundtrip):
+            return canonicalized
+        if not _expressions_equivalent_under_conditions(
+            lowered_roundtrip,
+            original,
+            conditions,
+            self._current_parameters,
+        ):
+            return canonicalized
+        return lowered_roundtrip
 
     def _should_replay_canonicalized_return(
         self,
@@ -6202,7 +6308,15 @@ class ReturnAnalyzer:
         if expr is None or target_post_state is None:
             return False
 
-        for current in _iter_expression_nodes(expr, include_phi_conditions=False):
+        candidates = [expr]
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            candidates.extend(
+                value
+                for _cond, value in expr.value
+                if value is not None
+            )
+
+        for current in candidates:
             location = canonicalize_expr_read_location(current, self._current_parameters)
             if location is not None:
                 promoted = promote_effect_value_match_to_post_state_read(

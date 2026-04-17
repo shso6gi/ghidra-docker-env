@@ -50,6 +50,7 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     LocationBaseRef,
     ObservedMemoryReadRef,
+    PostStateValueRef,
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -4535,6 +4536,122 @@ def test_normalize_post_state_expression_does_not_replay_existing_effect_value_t
     assert normalized.to_string() == "(MEM[(trace + 4)] + 1)"
 
 
+def test_lower_post_state_expression_for_smt_keeps_materialized_object_state_value_atomic():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    copy_flag = Expression.parameter("copy_flag", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    accumulate_taken = Condition(
+        Expression.binary_op("INT_EQUAL", copy_flag, Expression.constant(0, 4)),
+        False,
+    )
+    accumulated = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(dst, size=4),
+        Expression.memory(src, size=4),
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("dst", 0, 4),
+            value=accumulated,
+            conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+            order_key=7,
+        ),
+    ]
+    params = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("copy_flag", size=4, is_signed=False, index=2),
+    ]
+
+    symbolic_value = post_state_read_expression_for_location(
+        _loc("dst", 0, 4),
+        params,
+        symbolic=True,
+    )
+
+    normalized = lower_post_state_expression_for_smt(
+        symbolic_value,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effects,
+        params,
+    )
+
+    assert normalized is not None
+    assert normalized.to_string() == "(MEM[dst] + MEM[src])"
+    assert isinstance(getattr(normalized, "runtime_ref", None), PostStateValueRef)
+    assert normalized.runtime_ref.location == _loc("dst", 0, 4)
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effects,
+        params,
+    )
+
+    assert lowered is not None
+    assert lowered.to_string() == "(MEM[dst] + MEM[src])"
+
+
+def test_lower_post_state_expression_for_smt_materializes_matching_composite_effect_value_before_replay():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    copy_flag = Expression.parameter("copy_flag", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    accumulate_taken = Condition(
+        Expression.binary_op("INT_EQUAL", copy_flag, Expression.constant(0, 4)),
+        False,
+    )
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(dst, size=4, runtime_ref=_loc("dst", 0, 4)),
+        Expression.memory(src, size=4, runtime_ref=_loc("src", 0, 4)),
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("dst", 0, 4),
+            value=Expression.binary_op(
+                "INT_ADD",
+                Expression.memory(dst, size=4, read_order_key=10),
+                Expression.memory(src, size=4, read_order_key=11),
+            ),
+            conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+            order_key=7,
+        ),
+    ]
+    params = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("copy_flag", size=4, is_signed=False, index=2),
+    ]
+
+    lowered = lower_post_state_expression_for_smt(
+        expr,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effects,
+        params,
+    )
+
+    assert lowered is not None
+    assert lowered.to_string() == "(MEM[dst] + MEM[src])"
+    assert isinstance(getattr(lowered, "runtime_ref", None), PostStateValueRef)
+    assert lowered.runtime_ref.location == _loc("dst", 0, 4)
+
+
 def test_call_effect_summary_policy_accepts_interdependent_swap_writes():
     summary = EffectSummary(
         parameter_names=["a", "b"],
@@ -8338,6 +8455,223 @@ def test_return_analyzer_effect_sensitive_rewrite_does_not_double_apply_outer_de
 
     assert len(results) == 1
     assert results[0].value.to_string() == "(delta - MEM[value])"
+
+
+def test_return_analyzer_materializes_normalized_composite_effect_value_at_root():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    copy_flag = Expression.parameter("copy_flag", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    accumulate_taken = Condition(
+        Expression.binary_op("INT_EQUAL", copy_flag, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("copy_flag", size=4, is_signed=False, index=2),
+    ]
+    effect_summary = EffectSummary(
+        parameter_names=["dst", "src", "copy_flag"],
+        effects=[
+            StoreEffect(
+                location=_loc("dst", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(dst, size=4, read_order_key=10),
+                    Expression.memory(src, size=4, read_order_key=11),
+                ),
+                conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+                order_key=7,
+            ),
+        ],
+    )
+
+    stale_replayed = Expression.binary_op(
+        "INT_ADD",
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.memory(dst, size=4, runtime_ref=_loc("dst", 0, 4)),
+            Expression.memory(src, size=4, runtime_ref=_loc("src", 0, 4)),
+        ),
+        Expression.memory(src, size=4, runtime_ref=_loc("src", 0, 4)),
+    )
+
+    normalized = analyzer._normalize_return_value_with_effect_summary(
+        stale_replayed,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effect_summary,
+    )
+
+    assert normalized is not None
+    assert normalized.to_string() == "(MEM[dst] + MEM[src])"
+    assert isinstance(getattr(normalized, "runtime_ref", None), PostStateValueRef)
+    assert normalized.runtime_ref.location == _loc("dst", 0, 4)
+
+
+def test_return_analyzer_rewrite_prefers_precise_object_state_carrier_for_observed_effect_value():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    copy_flag = Expression.parameter("copy_flag", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    accumulate_taken = Condition(
+        Expression.binary_op("INT_EQUAL", copy_flag, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("copy_flag", size=4, is_signed=False, index=2),
+    ]
+    effect_summary = EffectSummary(
+        parameter_names=["dst", "src", "copy_flag"],
+        effects=[
+            StoreEffect(
+                location=_loc("dst", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(
+                        dst,
+                        size=4,
+                        read_order_key=10,
+                        runtime_ref=_observed_read("dst", index=0, size=4, order_key=10),
+                    ),
+                    Expression.memory(
+                        src,
+                        size=4,
+                        read_order_key=11,
+                        runtime_ref=_observed_read("src", index=0, size=4, order_key=11),
+                    ),
+                ),
+                conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+                order_key=7,
+            ),
+        ],
+    )
+    original = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(
+            dst,
+            size=4,
+            read_order_key=10,
+            runtime_ref=_observed_read("dst", index=0, size=4, order_key=10),
+        ),
+        Expression.memory(
+            src,
+            size=4,
+            read_order_key=11,
+            runtime_ref=_observed_read("src", index=0, size=4, order_key=11),
+        ),
+    )
+
+    rewritten = analyzer._rewrite_effect_sensitive_return_value(
+        original,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effect_summary,
+    )
+
+    assert rewritten is not None
+    assert rewritten.to_string() == "(MEM[dst] + MEM[src])"
+    assert isinstance(getattr(rewritten, "runtime_ref", None), PostStateValueRef)
+    assert rewritten.runtime_ref.location == _loc("dst", 0, 4)
+
+
+def test_build_return_infos_materializes_observed_effect_value_before_generic_rewrite():
+    dst = Expression.parameter("dst", 0, size=8)
+    src = Expression.parameter("src", 1, size=8)
+    copy_flag = Expression.parameter("copy_flag", 2, size=4)
+    dst_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", dst, Expression.constant(0, 8)),
+        False,
+    )
+    src_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", src, Expression.constant(0, 8)),
+        False,
+    )
+    accumulate_taken = Condition(
+        Expression.binary_op("INT_EQUAL", copy_flag, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("dst", size=8, is_signed=False),
+        _param("src", size=8, is_signed=False, index=1),
+        _param("copy_flag", size=4, is_signed=False, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["dst", "src", "copy_flag"],
+        effects=[
+            StoreEffect(
+                location=_loc("dst", 0, 4),
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(
+                        dst,
+                        size=4,
+                        read_order_key=10,
+                        runtime_ref=_observed_read("dst", index=0, size=4, order_key=10),
+                    ),
+                    Expression.memory(
+                        src,
+                        size=4,
+                        read_order_key=11,
+                        runtime_ref=_observed_read("src", index=0, size=4, order_key=11),
+                    ),
+                ),
+                conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+                order_key=7,
+            ),
+        ],
+    )
+
+    results = analyzer._build_return_infos_from_expansions(
+        "00100000",
+        [
+            ExpandedValue(
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.memory(
+                        dst,
+                        size=4,
+                        read_order_key=10,
+                        runtime_ref=_observed_read("dst", index=0, size=4, order_key=10),
+                    ),
+                    Expression.memory(
+                        src,
+                        size=4,
+                        read_order_key=11,
+                        runtime_ref=_observed_read("src", index=0, size=4, order_key=11),
+                    ),
+                ),
+                [dst_nonnull, src_nonnull, accumulate_taken],
+            )
+        ],
+        return_index=0,
+    )
+
+    assert len(results) == 1
+    assert results[0].value.to_string() == "(MEM[dst] + MEM[src])"
+    assert isinstance(getattr(results[0].value, "runtime_ref", None), PostStateValueRef)
+    assert results[0].value.runtime_ref.location == _loc("dst", 0, 4)
 
 
 def test_return_analyzer_splits_effect_sensitive_observed_load_returns_into_cases():

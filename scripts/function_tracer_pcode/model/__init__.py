@@ -14,6 +14,7 @@ from .runtime_refs import (
     LocationBaseRef,
     LocationStep,
     ObservedMemoryReadRef,
+    PostStateValueRef,
     PcodeOpRef,
     UnknownValueRef,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "LocationBaseRef",
     "LocationStep",
     "ObservedMemoryReadRef",
+    "PostStateValueRef",
     "PcodeOpRef",
     "UnknownValueRef",
     "DeferredCallInfo",

@@ -273,6 +273,31 @@ class CanonicalLocation:
 
 
 @dataclass(frozen=True)
+class PostStateValueRef:
+    """Structured identity for a fully materialized final object-state value."""
+
+    location: CanonicalLocation
+    source: str = "effect_summary"
+    state_kind: str = "materialized_final_value"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "post_state_value",
+            self.location.stable_key(),
+            self.source,
+            self.state_kind,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "post_state_value",
+            "location": self.location.to_dict(),
+            "source": self.source,
+            "state_kind": self.state_kind,
+        }
+
+
+@dataclass(frozen=True)
 class PcodeOpRef:
     """Stable identity for a concrete Ghidra P-code operation."""
 

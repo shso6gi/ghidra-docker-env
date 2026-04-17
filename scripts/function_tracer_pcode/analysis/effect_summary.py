@@ -18,6 +18,7 @@ from ..model import (
     LocationBaseRef,
     LocationStep,
     ObservedMemoryReadRef,
+    PostStateValueRef,
     StorageInfo,
     coerce_call_target_ref,
     expression_key_or_identity,
@@ -146,6 +147,179 @@ def _rebuild_expression_from_optional_operands(
     return _clone_expression_with_operands(expr, new_operands)
 
 
+def _strip_materialized_post_state_value_refs(
+    expr: Optional[Expression],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    stripped_runtime_ref = None if isinstance(runtime_ref, PostStateValueRef) else runtime_ref
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = stripped_runtime_ref != runtime_ref
+        branches = []
+        for cond, value in expr.value:
+            new_value = _strip_materialized_post_state_value_refs(value)
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt.clone_with(runtime_ref=stripped_runtime_ref)
+
+    operands = getattr(expr, "operands", None) or []
+    rewritten_operands = [
+        _strip_materialized_post_state_value_refs(operand)
+        for operand in operands
+    ]
+    if (
+        stripped_runtime_ref == runtime_ref
+        and all(new is old for new, old in zip(rewritten_operands, operands))
+    ):
+        return expr
+    rebuilt = _rebuild_expression_from_optional_operands(
+        expr,
+        rewritten_operands,
+        fallback=expr,
+    )
+    if rebuilt is None:
+        return expr.clone_with(runtime_ref=stripped_runtime_ref)
+    return rebuilt.clone_with(runtime_ref=stripped_runtime_ref)
+
+
+def _strip_symbolic_post_state_runtime_refs(
+    expr: Optional[Expression],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    stripped_runtime_ref = None if isinstance(runtime_ref, CanonicalLocation) else runtime_ref
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = stripped_runtime_ref != runtime_ref
+        branches = []
+        for cond, value in expr.value:
+            new_value = _strip_symbolic_post_state_runtime_refs(value)
+            branches.append((cond, new_value))
+            changed = changed or (new_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        return rebuilt.clone_with(runtime_ref=stripped_runtime_ref)
+
+    operands = getattr(expr, "operands", None) or []
+    rewritten_operands = [
+        _strip_symbolic_post_state_runtime_refs(operand)
+        for operand in operands
+    ]
+    if (
+        stripped_runtime_ref == runtime_ref
+        and all(new is old for new, old in zip(rewritten_operands, operands))
+    ):
+        return expr
+    rebuilt = _rebuild_expression_from_optional_operands(
+        expr,
+        rewritten_operands,
+        fallback=expr,
+    )
+    if rebuilt is None:
+        return expr.clone_with(runtime_ref=stripped_runtime_ref)
+    return rebuilt.clone_with(runtime_ref=stripped_runtime_ref)
+
+
+def _materialize_existing_effect_value_carrier(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+    if expr.expr_type not in (
+        ExpressionType.BINARY_OP,
+        ExpressionType.UNARY_OP,
+        ExpressionType.CALL,
+    ):
+        return expr
+    location = _find_unique_effect_location_for_value(
+        expr,
+        return_conditions,
+        effects,
+        parameters,
+    )
+    if location is None:
+        return expr
+    stripped = _strip_symbolic_post_state_runtime_refs(expr)
+    if stripped is None or expression_contains_post_state_reads(stripped):
+        return expr
+    return _attach_materialized_post_state_value_ref(stripped, location)
+
+
+def _canonicalize_expression_for_effect_value_identity(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        location = canonicalize_expr_read_location(expr, parameters)
+        if location is not None:
+            return post_state_read_expression_for_location(
+                location,
+                parameters,
+                symbolic=True,
+            )
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateValueRef):
+        expr = expr.clone_with(runtime_ref=None)
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        rewritten_branches = []
+        for cond, value in expr.value:
+            rewritten_cond = cond
+            cond_expr = getattr(cond, "expression", None) if cond is not None else None
+            if cond_expr is not None:
+                canonicalized_cond_expr = _canonicalize_expression_for_effect_value_identity(
+                    cond_expr,
+                    parameters,
+                )
+                if canonicalized_cond_expr is not cond_expr:
+                    rewritten_cond = Condition(canonicalized_cond_expr, cond.negated)
+                    changed = True
+            rewritten_value = _canonicalize_expression_for_effect_value_identity(
+                value,
+                parameters,
+            )
+            rewritten_branches.append((rewritten_cond, rewritten_value))
+            changed = changed or (rewritten_value is not value)
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(rewritten_branches)
+        rebuilt.size = expr.size
+        return rebuilt
+
+    operands = getattr(expr, "operands", None) or []
+    rewritten_operands = [
+        _canonicalize_expression_for_effect_value_identity(operand, parameters)
+        for operand in operands
+    ]
+    if all(new is old for new, old in zip(rewritten_operands, operands)):
+        return expr
+    rebuilt = _rebuild_expression_from_optional_operands(
+        expr,
+        rewritten_operands,
+        fallback=expr,
+    )
+    return rebuilt if rebuilt is not None else expr
+
+
 def _display_name_for_location_base(base_ref: LocationBaseRef) -> str:
     return base_ref.display_name()
 
@@ -168,6 +342,8 @@ def _expression_location_ref(expr: Optional[Expression]) -> Optional[CanonicalLo
     if expr is None:
         return None
     runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateValueRef):
+        return runtime_ref.location
     if isinstance(runtime_ref, CanonicalLocation):
         return runtime_ref
     if isinstance(runtime_ref, ObservedMemoryReadRef):
@@ -180,6 +356,30 @@ def _expression_observed_read_ref(expr: Optional[Expression]) -> Optional[Observ
         return None
     runtime_ref = getattr(expr, "runtime_ref", None)
     if isinstance(runtime_ref, ObservedMemoryReadRef):
+        return runtime_ref
+    return None
+
+
+def _expression_post_state_value_ref(expr: Optional[Expression]) -> Optional[PostStateValueRef]:
+    if expr is None:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, PostStateValueRef):
+        return runtime_ref
+    return None
+
+
+def _expression_is_materialized_post_state_value(expr: Optional[Expression]) -> bool:
+    return _expression_post_state_value_ref(expr) is not None
+
+
+def _expression_symbolic_post_state_location_ref(
+    expr: Optional[Expression],
+) -> Optional[CanonicalLocation]:
+    if expr is None:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, CanonicalLocation):
         return runtime_ref
     return None
 
@@ -225,6 +425,28 @@ def _memory_expr_with_runtime_location(
     )
 
 
+def _attach_materialized_post_state_value_ref(
+    expr: Optional[Expression],
+    location: Optional[CanonicalLocation],
+) -> Optional[Expression]:
+    if expr is None or location is None:
+        return expr
+    normalized_location = _normalize_canonical_location(location)
+    if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        return _memory_expr_with_runtime_location(
+            expr.operands[0],
+            expr.size,
+            read_order_key=expr.read_order_key,
+            runtime_location=normalized_location,
+            runtime_ref=getattr(expr, "runtime_ref", None),
+        )
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    desired_ref = PostStateValueRef(location=normalized_location)
+    if runtime_ref == desired_ref:
+        return expr
+    return expr.clone_with(runtime_ref=desired_ref)
+
+
 def _post_state_read_name(location: CanonicalLocation) -> str:
     normalized = _normalize_canonical_location(location)
     tokens = [
@@ -267,7 +489,7 @@ def _iter_expression_nodes(
 
 def expression_contains_post_state_reads(expr: Optional[Expression]) -> bool:
     for node in _iter_expression_nodes(expr):
-        if _expression_location_ref(node) is not None:
+        if _expression_symbolic_post_state_location_ref(node) is not None:
             return True
     return False
 
@@ -2506,6 +2728,8 @@ def rewrite_loads_from_effects(
         )
 
     if expr.expr_type == ExpressionType.MEMORY and expr.operands:
+        synthetic_location = _expression_location_ref(expr)
+        symbolic_post_state_location = _expression_symbolic_post_state_location_ref(expr)
         rewritten_addr = rewrite_loads_from_effects(
             expr.operands[0],
             return_conditions,
@@ -2521,7 +2745,7 @@ def rewrite_loads_from_effects(
             rewritten_addr,
             expr.size,
             read_order_key=expr.read_order_key,
-            runtime_location=_expression_location_ref(expr),
+            runtime_location=synthetic_location,
             runtime_ref=getattr(expr, "runtime_ref", None),
         )
         if location is None:
@@ -2541,10 +2765,16 @@ def rewrite_loads_from_effects(
             max_order_key=max_order_key,
             blocked_locations=active_blocked_locations,
             cycle_components=active_cycle_components,
+            definite_post_state=(
+                symbolic_post_state_location is not None
+                and _expression_observed_read_ref(expr) is None
+            ),
             preserve_symbolic_fallback=preserve_symbolic_fallback,
         )
 
     if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
+        if _expression_is_materialized_post_state_value(expr):
+            return expr
         expr_location = canonicalize_expr_read_location(expr, parameters)
         if expr_location is not None:
             matching_effect = _find_matching_effect_value(
@@ -2570,6 +2800,11 @@ def rewrite_loads_from_effects(
                     cycle_components=active_cycle_components,
                     preserve_symbolic_fallback=preserve_symbolic_fallback,
                 )
+                if materialized_value is not None and not expression_contains_post_state_reads(materialized_value):
+                    materialized_value = _attach_materialized_post_state_value_ref(
+                        materialized_value,
+                        expr_location,
+                    )
                 return materialized_value
         new_operands = [
             rewrite_loads_from_effects(
@@ -2701,14 +2936,28 @@ def _rewrite_canonical_location_read(
         return fallback_expr
 
     if definite_post_state and _all_residual_guards_empty(matched):
-        replayed_state = _replay_definite_active_effects_for_location(
-            location,
-            normalized_return_conditions,
-            effects,
-            parameters,
-        )
-        if replayed_state is not None:
-            return replayed_state
+        if not (
+            len(effects) > 1
+            and _summary_has_interdependent_writes(
+                EffectSummary(
+                    parameter_names=_collect_named_parameter_names(parameters),
+                    effects=list(effects),
+                )
+            )
+        ):
+            replayed_state = _replay_definite_active_effects_for_location(
+                location,
+                normalized_return_conditions,
+                effects,
+                parameters,
+            )
+            if replayed_state is not None:
+                if not expression_contains_post_state_reads(replayed_state):
+                    replayed_state = _attach_materialized_post_state_value_ref(
+                        replayed_state,
+                        location,
+                    )
+                return replayed_state
 
     if _has_overlapping_guards(matched):
         return fallback_expr
@@ -2881,6 +3130,45 @@ def _find_matching_effect_value(
         ):
             return effect.order_key, effect.value
     return None
+
+
+def _find_unique_effect_location_for_value(
+    expr: Expression,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> Optional[CanonicalLocation]:
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_expr = _canonicalize_expression_for_effect_value_identity(expr, parameters)
+    normalized_expr_key = expression_key_safe(
+        normalized_expr,
+        include_memory_read_order=True,
+        include_semantic_runtime_refs=False,
+    )
+    if normalized_expr_key is None:
+        return None
+    matched_location: Optional[CanonicalLocation] = None
+    for effect in effects:
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        normalized_effect_value = _canonicalize_expression_for_effect_value_identity(
+            effect.value,
+            parameters,
+        )
+        effect_value_key = expression_key_safe(
+            normalized_effect_value,
+            include_memory_read_order=True,
+            include_semantic_runtime_refs=False,
+        )
+        if effect_value_key is None or effect_value_key != normalized_expr_key:
+            continue
+        if matched_location is None:
+            matched_location = effect.location
+            continue
+        if matched_location != effect.location:
+            return None
+    return matched_location
 
 
 def resolve_definite_post_state_read_for_location(
@@ -3310,8 +3598,14 @@ def _expressions_equivalent_under_conditions(
     if _expressions_equivalent(left, right):
         return True
 
-    left_rewritten = _apply_condition_parameter_replacements(left, conditions, parameters)
-    right_rewritten = _apply_condition_parameter_replacements(right, conditions, parameters)
+    left_unwrapped = _strip_materialized_post_state_value_refs(left)
+    right_unwrapped = _strip_materialized_post_state_value_refs(right)
+    if left_unwrapped is not left or right_unwrapped is not right:
+        if _expressions_equivalent(left_unwrapped, right_unwrapped):
+            return True
+
+    left_rewritten = _apply_condition_parameter_replacements(left_unwrapped, conditions, parameters)
+    right_rewritten = _apply_condition_parameter_replacements(right_unwrapped, conditions, parameters)
     if _expressions_equivalent(left_rewritten, right_rewritten):
         return True
 
@@ -3986,6 +4280,23 @@ def normalize_post_state_expression(
         return None
 
     def _normalize_candidate(candidate_expr: Expression) -> Expression:
+        early_materialized = _materialize_existing_effect_value_carrier(
+            candidate_expr,
+            return_conditions,
+            effects,
+            parameters,
+        )
+        if (
+            early_materialized is not None
+            and early_materialized is not candidate_expr
+            and _expression_contains_observed_loads(candidate_expr)
+        ):
+            reduced_early = _reduce_expression_under_conditions(
+                early_materialized,
+                return_conditions,
+            )
+            return reduced_early if reduced_early is not None else early_materialized
+
         normalized = candidate_expr
 
         if prefer_canonical_post_state:
@@ -4019,6 +4330,15 @@ def normalize_post_state_expression(
             )
             if collapsed_equivalent is not None:
                 normalized = collapsed_equivalent
+
+        materialized_effect_value = _materialize_existing_effect_value_carrier(
+            normalized,
+            return_conditions,
+            effects,
+            parameters,
+        )
+        if materialized_effect_value is not None:
+            normalized = materialized_effect_value
 
         post_state_promoted = (
             expression_contains_post_state_reads(normalized)
@@ -4161,6 +4481,27 @@ def lower_post_state_expression_for_smt(
     if expr is None:
         return None
 
+    materialized_effect_value = _materialize_existing_effect_value_carrier(
+        expr,
+        return_conditions,
+        effects,
+        parameters,
+    )
+    if (
+        materialized_effect_value is not None
+        and materialized_effect_value is not expr
+        and not expression_contains_post_state_reads(materialized_effect_value)
+    ):
+        reduced_materialized = _reduce_expression_under_conditions(
+            materialized_effect_value,
+            return_conditions,
+        )
+        return (
+            reduced_materialized
+            if reduced_materialized is not None
+            else materialized_effect_value
+        )
+
     lowered = rewrite_loads_from_effects(
         expr,
         return_conditions,
@@ -4274,6 +4615,8 @@ def _rewrite_definite_post_state_subexpressions(
 
         reduced_replayed = _reduce_expression_under_conditions(replayed, return_conditions)
         resolved = reduced_replayed if reduced_replayed is not None else replayed
+        if not expression_contains_post_state_reads(resolved):
+            resolved = _attach_materialized_post_state_value_ref(resolved, location)
         return current if _expressions_equivalent(current, resolved) else resolved
 
     if expr.expr_type in (

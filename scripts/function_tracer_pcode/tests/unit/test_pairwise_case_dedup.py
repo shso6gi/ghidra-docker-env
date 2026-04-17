@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
+    lower_post_state_expression_for_smt,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
@@ -28,6 +29,7 @@ from scripts.function_tracer_pcode.model import (
     ExpressionType,
     FunctionReturnAnalysis,
     LocationBaseRef,
+    PostStateValueRef,
     ReturnInfo,
 )
 from conftest import resolve_mock_data_type
@@ -422,6 +424,75 @@ def test_extract_return_cases_preserves_original_object_centric_value_for_smt_lo
     assert "(select mem32 param_2)" in smt
     assert "(select mem32 param_1)" in smt
     assert "(bvsub (select mem32 param_1) (select mem32 param_2))" not in smt
+
+
+def test_return_case_value_smt_does_not_replay_materialized_object_state_value():
+    dst = _param("dst")
+    src = _param("src")
+    copy_flag = Expression(ExpressionType.PARAMETER, name="copy_flag", value=2, size=4)
+    dst_nonnull = _cond("INT_NOTEQUAL", dst, Expression(ExpressionType.CONSTANT, value=0, size=8))
+    src_nonnull = _cond("INT_NOTEQUAL", src, Expression(ExpressionType.CONSTANT, value=0, size=8))
+    accumulate_taken = Condition(
+        Expression(
+            ExpressionType.BINARY_OP,
+            operator="INT_EQUAL",
+            operands=[copy_flag, Expression(ExpressionType.CONSTANT, value=0, size=4)],
+            size=1,
+        ),
+        False,
+    )
+    params = [
+        {"name": "dst", "index": 0, "size": 8},
+        {"name": "src", "index": 1, "size": 8},
+        {"name": "copy_flag", "index": 2, "size": 4},
+    ]
+    accumulated = Expression.binary_op(
+        "INT_ADD",
+        Expression.memory(dst, size=4),
+        Expression.memory(src, size=4),
+    )
+    effects = [
+        StoreEffect(
+            location=CanonicalLocation(base_ref=LocationBaseRef.parameter("dst", index=0), offset=0, size=4),
+            value=accumulated,
+            conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+            order_key=7,
+        ),
+    ]
+    value_expr = post_state_read_expression_for_location(
+        CanonicalLocation(base_ref=LocationBaseRef.parameter("dst", index=0), offset=0, size=4),
+        params,
+        symbolic=True,
+    )
+
+    value_expr = lower_post_state_expression_for_smt(
+        value_expr,
+        [dst_nonnull, src_nonnull, accumulate_taken],
+        effects,
+        params,
+    )
+    assert isinstance(getattr(value_expr, "runtime_ref", None), PostStateValueRef)
+
+    case = ReturnCase(
+        index=0,
+        conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+        value_expr=value_expr,
+        return_info=ReturnInfo(
+            address="0x1004",
+            value=value_expr,
+            conditions=[dst_nonnull, src_nonnull, accumulate_taken],
+        ),
+        parameters=params,
+        effect_summary=EffectSummary(
+            parameter_names=["dst", "src", "copy_flag"],
+            effects=effects,
+        ),
+    )
+
+    smt = case.get_value_smt(lambda expr: expr)
+
+    assert smt.count("(select mem32 dst)") == 1
+    assert smt.count("(select mem32 src)") == 1
 
 
 def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effect_summary():
