@@ -14,6 +14,8 @@ from ..model import (
     LocationBaseRef,
     ObservedMemoryReadRef,
     PcodeOpRef,
+    PTRADD_OPCODE,
+    PTRSUB_OPCODE,
 )
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
@@ -193,44 +195,14 @@ class PcodeTracer:
         symbol: Any = None,
         high_var: Any = None,
     ) -> Optional[AddressValueRef]:
-        representative = None
-        if high_var is not None:
-            try:
-                representative = high_var.getRepresentative()
-            except Exception:
-                representative = None
-
-        probes = (
-            (symbol, "getAddress", "symbol_address"),
-            (high_var, "getAddress", "high_var_address"),
-            (high_var, "getPCAddress", "high_var_pc_address"),
-            (representative, "getAddress", "high_var_representative_address"),
-            (representative, "getPCAddress", "high_var_representative_pc_address"),
-        )
-        probe_failures = []
-        for owner, method_name, source in probes:
-            if owner is None:
-                continue
-            getter = getattr(owner, method_name, None)
-            if not callable(getter):
-                probe_failures.append(f"{source}=missing_method")
-                continue
-            try:
-                address = getter()
-            except Exception as exc:
-                probe_failures.append(f"{source}=error:{type(exc).__name__}")
-                continue
-            if address is None:
-                probe_failures.append(f"{source}=none")
-                continue
+        def _build_runtime_ref(address, source: str) -> Optional[AddressValueRef]:
             try:
                 offset = int(address.getOffset())
-            except Exception as exc:
-                probe_failures.append(f"{source}=bad_offset:{type(exc).__name__}")
-                continue
+            except Exception:
+                return None
             if offset < 0:
-                probe_failures.append(f"{source}=negative_offset")
-                continue
+                return None
+
             space_name = None
             space_id = None
             try:
@@ -289,12 +261,236 @@ class PcodeTracer:
                 can_execute=can_execute,
                 is_volatile=is_volatile,
             )
+
+        representative = None
+        if high_var is not None:
+            try:
+                representative = high_var.getRepresentative()
+            except Exception:
+                representative = None
+
+        probes = (
+            (symbol, "getAddress", "symbol_address"),
+            (high_var, "getAddress", "high_var_address"),
+            (high_var, "getPCAddress", "high_var_pc_address"),
+            (representative, "getAddress", "high_var_representative_address"),
+            (representative, "getPCAddress", "high_var_representative_pc_address"),
+        )
+        probe_failures = []
+        for owner, method_name, source in probes:
+            if owner is None:
+                continue
+            getter = getattr(owner, method_name, None)
+            if not callable(getter):
+                probe_failures.append(f"{source}=missing_method")
+                continue
+            try:
+                address = getter()
+            except Exception as exc:
+                probe_failures.append(f"{source}=error:{type(exc).__name__}")
+                continue
+            if address is None:
+                probe_failures.append(f"{source}=none")
+                continue
+            runtime_ref = _build_runtime_ref(address, source)
+            if runtime_ref is not None:
+                return runtime_ref
+            probe_failures.append(f"{source}=bad_offset")
         if self.debug and display_name:
             self._debug_print(
                 "[PcodeTracer] failed to build AddressValueRef "
                 f"name={display_name} probes={probe_failures}"
             )
         return None
+
+    def _make_address_runtime_ref_for_offset(
+        self,
+        offset: int,
+        *,
+        display_name: Optional[str] = None,
+        require_ghidra_evidence: bool = True,
+    ) -> Optional[AddressValueRef]:
+        if self.program is None:
+            return None
+        try:
+            offset = int(offset)
+        except Exception:
+            return None
+        if offset < 0:
+            return None
+
+        try:
+            address_factory = self.program.getAddressFactory()
+            default_space = (
+                address_factory.getDefaultAddressSpace()
+                if address_factory is not None and hasattr(address_factory, "getDefaultAddressSpace")
+                else None
+            )
+            address = default_space.getAddress(offset) if default_space is not None else None
+        except Exception:
+            address = None
+        if address is None:
+            return None
+
+        try:
+            memory = self.program.getMemory()
+            block = memory.getBlock(address) if memory is not None else None
+        except Exception:
+            block = None
+
+        has_symbol = bool(self._lookup_symbol_name_for_address(address))
+        has_data = False
+        try:
+            listing = self.program.getListing()
+        except Exception:
+            listing = None
+        if listing is not None:
+            for getter_name in ("getDataAt", "getDataContaining"):
+                getter = getattr(listing, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    if getter(address) is not None:
+                        has_data = True
+                        break
+                except Exception:
+                    continue
+
+        has_reference = False
+        try:
+            reference_manager = self.program.getReferenceManager()
+        except Exception:
+            reference_manager = None
+        if reference_manager is not None:
+            for getter_name in ("getReferencesFrom", "getReferencesTo"):
+                getter = getattr(reference_manager, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    refs = getter(address)
+                except Exception:
+                    refs = None
+                if refs is None:
+                    continue
+                if hasattr(refs, "hasNext"):
+                    try:
+                        has_reference = bool(refs.hasNext())
+                    except Exception:
+                        has_reference = False
+                else:
+                    try:
+                        has_reference = bool(list(refs))
+                    except Exception:
+                        has_reference = False
+                if has_reference:
+                    break
+
+        is_readonly_block = False
+        if block is not None:
+            try:
+                is_readonly_block = bool(
+                    block.isInitialized()
+                    and block.isRead()
+                    and not block.isWrite()
+                    and not block.isVolatile()
+                )
+            except Exception:
+                is_readonly_block = False
+
+        if require_ghidra_evidence and not (has_symbol or has_data or has_reference or is_readonly_block):
+            return None
+
+        return AddressValueRef(
+            address_offset=offset,
+            source="constant_offset",
+            display_hint=display_name,
+            program_id=(
+                int(self.program.getUniqueProgramID())
+                if self.program is not None and hasattr(self.program, "getUniqueProgramID")
+                else None
+            ),
+            space_id=(
+                int(address.getAddressSpace().getSpaceID())
+                if address is not None and address.getAddressSpace() is not None
+                else None
+            ),
+            space_name=(
+                address.getAddressSpace().getName()
+                if address is not None and address.getAddressSpace() is not None
+                else None
+            ),
+            symbol_name=self._lookup_symbol_name_for_address(address),
+            block_name=block.getName() if block is not None else None,
+            is_initialized=bool(block.isInitialized()) if block is not None else None,
+            can_read=bool(block.isRead()) if block is not None else None,
+            can_write=bool(block.isWrite()) if block is not None else None,
+            can_execute=bool(block.isExecute()) if block is not None else None,
+            is_volatile=bool(block.isVolatile()) if block is not None else None,
+        )
+
+    def _resolve_concrete_address_offset(self, expr: Optional[Expression]) -> Optional[int]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, AddressValueRef) and runtime_ref.has_concrete_address():
+            return int(runtime_ref.address_offset)
+
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return None
+
+        expr_kind = expr.expr_type.__class__
+        if expr.expr_type == expr_kind.CONSTANT and isinstance(expr.value, int):
+            return int(expr.value)
+
+        if expr.expr_type == expr_kind.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
+            left_value = self._resolve_concrete_address_offset(expr.operands[0])
+            right_value = self._resolve_concrete_address_offset(expr.operands[1])
+            if left_value is None or right_value is None:
+                return None
+            return left_value + right_value
+
+        if expr.expr_type == expr_kind.BINARY_OP and expr.operator == "INT_MULT" and len(expr.operands) == 2:
+            left_value = self._resolve_concrete_address_offset(expr.operands[0])
+            right_value = self._resolve_concrete_address_offset(expr.operands[1])
+            if left_value is None or right_value is None:
+                return None
+            return left_value * right_value
+
+        if expr.expr_type != expr_kind.INTRINSIC:
+            return None
+
+        mnemonic = getattr(expr, "name", None) or ""
+        opcode = getattr(expr, "opcode", None)
+        operands = getattr(expr, "operands", None) or []
+
+        if (opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB") and len(operands) == 2:
+            base_value = self._resolve_concrete_address_offset(operands[0])
+            offset_value = self._resolve_concrete_address_offset(operands[1])
+            if base_value is None or offset_value is None:
+                return None
+            return base_value + offset_value
+
+        if (opcode == PTRADD_OPCODE or mnemonic == "PTRADD") and len(operands) == 3:
+            base_value = self._resolve_concrete_address_offset(operands[0])
+            index_value = self._resolve_concrete_address_offset(operands[1])
+            elem_value = self._resolve_concrete_address_offset(operands[2])
+            if base_value is None or index_value is None or elem_value is None:
+                return None
+            return base_value + index_value * elem_value
+
+        return None
+
+    def _derive_pointer_runtime_ref(
+        self,
+        expr: Expression,
+        *,
+        display_name: Optional[str] = None,
+    ) -> Optional[AddressValueRef]:
+        concrete_offset = self._resolve_concrete_address_offset(expr)
+        if concrete_offset is None:
+            return None
+        return self._make_address_runtime_ref_for_offset(
+            concrete_offset,
+            display_name=display_name,
+        )
 
     def _lookup_symbol_name_for_address(self, address) -> Optional[str]:
         if address is None:
@@ -684,7 +880,11 @@ class PcodeTracer:
             value = varnode.getOffset()
             if self._debug_available():
                 self._debug_print(f"  -> Constant: 0x{value:x}")
-            return Expression.constant(value, varnode.getSize())
+            return Expression.constant(
+                value,
+                varnode.getSize(),
+                runtime_ref=self._make_address_runtime_ref_for_offset(value),
+            )
         
         # ストレージ情報を取得
         storage_info = self._get_storage_info_from_varnode(varnode)
@@ -1058,16 +1258,44 @@ class PcodeTracer:
                 base = self.trace_varnode(inputs[0], depth, use_cache)
                 index = self.trace_varnode(inputs[1], depth, use_cache)
                 element_size = self.trace_varnode(inputs[2], depth, use_cache)
-                mult = Expression.binary_op("INT_MULT", index, element_size)
-                return Expression.binary_op("INT_ADD", base, mult)
+                output = pcode_op.getOutput()
+                output_size = output.getSize() if output else max(
+                    base.size if base is not None else 0,
+                    index.size if index is not None else 0,
+                    element_size.size if element_size is not None else 0,
+                )
+                intrinsic = Expression.intrinsic(
+                    "PTRADD",
+                    [base, index, element_size],
+                    size=output_size,
+                    opcode=PTRADD_OPCODE,
+                )
+                runtime_ref = self._derive_pointer_runtime_ref(intrinsic)
+                if runtime_ref is not None:
+                    intrinsic = intrinsic.clone_with(runtime_ref=runtime_ref)
+                return intrinsic
             return Expression.unknown("ptradd_insufficient_inputs")
-        
+
         # PTRSUB
         if mnemonic == "PTRSUB":
             if len(inputs) >= 2:
                 base = self.trace_varnode(inputs[0], depth, use_cache)
                 offset = self.trace_varnode(inputs[1], depth, use_cache)
-                return Expression.binary_op("INT_ADD", base, offset)
+                output = pcode_op.getOutput()
+                output_size = output.getSize() if output else max(
+                    base.size if base is not None else 0,
+                    offset.size if offset is not None else 0,
+                )
+                intrinsic = Expression.intrinsic(
+                    "PTRSUB",
+                    [base, offset],
+                    size=output_size,
+                    opcode=PTRSUB_OPCODE,
+                )
+                runtime_ref = self._derive_pointer_runtime_ref(intrinsic)
+                if runtime_ref is not None:
+                    intrinsic = intrinsic.clone_with(runtime_ref=runtime_ref)
+                return intrinsic
             return Expression.unknown("ptrsub_insufficient_inputs")
         
         # PIECE - サイズ情報を保持

@@ -201,6 +201,7 @@ class Expression:
         arguments: List['Expression'],
         *,
         size: int = 0,
+        runtime_ref: Any = None,
         opcode: Optional[int] = None,
     ) -> 'Expression':
         inferred_size = size
@@ -214,6 +215,7 @@ class Expression:
             name=mnemonic,
             operands=arguments,
             size=inferred_size,
+            runtime_ref=runtime_ref,
             opcode=opcode,
         )
     

@@ -8,7 +8,14 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .condition.normalizer import ConditionNormalizer
-from ..model import AddressValueRef, Condition, Expression, ExpressionType
+from ..model import (
+    AddressValueRef,
+    Condition,
+    Expression,
+    ExpressionType,
+    PTRADD_OPCODE,
+    PTRSUB_OPCODE,
+)
 
 
 MAX_ENUMERATED_INDEX_VALUES = 16
@@ -18,6 +25,7 @@ MAX_ENUMERATED_INDEX_VALUES = 16
 class IndexedAddressPattern:
     """A small subset of address expressions: base + offset + index * scale."""
 
+    base_ref: Optional[AddressValueRef]
     base_address: int
     scale: int
     index_expr: Expression
@@ -454,7 +462,7 @@ def _resolve_direct_readonly_address(
             candidates.append(value)
 
     if symbolic_bases:
-        _append(symbolic_bases[0] + const_total)
+        _append(symbolic_bases[0].address_offset + const_total)
         if image_base is not None:
             _append(image_base + const_total)
     else:
@@ -483,7 +491,8 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
         return None
 
     return IndexedAddressPattern(
-        base_address=symbolic_bases[0] if symbolic_bases else 0,
+        base_ref=symbolic_bases[0] if symbolic_bases else None,
+        base_address=symbolic_bases[0].address_offset if symbolic_bases else 0,
         const_offset=const_total,
         scale=scale,
         index_expr=index_expr,
@@ -494,7 +503,7 @@ def _extract_indexed_pattern(addr_expr: Expression) -> Optional[IndexedAddressPa
 
 def _flatten_additive_terms(
     expr: Expression,
-) -> Optional[Tuple[int, List[int], List[Tuple[Expression, int]]]]:
+) -> Optional[Tuple[int, List[AddressValueRef], List[Tuple[Expression, int]]]]:
     if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
         left_flat = _flatten_additive_terms(expr.operands[0])
         right_flat = _flatten_additive_terms(expr.operands[1])
@@ -511,6 +520,36 @@ def _flatten_additive_terms(
         if right.expr_type == ExpressionType.CONSTANT and right.value == 1:
             return _flatten_additive_terms(left)
 
+    if expr.expr_type == ExpressionType.INTRINSIC:
+        opcode = getattr(expr, "opcode", None)
+        mnemonic = getattr(expr, "name", None) or ""
+        operands = getattr(expr, "operands", None) or []
+
+        if (opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB") and len(operands) == 2:
+            left_flat = _flatten_additive_terms(operands[0])
+            right_flat = _flatten_additive_terms(operands[1])
+            if left_flat is None or right_flat is None:
+                return None
+            left_const, left_bases, left_terms = left_flat
+            right_const, right_bases, right_terms = right_flat
+            return left_const + right_const, left_bases + right_bases, left_terms + right_terms
+
+        if (opcode == PTRADD_OPCODE or mnemonic == "PTRADD") and len(operands) == 3:
+            base_flat = _flatten_additive_terms(operands[0])
+            if base_flat is None:
+                return None
+            multiplied_index = Expression.binary_op("INT_MULT", operands[1], operands[2])
+            index_flat = _flatten_additive_terms(multiplied_index)
+            if index_flat is None:
+                return None
+            base_const, base_refs, base_terms = base_flat
+            index_const, index_refs, index_terms = index_flat
+            return (
+                base_const + index_const,
+                base_refs + index_refs,
+                base_terms + index_terms,
+            )
+
     symbolic_base = _extract_symbolic_base_address(expr)
     if symbolic_base is not None:
         return 0, [symbolic_base], []
@@ -526,22 +565,17 @@ def _flatten_additive_terms(
     return None
 
 
-def _extract_symbolic_base_address(expr: Expression) -> Optional[int]:
-    if expr.expr_type == ExpressionType.VARIABLE:
-        runtime_ref = _coerce_address_runtime_ref(expr)
-        if runtime_ref is not None:
-            return int(runtime_ref.address_offset)
-    return None
+def _extract_symbolic_base_address(expr: Expression) -> Optional[AddressValueRef]:
+    runtime_ref = _coerce_address_runtime_ref(expr)
+    if runtime_ref is None or not runtime_ref.has_concrete_address():
+        return None
+    return runtime_ref
 
 
 def _extract_constant_address(expr: Expression) -> Optional[int]:
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return expr.value
 
-    if expr.expr_type == ExpressionType.VARIABLE:
-        runtime_ref = _coerce_address_runtime_ref(expr)
-        if runtime_ref is not None:
-            return int(runtime_ref.address_offset)
     return None
 
 
