@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
-from typing import List, Dict, Optional, Any, TYPE_CHECKING
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:
     from .condition import Condition
@@ -17,7 +17,7 @@ from .signature import (
     parameters_without_runtime_objects,
 )
 from .call_target import CallTargetRef, coerce_call_target_ref
-from .runtime_refs import UnknownValueRef
+from .runtime_refs import DeferredCallRef, UnknownValueRef
 
 @dataclass
 class ReturnInfo:
@@ -54,26 +54,38 @@ class ReturnInfo:
 class DeferredCallInfo:
     """解析時に展開できなかった呼び出しサイトの情報。"""
 
-    placeholder_name: str
+    deferred_call_ref: DeferredCallRef
     target_ref: CallTargetRef
     arguments: List["Expression"] = field(default_factory=list)
     call_target_expr: Optional["Expression"]
-    sequence: Optional[int]
+    display_hint: Optional[str]
 
     def __init__(
         self,
-        placeholder_name: str,
-        target_ref,
+        placeholder_name: Optional[str] = None,
+        target_ref=None,
         arguments: Optional[List["Expression"]] = None,
         call_target_expr: Optional["Expression"] = None,
         sequence: Optional[int] = None,
+        deferred_call_ref: Optional[DeferredCallRef] = None,
     ) -> None:
         normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
-        self.placeholder_name = placeholder_name
+        self.deferred_call_ref = deferred_call_ref or DeferredCallRef(
+            target_ref=normalized,
+            sequence=sequence,
+        )
         self.target_ref = normalized
         self.arguments = list(arguments or [])
         self.call_target_expr = call_target_expr
-        self.sequence = sequence
+        self.display_hint = placeholder_name or self.deferred_call_ref.display_name()
+
+    @property
+    def placeholder_name(self) -> str:
+        return self.display_hint or self.deferred_call_ref.display_name()
+
+    @property
+    def sequence(self) -> Optional[int]:
+        return self.deferred_call_ref.sequence
 
     @property
     def target_name(self) -> str:
@@ -84,7 +96,6 @@ class DeferredCallInfo:
         return self.target_ref.analysis_key()
 
     def identity_key(self):
-        target_key = self.target_ref.stable_key() if self.target_ref is not None else None
         target_expr_key = (
             self.call_target_expr.structural_key()
             if self.call_target_expr is not None
@@ -96,8 +107,7 @@ class DeferredCallInfo:
         )
         return (
             "deferred_call",
-            int(self.sequence) if self.sequence is not None else None,
-            target_key,
+            self.deferred_call_ref.stable_key(),
             target_expr_key,
             argument_key,
         )
@@ -105,16 +115,15 @@ class DeferredCallInfo:
     @property
     def unknown_ref(self) -> UnknownValueRef:
         return UnknownValueRef.deferred_call(
-            deferred_key=self.identity_key(),
-            placeholder_name=self.placeholder_name,
+            deferred_call_ref=self.deferred_call_ref,
             target_ref=self.target_ref,
-            sequence=self.sequence,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "placeholder_name": self.placeholder_name,
             "target_name": self.target_name,
+            "deferred_call_ref": self.deferred_call_ref.to_dict(),
             "target_ref": self.target_ref.to_dict(),
             "unknown_ref": self.unknown_ref.to_dict(),
             "arguments": [arg.to_dict() for arg in self.arguments],
@@ -209,6 +218,7 @@ class FunctionReturnAnalysis:
     entry_point: str
     parameters: List[Dict]
     returns: List[ReturnInfo]
+    function_ref: Optional[CallTargetRef] = None
     return_type: Optional[str] = None
     return_type_obj: Any = None
     signedness_result: Optional[SignednessResult] = None
@@ -217,15 +227,41 @@ class FunctionReturnAnalysis:
     analysis_notes: List[str] = field(default_factory=list)
     recovered_from_decompiler: bool = False
     incomplete_control_flow: bool = False
-    deferred_calls: Dict[str, DeferredCallInfo] = field(default_factory=dict)
+    deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = field(default_factory=dict)
     effect_summary: Optional["EffectSummary"] = None
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     comparison_surface: Optional[ComparisonSurface] = None
+
+    def __post_init__(self) -> None:
+        if self.function_ref is None:
+            entry_offset = None
+            try:
+                entry_offset = int(str(self.entry_point), 0)
+            except Exception:
+                entry_offset = None
+            self.function_ref = CallTargetRef.from_name(
+                self.function_name,
+                entry_offset=entry_offset,
+            )
+        self.normalize_deferred_calls()
+
+    def normalize_deferred_calls(self) -> None:
+        if not self.deferred_calls:
+            return
+        normalized: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
+        for key, info in list(self.deferred_calls.items()):
+            if isinstance(info, DeferredCallInfo):
+                identity = info.deferred_call_ref.stable_key()
+                normalized[identity] = info
+            else:
+                normalized[key] = info
+        self.deferred_calls = normalized
 
     def to_dict(self) -> Dict:
         result = {
             "function_name": self.function_name,
             "entry_point": self.entry_point,
+            "function_ref": self.function_ref.to_dict() if self.function_ref is not None else None,
             "parameters": parameters_without_runtime_objects(self.parameters),
             "returns": [r.to_dict() for r in self.returns],
             "return_type": get_data_type_display_name(self.return_type_obj, self.return_type),
@@ -234,10 +270,7 @@ class FunctionReturnAnalysis:
             "analysis_notes": list(self.analysis_notes),
             "recovered_from_decompiler": self.recovered_from_decompiler,
             "incomplete_control_flow": self.incomplete_control_flow,
-            "deferred_calls": {
-                name: info.to_dict()
-                for name, info in self.deferred_calls.items()
-            },
+            "deferred_calls": [info.to_dict() for info in self.deferred_calls.values()],
         }
         
         if self.signedness_result:

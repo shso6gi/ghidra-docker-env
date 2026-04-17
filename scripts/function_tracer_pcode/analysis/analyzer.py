@@ -17,7 +17,7 @@ from ..model.analysis import (
     FunctionReturnAnalysis,
     SignednessResult,
 )
-from ..model.runtime_refs import AddressValueRef, UnknownValueRef
+from ..model.runtime_refs import AddressValueRef, DeferredCallRef, UnknownValueRef
 from ..model.signature import (
     get_declared_type_signedness,
     is_void_data_type,
@@ -118,13 +118,13 @@ class ReturnAnalyzer:
         self._decompiler = None
         self._current_parameters: List[Dict] = []
         self._current_effect_summary: Optional[EffectSummary] = None
-        self._effect_summary_cache: Dict[str, Any] = {}
-        self._effect_summary_parameter_cache: Dict[str, List[Dict]] = {}
-        self._call_analysis_cache: Dict[str, Optional[FunctionReturnAnalysis]] = {}
+        self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
+        self._effect_summary_parameter_cache: Dict[Tuple[Any, ...], List[Dict]] = {}
+        self._call_analysis_cache: Dict[Tuple[Any, ...], Optional[FunctionReturnAnalysis]] = {}
         self._local_target_cache: Dict[int, Optional[List[Any]]] = {}
-        self._current_deferred_calls: Dict[str, DeferredCallInfo] = {}
+        self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
         self._deferred_call_counter: int = 0
-        self._analysis_in_progress: Dict[str, FunctionReturnAnalysis] = {}
+        self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
         self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
@@ -593,7 +593,7 @@ class ReturnAnalyzer:
         self,
         function,
         timeout: int = 60,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
     ) -> Optional[FunctionReturnAnalysis]:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
@@ -604,7 +604,6 @@ class ReturnAnalyzer:
         current_active_key = self._target_active_key(CallTargetRef.from_function(function))
         if current_active_key is not None:
             active_functions.add(current_active_key)
-        active_functions.add(function.getName())
 
         self._debug_print("=" * 60)
         self._debug_print(f"Analyzing function: {function.getName()}")
@@ -710,6 +709,7 @@ class ReturnAnalyzer:
                 entry_point=str(function.getEntryPoint()),
                 parameters=parameters,
                 returns=return_infos,
+                function_ref=CallTargetRef.from_function(function),
                 return_type=return_type,
                 return_type_obj=return_type_obj,
                 signedness_result=signedness_result,
@@ -784,15 +784,17 @@ class ReturnAnalyzer:
                 result.returns = summary[0]
                 result.analysis_notes.append(summary[1])
 
-            self._analysis_in_progress[function.getName()] = result
+            if current_active_key is not None:
+                self._analysis_in_progress[current_active_key] = result
             try:
                 self._apply_bounded_call_refinement(
                     result,
                     active_functions,
-                    function.getName(),
+                    CallTargetRef.from_function(function),
                 )
             finally:
-                self._analysis_in_progress.pop(function.getName(), None)
+                if current_active_key is not None:
+                    self._analysis_in_progress.pop(current_active_key, None)
 
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             result.returns = self._strip_stack_protector_only_conditions(result.returns)
@@ -1237,16 +1239,20 @@ class ReturnAnalyzer:
                 seen.add(reason)
         analysis.incomplete_control_flow = bool(reasons)
 
-    def _make_deferred_call_recorder(self, target_function_name: str):
+    def _make_deferred_call_recorder(self, current_function=None):
+        current_function_ref = (
+            CallTargetRef.from_function(current_function)
+            if current_function is not None
+            else CallTargetRef.unknown()
+        )
+
         def record_call(
             target,
             args: List[Expression],
             call_target_expr: Optional[Expression] = None,
         ) -> UnknownValueRef:
             target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
-            target_label = target_ref.placeholder_name()
             sequence = self._deferred_call_counter
-            placeholder_name = f"call_out_of_scope:{target_label}#{sequence}"
             self._deferred_call_counter += 1
             cloned_args = [self._clone_expression(arg) for arg in args]
             cloned_target_expr = (
@@ -1254,14 +1260,20 @@ class ReturnAnalyzer:
                 if call_target_expr is not None
                 else None
             )
+            deferred_call_ref = DeferredCallRef(
+                caller_program_id=current_function_ref.program_id,
+                caller_entry_offset=current_function_ref.entry_offset,
+                target_ref=target_ref,
+                sequence=sequence,
+            )
             info = DeferredCallInfo(
-                placeholder_name=placeholder_name,
                 target_ref=target_ref,
                 arguments=cloned_args,
                 call_target_expr=cloned_target_expr,
-                sequence=sequence,
+                deferred_call_ref=deferred_call_ref,
+                placeholder_name=deferred_call_ref.display_name(),
             )
-            self._current_deferred_calls[placeholder_name] = info
+            self._current_deferred_calls[deferred_call_ref.stable_key()] = info
             if self.debug:
                 arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
                 target_expr_dump = (
@@ -1270,8 +1282,8 @@ class ReturnAnalyzer:
                     else "<none>"
                 )
                 self._debug_print(
-                    f"Recorded deferred call in '{target_function_name}': "
-                    f"{placeholder_name} -> {target_ref.display_name()}([{arg_dump}]) "
+                    f"Recorded deferred call in '{current_function_ref.display_name()}': "
+                    f"{info.placeholder_name} -> {target_ref.display_name()}([{arg_dump}]) "
                     f"target_expr={target_expr_dump}"
                 )
             return info.unknown_ref
@@ -1281,8 +1293,8 @@ class ReturnAnalyzer:
     def _apply_bounded_call_refinement(
         self,
         analysis: FunctionReturnAnalysis,
-        active_functions: Set[str],
-        current_function_name: str,
+        active_functions: Set[Tuple[Any, ...]],
+        current_function_ref: Optional[CallTargetRef],
     ) -> None:
         if (
             not self._bounded_call_refinement_enabled
@@ -1296,12 +1308,15 @@ class ReturnAnalyzer:
             target_ref = self._coerce_runtime_target_ref(target)
             if target_ref is None:
                 return None
-            if target_ref.function_name == current_function_name:
+            if (
+                current_function_ref is not None
+                and target_ref.analysis_key() == current_function_ref.analysis_key()
+            ):
                 return analysis
-            in_progress = self._analysis_in_progress.get(target_ref.function_name or "")
+            active_key = self._target_active_key(target_ref)
+            in_progress = self._analysis_in_progress.get(active_key) if active_key is not None else None
             if in_progress is not None:
                 return in_progress
-            active_key = self._target_active_key(target_ref)
             if active_key is not None and active_key in active_functions:
                 return None
             return self._get_or_analyze_call_target(target_ref, active_functions)
@@ -1707,6 +1722,7 @@ class ReturnAnalyzer:
             entry_point=analysis.entry_point,
             parameters=list(analysis.parameters or []),
             returns=list(affected_returns),
+            function_ref=analysis.function_ref,
             return_type=analysis.return_type,
             return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
@@ -1745,6 +1761,7 @@ class ReturnAnalyzer:
             entry_point=analysis.entry_point,
             parameters=list(analysis.parameters or []),
             returns=list(affected_returns),
+            function_ref=analysis.function_ref,
             return_type=analysis.return_type,
             return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
@@ -2431,23 +2448,18 @@ class ReturnAnalyzer:
         caller_storage: Optional[Dict],
         callee_storage: Optional[Dict],
     ) -> bool:
-        caller = caller_storage or {}
-        callee = callee_storage or {}
-        if not caller.get("is_register") or not callee.get("is_register"):
+        caller = self._coerce_wrapper_storage_info(caller_storage)
+        callee = self._coerce_wrapper_storage_info(callee_storage)
+        if caller is None or callee is None:
             return False
-
-        caller_base = (caller.get("base_register_name") or caller.get("register_name") or "").lower()
-        callee_base = (callee.get("base_register_name") or callee.get("register_name") or "").lower()
-        if not caller_base or caller_base != callee_base:
+        if not caller.is_register or not callee.is_register:
             return False
-
-        caller_offset = int(caller.get("bit_offset_in_base", 0))
-        callee_offset = int(callee.get("bit_offset_in_base", 0))
-        if caller_offset != callee_offset:
+        if not caller.shares_base_register_with(callee):
             return False
-
-        caller_bits = int(caller.get("size_bits") or (caller.get("size", 0) * 8))
-        callee_bits = int(callee.get("size_bits") or (callee.get("size", 0) * 8))
+        if int(caller.bit_offset_in_base or 0) != int(callee.bit_offset_in_base or 0):
+            return False
+        caller_bits = int(caller.size_bits or (caller.size or 0) * 8)
+        callee_bits = int(callee.size_bits or (callee.size or 0) * 8)
         return caller_bits == callee_bits and caller_bits > 0
 
     def _coerce_wrapper_storage_info(self, storage: Optional[object]) -> Optional[StorageInfo]:
@@ -2460,15 +2472,21 @@ class ReturnAnalyzer:
                 return StorageInfo(
                     is_register=bool(storage.get("is_register", False)),
                     space_name=str(storage.get("space_name", "")),
+                    space_id=self._coerce_optional_int(storage.get("space_id")),
                     offset=int(storage.get("offset", 0)),
                     size=int(storage.get("size", 0)),
                     size_bits=int(storage.get("size_bits", 0)),
                     register_name=storage.get("register_name"),
+                    register_offset=self._coerce_optional_int(storage.get("register_offset")),
+                    register_size=self._coerce_optional_int(storage.get("register_size")),
+                    register_size_bits=self._coerce_optional_int(storage.get("register_size_bits")),
                     base_register_name=storage.get("base_register_name"),
                     base_register_offset=int(storage.get("base_register_offset", 0)),
                     base_register_size=int(storage.get("base_register_size", 0)),
                     base_register_size_bits=int(storage.get("base_register_size_bits", 0)),
                     bit_offset_in_base=int(storage.get("bit_offset_in_base", 0)),
+                    is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
+                    is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
                 )
             except Exception:
                 return None
@@ -2497,24 +2515,18 @@ class ReturnAnalyzer:
     def _coerce_runtime_target_ref(self, target) -> Optional[CallTargetRef]:
         return coerce_call_target_ref(target)
 
-    def _function_cache_key(self, function) -> Optional[str]:
+    def _function_cache_key(self, function) -> Optional[Tuple[Any, ...]]:
         if function is None:
             return None
         try:
-            return str(function.getEntryPoint())
+            return (str(function.getEntryPoint()),)
         except Exception:
             return None
 
-    def _target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[str]:
+    def _target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[Tuple[Any, ...]]:
         if target_ref is None:
             return None
-        if target_ref.entry_offset is not None:
-            return f"entry@0x{target_ref.entry_offset:x}"
-        if target_ref.function_name:
-            return f"name:{target_ref.function_name}"
-        if target_ref.address_offset is not None:
-            return f"code@0x{target_ref.address_offset:x}"
-        return None
+        return target_ref.analysis_key()
 
     def _resolve_target_function(self, target) -> Optional[Any]:
         target_ref = self._coerce_runtime_target_ref(target)
@@ -2584,8 +2596,6 @@ class ReturnAnalyzer:
             if target_ref.is_unknown():
                 continue
             if active_key is not None and active_key in active_functions:
-                continue
-            if target_ref.function_name and target_ref.function_name in active_functions:
                 continue
 
             explicit_count = max(0, int(op.getNumInputs()) - 1)
@@ -2751,9 +2761,11 @@ class ReturnAnalyzer:
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
         parameters: List[Dict],
-        active_functions: set,
+        active_functions: Set[Tuple[Any, ...]],
     ):
-        cache_key = str(function.getEntryPoint())
+        cache_key = self._function_cache_key(function)
+        if cache_key is None:
+            return None
         self._effect_summary_parameter_cache[cache_key] = list(parameters)
         cached = self._effect_summary_cache.get(cache_key)
         if cached is not None:
@@ -2765,8 +2777,6 @@ class ReturnAnalyzer:
                 return None
             active_key = self._target_active_key(target_ref)
             if active_key is not None and active_key in active_functions:
-                return None
-            if target_ref.function_name and target_ref.function_name in active_functions:
                 return None
             callee = self._resolve_target_function(target_ref)
             if callee is None:
@@ -2841,7 +2851,7 @@ class ReturnAnalyzer:
         self._effect_summary_cache[cache_key] = summary
         return summary
 
-    def _make_call_resolver(self, active_functions: Set[str], current_function=None):
+    def _make_call_resolver(self, active_functions: Set[Tuple[Any, ...]], current_function=None):
         def resolve_call(target, args):
             return self._resolve_call_expansions(target, args, active_functions, current_function)
 
@@ -2851,7 +2861,7 @@ class ReturnAnalyzer:
         self,
         target,
         args: List[Expression],
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
         current_function=None,
     ):
         from ..transform.expander import ExpandedValue
@@ -2869,9 +2879,7 @@ class ReturnAnalyzer:
             )
 
         active_key = self._target_active_key(target_ref)
-        if (active_key is not None and active_key in active_functions) or (
-            target_ref.function_name and target_ref.function_name in active_functions
-        ):
+        if active_key is not None and active_key in active_functions:
             self._debug_print(f"Skipping recursive call expansion for '{target_label}'")
             return None
 
@@ -2892,7 +2900,7 @@ class ReturnAnalyzer:
             self._apply_bounded_call_refinement(
                 specialized,
                 active_functions,
-                analysis.function_name,
+                analysis.function_ref,
             )
 
         expanded = []
@@ -3638,7 +3646,7 @@ class ReturnAnalyzer:
         args: List[Expression],
     ) -> FunctionReturnAnalysis:
         replacements = _build_parameter_replacements(analysis.parameters, args)
-        specialized_deferred_calls: Dict[str, DeferredCallInfo] = {}
+        specialized_deferred_calls: Dict[Tuple[object, ...], DeferredCallInfo] = {}
         original_to_specialized: Dict[Tuple[object, ...], DeferredCallInfo] = {}
 
         for info in (analysis.deferred_calls or {}).values():
@@ -3654,10 +3662,10 @@ class ReturnAnalyzer:
                     if info.call_target_expr is not None
                     else None
                 ),
-                sequence=info.sequence,
+                deferred_call_ref=info.deferred_call_ref,
             )
-            specialized_deferred_calls[info.placeholder_name] = specialized_info
-            original_to_specialized[info.identity_key()] = specialized_info
+            specialized_deferred_calls[info.deferred_call_ref.stable_key()] = specialized_info
+            original_to_specialized[info.deferred_call_ref.stable_key()] = specialized_info
 
         for info in specialized_deferred_calls.values():
             info.arguments = [
@@ -3707,6 +3715,7 @@ class ReturnAnalyzer:
             entry_point=analysis.entry_point,
             parameters=[dict(param) for param in (analysis.parameters or [])],
             returns=specialized_returns,
+            function_ref=analysis.function_ref,
             return_type=analysis.return_type,
             return_type_obj=analysis.return_type_obj,
             signedness_result=analysis.signedness_result,
@@ -3797,7 +3806,12 @@ class ReturnAnalyzer:
 
         if expr.expr_type == ExpressionType.UNKNOWN:
             runtime_ref = getattr(expr, "runtime_ref", None)
-            deferred_key = getattr(runtime_ref, "deferred_key", None)
+            deferred_call_ref = getattr(runtime_ref, "deferred_call_ref", None)
+            deferred_key = (
+                deferred_call_ref.stable_key()
+                if hasattr(deferred_call_ref, "stable_key")
+                else None
+            )
             replacement_info = deferred_mapping.get(deferred_key)
             if replacement_info is not None:
                 return expr.clone_with(runtime_ref=replacement_info.unknown_ref)
@@ -4755,9 +4769,7 @@ class ReturnAnalyzer:
             resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
-            record_deferred_call=self._make_deferred_call_recorder(
-                current_function.getName() if current_function is not None else "<unknown>"
-            ),
+            record_deferred_call=self._make_deferred_call_recorder(current_function),
         )
 
         path_condition_sets = all_path_conditions or []
@@ -4837,9 +4849,7 @@ class ReturnAnalyzer:
                 resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
-                record_deferred_call=self._make_deferred_call_recorder(
-                    current_function.getName() if current_function is not None else "<unknown>"
-                ),
+                record_deferred_call=self._make_deferred_call_recorder(current_function),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:
@@ -4870,9 +4880,7 @@ class ReturnAnalyzer:
                 resolve_callee_parameters=self._get_freshest_callee_parameters,
                 read_memory_value=self._read_memory_value,
                 image_base=self.program.getImageBase().getOffset(),
-                record_deferred_call=self._make_deferred_call_recorder(
-                    current_function.getName() if current_function is not None else "<unknown>"
-                ),
+                record_deferred_call=self._make_deferred_call_recorder(current_function),
             )
             path_condition_sets = all_path_conditions or []
             if not path_condition_sets:

@@ -16,6 +16,8 @@ class AddressValueRef:
     address_offset: int
     source: str = "ghidra_object"
     display_hint: Optional[str] = None
+    program_id: Optional[int] = None
+    space_id: Optional[int] = None
     space_name: Optional[str] = None
     symbol_name: Optional[str] = None
     block_name: Optional[str] = None
@@ -25,8 +27,13 @@ class AddressValueRef:
     can_execute: Optional[bool] = None
     is_volatile: Optional[bool] = None
 
-    def stable_key(self) -> Tuple[str, int]:
-        return ("address", self.space_name or "", int(self.address_offset))
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "address",
+            self.program_id,
+            self.space_id,
+            int(self.address_offset),
+        )
 
     def has_concrete_address(self) -> bool:
         return int(self.address_offset) >= 0
@@ -49,6 +56,8 @@ class AddressValueRef:
             "address_offset": int(self.address_offset),
             "source": self.source,
             "display_name": self.display_name(),
+            "program_id": self.program_id,
+            "space_id": self.space_id,
             "space_name": self.space_name,
             "symbol_name": self.symbol_name,
             "block_name": self.block_name,
@@ -68,6 +77,7 @@ class LocationBaseRef:
     kind: str
     parameter_name: Optional[str] = None
     parameter_index: Optional[int] = None
+    storage_space_id: Optional[int] = None
     storage_space: Optional[str] = None
     storage_offset: Optional[int] = None
     storage_size: Optional[int] = None
@@ -99,6 +109,7 @@ class LocationBaseRef:
     def storage(
         cls,
         *,
+        space_id: Optional[int] = None,
         space_name: Optional[str],
         offset: int,
         size: int,
@@ -106,6 +117,7 @@ class LocationBaseRef:
     ) -> "LocationBaseRef":
         return cls(
             kind="storage",
+            storage_space_id=space_id,
             storage_space=space_name or None,
             storage_offset=int(offset),
             storage_size=max(1, int(size or 0)),
@@ -130,33 +142,27 @@ class LocationBaseRef:
         if self.kind != other.kind:
             return False
         if self.is_parameter():
-            if self.parameter_name is not None and other.parameter_name is not None:
-                return self.parameter_name == other.parameter_name
             if self.parameter_index is not None and other.parameter_index is not None:
                 return int(self.parameter_index) == int(other.parameter_index)
-            return (
-                self.parameter_name == other.parameter_name
-                and self.parameter_index == other.parameter_index
-            )
+            return False
         if self.is_stack_frame():
             return True
         return (
-            self.storage_space == other.storage_space
+            self.storage_space_id == other.storage_space_id
             and int(self.storage_offset or 0) == int(other.storage_offset or 0)
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_parameter():
-            if self.parameter_name is not None:
-                return ("parameter_name", self.parameter_name)
             if self.parameter_index is not None:
                 return ("parameter", int(self.parameter_index))
-            return ("parameter_name", None)
+            return ("parameter", None)
         if self.is_stack_frame():
             return ("stack_frame",)
         return (
             "storage",
+            self.storage_space_id,
             self.storage_space,
             int(self.storage_offset or 0),
             int(self.storage_size or 0),
@@ -194,6 +200,8 @@ class LocationBaseRef:
             result["parameter_index"] = self.parameter_index
         if self.storage_space is not None:
             result["storage_space"] = self.storage_space
+        if self.storage_space_id is not None:
+            result["storage_space_id"] = self.storage_space_id
         if self.storage_offset is not None:
             result["storage_offset"] = self.storage_offset
         if self.storage_size is not None:
@@ -296,6 +304,47 @@ class PcodeOpRef:
 
 
 @dataclass(frozen=True)
+class DeferredCallRef:
+    """Structured identity for a deferred call site."""
+
+    caller_program_id: Optional[int] = None
+    caller_entry_offset: Optional[int] = None
+    pcode_op_ref: Optional[PcodeOpRef] = None
+    target_ref: Optional[CallTargetRef] = None
+    sequence: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target_ref", coerce_call_target_ref(self.target_ref))
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "deferred_call_site",
+            self.caller_program_id,
+            self.caller_entry_offset,
+            self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
+            self.target_ref.stable_key() if self.target_ref is not None else None,
+            self.sequence,
+        )
+
+    def display_name(self) -> str:
+        target_name = self.target_ref.display_name() if self.target_ref is not None else "unknown"
+        if self.pcode_op_ref is not None and self.pcode_op_ref.address_offset is not None:
+            return f"{target_name}@0x{int(self.pcode_op_ref.address_offset):x}"
+        return target_name
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "deferred_call_site",
+            "caller_program_id": self.caller_program_id,
+            "caller_entry_offset": self.caller_entry_offset,
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
+            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
+            "sequence": self.sequence,
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
 class ObservedMemoryReadRef:
     """Structured provenance for an observed LOAD-derived memory read."""
 
@@ -338,33 +387,40 @@ class UnknownValueRef:
     kind: str
     reason: Optional[str] = None
     target_ref: Optional[CallTargetRef] = None
-    deferred_key: Optional[Tuple[Any, ...]] = None
-    placeholder_name: Optional[str] = None
-    sequence: Optional[int] = None
+    deferred_call_ref: Optional[DeferredCallRef] = None
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
         normalized_target = coerce_call_target_ref(self.target_ref)
         object.__setattr__(self, "target_ref", normalized_target)
+        deferred_call_ref = getattr(self, "deferred_call_ref", None)
+        if isinstance(deferred_call_ref, DeferredCallRef):
+            object.__setattr__(self, "deferred_call_ref", deferred_call_ref)
 
     @classmethod
     def deferred_call(
         cls,
         *,
-        deferred_key: Optional[Tuple[Any, ...]] = None,
-        placeholder_name: str,
-        target_ref,
+        deferred_call_ref: Optional[DeferredCallRef] = None,
+        target_ref=None,
+        placeholder_name: Optional[str] = None,
         sequence: Optional[int] = None,
+        deferred_key: Optional[Tuple[Any, ...]] = None,
     ) -> "UnknownValueRef":
         normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
+        normalized_ref = deferred_call_ref
+        if normalized_ref is None:
+            normalized_ref = DeferredCallRef(
+                target_ref=normalized,
+                sequence=sequence,
+            )
+        display_hint = placeholder_name or normalized_ref.display_name()
         return cls(
             kind="deferred_call",
             reason="call_out_of_scope",
             target_ref=normalized,
-            deferred_key=deferred_key,
-            placeholder_name=placeholder_name,
-            sequence=sequence,
-            display_hint=placeholder_name,
+            deferred_call_ref=normalized_ref,
+            display_hint=display_hint,
         )
 
     @classmethod
@@ -402,16 +458,14 @@ class UnknownValueRef:
             self.kind,
             self.reason,
             target_key,
-            self.deferred_key,
-            self.placeholder_name,
-            self.sequence,
+            self.deferred_call_ref.stable_key() if self.deferred_call_ref is not None else None,
         )
 
     def display_name(self) -> str:
         if self.display_hint:
             return self.display_hint
-        if self.placeholder_name:
-            return self.placeholder_name
+        if self.deferred_call_ref is not None:
+            return self.deferred_call_ref.display_name()
         if self.target_ref is not None:
             return self.target_ref.display_name()
         return self.reason or "unknown"
@@ -423,12 +477,8 @@ class UnknownValueRef:
         }
         if self.reason is not None:
             result["reason"] = self.reason
-        if self.deferred_key is not None:
-            result["deferred_key"] = list(self.deferred_key)
-        if self.placeholder_name is not None:
-            result["placeholder_name"] = self.placeholder_name
-        if self.sequence is not None:
-            result["sequence"] = self.sequence
+        if self.deferred_call_ref is not None:
+            result["deferred_call_ref"] = self.deferred_call_ref.to_dict()
         if self.target_ref is not None:
             result["target_ref"] = self.target_ref.to_dict()
         return result

@@ -50,10 +50,19 @@ class EffectSummary:
                 _coerce_callee_parameter_ref(ref, index)
                 for index, ref in enumerate(self.parameter_refs)
             ]
-            return
-        self.parameter_refs = [
-            LocationBaseRef.parameter(name, index=index)
-            for index, name in enumerate(self.parameter_names)
+        else:
+            self.parameter_refs = [
+                LocationBaseRef.parameter(name, index=index)
+                for index, name in enumerate(self.parameter_names)
+            ]
+        self.effects = [
+            StoreEffect(
+                location=_bind_location_to_parameter_refs(effect.location, self.parameter_refs),
+                value=effect.value,
+                conditions=list(effect.conditions or []),
+                order_key=effect.order_key,
+            )
+            for effect in (self.effects or [])
         ]
 
 
@@ -147,6 +156,7 @@ def _storage_base_ref(storage: Optional[StorageInfo]) -> Optional[LocationBaseRe
         return None
     space_name = re.sub(r"[^0-9A-Za-z_]", "_", str(storage.space_name or "mem"))
     return LocationBaseRef.storage(
+        space_id=storage.space_id,
         space_name=space_name,
         offset=int(storage.offset),
         size=max(1, int(storage.size or 0)),
@@ -1646,7 +1656,10 @@ def _stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool
         if space is None:
             return False
         return (
-            space.getName() == target_storage.space_name
+            (
+                target_storage.space_id is not None
+                and int(space.getSpaceID()) == int(target_storage.space_id)
+            )
             and int(varnode.getOffset()) == target_storage.offset
             and int(varnode.getSize()) == target_storage.size
         )
@@ -1669,22 +1682,14 @@ def _storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
                 and left.size == right.size
             ):
                 return 3
-            if (
-                StorageInfo._normalize_reg_name(left.register_name or "")
-                == StorageInfo._normalize_reg_name(right.register_name or "")
-            ):
+            if left.register_identity_key() == right.register_identity_key():
                 return 2
             if left.bit_range_overlaps_with(right):
                 return 1
             return 0
-        return (
-            2
-            if StorageInfo._normalize_reg_name(left.register_name or "")
-            == StorageInfo._normalize_reg_name(right.register_name or "")
-            else 0
-        )
+        return 2 if left.register_identity_key() == right.register_identity_key() else 0
     return 3 if (
-        left.space_name == right.space_name
+        left.space_id == right.space_id
         and left.offset == right.offset
         and left.size == right.size
     ) else 0
@@ -1789,22 +1794,7 @@ def _storage_identity_key(storage: Optional[StorageInfo]) -> Optional[Tuple[obje
     storage = _coerce_storage_info(storage)
     if storage is None:
         return None
-    if storage.is_register:
-        base_name = StorageInfo._normalize_reg_name(storage.base_register_name or storage.register_name or "")
-        if not base_name:
-            return None
-        return (
-            "param_storage_reg",
-            base_name,
-            int(storage.bit_offset_in_base or 0),
-            int(storage.size_bits or 0),
-        )
-    return (
-        "param_storage_mem",
-        storage.space_name or "",
-        int(storage.offset or 0),
-        int(storage.size or 0),
-    )
+    return storage.storage_identity_key()
 
 
 def _parameter_identity_key_from_base_ref(
@@ -1927,6 +1917,64 @@ def _parameter_base_ref(
         parameter_index=_normalize_parameter_index(index),
         display_hint=normalized_name,
     )
+
+
+def _bind_location_to_parameter_refs(
+    location: CanonicalLocation,
+    parameter_refs: Sequence[LocationBaseRef],
+) -> CanonicalLocation:
+    base_ref = getattr(location, "base_ref", None)
+    if not isinstance(base_ref, LocationBaseRef) or not base_ref.is_parameter():
+        return location
+    if base_ref.parameter_index is not None:
+        return location
+    parameter_name = base_ref.parameter_name
+    if not parameter_name:
+        return location
+    for ref in parameter_refs or []:
+        if not isinstance(ref, LocationBaseRef) or not ref.is_parameter():
+            continue
+        if ref.parameter_name != parameter_name:
+            continue
+        return CanonicalLocation(
+            base_ref=ref,
+            offset=location.offset,
+            size=location.size,
+            steps=tuple(location.steps),
+        )
+    return location
+
+
+def _bind_location_to_parameter_identity(
+    location: CanonicalLocation,
+    parameters: Sequence[Dict],
+) -> CanonicalLocation:
+    return _bind_location_to_parameter_refs(
+        location,
+        [
+            _parameter_base_ref(name=param.get("name"), index=param.get("index"))
+            for param in (parameters or [])
+        ],
+    )
+
+
+def _normalize_effect_locations_for_parameters(
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> List[StoreEffect]:
+    parameter_refs = [
+        _parameter_base_ref(name=param.get("name"), index=param.get("index"))
+        for param in (parameters or [])
+    ]
+    return [
+        StoreEffect(
+            location=_bind_location_to_parameter_refs(effect.location, parameter_refs),
+            value=effect.value,
+            conditions=list(effect.conditions or []),
+            order_key=effect.order_key,
+        )
+        for effect in (effects or [])
+    ]
 
 
 def _parameter_base_ref_from_expression(expr: Optional[Expression]) -> Optional[LocationBaseRef]:
@@ -2504,6 +2552,8 @@ def rewrite_location_read_from_effects(
     definite_post_state: bool = False,
     preserve_symbolic_fallback: bool = True,
 ) -> Expression:
+    location = _bind_location_to_parameter_identity(location, parameters)
+    effects = _normalize_effect_locations_for_parameters(effects, parameters)
     candidate = memory_expression_for_location(location, parameters)
     if candidate is None:
         return fallback_expr
@@ -2765,8 +2815,20 @@ def resolve_definite_post_state_read_for_location(
     *,
     symbolic_post_state: bool = False,
 ) -> Optional[Expression]:
+    location = _bind_location_to_parameter_identity(
+        _normalize_canonical_location(location),
+        parameters,
+    )
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
-    active_effects = _collect_definite_active_effects(normalized_return_conditions, effects)
+    active_effects = [
+        StoreEffect(
+            location=_bind_location_to_parameter_identity(effect.location, parameters),
+            value=effect.value,
+            conditions=list(effect.conditions or []),
+            order_key=effect.order_key,
+        )
+        for effect in _collect_definite_active_effects(normalized_return_conditions, effects)
+    ]
     tracked_locations = sorted(
         {location, *[effect.location for effect in active_effects]},
         key=_location_sort_key,
@@ -2813,6 +2875,7 @@ def promote_effect_value_match_to_post_state_read(
 ) -> Optional[Expression]:
     if expr is None:
         return None
+    effects = _normalize_effect_locations_for_parameters(effects, parameters)
 
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
@@ -3253,7 +3316,9 @@ def _latest_definite_effect_value_for_location(
     location: CanonicalLocation,
     return_conditions: Sequence[Condition],
     effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
 ) -> Optional[Expression]:
+    effects = _normalize_effect_locations_for_parameters(effects, parameters)
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     latest_effect: Optional[StoreEffect] = None
     for effect in effects:
@@ -3349,6 +3414,7 @@ def collapse_post_state_expr_to_canonical_read(
                 location,
                 active_conditions,
                 candidate_effects,
+                parameters,
             )
             if latest_value is not None:
                 normalized_latest_value = _reduce_expression_under_conditions(latest_value, active_conditions)
@@ -4244,6 +4310,7 @@ def _replay_definite_active_effects_for_location(
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
 ) -> Optional[Expression]:
+    effects = _normalize_effect_locations_for_parameters(effects, parameters)
     normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
     tracked_locations = sorted(
         {location, *[effect.location for effect in effects]},
@@ -4461,7 +4528,7 @@ def _resolve_alias_representative(
 def _location_sort_key(location: CanonicalLocation) -> Tuple[Tuple[object, ...], Tuple[Tuple[str, int], ...], int, int]:
     normalized = _normalize_canonical_location(location)
     step_key = tuple((step.kind, int(step.value)) for step in normalized.steps)
-    return (normalized.base_ref.stable_key(), step_key, normalized.offset, normalized.size)
+    return (tuple(repr(part) for part in normalized.base_ref.stable_key()), step_key, normalized.offset, normalized.size)
 
 
 def memory_expression_for_location(
@@ -4532,6 +4599,7 @@ def post_state_read_expression_for_location(
     symbolic: bool = False,
 ) -> Expression:
     location = _normalize_canonical_location(location)
+    location = _bind_location_to_parameter_identity(location, parameters)
     concrete_expr = memory_expression_for_location(location, parameters)
     if concrete_expr is not None and concrete_expr.expr_type == ExpressionType.MEMORY and concrete_expr.operands:
         if not symbolic:
@@ -5192,7 +5260,7 @@ def _resolve_location_base_with_offset(
     expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
     if expr_storage is None:
         return None
-    if not expr_storage.is_register and expr_storage.space_name == "stack":
+    if not expr_storage.is_register and (expr_storage.space_name == "stack" or expr_storage.is_stack_pointer):
         return LocationBaseRef.stack_frame(), int(expr_storage.offset)
     base_ref = _storage_base_ref(expr_storage)
     if base_ref is None:
@@ -5205,39 +5273,10 @@ def _is_stack_frame_base_expression(expr: Optional[Expression]) -> bool:
         return False
 
     expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
-    register_candidates = []
-    if expr_storage is not None and expr_storage.is_register:
-        register_candidates.extend(
-            [
-                expr_storage.register_name,
-                expr_storage.base_register_name,
-            ]
-        )
-
-    if expr.expr_type == ExpressionType.VARIABLE and expr.name:
-        register_candidates.append(expr.name)
-
-    normalized = {
-        StorageInfo._normalize_reg_name(candidate or "")
-        for candidate in register_candidates
-        if candidate
-    }
-    return bool(
-        normalized.intersection(
-            {
-                "sp",
-                "wsp",
-                "rsp",
-                "esp",
-                "rbp",
-                "ebp",
-                "bp",
-                "fp",
-                "s8",
-                "x29",
-            }
-        )
-    )
+    if expr_storage is not None:
+        if bool(expr_storage.is_stack_pointer) or bool(expr_storage.is_frame_pointer):
+            return True
+    return False
 
 
 def _resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Optional[str]:
@@ -5261,15 +5300,21 @@ def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
             return StorageInfo(
                 is_register=bool(storage.get("is_register", False)),
                 space_name=str(storage.get("space_name", "")),
+                space_id=storage.get("space_id"),
                 offset=int(storage.get("offset", 0)),
                 size=int(storage.get("size", 0)),
                 size_bits=int(storage.get("size_bits", 0)),
                 register_name=storage.get("register_name"),
+                register_offset=storage.get("register_offset"),
+                register_size=storage.get("register_size"),
+                register_size_bits=storage.get("register_size_bits"),
                 base_register_name=storage.get("base_register_name"),
                 base_register_offset=int(storage.get("base_register_offset", 0)),
                 base_register_size=int(storage.get("base_register_size", 0)),
                 base_register_size_bits=int(storage.get("base_register_size_bits", 0)),
                 bit_offset_in_base=int(storage.get("bit_offset_in_base", 0)),
+                is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
+                is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
             )
         except Exception:
             return None
@@ -5284,22 +5329,16 @@ def _storage_matches_parameter(expr_storage: StorageInfo, param_storage: Storage
             param_low = param_storage.bit_offset_in_base
             param_high = param_low + max(0, int(param_storage.size_bits or 0))
             if expr_high <= expr_low or param_high <= param_low:
-                return (
-                    StorageInfo._normalize_reg_name(expr_storage.register_name or "")
-                    == StorageInfo._normalize_reg_name(param_storage.register_name or "")
-                )
+                return expr_storage.register_identity_key() == param_storage.register_identity_key()
             # Only treat a register-backed value as "the same parameter" when all
             # of the value's bits are contained within the parameter fragment.
             # Mere overlap is too permissive on architectures like MIPS64 where
             # `a0` and `a0_lo` share a base register but mean different things.
             return param_low <= expr_low and expr_high <= param_high
-        return (
-            StorageInfo._normalize_reg_name(expr_storage.register_name or "")
-            == StorageInfo._normalize_reg_name(param_storage.register_name or "")
-        )
+        return expr_storage.register_identity_key() == param_storage.register_identity_key()
 
     return (
-        expr_storage.space_name == param_storage.space_name
+        expr_storage.space_id == param_storage.space_id
         and expr_storage.offset == param_storage.offset
         and expr_storage.size == param_storage.size
     )

@@ -44,6 +44,8 @@ def abstract_recursive_calls(
     のみを対応対象にする。
     """
 
+    analysis1.normalize_deferred_calls()
+    analysis2.normalize_deferred_calls()
     deferred1 = list((analysis1.deferred_calls or {}).values())
     deferred2 = list((analysis2.deferred_calls or {}).values())
     if not deferred1 or not deferred2:
@@ -63,8 +65,8 @@ def abstract_recursive_calls(
             summary_name = f"summary_rec_{next_summary_index}"
             matches.append(
                 AbstractedCallMatch(
-                    deferred_key1=left_infos[pair_index].identity_key(),
-                    deferred_key2=right_infos[pair_index].identity_key(),
+                    deferred_key1=left_infos[pair_index].deferred_call_ref.stable_key(),
+                    deferred_key2=right_infos[pair_index].deferred_call_ref.stable_key(),
                     summary_name=summary_name,
                     summary_index=next_summary_index,
                 )
@@ -106,7 +108,8 @@ def _deferred_call_key(
     if info is None or info.target_ref is None:
         return None
 
-    if info.target_ref.function_name == analysis.function_name:
+    function_ref = getattr(analysis, "function_ref", None)
+    if function_ref is not None and info.target_ref.analysis_key() == function_ref.analysis_key():
         target_key = ("self_recursive",)
     else:
         target_key = info.target_ref.stable_key()
@@ -192,6 +195,7 @@ def _rewrite_analysis_with_abstract_calls(
         entry_point=analysis.entry_point,
         parameters=[dict(param) for param in (analysis.parameters or [])],
         returns=[],
+        function_ref=analysis.function_ref,
         return_type=analysis.return_type,
         return_type_obj=analysis.return_type_obj,
         signedness_result=analysis.signedness_result,
@@ -250,9 +254,9 @@ def _rewrite_analysis_with_abstract_calls(
 
     # 共有抽象へ置き換えられた placeholder は unresolved 扱いから外す
     cloned.deferred_calls = {
-        name: info
-        for name, info in cloned.deferred_calls.items()
-        if info.identity_key() not in placeholder_mapping
+        key: info
+        for key, info in cloned.deferred_calls.items()
+        if key not in placeholder_mapping
     }
     return cloned
 
@@ -266,7 +270,12 @@ def _rewrite_expression(
 
     if expr.expr_type == ExpressionType.UNKNOWN:
         runtime_ref = getattr(expr, "runtime_ref", None)
-        deferred_key = getattr(runtime_ref, "deferred_key", None)
+        deferred_call_ref = getattr(runtime_ref, "deferred_call_ref", None)
+        deferred_key = (
+            deferred_call_ref.stable_key()
+            if hasattr(deferred_call_ref, "stable_key")
+            else None
+        )
         if deferred_key in placeholder_mapping:
             match = placeholder_mapping[deferred_key]
             size = expr.size or 4

@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
     FunctionReturnAnalysis, 
     ReturnInfo, 
     Expression, 
@@ -325,11 +326,17 @@ def create_mock_analysis(
             normalized.setdefault("is_signed", bool(data_type_obj.isSigned()))
         normalized_parameters.append(normalized)
 
+    synthetic_program_id = sum(ord(ch) for ch in function_name) & 0xFFFFFFFF
     analysis = FunctionReturnAnalysis(
         function_name=function_name,
         entry_point="0x00401000",
         parameters=normalized_parameters,
         returns=returns,
+        function_ref=CallTargetRef.from_name(
+            function_name,
+            program_id=synthetic_program_id,
+            entry_offset=0x00401000,
+        ),
     )
     
     analysis.return_type = return_type

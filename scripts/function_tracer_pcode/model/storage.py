@@ -22,10 +22,14 @@ class StorageInfo:
     """
     is_register: bool = False
     space_name: str = ""
+    space_id: Optional[int] = None
     offset: int = 0
     size: int = 0
     size_bits: int = 0
     # レジスタの場合の追加情報
+    register_offset: int = 0
+    register_size: int = 0
+    register_size_bits: int = 0
     register_name: Optional[str] = None
     base_register_name: Optional[str] = None
     base_register_offset: int = 0
@@ -33,6 +37,63 @@ class StorageInfo:
     base_register_size_bits: int = 0
     # 親レジスタ内でのビットオフセット
     bit_offset_in_base: int = 0
+    is_stack_pointer: bool = False
+    is_frame_pointer: bool = False
+
+    def __post_init__(self) -> None:
+        self.size = int(self.size or 0)
+        self.size_bits = int(self.size_bits or (self.size * 8))
+        self.offset = int(self.offset or 0)
+        self.register_offset = int(self.register_offset or self.offset or 0)
+        self.register_size = int(self.register_size or self.size or 0)
+        self.register_size_bits = int(
+            self.register_size_bits or (self.register_size * 8) or self.size_bits
+        )
+        self.base_register_size_bits = int(
+            self.base_register_size_bits or self.register_size_bits or self.size_bits
+        )
+        self.base_register_size = int(
+            self.base_register_size or ((self.base_register_size_bits + 7) // 8)
+        )
+        self.bit_offset_in_base = int(self.bit_offset_in_base or 0)
+
+        if self.space_id is None and self.space_name:
+            self.space_id = self._synthetic_space_id(self.space_name)
+
+        if self.is_register:
+            normalized_base = self._normalize_reg_name(
+                self.base_register_name or self.register_name or ""
+            )
+            if not self.base_register_offset and normalized_base:
+                self.base_register_offset = self._synthetic_register_offset(normalized_base)
+            else:
+                self.base_register_offset = int(self.base_register_offset or self.register_offset or 0)
+            if not self.is_stack_pointer and normalized_base in {"sp", "wsp", "rsp", "esp"}:
+                self.is_stack_pointer = True
+            if not self.is_frame_pointer and normalized_base in {"rbp", "ebp", "bp", "fp", "s8", "x29"}:
+                self.is_frame_pointer = True
+
+    @staticmethod
+    def _synthetic_space_id(name: str) -> int:
+        normalized = str(name or "").strip().lower()
+        if normalized == "register":
+            return 0
+        if normalized == "stack":
+            return 1
+        value = 0
+        for ch in normalized:
+            value = ((value * 131) + ord(ch)) & 0xFFFFFFFF
+        return value
+
+    @staticmethod
+    def _synthetic_register_offset(name: str) -> int:
+        normalized = StorageInfo._normalize_reg_name(name)
+        if not normalized:
+            return 0
+        value = 0
+        for ch in normalized:
+            value = ((value * 131) + ord(ch)) & 0xFFFFFFFF
+        return value or 1
     
     @staticmethod
     def _normalize_reg_name(name: str) -> str:
@@ -45,11 +106,14 @@ class StorageInfo:
         """同じ親レジスタを共有するかどうか"""
         if not self.is_register or not other.is_register:
             return False
-        if not self.base_register_name or not other.base_register_name:
+        if self.base_register_size_bits <= 0 or other.base_register_size_bits <= 0:
             return False
-        
-        return (self._normalize_reg_name(self.base_register_name) == 
-                self._normalize_reg_name(other.base_register_name))
+
+        return (
+            int(self.space_id or -1) == int(other.space_id or -1)
+            and int(self.base_register_offset) == int(other.base_register_offset)
+            and int(self.base_register_size_bits) == int(other.base_register_size_bits)
+        )
     
     def bit_range_overlaps_with(self, other: 'StorageInfo') -> bool:
         """ビット範囲が重なるかどうか"""
@@ -117,37 +181,52 @@ class StorageInfo:
         """
         if not self.is_complement_of(other):
             return False
-        
-        # レジスタ名から上位/下位を判定
-        if self.register_name and other.register_name:
-            self_name = self._normalize_reg_name(self.register_name)
-            other_name = self._normalize_reg_name(other.register_name)
-            
-            # _hi/_lo パターン
-            if '_hi' in self_name or self_name.endswith('hi'):
-                if '_lo' in other_name or other_name.endswith('lo'):
-                    return True
-            
-            if '_lo' in self_name or self_name.endswith('lo'):
-                if '_hi' in other_name or other_name.endswith('hi'):
-                    return False
-        
-        # レジスタ名で判定できない場合:
-        # 補完関係にあれば、selfを上位ビットとして扱う
-        # （sign/zero extensionで正しく制約される）
-        return True
+
+        # bit_offset_in_base は least-significant bit からの距離なので、
+        # より大きい方が「上位ビット側」の断片になる。
+        return self.bit_offset_in_base > other.bit_offset_in_base
+
+    def register_identity_key(self):
+        if not self.is_register:
+            return None
+        if self.base_register_size_bits <= 0:
+            return None
+        return (
+            "register_storage",
+            int(self.space_id or -1),
+            int(self.base_register_offset),
+            int(self.base_register_size_bits),
+            int(self.bit_offset_in_base),
+            int(self.size_bits),
+        )
+
+    def storage_identity_key(self):
+        if self.is_register:
+            return self.register_identity_key()
+        return (
+            "memory_storage",
+            int(self.space_id or -1),
+            int(self.offset),
+            int(self.size),
+        )
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "is_register": self.is_register,
             "space_name": self.space_name,
+            "space_id": self.space_id,
             "offset": self.offset,
             "size": self.size,
             "size_bits": self.size_bits,
+            "register_offset": self.register_offset,
+            "register_size": self.register_size,
+            "register_size_bits": self.register_size_bits,
             "register_name": self.register_name,
             "base_register_name": self.base_register_name,
             "base_register_offset": self.base_register_offset,
             "base_register_size": self.base_register_size,
             "base_register_size_bits": self.base_register_size_bits,
             "bit_offset_in_base": self.bit_offset_in_base,
+            "is_stack_pointer": self.is_stack_pointer,
+            "is_frame_pointer": self.is_frame_pointer,
         }

@@ -4041,7 +4041,7 @@ def test_summarize_store_effects_captures_double_indirect_parameter_store():
     )
 
     assert len(summary.effects) == 1
-    assert summary.effects[0].location == CanonicalLocation(
+    assert summary.effects[0].location == _loc(
         "slot",
         0,
         4,

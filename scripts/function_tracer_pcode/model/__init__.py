@@ -10,6 +10,7 @@ from .call_target import CallTargetRef, coerce_call_target_ref
 from .runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
+    DeferredCallRef,
     LocationBaseRef,
     LocationStep,
     ObservedMemoryReadRef,
@@ -50,6 +51,7 @@ __all__ = [
     "coerce_call_target_ref",
     "AddressValueRef",
     "CanonicalLocation",
+    "DeferredCallRef",
     "LocationBaseRef",
     "LocationStep",
     "ObservedMemoryReadRef",

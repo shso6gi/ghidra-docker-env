@@ -67,6 +67,7 @@ class BoundedCallRefiner:
     def refine_analysis(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis is None or not analysis.returns or not analysis.deferred_calls or self.max_unroll <= 0:
             return False
+        analysis.normalize_deferred_calls()
 
         original_signature = self._analysis_signature(analysis.returns)
         refined_returns: List[ReturnInfo] = []
@@ -241,7 +242,7 @@ class BoundedCallRefiner:
         ):
             if len(deferred.arguments) < len(callee_analysis.parameters):
                 self._debug(
-                    f"Skipped deferred call '{deferred.placeholder_name}': expected "
+                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
                     f"{len(callee_analysis.parameters)} args, got {len(deferred.arguments)}"
                 )
                 continue
@@ -401,11 +402,14 @@ class BoundedCallRefiner:
         if expr is None or expr.expr_type != ExpressionType.UNKNOWN:
             return None
         runtime_ref = getattr(expr, "runtime_ref", None)
-        deferred_key = getattr(runtime_ref, "deferred_key", None)
+        deferred_call_ref = getattr(runtime_ref, "deferred_call_ref", None)
+        deferred_key = (
+            deferred_call_ref.stable_key()
+            if hasattr(deferred_call_ref, "stable_key")
+            else None
+        )
         if deferred_key is not None:
-            for info in (analysis.deferred_calls or {}).values():
-                if info.identity_key() == deferred_key:
-                    return info
+            return (analysis.deferred_calls or {}).get(deferred_key)
         return None
 
     def _clone_expression_with_operands(
@@ -487,7 +491,7 @@ class BoundedCallRefiner:
     def _filter_deferred_calls_in_use(
         self,
         analysis: FunctionReturnAnalysis,
-    ) -> Dict[str, DeferredCallInfo]:
+    ) -> Dict[Tuple[object, ...], DeferredCallInfo]:
         used: Set[Tuple[object, ...]] = set()
 
         def visit_expression(expr: Optional[Expression]) -> None:
@@ -495,7 +499,12 @@ class BoundedCallRefiner:
                 return
             if expr.expr_type == ExpressionType.UNKNOWN:
                 runtime_ref = getattr(expr, "runtime_ref", None)
-                deferred_key = getattr(runtime_ref, "deferred_key", None)
+                deferred_call_ref = getattr(runtime_ref, "deferred_call_ref", None)
+                deferred_key = (
+                    deferred_call_ref.stable_key()
+                    if hasattr(deferred_call_ref, "stable_key")
+                    else None
+                )
                 if deferred_key is not None:
                     used.add(deferred_key)
                     return
@@ -515,7 +524,7 @@ class BoundedCallRefiner:
                 visit_expression(cond.expression)
 
         return {
-            name: info
-            for name, info in analysis.deferred_calls.items()
-            if info.identity_key() in used
+            key: info
+            for key, info in analysis.deferred_calls.items()
+            if key in used
         }

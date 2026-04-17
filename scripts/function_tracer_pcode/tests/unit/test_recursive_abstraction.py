@@ -28,15 +28,7 @@ def _const(value: int, size: int = 4):
 
 
 def _deferred_unknown(info: DeferredCallInfo):
-    return Expression.unknown(
-        info.placeholder_name,
-        runtime_ref=UnknownValueRef.deferred_call(
-            placeholder_name=info.placeholder_name,
-            target_ref=info.target_ref,
-            sequence=info.sequence,
-            deferred_key=info.identity_key(),
-        ),
-    )
+    return Expression.unknown(info.placeholder_name, runtime_ref=info.unknown_ref)
 
 
 def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_shared_params():
@@ -46,13 +38,13 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     placeholder2 = "call_out_of_scope:right#0"
     info1 = DeferredCallInfo(
         placeholder1,
-        "left",
+        CallTargetRef.from_name("left"),
         [Expression.binary_op("INT_SUB", n1, _const(1))],
         sequence=0,
     )
     info2 = DeferredCallInfo(
         placeholder2,
-        "right",
+        CallTargetRef.from_name("right"),
         [Expression.binary_op("INT_SUB", n2, _const(1))],
         sequence=0,
     )
@@ -105,13 +97,13 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
     placeholder2 = "call_out_of_scope:right#0"
     info1 = DeferredCallInfo(
         placeholder1,
-        "left",
+        CallTargetRef.from_name("left"),
         [Expression.binary_op("INT_ADD", n1, _const(1))],
         sequence=0,
     )
     info2 = DeferredCallInfo(
         placeholder2,
-        "right",
+        CallTargetRef.from_name("right"),
         [Expression.binary_op("INT_ADD", _const(1), n2)],
         sequence=0,
     )

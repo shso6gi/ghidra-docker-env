@@ -133,7 +133,7 @@ def test_return_analyzer_resolves_call_summary_with_argument_substitution():
 
     with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
         expanded = analyzer._resolve_call_expansions(
-            "callee",
+            CallTargetRef.from_name("callee"),
             [_param_expr("arg0", 0, size=4)],
             active_functions=set(),
         )
@@ -176,7 +176,7 @@ def test_return_analyzer_allows_safe_call_summary_despite_incomplete_control_flo
 
     with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
         expanded = analyzer._resolve_call_expansions(
-            "callee",
+            CallTargetRef.from_name("callee"),
             [_param_expr("arg0", 0, size=4)],
             active_functions=set(),
         )
@@ -1599,7 +1599,11 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
 
     analyzer._resolve_local_code_target_expansions = _fake_local
 
-    resolved = analyzer._resolve_call_expansions("ADDR_102528", [], {"branch_switch_dense"})
+    resolved = analyzer._resolve_call_expansions(
+        CallTargetRef.from_code_address(0x102528, display_hint="ADDR_102528"),
+        [],
+        {"branch_switch_dense"},
+    )
 
     assert resolved == ["ok"]
     assert captured == [(0x102528, {"branch_switch_dense"}, None)]
@@ -3476,7 +3480,7 @@ def test_return_analyzer_specializes_higher_order_wrapper_from_object_targets():
 
     with patch.object(analyzer, "_get_or_analyze_call_target", side_effect=_analysis_side_effect):
         expanded = analyzer._resolve_call_expansions(
-            "ptr_apply_callback",
+            CallTargetRef.from_name("ptr_apply_callback"),
             [
                 phi_target,
                 Expression.parameter("param_2", 1, size=4),
@@ -4461,7 +4465,7 @@ def test_return_analyzer_refreshes_callee_parameter_cache_when_decompilation_is_
     ]
     analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
 
-    cache_key = str(functions[0].getEntryPoint())
+    cache_key = analyzer._function_cache_key(functions[0])
     analyzer._effect_summary_parameter_cache[cache_key] = [
         {"name": "param_1", "index": 0, "size": 8}
     ]
@@ -4476,7 +4480,9 @@ def test_return_analyzer_refreshes_callee_parameter_cache_when_decompilation_is_
 
     with patch.object(analyzer, "_decompile_function", return_value=fake_results):
         with patch.object(analyzer, "_collect_parameters", return_value=fresh_parameters):
-            refreshed = analyzer._get_freshest_callee_parameters("ptr_apply_callback")
+            refreshed = analyzer._get_freshest_callee_parameters(
+                CallTargetRef.from_name("ptr_apply_callback")
+            )
 
     assert [param["name"] for param in refreshed] == ["param_1", "param_2", "param_3"]
     assert len(analyzer._effect_summary_parameter_cache[cache_key]) == 3
@@ -4488,7 +4494,7 @@ def test_return_analyzer_reanalyzes_call_target_when_cached_signature_is_too_sma
     ]
     analyzer = ReturnAnalyzer(program=_FakeProgram(functions), debug=False)
 
-    cache_key = str(functions[0].getEntryPoint())
+    cache_key = analyzer._function_cache_key(functions[0])
     stale_analysis = FunctionReturnAnalysis(
         function_name="ptr_apply_callback",
         entry_point="0x402000",
@@ -4511,7 +4517,7 @@ def test_return_analyzer_reanalyzes_call_target_when_cached_signature_is_too_sma
 
     with patch.object(analyzer, "analyze_function", return_value=fresh_analysis) as patched_analyze:
         refreshed = analyzer._get_or_analyze_call_target(
-            "ptr_apply_callback",
+            CallTargetRef.from_name("ptr_apply_callback"),
             set(),
             minimum_param_count=3,
         )

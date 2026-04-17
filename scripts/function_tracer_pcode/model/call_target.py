@@ -4,11 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 from typing import Any, Optional, Tuple, Union
-
-
-_RAW_CODE_TARGET_PATTERN = re.compile(r"ADDR_([0-9a-fA-F]+)")
 
 
 def _safe_offset(address_or_value: Any) -> Optional[int]:
@@ -30,12 +26,34 @@ def _safe_offset(address_or_value: Any) -> Optional[int]:
         return None
 
 
+def _safe_program_id(owner: Any) -> Optional[int]:
+    if owner is None:
+        return None
+
+    program = owner
+    get_program = getattr(owner, "getProgram", None)
+    if callable(get_program):
+        try:
+            program = get_program()
+        except Exception:
+            program = owner
+
+    get_unique_program_id = getattr(program, "getUniqueProgramID", None)
+    if callable(get_unique_program_id):
+        try:
+            return int(get_unique_program_id())
+        except Exception:
+            return None
+    return None
+
+
 @dataclass(frozen=True)
 class CallTargetRef:
     """Stable call target identity for runtime analysis."""
 
     kind: str
     function_name: Optional[str] = None
+    program_id: Optional[int] = None
     entry_offset: Optional[int] = None
     address_offset: Optional[int] = None
     display_hint: Optional[str] = None
@@ -49,6 +67,7 @@ class CallTargetRef:
     def from_function(cls, function) -> "CallTargetRef":
         name = None
         entry_offset = None
+        program_id = _safe_program_id(function)
         if function is not None:
             get_name = getattr(function, "getName", None)
             if callable(get_name):
@@ -65,6 +84,7 @@ class CallTargetRef:
         return cls(
             kind="function",
             function_name=name,
+            program_id=program_id,
             entry_offset=entry_offset,
             address_offset=entry_offset,
             display_hint=name,
@@ -76,10 +96,13 @@ class CallTargetRef:
         cls,
         address_value: int,
         display_hint: Optional[str] = None,
+        *,
+        program_id: Optional[int] = None,
     ) -> "CallTargetRef":
         normalized = _safe_offset(address_value)
         return cls(
             kind="code_address",
+            program_id=program_id,
             address_offset=normalized,
             display_hint=display_hint,
         )
@@ -89,12 +112,14 @@ class CallTargetRef:
         cls,
         function_name: str,
         *,
+        program_id: Optional[int] = None,
         entry_offset: Optional[int] = None,
         function_obj: Any = None,
     ) -> "CallTargetRef":
         return cls(
             kind="function",
             function_name=function_name or None,
+            program_id=program_id,
             entry_offset=_safe_offset(entry_offset),
             address_offset=_safe_offset(entry_offset),
             display_hint=function_name or None,
@@ -117,12 +142,11 @@ class CallTargetRef:
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_function():
             if self.entry_offset is not None:
-                return ("function", self.entry_offset)
-            if self.function_name:
-                return ("function_name", self.function_name)
+                return ("function", self.program_id, self.entry_offset)
+            return ("function", self.program_id, None)
         if self.is_code_address():
-            return ("code_address", self.address_offset)
-        return ("unknown", self.display_hint)
+            return ("code_address", self.program_id, self.address_offset)
+        return ("unknown", self.program_id)
 
     def analysis_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_unknown():
@@ -150,6 +174,8 @@ class CallTargetRef:
         }
         if self.function_name:
             result["function_name"] = self.function_name
+        if self.program_id is not None:
+            result["program_id"] = self.program_id
         if self.entry_offset is not None:
             result["entry_offset"] = self.entry_offset
         if self.address_offset is not None:
@@ -162,14 +188,4 @@ def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optiona
         return target
     if target is None:
         return None
-    if isinstance(target, str):
-        if not target or target == "UNKNOWN_FUNC":
-            return CallTargetRef.unknown(target or None)
-        match = _RAW_CODE_TARGET_PATTERN.fullmatch(target)
-        if match:
-            try:
-                return CallTargetRef.from_code_address(int(match.group(1), 16), display_hint=target)
-            except Exception:
-                return CallTargetRef.unknown(target)
-        return CallTargetRef.from_name(target)
     return None

@@ -32,15 +32,7 @@ def _cond(operator: str, left: Expression, right: Expression) -> Condition:
 
 
 def _deferred_unknown(info: DeferredCallInfo) -> Expression:
-    return Expression.unknown(
-        info.placeholder_name,
-        runtime_ref=UnknownValueRef.deferred_call(
-            placeholder_name=info.placeholder_name,
-            target_ref=info.target_ref,
-            sequence=info.sequence,
-            deferred_key=info.identity_key(),
-        ),
-    )
+    return Expression.unknown(info.placeholder_name, runtime_ref=info.unknown_ref)
 
 
 def test_bounded_call_refiner_runtime_dedup_does_not_require_to_string(monkeypatch):

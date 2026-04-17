@@ -27,30 +27,34 @@ if TYPE_CHECKING:
 class VarnodeKey:
     """Varnodeを識別するためのキー"""
     
-    def __init__(self, space: str, offset: int, size: int):
-        self.space = space
+    def __init__(self, space_id: Optional[int], space_name: str, offset: int, size: int):
+        self.space_id = space_id
+        self.space_name = space_name
         self.offset = offset
         self.size = size
     
     def __hash__(self):
-        return hash((self.space, self.offset, self.size))
+        return hash((self.space_id, self.space_name, self.offset, self.size))
     
     def __eq__(self, other):
         if not isinstance(other, VarnodeKey):
             return False
-        return (self.space == other.space and 
+        return (self.space_id == other.space_id and
+                self.space_name == other.space_name and
                 self.offset == other.offset and 
                 self.size == other.size)
     
     def __repr__(self):
-        return f"VarnodeKey({self.space}, 0x{self.offset:x}, {self.size})"
+        return f"VarnodeKey({self.space_id},{self.space_name},0x{self.offset:x},{self.size})"
     
     @classmethod
     def from_varnode(cls, varnode) -> 'VarnodeKey':
         """GhidraのVarnodeからキーを作成"""
         addr = varnode.getAddress()
+        space = addr.getAddressSpace()
         return cls(
-            space=str(addr.getAddressSpace().getName()),
+            space_id=int(space.getSpaceID()) if space is not None else None,
+            space_name=str(space.getName()) if space is not None else "unknown",
             offset=varnode.getOffset(),
             size=varnode.getSize()
         )
@@ -70,10 +74,10 @@ class PcodeTracer:
         self._debug_suppressed = False
         
         # トレース済みのキャッシュ（一意なキー -> Expression）
-        self._trace_cache: Dict[str, Expression] = {}
+        self._trace_cache: Dict[Tuple[Any, ...], Expression] = {}
         
         # トレース中のスタック（循環検出用）
-        self._trace_stack: Set[str] = set()
+        self._trace_stack: Set[Tuple[Any, ...]] = set()
         
         # Unknown発生追跡
         self.unknown_tracker = UnknownTracker()
@@ -148,12 +152,15 @@ class PcodeTracer:
                 probe_failures.append(f"{source}=negative_offset")
                 continue
             space_name = None
+            space_id = None
             try:
                 space = address.getAddressSpace()
                 if space is not None:
                     space_name = space.getName()
+                    space_id = int(space.getSpaceID())
             except Exception:
                 space_name = None
+                space_id = None
 
             symbol_name = None
             if symbol is not None:
@@ -187,6 +194,12 @@ class PcodeTracer:
                 address_offset=offset,
                 source=source,
                 display_hint=display_name,
+                program_id=(
+                    int(self.program.getUniqueProgramID())
+                    if self.program is not None and hasattr(self.program, "getUniqueProgramID")
+                    else None
+                ),
+                space_id=space_id,
                 space_name=space_name,
                 symbol_name=symbol_name,
                 block_name=block_name,
@@ -256,7 +269,7 @@ class PcodeTracer:
                         return name
         return None
     
-    def _get_op_key(self, pcode_op) -> str:
+    def _get_op_key(self, pcode_op) -> Tuple[Any, ...]:
         """PcodeOpの一意なキーを生成（同一seqnumの異なるopを区別）"""
         seq = pcode_op.getSeqnum()
         if seq:
@@ -264,9 +277,31 @@ class PcodeTracer:
             time = getattr(seq, "getTime", lambda: None)()
             order = seq.getOrder()
             obj_id = id(pcode_op)
-            return f"{target}:t{time}:o{order}:{obj_id}"
+            target_offset = None
+            if target is not None:
+                get_offset = getattr(target, "getOffset", None)
+                if callable(get_offset):
+                    try:
+                        target_offset = int(get_offset())
+                    except Exception:
+                        target_offset = None
+            return (
+                "pcode_op_instance",
+                target_offset,
+                None if time is None else int(time),
+                None if order is None else int(order),
+                obj_id,
+            )
         obj_id = id(pcode_op)
-        return f"noseq:{pcode_op.hashCode()}:{pcode_op.getMnemonic()}:{obj_id}"
+        return (
+            "pcode_op_instance",
+            None,
+            None,
+            None,
+            pcode_op.hashCode(),
+            pcode_op.getMnemonic(),
+            obj_id,
+        )
 
     def _get_stable_op_key(self, pcode_op) -> str:
         """
@@ -431,6 +466,7 @@ class PcodeTracer:
             storage_info = StorageInfo(
                 is_register=space.isRegisterSpace(),
                 space_name=space.getName(),
+                space_id=int(space.getSpaceID()),
                 offset=varnode.getOffset(),
                 size=varnode.getSize(),
                 size_bits=varnode.getSize() * 8
@@ -441,6 +477,9 @@ class PcodeTracer:
                 reg = self.program.getRegister(addr, varnode.getSize())
                 if reg:
                     storage_info.register_name = reg.getName()
+                    storage_info.register_offset = reg.getOffset()
+                    storage_info.register_size = reg.getNumBytes()
+                    storage_info.register_size_bits = reg.getBitLength()
                     
                     # 親レジスタ情報
                     base_reg = reg.getBaseRegister()
@@ -462,6 +501,25 @@ class PcodeTracer:
                         storage_info.base_register_size = reg.getBitLength() // 8
                         storage_info.base_register_size_bits = reg.getBitLength()
                         storage_info.bit_offset_in_base = 0
+                    try:
+                        storage_info.is_frame_pointer = bool(reg.isDefaultFramePointer())
+                    except Exception:
+                        storage_info.is_frame_pointer = False
+                    try:
+                        compiler_spec = self.program.getCompilerSpec()
+                        stack_pointer = compiler_spec.getStackPointer() if compiler_spec is not None else None
+                    except Exception:
+                        stack_pointer = None
+                    try:
+                        reg_base = reg.getBaseRegister() if reg is not None else None
+                        stack_base = stack_pointer.getBaseRegister() if stack_pointer is not None else None
+                        storage_info.is_stack_pointer = (
+                            reg_base is not None
+                            and stack_base is not None
+                            and reg_base.getOffset() == stack_base.getOffset()
+                        )
+                    except Exception:
+                        storage_info.is_stack_pointer = False
             
             return storage_info
         except Exception as e:
@@ -690,7 +748,7 @@ class PcodeTracer:
             self._debug_print("  -> Unknown")
         
         key = VarnodeKey.from_varnode(varnode)
-        return Expression.unknown(f"untraced_{key.space}_0x{key.offset:x}")
+        return Expression.unknown(f"untraced_{key.space_name}_0x{key.offset:x}")
     
     def _trace_pcode_op(self, pcode_op, depth: int, use_cache: bool = True) -> Expression:
         """PcodeOpをトレースして式を構築"""

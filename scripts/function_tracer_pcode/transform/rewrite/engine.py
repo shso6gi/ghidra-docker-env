@@ -359,6 +359,7 @@ def rewrite_analysis_returns(
         entry_point=analysis.entry_point,
         parameters=analysis.parameters,
         returns=new_returns,
+        function_ref=analysis.function_ref,
         return_type=analysis.return_type,
         return_type_obj=analysis.return_type_obj,
         signedness_result=analysis.signedness_result,
