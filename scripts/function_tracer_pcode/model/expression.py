@@ -33,6 +33,7 @@ class ExpressionType(Enum):
     BINARY_OP = auto()
     UNARY_OP = auto()
     CALL = auto()
+    INTRINSIC = auto()
     MEMORY = auto()
     PHI = auto()
     UNKNOWN = auto()
@@ -62,6 +63,7 @@ class Expression:
         storage_info: Optional[StorageInfo] = None,
         read_order_key: Optional[int] = None,
         runtime_ref: Any = None,
+        opcode: Optional[int] = None,
     ):
         self.expr_type = expr_type
         self.value = value
@@ -78,6 +80,7 @@ class Expression:
         self.storage_info = storage_info
         self.read_order_key = read_order_key
         self.runtime_ref = runtime_ref
+        self.opcode = opcode
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
@@ -190,6 +193,29 @@ class Expression:
     @classmethod
     def call(cls, func_name: str, arguments: List['Expression']) -> 'Expression':
         return cls(expr_type=ExpressionType.CALL, name=func_name, operands=arguments)
+
+    @classmethod
+    def intrinsic(
+        cls,
+        mnemonic: str,
+        arguments: List['Expression'],
+        *,
+        size: int = 0,
+        opcode: Optional[int] = None,
+    ) -> 'Expression':
+        inferred_size = size
+        if inferred_size <= 0 and arguments:
+            inferred_size = max(
+                int(getattr(argument, "size", 0) or 0)
+                for argument in arguments
+            )
+        return cls(
+            expr_type=ExpressionType.INTRINSIC,
+            name=mnemonic,
+            operands=arguments,
+            size=inferred_size,
+            opcode=opcode,
+        )
     
     @classmethod
     def memory(
@@ -276,7 +302,18 @@ class Expression:
             else:
                 # その他の単項演算: オペランドと同じ
                 return self.operands[0].get_bit_width()
-        
+
+        elif self.expr_type == ExpressionType.INTRINSIC:
+            if self.size and self.size > 0:
+                return self.size * 8
+            if self.operands:
+                return max(
+                    operand.get_bit_width()
+                    for operand in self.operands
+                    if hasattr(operand, "get_bit_width")
+                )
+            return 32
+
         elif self.expr_type == ExpressionType.MEMORY:
             return (self.size if self.size else 4) * 8
         
@@ -337,6 +374,7 @@ class Expression:
         storage_info: Any = _EXPR_UNSET,
         read_order_key: Any = _EXPR_UNSET,
         runtime_ref: Any = _EXPR_UNSET,
+        opcode: Any = _EXPR_UNSET,
     ) -> 'Expression':
         """Clone an expression while preserving semantic metadata by default."""
 
@@ -353,6 +391,7 @@ class Expression:
             storage_info=self.storage_info if storage_info is _EXPR_UNSET else storage_info,
             read_order_key=self.read_order_key if read_order_key is _EXPR_UNSET else read_order_key,
             runtime_ref=getattr(self, "runtime_ref", None) if runtime_ref is _EXPR_UNSET else runtime_ref,
+            opcode=getattr(self, "opcode", None) if opcode is _EXPR_UNSET else opcode,
         )
     
     def equals(self, other: 'Expression') -> bool:
@@ -372,6 +411,8 @@ class Expression:
         if self.read_order_key != other.read_order_key:
             return False
         if self.runtime_ref != other.runtime_ref:
+            return False
+        if getattr(self, "opcode", None) != getattr(other, "opcode", None):
             return False
         if len(self.operands) != len(other.operands):
             return False
@@ -444,6 +485,8 @@ class Expression:
             result["read_order_key"] = self.read_order_key
         if self.runtime_ref is not None:
             result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
+        if self.opcode is not None:
+            result["opcode"] = int(self.opcode)
         return result
 
     def _serialize_runtime_ref(self, value: Any) -> Any:

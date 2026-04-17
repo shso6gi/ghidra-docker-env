@@ -290,6 +290,7 @@ def _clone_expression(expr: Expression) -> Expression:
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
         runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
     )
 
 

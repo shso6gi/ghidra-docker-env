@@ -50,6 +50,10 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
                 arg_count = len(node.operands or [])
                 return f"CALL({node.name or '?'}, argc={arg_count})"
 
+            if expr_type == ExpressionType.INTRINSIC:
+                arg_count = len(node.operands or [])
+                return f"INTRINSIC({node.name or '?'}, argc={arg_count})"
+
             if expr_type == ExpressionType.MEMORY:
                 inner = _render((node.operands or [None])[0], depth - 1)
                 return f"MEM[{inner}]"

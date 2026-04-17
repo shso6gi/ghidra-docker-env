@@ -1107,7 +1107,14 @@ class PcodeTracer:
             elif len(traced_inputs) == 2:
                 return Expression.binary_op(mnemonic, traced_inputs[0], traced_inputs[1])
             else:
-                return Expression.call(mnemonic, traced_inputs)
+                output = pcode_op.getOutput()
+                output_size = output.getSize() if output is not None else 0
+                return Expression.intrinsic(
+                    mnemonic,
+                    traced_inputs,
+                    size=output_size,
+                    opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+                )
 
         return Expression.unknown(f"unhandled_{mnemonic}")
 

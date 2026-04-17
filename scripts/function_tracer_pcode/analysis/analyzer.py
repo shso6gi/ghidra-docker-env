@@ -985,6 +985,7 @@ class ReturnAnalyzer:
             ExpressionType.BINARY_OP,
             ExpressionType.UNARY_OP,
             ExpressionType.CALL,
+            ExpressionType.INTRINSIC,
             ExpressionType.MEMORY,
         }:
             for operand in expr.operands or []:
@@ -3648,7 +3649,9 @@ class ReturnAnalyzer:
         if expr is None:
             return False
 
-        if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            return True
+        if expr.expr_type == ExpressionType.CALL:
             return True
 
         if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -5274,6 +5277,7 @@ class ReturnAnalyzer:
             ExpressionType.BINARY_OP,
             ExpressionType.UNARY_OP,
             ExpressionType.CALL,
+            ExpressionType.INTRINSIC,
         }:
             return False
 
@@ -5331,7 +5335,7 @@ class ReturnAnalyzer:
             return False
         if expr.expr_type == ExpressionType.UNARY_OP:
             return True
-        if expr.expr_type == ExpressionType.CALL:
+        if expr.expr_type in {ExpressionType.CALL, ExpressionType.INTRINSIC}:
             return True
         return False
 
@@ -5603,7 +5607,7 @@ class ReturnAnalyzer:
     def _count_unresolved_value_nodes(self, expr: Optional[Expression]) -> int:
         if expr is None:
             return 1
-        count = 1 if expr.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL} else 0
+        count = 1 if expr.expr_type == ExpressionType.UNKNOWN else 0
         if expr.expr_type == ExpressionType.PHI and expr.value:
             for cond, value in expr.value:
                 cond_expr = getattr(cond, "expression", None) if cond is not None else None
@@ -6339,7 +6343,7 @@ class ReturnAnalyzer:
         if expr_type is None:
             return True
 
-        if expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
+        if expr_type == ExpressionType.UNKNOWN:
             return True
 
         if expr_type == ExpressionType.PHI and expr.value:

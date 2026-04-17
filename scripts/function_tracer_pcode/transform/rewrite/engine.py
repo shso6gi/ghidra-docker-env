@@ -247,6 +247,21 @@ class ExpressionRewriter:
                     result = Expression.call(expr.name, new_args)
                     result.size = getattr(expr, 'size', 4)
                     return result
+
+        elif expr.expr_type == ExpressionType.INTRINSIC:
+            if expr.operands:
+                new_args = [self._rewrite_recursive(arg, depth + 1) for arg in expr.operands]
+
+                if any(new_arg is not old_arg for new_arg, old_arg in zip(new_args, expr.operands)):
+                    if not hasattr(expr, 'name') or expr.name is None:
+                        return expr
+                    result = Expression.intrinsic(
+                        expr.name,
+                        new_args,
+                        size=getattr(expr, 'size', 4),
+                        opcode=getattr(expr, 'opcode', None),
+                    )
+                    return result
         
         elif expr.expr_type == ExpressionType.PHI:
             if expr.operands:

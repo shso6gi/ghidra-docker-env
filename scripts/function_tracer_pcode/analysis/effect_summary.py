@@ -130,6 +130,7 @@ def _clone_expression_with_operands(
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
         runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
     )
 
 
@@ -243,6 +244,7 @@ def _materialize_existing_effect_value_carrier(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         return expr
     location = _find_unique_effect_location_for_value(
@@ -1043,7 +1045,7 @@ def _enumerate_expression_variants(
                 break
         return resolved or [([], expr)]
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY):
         operand_variants = [
             _enumerate_expression_variants(operand, limit=limit)
             for operand in expr.operands
@@ -1275,6 +1277,8 @@ def _score_call_argument_alignment(
         score += 16
     elif expr.expr_type == ExpressionType.CALL:
         score += 12
+    elif expr.expr_type == ExpressionType.INTRINSIC:
+        score += 9
     elif expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.MEMORY}:
         score += 5
 
@@ -1331,7 +1335,7 @@ def _should_prefer_explicit_call_argument(
         return False
     if expr.expr_type == ExpressionType.PHI:
         return True
-    if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.MEMORY, ExpressionType.CALL}:
+    if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.MEMORY, ExpressionType.CALL, ExpressionType.INTRINSIC}:
         return True
     if expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP}:
         return True
@@ -2772,7 +2776,7 @@ def rewrite_loads_from_effects(
             preserve_symbolic_fallback=preserve_symbolic_fallback,
         )
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC):
         if _expression_is_materialized_post_state_value(expr):
             return expr
         expr_location = canonicalize_expr_read_location(expr, parameters)
@@ -3041,6 +3045,7 @@ def rewrite_observed_loads_from_effects(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         rewritten_operands = [
             rewrite_observed_loads_from_effects(
@@ -3925,6 +3930,7 @@ def promote_effect_subexpressions_to_post_state_reads(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         rewritten_operands = [
             promote_effect_subexpressions_to_post_state_reads(
@@ -4021,6 +4027,7 @@ def collapse_equivalent_post_state_subexpressions(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         rewritten_operands = [
             collapse_equivalent_post_state_subexpressions(
@@ -4181,7 +4188,7 @@ def canonicalize_post_state_subexpressions(
         if collapsed is not None:
             return collapsed
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY):
         rewritten_operands = [
             canonicalize_post_state_subexpressions(
                 op,
@@ -4350,6 +4357,7 @@ def normalize_post_state_expression(
             ExpressionType.BINARY_OP,
             ExpressionType.UNARY_OP,
             ExpressionType.CALL,
+            ExpressionType.INTRINSIC,
         ):
             candidate_is_stale_effect_carrier = (
                 promote_effect_value_match_to_post_state_read(
@@ -4367,6 +4375,7 @@ def normalize_post_state_expression(
                 ExpressionType.BINARY_OP,
                 ExpressionType.UNARY_OP,
                 ExpressionType.CALL,
+                ExpressionType.INTRINSIC,
             )
             and _expression_contains_observed_loads(candidate_expr)
         )
@@ -4623,6 +4632,7 @@ def _rewrite_definite_post_state_subexpressions(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         expr_location = canonicalize_expr_read_location(expr, parameters)
         if expr_location is not None and _matches_existing_effect_value(
@@ -4859,6 +4869,7 @@ def _rewrite_expression_with_replayed_state(
         ExpressionType.BINARY_OP,
         ExpressionType.UNARY_OP,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
     ):
         rewritten_operands = [
             _rewrite_expression_with_replayed_state(
@@ -5078,7 +5089,7 @@ def _reduce_expression_under_conditions(
         rebuilt.size = expr.size
         return rebuilt
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY):
         new_operands = [_reduce_expression_under_conditions(op, conditions) for op in expr.operands]
         return _clone_expression_with_operands(expr, new_operands) if not all(
             new is old for new, old in zip(new_operands, expr.operands)
@@ -5202,7 +5213,7 @@ def substitute_expression(
     if replacement is not None:
         return _simplify_substituted_expression(replacement, parameters)
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY):
         new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
         if all(new is old for new, old in zip(new_operands, expr.operands)):
             return _simplify_substituted_expression(expr, parameters)

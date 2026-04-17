@@ -18,6 +18,7 @@ from ...model.signature import (
     is_unsigned_data_type,
 )
 from ...model.render_smt import (
+    expression_contains_unsupported_smt_ops,
     expression_contains_signed_comparison,
     expression_returns_bool,
     expression_smt_bit_width,
@@ -159,7 +160,9 @@ def expression_has_unresolved_value(expr: Optional[Expression]) -> bool:
     if expr_type is None or expr_kind is None:
         return True
 
-    if expr_type in {expr_kind.UNKNOWN, expr_kind.CALL}:
+    if expr_type == expr_kind.UNKNOWN:
+        return True
+    if expression_contains_unsupported_smt_ops(expr):
         return True
 
     if expr_type == expr_kind.PHI and expr.value:

@@ -21,7 +21,7 @@ def contains_memory_access(expr) -> bool:
     if expr_type == expr_kind.MEMORY:
         return True
 
-    if expr_type in (expr_kind.BINARY_OP, expr_kind.UNARY_OP, expr_kind.CALL):
+    if expr_type in (expr_kind.BINARY_OP, expr_kind.UNARY_OP, expr_kind.CALL, expr_kind.INTRINSIC):
         return any(contains_memory_access(operand) for operand in expr.operands)
 
     if expr_type == expr_kind.PHI and expr.value:
@@ -55,7 +55,7 @@ def collect_variables_into(expr, variables: Set[str]) -> None:
             operand._collect_variables(variables)
         return
 
-    if expr_type == expr_kind.CALL:
+    if expr_type in (expr_kind.CALL, expr_kind.INTRINSIC):
         for operand in expr.operands:
             operand._collect_variables(variables)
         return
@@ -98,7 +98,7 @@ def collect_variables_with_storage_into(
             operand._collect_variables_with_storage(variables)
         return
 
-    if expr_type == expr_kind.CALL:
+    if expr_type in (expr_kind.CALL, expr_kind.INTRINSIC):
         for operand in expr.operands:
             operand._collect_variables_with_storage(variables)
         return

@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Callable, Hashable, Iterable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation
+from ..model.intrinsics import resolve_pcode_intrinsic
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
 from ..config.settings import (
@@ -667,7 +668,7 @@ class ExpressionExpander:
         if expr.expr_type == ExpressionType.MEMORY and not expr.operands:
             return expr
 
-        if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.MEMORY):
+        if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY):
             rewritten_operands = [
                 self._canonicalize_expression_to_location_leaf(operand, location, conditions)
                 for operand in expr.operands
@@ -1472,6 +1473,26 @@ class ExpressionExpander:
             )
             return self._deduplicate_expanded_values(expanded, depth) if expanded else []
 
+        if expr.expr_type == ExpressionType.INTRINSIC and expr.operands:
+            operand_cases = [
+                self._expand_expression_cases(operand, base_conditions, depth + 1)
+                for operand in expr.operands
+            ]
+            normalized_cases = []
+            for operand, cases in zip(expr.operands, operand_cases):
+                normalized_cases.append(
+                    cases or [ExpandedValue(operand, ConditionSimplifier.simplify_conditions(base_conditions))]
+                )
+            expanded = self._combine_input_expansions_with_conditions(
+                expr.name or "INTRINSIC",
+                normalized_cases,
+                [],
+                depth,
+                output_size=expr.size,
+                opcode=getattr(expr, "opcode", None),
+            )
+            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+
         return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
 
     def _trace_operation_expression(
@@ -1621,6 +1642,7 @@ class ExpressionExpander:
             output_size=output_size,
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
+            opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
         )
         return self._maybe_replace_budget_results_with_traced_fallback(
             pcode_op,
@@ -2173,6 +2195,7 @@ class ExpressionExpander:
             output_size=output_size,
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
+            opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
         )
         return self._maybe_replace_budget_results_with_traced_fallback(
             pcode_op,
@@ -2191,6 +2214,7 @@ class ExpressionExpander:
         output_size: int = 0,
         output_varnode=None,
         read_order_key: Optional[int] = None,
+        opcode: Optional[int] = None,
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
         self._debug_print(f"Combining expansions for {mnemonic}", depth)
@@ -2292,9 +2316,12 @@ class ExpressionExpander:
                             output_size=output_size if output_size > 0 else left_ev.value.size,
                         )
                     else:
-                        new_value = Expression.binary_op(mnemonic, left_ev.value, right_ev.value)
-                        if output_size > 0 and new_value.size == 0:
-                            new_value.size = output_size
+                        new_value = self._build_combined_operation_expression(
+                            mnemonic,
+                            [left_ev.value, right_ev.value],
+                            output_size=output_size,
+                            opcode=opcode,
+                        )
                     simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
                     reduced_value = _reduce_expression_under_conditions(new_value, simplified_conds)
                     normalized_value = reduced_value if reduced_value is not None else new_value
@@ -2332,22 +2359,85 @@ class ExpressionExpander:
                 depth,
             )
         
-        # 3つ以上の入力
-        self._debug_print(f"  Too many inputs ({len(input_expansions)}), falling back", depth)
-        first_expansions = input_expansions[0]
-        result = []
-        for ev in first_expansions:
-            other_values = []
-            for exp_list in input_expansions[1:]:
-                if exp_list:
-                    other_values.append(exp_list[0].value)
-            
-            all_values = [ev.value] + other_values
-            new_value = Expression.call(mnemonic, all_values)
-            combined_conds = base_conditions + ev.conditions
-            result.append(ExpandedValue(new_value, combined_conds))
-        
-        return result if result else [ExpandedValue(Expression.unknown(f"{mnemonic}_fail"), base_conditions)]
+        # 3つ以上の入力は intrinsic として保持しつつ、条件は全組み合わせで構成する
+        self._debug_print(f"  Combining n-ary operation ({len(input_expansions)} inputs)", depth)
+        result_map = {}
+        novel_results = 0
+
+        from itertools import product
+
+        for variant_tuple in product(*input_expansions):
+            combined_conds: List[Condition] = list(base_conditions)
+            operands: List[Expression] = []
+            for expanded in variant_tuple:
+                combined_conds.extend(expanded.conditions)
+                operands.append(expanded.value)
+
+            if ConditionSimplifier.is_contradiction(combined_conds):
+                continue
+
+            simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
+            new_value = self._build_combined_operation_expression(
+                mnemonic,
+                operands,
+                output_size=output_size,
+                opcode=opcode,
+            )
+            reduced_value = _reduce_expression_under_conditions(new_value, simplified_conds)
+            normalized_value = reduced_value if reduced_value is not None else new_value
+            normalized_ev = ExpandedValue(normalized_value, simplified_conds)
+            result_key = (
+                self._expansion_expression_signature(normalized_ev.value),
+                normalized_ev.get_condition_signature(),
+            )
+            existing = result_map.get(result_key)
+            if existing is not None:
+                if self._prefer_expanded_value(normalized_ev, existing):
+                    result_map[result_key] = normalized_ev
+                continue
+            result_map[result_key] = normalized_ev
+            novel_results += 1
+            if novel_results > self._max_combination_attempts:
+                return self._finalize_combined_results(
+                    mnemonic,
+                    list(result_map.values()),
+                    base_conditions,
+                    depth,
+                    over_budget=True,
+                )
+
+        return list(result_map.values()) or [ExpandedValue(Expression.unknown(f"{mnemonic}_fail"), base_conditions)]
+
+    def _build_combined_operation_expression(
+        self,
+        mnemonic: str,
+        operands: List[Expression],
+        *,
+        output_size: int = 0,
+        opcode: Optional[int] = None,
+    ) -> Expression:
+        intrinsic = resolve_pcode_intrinsic(opcode=opcode, mnemonic=mnemonic)
+        if intrinsic is not None:
+            expr = Expression.intrinsic(
+                intrinsic.mnemonic,
+                operands,
+                size=output_size,
+                opcode=intrinsic.opcode,
+            )
+        elif len(operands) == 1:
+            expr = operands[0]
+        elif len(operands) == 2:
+            expr = Expression.binary_op(mnemonic, operands[0], operands[1])
+        else:
+            expr = Expression.intrinsic(
+                mnemonic,
+                operands,
+                size=output_size,
+                opcode=opcode,
+            )
+        if output_size > 0 and getattr(expr, "size", 0) == 0:
+            expr.size = output_size
+        return expr
     
     def _get_edge_condition(self, from_block_info, to_block) -> Optional[Condition]:
         """fromブロックからtoブロックへのエッジ条件を取得"""

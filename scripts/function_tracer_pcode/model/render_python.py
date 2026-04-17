@@ -50,6 +50,10 @@ def _to_string_internal(expr, simplify: bool) -> str:
         args = ", ".join(operand._to_string_internal(simplify) for operand in expr.operands)
         return f"{expr.name}({args})"
 
+    if expr_type == expr_kind.INTRINSIC:
+        args = ", ".join(operand._to_string_internal(simplify) for operand in expr.operands)
+        return f"{expr.name}({args})"
+
     if expr_type == expr_kind.MEMORY:
         addr = expr.operands[0]._to_string_internal(simplify)
         return f"MEM[{addr}]"

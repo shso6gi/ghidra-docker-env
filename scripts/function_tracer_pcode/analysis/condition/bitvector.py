@@ -80,6 +80,7 @@ def _eval_constant_raw_internal(
         ExpressionType.PARAMETER,
         ExpressionType.VARIABLE,
         ExpressionType.CALL,
+        ExpressionType.INTRINSIC,
         ExpressionType.MEMORY,
         ExpressionType.PHI,
         ExpressionType.UNKNOWN,

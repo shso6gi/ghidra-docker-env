@@ -4,6 +4,11 @@
 import hashlib
 from typing import Any, List, Mapping, Optional, Tuple
 
+from .intrinsics import (
+    PTRADD_OPCODE,
+    PTRSUB_OPCODE,
+    is_supported_pcode_intrinsic,
+)
 from .signature import get_declared_type_signedness
 from .runtime_refs import AddressValueRef
 
@@ -106,6 +111,14 @@ def expression_smt_bit_width(expr) -> int:
     if expr_type == expr_kind.UNKNOWN:
         return expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
 
+    if expr_type == expr_kind.INTRINSIC:
+        explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        operand_bits = max(
+            (expression_smt_bit_width(operand) for operand in getattr(expr, "operands", []) or []),
+            default=0,
+        )
+        return max(explicit_bits, operand_bits)
+
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0] if getattr(expr, "operands", None) else None
         operand_bits = expression_smt_bit_width(operand)
@@ -188,6 +201,15 @@ def expression_contains_unsupported_smt_ops(expr) -> bool:
         return True
 
     if expr_type == expr_kind.UNARY_OP and expr.operator not in _SUPPORTED_UNARY_OPERATORS:
+        return True
+
+    if expr_type == expr_kind.CALL:
+        return True
+
+    if expr_type == expr_kind.INTRINSIC and not is_supported_pcode_intrinsic(
+        opcode=getattr(expr, "opcode", None),
+        mnemonic=getattr(expr, "name", None),
+    ):
         return True
 
     if getattr(expr, "operands", None):
@@ -455,6 +477,14 @@ def _to_smt_internal(
     if expr_type == expr_kind.UNKNOWN:
         return _unknown_smt_symbol_name(expr)
 
+    if expr_type == expr_kind.INTRINSIC:
+        return _lower_intrinsic_to_smt(
+            expr,
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+        )
+
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0]
         right = expr.operands[1]
@@ -721,6 +751,92 @@ def _to_smt_internal(
 
     return "unknown"
 
+
+def _intrinsic_result_bits(expr) -> int:
+    explicit_bits = expression_smt_bit_width(expr)
+    if explicit_bits > 0:
+        return explicit_bits
+    operands = getattr(expr, "operands", None) or []
+    if operands:
+        return max(expression_smt_bit_width(operand) for operand in operands)
+    return 0
+
+
+def _lower_intrinsic_to_smt(
+    expr,
+    *,
+    prefer_signed_arithmetic: bool,
+    symbol_name_mapping: Optional[Mapping[str, str]],
+    address_context: bool,
+) -> str:
+    opcode = getattr(expr, "opcode", None)
+    mnemonic = getattr(expr, "name", None) or ""
+    operands = getattr(expr, "operands", None) or []
+    result_bits = _intrinsic_result_bits(expr)
+
+    if opcode == PTRADD_OPCODE or mnemonic == "PTRADD":
+        if len(operands) != 3:
+            raise ValueError(f"PTRADD expects 3 operands, got {len(operands)}")
+        base, index, element_size = operands
+        base_smt = _to_smt_internal(
+            base,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            True,
+        )
+        index_smt = _to_smt_internal(
+            index,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        elem_smt = _to_smt_internal(
+            element_size,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        target_bits = max(
+            result_bits,
+            expression_smt_bit_width(base),
+            expression_smt_bit_width(index),
+            expression_smt_bit_width(element_size),
+            1,
+        )
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits)
+        index_smt = _coerce_expr_to_bitvec_width(index, index_smt, target_bits)
+        elem_smt = _coerce_expr_to_bitvec_width(element_size, elem_smt, target_bits)
+        return f"(bvadd {base_smt} (bvmul {index_smt} {elem_smt}))"
+
+    if opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB":
+        if len(operands) != 2:
+            raise ValueError(f"PTRSUB expects 2 operands, got {len(operands)}")
+        base, offset = operands
+        base_smt = _to_smt_internal(
+            base,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            True,
+        )
+        offset_smt = _to_smt_internal(
+            offset,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        target_bits = max(
+            result_bits,
+            expression_smt_bit_width(base),
+            expression_smt_bit_width(offset),
+            1,
+        )
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits)
+        offset_smt = _coerce_expr_to_bitvec_width(offset, offset_smt, target_bits)
+        return f"(bvadd {base_smt} {offset_smt})"
+
+    raise ValueError(
+        f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"
+    )
 
 def _coerce_address_value_ref(expr) -> Optional[AddressValueRef]:
     runtime_ref = getattr(expr, "runtime_ref", None)

@@ -18,6 +18,13 @@ from .runtime_refs import (
     PcodeOpRef,
     UnknownValueRef,
 )
+from .intrinsics import (
+    PTRADD_OPCODE,
+    PTRSUB_OPCODE,
+    PcodeIntrinsicSpec,
+    is_supported_pcode_intrinsic,
+    resolve_pcode_intrinsic,
+)
 from .analysis import (
     ComparisonSurface,
     DeferredCallInfo,
@@ -59,6 +66,11 @@ __all__ = [
     "PostStateValueRef",
     "PcodeOpRef",
     "UnknownValueRef",
+    "PTRADD_OPCODE",
+    "PTRSUB_OPCODE",
+    "PcodeIntrinsicSpec",
+    "is_supported_pcode_intrinsic",
+    "resolve_pcode_intrinsic",
     "DeferredCallInfo",
     "ComparisonSurface",
     "ReturnInfo",

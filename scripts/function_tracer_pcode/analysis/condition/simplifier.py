@@ -976,6 +976,7 @@ class ConditionSimplifier:
             ExpressionType.BINARY_OP,
             ExpressionType.UNARY_OP,
             ExpressionType.CALL,
+            ExpressionType.INTRINSIC,
             ExpressionType.MEMORY,
         ):
             new_operands = [cls._reduce_expression_under_conditions(op, conditions) for op in expr.operands]
@@ -993,6 +994,7 @@ class ConditionSimplifier:
                 storage_info=expr.storage_info,
                 read_order_key=expr.read_order_key,
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                opcode=getattr(expr, "opcode", None),
             )
             return rebuilt
 

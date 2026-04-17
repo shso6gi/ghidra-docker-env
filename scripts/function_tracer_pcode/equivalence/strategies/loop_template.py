@@ -490,6 +490,7 @@ def _substitute_exact_replacements(
         size=expr.size,
         name=expr.name,
         data_type=expr.data_type,
+        opcode=getattr(expr, "opcode", None),
         data_type_obj=getattr(expr, "data_type_obj", None),
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,

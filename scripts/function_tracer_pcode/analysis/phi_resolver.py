@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """PHI（MULTIEQUAL）の処理専用モジュール"""
 
+from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable
 from ..model import Expression, Condition, ExpressionType
+from ..model.intrinsics import resolve_pcode_intrinsic
 from .condition import ConditionSimplifier, ConditionNormalizer
 
 
@@ -388,13 +390,23 @@ class PhiHandler:
             return [ExpandedBranch(conditions, value)]
         
         # PHIがある場合は組み合わせを展開
-        return self._combine_expansions(mnemonic, input_expansions, conditions)
+        output = pcode_op.getOutput()
+        output_size = output.getSize() if output is not None else 0
+        return self._combine_expansions(
+            mnemonic,
+            input_expansions,
+            conditions,
+            opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+            output_size=output_size,
+        )
     
     def _combine_expansions(
         self,
         mnemonic: str,
         input_expansions: List[List[ExpandedBranch]],
-        base_conditions: List[Condition]
+        base_conditions: List[Condition],
+        opcode: Optional[int] = None,
+        output_size: int = 0,
     ) -> List[ExpandedBranch]:
         """入力の展開を組み合わせて結果を生成"""
         if len(input_expansions) == 1:
@@ -414,13 +426,65 @@ class PhiHandler:
                     if ConditionSimplifier.is_contradiction(combined_conds):
                         continue
                     
-                    new_value = Expression.binary_op(mnemonic, left_exp.value, right_exp.value)
+                    new_value = self._build_combined_expression(
+                        mnemonic,
+                        [left_exp.value, right_exp.value],
+                        output_size=output_size,
+                        opcode=opcode,
+                    )
                     result.append(ExpandedBranch(combined_conds, new_value))
             
             return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]
-        
-        # 3つ以上の入力
-        return [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_too_many_inputs"))]
+
+        result = []
+        for expansion_tuple in product(*input_expansions):
+            combined_conds: List[Condition] = list(base_conditions)
+            operands: List[Expression] = []
+            for expanded in expansion_tuple:
+                combined_conds.extend(expanded.conditions)
+                operands.append(expanded.value)
+
+            if ConditionSimplifier.is_contradiction(combined_conds):
+                continue
+
+            new_value = self._build_combined_expression(
+                mnemonic,
+                operands,
+                output_size=output_size,
+                opcode=opcode,
+            )
+            if output_size > 0 and getattr(new_value, "size", 0) == 0:
+                new_value.size = output_size
+            result.append(ExpandedBranch(combined_conds, new_value))
+
+        return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]
+
+    def _build_combined_expression(
+        self,
+        mnemonic: str,
+        operands: List[Expression],
+        *,
+        output_size: int = 0,
+        opcode: Optional[int] = None,
+    ) -> Expression:
+        intrinsic = resolve_pcode_intrinsic(opcode=opcode, mnemonic=mnemonic)
+        if intrinsic is not None:
+            return Expression.intrinsic(
+                intrinsic.mnemonic,
+                operands,
+                size=output_size,
+                opcode=intrinsic.opcode,
+            )
+        if len(operands) == 1:
+            return operands[0]
+        if len(operands) == 2:
+            return Expression.binary_op(mnemonic, operands[0], operands[1])
+        return Expression.intrinsic(
+            mnemonic,
+            operands,
+            size=output_size,
+            opcode=opcode,
+        )
     
     def _merge_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
         """同じ値かつ同じ条件集合を持つ分岐のみマージ"""

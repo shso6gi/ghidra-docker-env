@@ -139,7 +139,7 @@ def _rewrite_expr(
         )
         return resolved or candidate
 
-    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL):
+    if expr.expr_type in (ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.CALL, ExpressionType.INTRINSIC):
         rewritten_operands = [
             _rewrite_expr(
                 op,

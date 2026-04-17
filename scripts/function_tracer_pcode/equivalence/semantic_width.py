@@ -93,6 +93,7 @@ class SemanticWidthNormalizer:
                 name=expr.name,
                 data_type=expr.data_type,
                 data_type_obj=getattr(expr, "data_type_obj", None),
+                opcode=getattr(expr, "opcode", None),
                 storage_info=expr.storage_info,
                 read_order_key=expr.read_order_key,
                 runtime_ref=getattr(expr, "runtime_ref", None),
@@ -652,6 +653,7 @@ def _rewrite_parameter_expression_metadata(
             storage_info=expr.storage_info,
             read_order_key=expr.read_order_key,
             runtime_ref=getattr(expr, "runtime_ref", None),
+            opcode=getattr(expr, "opcode", None),
         )
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -711,6 +713,7 @@ def _rewrite_parameter_expression_metadata(
         storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
         runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
     )
 
 

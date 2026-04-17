@@ -626,7 +626,7 @@ class PairwiseStrategy(CheckStrategy):
         if expr is None:
             return False
 
-        if expr.expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+        if expr.expr_type == ExpressionType.UNKNOWN:
             return True
         if expression_contains_unsupported_smt_ops(expr):
             return True
@@ -765,6 +765,7 @@ class PairwiseStrategy(CheckStrategy):
                 storage_info=expr.storage_info,
                 read_order_key=expr.read_order_key,
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                opcode=getattr(expr, "opcode", None),
             )
 
         collapsed = self._collapse_parameter_fragment_extension(candidate, fragment_map)

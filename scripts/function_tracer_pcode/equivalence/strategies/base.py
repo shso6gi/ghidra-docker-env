@@ -187,7 +187,7 @@ class CheckStrategy(ABC):
             return False
 
         expr_type = getattr(expr, "expr_type", None)
-        if expr_type in (ExpressionType.UNKNOWN, ExpressionType.CALL):
+        if expr_type == ExpressionType.UNKNOWN:
             return True
         if expression_contains_unsupported_smt_ops(expr):
             return True

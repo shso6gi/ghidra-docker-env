@@ -329,6 +329,22 @@ def expression_key(
                     remaining,
                 )
 
+            if expr_type == ExpressionType.INTRINSIC:
+                arg_keys = []
+                for operand in current.operands:
+                    arg_key, remaining = _build(operand, remaining)
+                    arg_keys.append(arg_key)
+                return (
+                    (
+                        "intrinsic",
+                        current.name or "",
+                        None if getattr(current, "opcode", None) is None else int(current.opcode),
+                        int(current.size or 0),
+                        tuple(arg_keys),
+                    ),
+                    remaining,
+                )
+
             if expr_type == ExpressionType.PHI:
                 branches = []
                 for condition, value in current.value or []:
