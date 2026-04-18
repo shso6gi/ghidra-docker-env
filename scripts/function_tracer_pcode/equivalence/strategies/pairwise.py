@@ -24,6 +24,7 @@ from .pairwise_query_executor import (
     solve_query_twostage,
     validate_counterexample_across_cases,
 )
+from .expression_safety import ExpressionSafetyChecker
 from ..formula.symbol_replace import build_symbol_replacer
 from ..normalize import (
     SignFacts,
@@ -66,6 +67,7 @@ class PairwiseStrategy(CheckStrategy):
         self.save_unknown_queries = False
         self.unknown_query_dir = "/tmp"
         self.normalization_settings = normalization_settings or NormalizationSettings.safe()
+        self._active_safety_checker = None
 
     def check(
         self,
@@ -87,6 +89,13 @@ class PairwiseStrategy(CheckStrategy):
         )
 
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        safety_checker = ExpressionSafetyChecker(
+            solver_runner=self.solver_runner,
+            debug_print=self._debug_print,
+            per_query_timeout=self.per_query_timeout,
+            base_ctx=base_ctx,
+        )
+        self._active_safety_checker = safety_checker
         analysis1 = normalize_analysis_semantic_width(
             analysis1,
             hints1,
@@ -205,7 +214,21 @@ class PairwiseStrategy(CheckStrategy):
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
                         )
                     continue
-                if self._case_contains_unresolved_expression(case1, case2.conditions) or self._case_contains_unresolved_expression(case2, case1.conditions):
+                if self._case_contains_unresolved_expression(
+                    case1,
+                    case2.conditions,
+                    own_render_fn=symbol_replace_fn1,
+                    extra_render_fn=symbol_replace_fn2,
+                    base_ctx=base_ctx,
+                    query_label=f"{pair_id}:case1",
+                ) or self._case_contains_unresolved_expression(
+                    case2,
+                    case1.conditions,
+                    own_render_fn=symbol_replace_fn2,
+                    extra_render_fn=symbol_replace_fn1,
+                    base_ctx=base_ctx,
+                    query_label=f"{pair_id}:case2",
+                ):
                     unknown_count += 1
                     self._debug_print(
                         f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
@@ -336,6 +359,7 @@ class PairwiseStrategy(CheckStrategy):
                 pairwise_debug_stats=normalization_stats,
             )
         finally:
+            self._active_safety_checker = None
             self._active_normalization_stats = None
 
     def _solve_query_twostage(
@@ -467,7 +491,12 @@ class PairwiseStrategy(CheckStrategy):
                 )
                 continue
 
-            if not self._case_contains_unresolved_expression(case):
+            if not self._case_contains_unresolved_expression(
+                case,
+                own_render_fn=param_replace_fn,
+                base_ctx=base_ctx,
+                query_label=f"{label}[{case.index}]",
+            ):
                 reachable_cases.append(case)
                 continue
 
@@ -591,36 +620,51 @@ class PairwiseStrategy(CheckStrategy):
         self,
         case: ReturnCase,
         extra_conditions: Optional[List[Condition]] = None,
+        *,
+        own_render_fn=None,
+        extra_render_fn=None,
+        base_ctx: Optional[Dict[str, Any]] = None,
+        query_label: str = "case",
     ) -> bool:
-        if self._case_value_contains_unresolved(case, extra_conditions):
-            return True
-        context_conditions = list(extra_conditions or [])
-        for index, cond in enumerate(case.conditions):
-            cond_context = ConditionSimplifier.simplify_conditions(
-                list(context_conditions)
-                + [other for offset, other in enumerate(case.conditions) if offset != index]
-            )
-            reduced_condition = ConditionSimplifier._reduce_expression_under_conditions(
-                cond.expression,
-                cond_context,
-            )
-            if self._expression_contains_unresolved(reduced_condition):
-                return True
-        return False
+        return self._get_expression_safety_checker(base_ctx).case_contains_unresolved(
+            case,
+            own_render_fn=own_render_fn,
+            extra_conditions=extra_conditions,
+            extra_render_fn=extra_render_fn,
+            query_label=query_label,
+        )
 
     def _case_value_contains_unresolved(
         self,
         case: ReturnCase,
         extra_conditions: Optional[List[Condition]] = None,
+        *,
+        own_render_fn=None,
+        extra_render_fn=None,
+        base_ctx: Optional[Dict[str, Any]] = None,
+        query_label: str = "value",
     ) -> bool:
-        context_conditions = ConditionSimplifier.simplify_conditions(
-            list(case.conditions) + list(extra_conditions or [])
+        return self._get_expression_safety_checker(base_ctx).value_contains_unresolved(
+            case,
+            own_render_fn=own_render_fn,
+            extra_conditions=extra_conditions,
+            extra_render_fn=extra_render_fn,
+            query_label=query_label,
         )
-        reduced_value = ConditionSimplifier._reduce_expression_under_conditions(
-            case.value_expr,
-            context_conditions,
+
+    def _get_expression_safety_checker(
+        self,
+        base_ctx: Optional[Dict[str, Any]] = None,
+    ) -> ExpressionSafetyChecker:
+        active = getattr(self, "_active_safety_checker", None)
+        if active is not None:
+            return active
+        return ExpressionSafetyChecker(
+            solver_runner=self.solver_runner,
+            debug_print=self._debug_print,
+            per_query_timeout=self.per_query_timeout,
+            base_ctx=base_ctx,
         )
-        return self._expression_contains_unresolved(reduced_value)
 
     def _expression_contains_unresolved(self, expr) -> bool:
         if expr is None:

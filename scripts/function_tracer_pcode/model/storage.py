@@ -109,9 +109,28 @@ class StorageInfo:
         if self.base_register_size_bits <= 0 or other.base_register_size_bits <= 0:
             return False
 
-        return (
-            int(self.space_id or -1) == int(other.space_id or -1)
+        same_space = int(self.space_id or -1) == int(other.space_id or -1)
+        if not same_space:
+            same_space = (
+                self._normalize_reg_name(self.space_name) == self._normalize_reg_name(other.space_name)
+                and bool(self.space_name or other.space_name)
+            )
+
+        if (
+            same_space
             and int(self.base_register_offset) == int(other.base_register_offset)
+            and int(self.base_register_size_bits) == int(other.base_register_size_bits)
+        ):
+            return True
+
+        self_base = self._normalize_reg_name(self.base_register_name or self.register_name or "")
+        other_base = self._normalize_reg_name(other.base_register_name or other.register_name or "")
+        if not self_base or not other_base:
+            return False
+
+        return (
+            same_space
+            and self_base == other_base
             and int(self.base_register_size_bits) == int(other.base_register_size_bits)
         )
     

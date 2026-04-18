@@ -65,6 +65,7 @@ from .effect_summary import (
 )
 from .memory_resolver import concretize_readonly_loads
 from .recurrence_summary import StructuralRecurrenceSummarizer
+from .switch import build_switch_dispatch_summaries
 
 
 _PCODE_OPCODE_BY_MNEMONIC = {
@@ -1684,19 +1685,23 @@ class ReturnAnalyzer:
         if not self._should_attempt_switch_recovery(analysis):
             return None
 
-        block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
-        switch_blocks = [
-            block_info
-            for block_info in block_by_index.values()
-            if self._find_branchind_op_on_block(block_info) is not None
-        ]
-        if not switch_blocks:
-            return None
+        switch_dispatch_summaries = build_switch_dispatch_summaries(
+            tracer=tracer,
+            condition_tracker=condition_tracker,
+            parameters=self._current_parameters,
+            concretize_readonly_loads=self._concretize_readonly_loads,
+            read_memory_value=self._read_memory_value,
+            max_cases=self._bounded_call_max_cases,
+            debug=self.debug,
+            debug_print=self._debug_print if self.debug else None,
+        )
+        attach_summaries = getattr(condition_tracker, "attach_switch_dispatch_summaries", None)
+        if callable(attach_summaries):
+            attach_summaries(switch_dispatch_summaries)
 
-        for switch_block in sorted(switch_blocks, key=lambda info: info.index):
-            branchind_op = self._find_branchind_op_on_block(switch_block)
-            if branchind_op is None:
-                continue
+        for dispatch_summary in switch_dispatch_summaries:
+            switch_block = dispatch_summary.block_info
+            dispatch_op = dispatch_summary.dispatch_op
 
             impacted_site_keys = self._collect_switch_impacted_return_sites(
                 switch_block,
@@ -1718,23 +1723,28 @@ class ReturnAnalyzer:
             if not self._switch_recovery_targets_problematic_region(analysis, affected_returns):
                 continue
 
-            candidate_entries = self._enumerate_switch_branch_targets(
-                switch_block,
-                branchind_op,
-                tracer,
-                condition_tracker,
-            )
+            candidate_entries = self._enumerate_switch_dispatch_targets(dispatch_summary)
             if not candidate_entries or len(candidate_entries) < 2:
                 continue
 
             expanded_values: List[ExpandedValue] = []
             candidate_failed = False
             for address_value, branch_conditions in candidate_entries:
-                resolved = self._resolve_local_code_target_expansions(
+                resolved = self._resolve_switch_case_target_expansions(
                     address_value,
-                    active_functions or set(),
+                    branch_conditions,
+                    tracer,
+                    condition_tracker,
+                    return_ops or [],
+                    active_functions=active_functions or set(),
                     current_function=current_function,
                 )
+                if not resolved:
+                    resolved = self._resolve_local_code_target_expansions(
+                        address_value,
+                        active_functions or set(),
+                        current_function=current_function,
+                    )
                 if not resolved:
                     if self.debug:
                         cond_dump = [
@@ -1765,9 +1775,9 @@ class ReturnAnalyzer:
                 continue
 
             site_metadata = self._describe_pcode_site(
-                branchind_op,
+                dispatch_op,
                 analysis.entry_point,
-                identity_prefix="branchind",
+                identity_prefix="switch_dispatch",
             )
             recovered = self._build_return_infos_from_expansions(
                 cast(str, site_metadata.get("address") or analysis.entry_point),
@@ -1791,32 +1801,343 @@ class ReturnAnalyzer:
                 continue
             if self.debug:
                 self._debug_print(
-                    "Recovered switch-like return cases from BRANCHIND/CFG structure "
+                    "Recovered switch-like return cases from JumpTable/CFG structure "
+                    f"(dispatch={dispatch_summary.dispatch_mnemonic}, "
+                    f"affected_sites={sorted(impacted_site_keys)}, recovered={len(recovered)})"
+                )
+            return combined
+
+        block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
+        switch_blocks = [
+            block_info
+            for block_info in block_by_index.values()
+            if self._find_indirect_dispatch_op_on_block(block_info) is not None
+        ]
+        if not switch_blocks:
+            return None
+
+        for switch_block in sorted(switch_blocks, key=lambda info: info.index):
+            indirect_op = self._find_indirect_dispatch_op_on_block(switch_block)
+            if indirect_op is None:
+                continue
+
+            impacted_site_keys = self._collect_switch_impacted_return_sites(
+                switch_block,
+                return_ops or [],
+                condition_tracker,
+                analysis.entry_point,
+            )
+            if impacted_site_keys is None or not impacted_site_keys:
+                continue
+
+            affected_returns = [
+                ret for ret in (analysis.returns or []) if self._return_site_key(ret) in impacted_site_keys
+            ]
+            unaffected_returns = [
+                ret for ret in (analysis.returns or []) if self._return_site_key(ret) not in impacted_site_keys
+            ]
+            if not affected_returns:
+                continue
+            if not self._switch_recovery_targets_problematic_region(analysis, affected_returns):
+                continue
+
+            candidate_entries = self._enumerate_switch_branch_targets(
+                switch_block,
+                indirect_op,
+                tracer,
+                condition_tracker,
+            )
+            if not candidate_entries or len(candidate_entries) < 2:
+                continue
+
+            expanded_values: List[ExpandedValue] = []
+            candidate_failed = False
+            for address_value, branch_conditions in candidate_entries:
+                resolved = self._resolve_switch_case_target_expansions(
+                    address_value,
+                    branch_conditions,
+                    tracer,
+                    condition_tracker,
+                    return_ops or [],
+                    active_functions=active_functions or set(),
+                    current_function=current_function,
+                )
+                if not resolved:
+                    resolved = self._resolve_local_code_target_expansions(
+                        address_value,
+                        active_functions or set(),
+                        current_function=current_function,
+                    )
+                if not resolved:
+                    if self.debug:
+                        cond_dump = [
+                            ConditionSimplifier.get_simplified_condition_string(cond)
+                            for cond in branch_conditions
+                        ]
+                        self._debug_print(
+                            "Switch recovery aborted: local target expansion failed for "
+                            f"0x{address_value:x} under {cond_dump}"
+                        )
+                    candidate_failed = True
+                    break
+
+                for ev in resolved:
+                    merged_conditions = ConditionSimplifier.simplify_conditions(
+                        list(branch_conditions) + list(getattr(ev, "conditions", []) or [])
+                    )
+                    if ConditionSimplifier.is_contradiction(merged_conditions):
+                        continue
+                    expanded_values.append(
+                        ExpandedValue(
+                            value=self._clone_expression(ev.value),
+                            conditions=merged_conditions,
+                        )
+                    )
+
+            if candidate_failed or not expanded_values:
+                continue
+
+            site_metadata = self._describe_pcode_site(
+                indirect_op,
+                analysis.entry_point,
+                identity_prefix="indirect_dispatch",
+            )
+            recovered = self._build_return_infos_from_expansions(
+                cast(str, site_metadata.get("address") or analysis.entry_point),
+                expanded_values,
+                0,
+                site_metadata=site_metadata,
+            )
+            recovered = self._merge_equivalent_return_infos(
+                self._prune_less_precise_return_infos(recovered)
+            )
+            if not recovered:
+                continue
+            if not self._switch_recovery_improves_returns(analysis, affected_returns, recovered):
+                continue
+            if self._switch_recovery_conflicts_with_unaffected_returns(unaffected_returns, recovered):
+                continue
+            combined = self._merge_equivalent_return_infos(
+                self._prune_less_precise_return_infos(list(unaffected_returns) + recovered)
+            )
+            if not combined:
+                continue
+            if self.debug:
+                self._debug_print(
+                    "Recovered switch-like return cases from indirect-dispatch/CFG structure "
                     f"(affected_sites={sorted(impacted_site_keys)}, recovered={len(recovered)})"
                 )
             return combined
 
         return None
 
-    def _find_branchind_op_on_block(self, block_info) -> Optional[Any]:
+    def _find_indirect_dispatch_op_on_block(
+        self,
+        block_info,
+        mnemonics: Optional[Set[str]] = None,
+    ) -> Optional[Any]:
         if block_info is None:
             return None
+        allowed_mnemonics = mnemonics or {"BRANCHIND", "CALLIND"}
         for pcode_op in reversed(list(getattr(block_info, "pcode_ops", []) or [])):
             try:
-                if pcode_op.getMnemonic() == "BRANCHIND":
+                if str(pcode_op.getMnemonic()) in allowed_mnemonics:
                     return pcode_op
             except Exception:
                 continue
         return None
 
+    def _enumerate_switch_dispatch_targets(
+        self,
+        dispatch_summary,
+    ) -> List[Tuple[int, List[Condition]]]:
+        resolved_targets: List[Tuple[int, List[Condition]]] = []
+        seen = set()
+
+        for path_summary in getattr(dispatch_summary, "paths", []) or []:
+            for dispatch_case in getattr(path_summary, "cases", []) or []:
+                merged_conditions = ConditionSimplifier.simplify_conditions(
+                    list(getattr(dispatch_case, "conditions", []) or [])
+                )
+                if ConditionSimplifier.is_contradiction(merged_conditions):
+                    continue
+                key = (
+                    int(getattr(dispatch_case, "target_address", 0)),
+                    tuple(
+                        ConditionSimplifier.get_simplified_condition_string(cond)
+                        for cond in merged_conditions
+                    ),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved_targets.append(
+                    (
+                        int(getattr(dispatch_case, "target_address", 0)),
+                        merged_conditions,
+                    )
+                )
+
+        if len(resolved_targets) > self._bounded_call_max_cases:
+            if self.debug:
+                self._debug_print(
+                    "Switch recovery skipped: dispatch fanout exceeds configured safety limit "
+                    f"({len(resolved_targets)} > {self._bounded_call_max_cases})"
+                )
+            return []
+        return resolved_targets
+
+    def _resolve_switch_case_target_expansions(
+        self,
+        address_value: int,
+        dispatch_conditions: List[Condition],
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        *,
+        active_functions: Set[str],
+        current_function=None,
+    ):
+        from ..transform.expander import ExpandedValue
+
+        target_block = self._find_block_info_for_program_offset(condition_tracker, address_value)
+        if target_block is None:
+            return None
+
+        recovered_infos: List[ReturnInfo] = []
+        get_paths_to_return = getattr(condition_tracker, "get_all_valid_block_paths_to_return", None)
+        if not callable(get_paths_to_return):
+            return None
+
+        fallback_address = (
+            str(current_function.getEntryPoint())
+            if current_function is not None and hasattr(current_function, "getEntryPoint")
+            else "unknown"
+        )
+
+        for return_index, return_op in enumerate(return_ops or []):
+            raw_path_entries = get_paths_to_return(return_op)
+            path_entries = self._coerce_block_path_entries(raw_path_entries)
+            if not path_entries:
+                continue
+
+            for path_index, (block_path, path_conditions) in enumerate(path_entries):
+                start_index = self._find_block_index_on_path(block_path, target_block)
+                if start_index is None:
+                    continue
+
+                combined_conditions = ConditionSimplifier.simplify_conditions(
+                    list(path_conditions) + list(dispatch_conditions)
+                )
+                if ConditionSimplifier.is_contradiction(combined_conditions):
+                    continue
+
+                site_metadata = self._describe_pcode_site(return_op, fallback_address)
+                suffix_path = list(block_path[start_index:])
+                linear_ops = self._collect_linear_ops_to_return(suffix_path, return_op)
+                if not linear_ops:
+                    continue
+
+                tracked_values = self._build_return_tracking_targets(
+                    return_op,
+                    tracer=tracer,
+                    current_function=current_function,
+                )
+                if not tracked_values:
+                    continue
+
+                for pcode_op in reversed(linear_ops[:-1]):
+                    tracked_values = self._rewrite_tracked_return_values_for_op(
+                        tracked_values,
+                        pcode_op,
+                        tracer=tracer,
+                        condition_tracker=condition_tracker,
+                        path_conditions=combined_conditions,
+                        current_function=current_function,
+                    )
+                    if not tracked_values:
+                        break
+
+                if not tracked_values:
+                    continue
+
+                path_results = self._recover_return_infos_from_tracked_sources(
+                    tracked_values,
+                    cast(str, site_metadata.get("address") or fallback_address),
+                    tracer,
+                    condition_tracker,
+                    combined_conditions,
+                    return_index * 1000 + path_index,
+                    all_path_conditions=[combined_conditions],
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+
+                if path_results:
+                    recovered_infos.extend(path_results)
+
+        if not recovered_infos:
+            return None
+
+        normalized_infos = self._merge_equivalent_return_infos(
+            self._prune_less_precise_return_infos(recovered_infos)
+        )
+        if not normalized_infos:
+            return None
+
+        expanded_values = []
+        for ret_info in normalized_infos:
+            residual_conditions = ConditionSimplifier.subtract_implied_conditions(
+                list(ret_info.conditions),
+                list(dispatch_conditions),
+            )
+            expanded_values.append(
+                ExpandedValue(
+                    value=self._clone_expression(ret_info.value),
+                    conditions=residual_conditions,
+                )
+            )
+        return expanded_values or None
+
+    def _find_block_info_for_program_offset(
+        self,
+        condition_tracker: ConditionTracker,
+        address_value: int,
+    ):
+        block_by_index = getattr(condition_tracker, "block_by_index", None) or {}
+        for block_info in block_by_index.values():
+            block = getattr(block_info, "block", None)
+            if block is None:
+                continue
+            start_offset = self._address_offset_for_block_endpoint(getattr(block, "getStart", lambda: None)())
+            stop_offset = self._address_offset_for_block_endpoint(getattr(block, "getStop", lambda: None)())
+            if start_offset is None:
+                continue
+            if stop_offset is None:
+                stop_offset = start_offset
+            lo = min(start_offset, stop_offset)
+            hi = max(start_offset, stop_offset)
+            if lo <= int(address_value) <= hi:
+                return block_info
+        return None
+
+    def _address_offset_for_block_endpoint(self, address) -> Optional[int]:
+        if address is None:
+            return None
+        try:
+            return int(address.getOffset())
+        except Exception:
+            return None
+
     def _enumerate_switch_branch_targets(
         self,
         switch_block,
-        branchind_op,
+        indirect_op,
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
     ) -> List[Tuple[int, List[Condition]]]:
-        if branchind_op is None or branchind_op.getNumInputs() < 1:
+        if indirect_op is None or indirect_op.getNumInputs() < 1:
             return []
 
         base_paths = condition_tracker.get_all_valid_block_paths_to_block(switch_block)
@@ -1827,7 +2148,7 @@ class ReturnAnalyzer:
         seen = set()
         for _blocks, base_conditions in base_paths:
             try:
-                target_varnode = branchind_op.getInput(0)
+                target_varnode = indirect_op.getInput(0)
             except Exception:
                 return []
 
@@ -1841,7 +2162,8 @@ class ReturnAnalyzer:
             if not target_branches:
                 if self.debug:
                     self._debug_print(
-                        f"Switch recovery skipped on block {switch_block.index}: BRANCHIND target was not finitely enumerable"
+                        "Switch recovery skipped on block "
+                        f"{switch_block.index}: indirect target was not finitely enumerable"
                     )
                 return []
 
@@ -3538,6 +3860,19 @@ class ReturnAnalyzer:
                 )
                 return expr
 
+        for return_storage in self._get_implicit_return_target_storages(current_function, tracer):
+            expr = self._lookup_local_expression_for_storage(
+                return_storage,
+                local_values,
+                local_storages,
+            )
+            if expr is not None and expr.expr_type != ExpressionType.UNKNOWN:
+                self._debug_print(
+                    "Local target RETURN without explicit value; using implicit return storage "
+                    f"{getattr(return_storage, 'base_register_name', None) or getattr(return_storage, 'register_name', None)}"
+                )
+                return expr
+
         self._debug_print("Local target RETURN without explicit value; defaulting to 0")
         return Expression.constant(0, 1)
 
@@ -3577,6 +3912,53 @@ class ReturnAnalyzer:
             )
             return aliased
         return None
+
+    def _lookup_local_expression_for_storage(
+        self,
+        target_storage: Optional[StorageInfo],
+        local_values: Dict[Tuple[str, int, int], Expression],
+        local_storages: Dict[Tuple[str, int, int], Any],
+    ) -> Optional[Expression]:
+        if target_storage is None or not getattr(target_storage, "is_register", False):
+            return None
+
+        best_expr: Optional[Expression] = None
+        best_score: Optional[Tuple[int, int, int, int]] = None
+
+        for key, candidate_storage in local_storages.items():
+            if candidate_storage is None:
+                continue
+            try:
+                same_base = candidate_storage.shares_base_register_with(target_storage)
+                overlaps = candidate_storage.bit_range_overlaps_with(target_storage)
+            except Exception:
+                continue
+            if not same_base or not overlaps:
+                continue
+
+            candidate_expr = local_values.get(key)
+            if candidate_expr is None:
+                continue
+
+            candidate_size = int(getattr(candidate_storage, "size", 0) or 0)
+            target_size = int(getattr(target_storage, "size", 0) or 0)
+            candidate_offset = int(getattr(candidate_storage, "bit_offset_in_base", 0) or 0)
+            target_offset = int(getattr(target_storage, "bit_offset_in_base", 0) or 0)
+            score = (
+                1 if candidate_offset == target_offset else 0,
+                1 if candidate_size == target_size else 0,
+                min(candidate_size, target_size),
+                -abs(candidate_offset - target_offset),
+            )
+            if best_score is not None and score <= best_score:
+                continue
+
+            aliased = self._clone_expression(candidate_expr)
+            aliased.size = max(1, target_size or getattr(aliased, "size", 0) or 0)
+            best_expr = aliased
+            best_score = score
+
+        return best_expr
 
     def _get_function_return_varnodes(self, function) -> List[Any]:
         if function is None:

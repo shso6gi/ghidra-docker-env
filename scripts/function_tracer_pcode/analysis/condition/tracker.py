@@ -21,6 +21,7 @@ class BasicBlockInfo:
         self.branch_condition_varnode = None
         self.true_out_index: int = -1
         self.false_out_index: int = -1
+        self.switch_dispatch_summaries = []
     
     def load_ops(self):
         pcode_iter = self.block.getIterator()
@@ -65,12 +66,45 @@ class ConditionTracker:
         self.entry_block: Optional[BasicBlockInfo] = None
         self._single_path_cache: Dict[int, List[Condition]] = {}
         self._valid_block_paths_cache: Dict[tuple[int, int], List[tuple[list[BasicBlockInfo], list[Condition]]]] = {}
+        self.switch_dispatch_summaries: Dict[int, List[Any]] = {}
         
         self._built = False
 
     def _clear_path_caches(self) -> None:
         self._single_path_cache.clear()
         self._valid_block_paths_cache.clear()
+
+    def attach_switch_dispatch_summaries(self, summaries) -> None:
+        self.switch_dispatch_summaries.clear()
+        for block_info in self.block_by_index.values():
+            block_info.switch_dispatch_summaries = []
+
+        for summary in summaries or []:
+            block_info = getattr(summary, "block_info", None)
+            block_index = getattr(block_info, "index", None)
+            if block_index is None:
+                continue
+            bucket = self.switch_dispatch_summaries.setdefault(block_index, [])
+            bucket.append(summary)
+            if block_index in self.block_by_index:
+                self.block_by_index[block_index].switch_dispatch_summaries = list(bucket)
+
+    def get_switch_dispatch_summaries(self, block_or_index=None):
+        if block_or_index is None:
+            summaries = []
+            for bucket in self.switch_dispatch_summaries.values():
+                summaries.extend(bucket)
+            return summaries
+
+        if isinstance(block_or_index, int):
+            return list(self.switch_dispatch_summaries.get(block_or_index, []))
+
+        block_index = getattr(block_or_index, "index", None)
+        if block_index is None:
+            block_index = getattr(getattr(block_or_index, "block", None), "getIndex", lambda: None)()
+        if block_index is None:
+            return []
+        return list(self.switch_dispatch_summaries.get(block_index, []))
 
     def _clone_conditions(self, conditions: List[Condition]) -> List[Condition]:
         return list(conditions or [])

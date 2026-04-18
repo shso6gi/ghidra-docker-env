@@ -11,6 +11,9 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import build_symbol_replacer
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -18,6 +21,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -40,6 +44,10 @@ def _const(value: int) -> Expression:
 
 def _binary(op: str, left: Expression, right: Expression) -> Expression:
     return Expression.binary_op(op, left, right)
+
+
+def _masked_param(name: str) -> Expression:
+    return _binary("INT_AND", _param(name), _const(0xFFFFFFFF))
 
 
 def _signed_modulo_expansion(lhs: Expression, rhs: Expression) -> Expression:
@@ -306,6 +314,138 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     solver_runner.run_sequential.side_effect = _run_sequential
 
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
+def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeypatch):
+    analysis1 = FunctionReturnAnalysis(
+        function_name="branch_sign_bucket_left",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_const(2),
+                conditions=[
+                    Condition(_binary("INT_EQUAL", _param("param_1"), _const(0)), negated=True),
+                    Condition(_binary("INT_LESS", _param("param_1"), _const(101))),
+                    Condition(_binary("INT_SLESS", _param("param_1"), _const(0)), negated=True),
+                ],
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="branch_sign_bucket_right",
+        entry_point="0x2000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x2001",
+                value=_const(2),
+                conditions=[
+                    Condition(_binary("INT_NOTEQUAL", _masked_param("param_1"), _const(0))),
+                    Condition(_binary("INT_LESS", _const(100), _masked_param("param_1")), negated=True),
+                    Condition(_binary("INT_LESS", _const(0xFFFFFFFF), _masked_param("param_1"))),
+                ],
+            )
+        ],
+        return_type="int",
+    )
+
+    formula_builder = FormulaBuilder()
+    base_ctx = formula_builder.build_base_context(analysis1, analysis2)
+    replace_fn1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))
+    replace_fn2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []))
+
+    strategy = PairwiseStrategy(formula_builder, Mock(), debug=False)
+    case1 = ReturnCase(
+        index=0,
+        conditions=list(analysis1.returns[0].conditions),
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type="int",
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=list(analysis2.returns[0].conditions),
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type="int",
+    )
+
+    def _unexpected_simplify(*_args, **_kwargs):
+        raise AssertionError("ConditionSimplifier.simplify_conditions should not be used here")
+
+    monkeypatch.setattr(ConditionSimplifier, "simplify_conditions", _unexpected_simplify)
+
+    assert (
+        strategy._case_contains_unresolved_expression(
+            case1,
+            case2.conditions,
+            own_render_fn=replace_fn1,
+            extra_render_fn=replace_fn2,
+            base_ctx=base_ctx,
+            query_label="mixed-guard",
+        )
+        is False
+    )
+
+
+def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
+    analysis1 = FunctionReturnAnalysis(
+        function_name="branch_sign_bucket_left",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_const(2),
+                conditions=[
+                    Condition(_binary("INT_EQUAL", _param("param_1"), _const(0)), negated=True),
+                    Condition(_binary("INT_LESS", _param("param_1"), _const(101))),
+                    Condition(_binary("INT_SLESS", _param("param_1"), _const(0)), negated=True),
+                ],
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="branch_sign_bucket_right",
+        entry_point="0x2000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x2001",
+                value=_const(2),
+                conditions=[
+                    Condition(_binary("INT_NOTEQUAL", _masked_param("param_1"), _const(0))),
+                    Condition(_binary("INT_LESS", _const(100), _masked_param("param_1")), negated=True),
+                    Condition(_binary("INT_SLESS", _masked_param("param_1"), _const(0)), negated=True),
+                ],
+            )
+        ],
+        return_type="int",
+    )
+
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+
+    def _run_sequential(query: str, timeout=None):
+        if "Return coverage gap query" in query:
+            return ParallelResult(results=[SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.01)])
+        if "; Value inequality" in query:
+            return ParallelResult(results=[SolverResult("mock", SolverStatus.UNSAT, elapsed_time=0.01)])
+        return ParallelResult(results=[SolverResult("mock", SolverStatus.SAT, elapsed_time=0.01)])
+
+    solver_runner.run_sequential.side_effect = _run_sequential
+
+    strategy = PairwiseStrategy(FormulaBuilder(), solver_runner, debug=False)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True

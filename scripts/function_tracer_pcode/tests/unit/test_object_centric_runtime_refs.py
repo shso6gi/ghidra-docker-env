@@ -82,6 +82,42 @@ def test_storage_info_register_identity_uses_numeric_base_metadata():
     assert left.register_identity_key() == right.register_identity_key()
 
 
+def test_storage_info_matches_base_register_by_name_when_numeric_offsets_differ():
+    synthetic = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=0,
+        size=8,
+        size_bits=64,
+        register_name="v0",
+        base_register_name="v0",
+        base_register_offset=StorageInfo._synthetic_register_offset("v0"),
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    concrete = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=548,
+        offset=0x10,
+        size=8,
+        size_bits=64,
+        register_name="v0",
+        register_offset=0x10,
+        register_size=8,
+        register_size_bits=64,
+        base_register_name="v0",
+        base_register_offset=0x10,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+
+    assert synthetic.base_register_offset != concrete.base_register_offset
+    assert synthetic.shares_base_register_with(concrete) is True
+
+
 def test_post_state_symbolic_locations_bind_parameter_indices():
     parameters = [{"name": "trace", "index": 0, "size": 8}]
     expr = post_state_read_expression_for_location(

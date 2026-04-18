@@ -72,8 +72,22 @@ def solve_query_twostage(
     contextual_unresolved = getattr(strategy, "_case_value_contains_unresolved", None)
     if contextual_unresolved is not None:
         has_unresolved_value = (
-            contextual_unresolved(case1, case2.conditions)
-            or contextual_unresolved(case2, case1.conditions)
+            contextual_unresolved(
+                case1,
+                case2.conditions,
+                own_render_fn=param_replace_fn1,
+                extra_render_fn=param_replace_fn2,
+                base_ctx=base_ctx,
+                query_label=f"{pair_id}:value1",
+            )
+            or contextual_unresolved(
+                case2,
+                case1.conditions,
+                own_render_fn=param_replace_fn2,
+                extra_render_fn=param_replace_fn1,
+                base_ctx=base_ctx,
+                query_label=f"{pair_id}:value2",
+            )
         )
     else:
         has_unresolved_value = (
