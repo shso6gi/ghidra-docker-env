@@ -153,6 +153,7 @@ class ReturnAnalyzer:
         self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
         self._deferred_call_counter: int = 0
         self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
+        self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
         self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
@@ -629,6 +630,7 @@ class ReturnAnalyzer:
         ConditionSimplifier.reset_debug_state()
         
         active_functions = set(active_functions or set())
+        self._return_path_entry_cache = {}
         current_active_key = self._target_active_key(CallTargetRef.from_function(function))
         if current_active_key is not None:
             active_functions.add(current_active_key)
@@ -687,22 +689,6 @@ class ReturnAnalyzer:
                 read_memory_value=self._read_memory_value,
                 image_base=image_base,
             )
-            effect_summary = self._build_effect_summary(
-                function,
-                high_function,
-                tracer,
-                condition_tracker,
-                parameters,
-                active_functions=(
-                    {function.getName()}
-                    | (
-                        {self._target_active_key(CallTargetRef.from_function(function))}
-                        if self._target_active_key(CallTargetRef.from_function(function)) is not None
-                        else set()
-                    )
-                ),
-            )
-            self._current_effect_summary = effect_summary
 
             # 戻り値の型を取得
             return_type_obj, return_type = self._get_return_type_info(high_function)
@@ -716,22 +702,52 @@ class ReturnAnalyzer:
                     self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
                     self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
 
-            return_infos = []
             return_ops = tracer.find_return_ops()
-
             self._debug_print(f"Found {len(return_ops)} RETURN operations")
 
-            for i, return_op in enumerate(return_ops):
-                self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
-                infos = self._analyze_return_op(
-                    return_op,
+            empty_effect_summary = self._make_empty_effect_summary(parameters)
+            recovered_control_returns, control_region_notes = self._recover_control_region_returns_early(
+                function,
+                tracer,
+                condition_tracker,
+                return_ops,
+                active_functions=active_functions,
+            )
+
+            effect_summary = empty_effect_summary
+            if recovered_control_returns is not None:
+                self._current_effect_summary = empty_effect_summary
+                return_infos = list(recovered_control_returns)
+            else:
+                effect_summary = self._build_effect_summary(
+                    function,
+                    high_function,
                     tracer,
                     condition_tracker,
-                    i,
-                    current_function=function,
-                    active_functions=active_functions,
+                    parameters,
+                    active_functions=(
+                        {function.getName()}
+                        | (
+                            {self._target_active_key(CallTargetRef.from_function(function))}
+                            if self._target_active_key(CallTargetRef.from_function(function)) is not None
+                            else set()
+                        )
+                    ),
                 )
-                return_infos.extend(infos)
+                self._current_effect_summary = effect_summary
+
+                return_infos = []
+                for i, return_op in enumerate(return_ops):
+                    self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
+                    infos = self._analyze_return_op(
+                        return_op,
+                        tracer,
+                        condition_tracker,
+                        i,
+                        current_function=function,
+                        active_functions=active_functions,
+                    )
+                    return_infos.extend(infos)
 
             result = FunctionReturnAnalysis(
                 function_name=function.getName(),
@@ -753,55 +769,60 @@ class ReturnAnalyzer:
                 }
             )
 
-            if (
-                return_type_obj is not None
-                and self._is_void_type(return_type_obj)
-                and effect_summary.synthetic_expr is not None
-                and not effect_summary.has_unsupported_call
-            ):
-                result.returns = [
-                    self._make_return_info(
-                        address=str(function.getEntryPoint()),
-                        conditions=[],
-                        branch_index=0,
-                        value=effect_summary.synthetic_expr,
+            for note in control_region_notes:
+                if note not in result.analysis_notes:
+                    result.analysis_notes.append(note)
+
+            if recovered_control_returns is None:
+                if (
+                    return_type_obj is not None
+                    and self._is_void_type(return_type_obj)
+                    and effect_summary.synthetic_expr is not None
+                    and not effect_summary.has_unsupported_call
+                ):
+                    result.returns = [
+                        self._make_return_info(
+                            address=str(function.getEntryPoint()),
+                            conditions=[],
+                            branch_index=0,
+                            value=effect_summary.synthetic_expr,
+                        )
+                    ]
+                    result.comparison_surface = ComparisonSurface(
+                        kind="memory_effect",
+                        explicit_bit_width=max(1, effect_summary.synthetic_expr.get_bit_width()),
+                        use_sign_extension=False,
+                        evidence={
+                            "source": "effect_summary.synthetic_expr",
+                            "effect_count": len(getattr(effect_summary, "effects", []) or []),
+                        },
                     )
-                ]
-                result.comparison_surface = ComparisonSurface(
-                    kind="memory_effect",
-                    explicit_bit_width=max(1, effect_summary.synthetic_expr.get_bit_width()),
-                    use_sign_extension=False,
-                    evidence={
-                        "source": "effect_summary.synthetic_expr",
-                        "effect_count": len(getattr(effect_summary, "effects", []) or []),
-                    },
+
+                recovered_returns = self._recover_call_wrapper_returns(
+                    results,
+                    result,
+                    function,
+                    tracer,
+                    condition_tracker,
+                    return_ops,
+                    active_functions,
                 )
+                if recovered_returns is not None:
+                    result.returns = recovered_returns
+                    result.analysis_notes.append("call_wrapper_return_recovery")
 
-            recovered_returns = self._recover_call_wrapper_returns(
-                results,
-                result,
-                function,
-                tracer,
-                condition_tracker,
-                return_ops,
-                active_functions,
-            )
-            if recovered_returns is not None:
-                result.returns = recovered_returns
-                result.analysis_notes.append("call_wrapper_return_recovery")
-
-            recovered_switch_returns = self._recover_switch_like_returns_from_pcode(
-                result,
-                tracer,
-                condition_tracker,
-                return_ops=return_ops,
-                current_function=function,
-                active_functions=active_functions,
-            )
-            if recovered_switch_returns is not None:
-                result.returns = recovered_switch_returns
-                if "switch_return_recovery" not in result.analysis_notes:
-                    result.analysis_notes.append("switch_return_recovery")
+                recovered_switch_returns = self._recover_switch_like_returns_from_pcode(
+                    result,
+                    tracer,
+                    condition_tracker,
+                    return_ops=return_ops,
+                    current_function=function,
+                    active_functions=active_functions,
+                )
+                if recovered_switch_returns is not None:
+                    result.returns = recovered_switch_returns
+                    if "switch_return_recovery" not in result.analysis_notes:
+                        result.analysis_notes.append("switch_return_recovery")
 
             summary = self._apply_structural_recurrence_summary(
                 function,
@@ -828,7 +849,8 @@ class ReturnAnalyzer:
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             self._repair_mixed_scalar_signedness(result)
             result.returns = self._strip_stack_protector_only_conditions(result.returns)
-            result.returns = self._exclusivize_return_regions(result.returns)
+            if "control_region_return_recovery" not in result.analysis_notes:
+                result.returns = self._exclusivize_return_regions(result.returns)
             result.returns = self._merge_equivalent_return_infos(result.returns)
             if (
                 result.has_symbolic_post_state_reads()
@@ -1534,6 +1556,453 @@ class ReturnAnalyzer:
                 f"(remaining deferred calls={len(analysis.deferred_calls)})"
             )
 
+    def _make_empty_effect_summary(
+        self,
+        parameters: List[Dict],
+    ) -> EffectSummary:
+        parameter_names = [
+            str(name)
+            for param in (parameters or [])
+            for name in [param.get("name")]
+            if isinstance(name, str) and name
+        ]
+        return EffectSummary(parameter_names=parameter_names, effects=[])
+
+    def _recover_control_region_returns_early(
+        self,
+        current_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        *,
+        active_functions,
+    ) -> Tuple[Optional[List[ReturnInfo]], List[str]]:
+        if not return_ops:
+            return None, []
+
+        recovered_switch = self._recover_switch_like_returns_from_placeholder_analysis(
+            current_function,
+            tracer,
+            condition_tracker,
+            return_ops,
+            active_functions=active_functions,
+        )
+        if recovered_switch is not None and self._control_region_returns_are_safe(recovered_switch):
+            return recovered_switch, ["switch_return_recovery", "control_region_return_recovery"]
+
+        recovered_paths = self._recover_control_flow_returns_from_block_paths(
+            current_function,
+            tracer,
+            condition_tracker,
+            return_ops,
+            active_functions=active_functions,
+        )
+        if recovered_paths is not None and self._control_region_returns_are_safe(recovered_paths):
+            return recovered_paths, ["control_region_return_recovery"]
+
+        return None, []
+
+    def _recover_switch_like_returns_from_placeholder_analysis(
+        self,
+        current_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        *,
+        active_functions,
+    ) -> Optional[List[ReturnInfo]]:
+        placeholders: List[ReturnInfo] = []
+        fallback_address = (
+            str(current_function.getEntryPoint())
+            if current_function is not None and hasattr(current_function, "getEntryPoint")
+            else "unknown"
+        )
+        for return_index, return_op in enumerate(return_ops or []):
+            site_metadata = self._describe_pcode_site(return_op, fallback_address)
+            placeholders.append(
+                self._make_return_info(
+                    address=cast(str, site_metadata.get("address") or fallback_address),
+                    value=Expression.unknown("control_region_placeholder"),
+                    conditions=[],
+                    branch_index=return_index,
+                    site_metadata=site_metadata,
+                )
+            )
+
+        placeholder_analysis = FunctionReturnAnalysis(
+            function_name=current_function.getName() if current_function is not None else "unknown",
+            entry_point=fallback_address,
+            parameters=list(self._current_parameters or []),
+            returns=placeholders,
+            function_ref=(
+                CallTargetRef.from_function(current_function)
+                if current_function is not None
+                else None
+            ),
+            return_type="unknown",
+            return_type_obj=None,
+            unknown_event_count=1,
+            unknown_event_reasons=["indirect_control_flow_unresolved"],
+        )
+        recovered = self._recover_switch_like_returns_from_pcode(
+            placeholder_analysis,
+            tracer,
+            condition_tracker,
+            return_ops=return_ops,
+            current_function=current_function,
+            active_functions=active_functions,
+        )
+        if recovered is None:
+            return None
+        return self._merge_equivalent_return_infos(
+            self._prune_less_precise_return_infos(recovered)
+        )
+
+    def _recover_control_flow_returns_from_block_paths(
+        self,
+        current_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        *,
+        active_functions,
+    ) -> Optional[List[ReturnInfo]]:
+        recovered_results: List[ReturnInfo] = []
+        fallback_address = (
+            str(current_function.getEntryPoint())
+            if current_function is not None and hasattr(current_function, "getEntryPoint")
+            else "unknown"
+        )
+
+        for return_index, return_op in enumerate(return_ops or []):
+            path_entries = self._get_cached_return_path_entries(
+                condition_tracker,
+                return_op,
+                tracer=tracer,
+            )
+            if not path_entries:
+                return None
+
+            site_metadata = self._describe_pcode_site(return_op, fallback_address)
+            address = cast(str, site_metadata.get("address") or fallback_address)
+            num_inputs = self._coerce_optional_int(getattr(return_op, "getNumInputs", lambda: 0)())
+            num_inputs = num_inputs if num_inputs is not None else 0
+
+            if num_inputs >= 2:
+                path_recovered = self._recover_explicit_return_from_block_paths(
+                    return_op,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    return_index,
+                    path_entries,
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+            else:
+                path_recovered = self._recover_implicit_return_from_block_paths(
+                    return_op,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    return_index,
+                    path_entries,
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+
+            if not path_recovered:
+                return None
+            recovered_results.extend(path_recovered)
+
+        if not recovered_results:
+            return None
+
+        recovered_results = self._merge_equivalent_return_infos(
+            self._prune_less_precise_return_infos(recovered_results)
+        )
+        return recovered_results
+
+    def _recover_explicit_return_from_block_paths(
+        self,
+        return_op,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_index: int,
+        path_entries,
+        active_functions: Optional[Set[Any]] = None,
+        current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        normalized_entries = self._coerce_block_path_entries(path_entries)
+        if not normalized_entries:
+            return None
+
+        try:
+            candidate_source = return_op.getInput(1)
+        except Exception:
+            return None
+
+        recovered_results: List[ReturnInfo] = []
+        unresolved_paths: List[int] = []
+
+        for path_idx, (block_path, conditions) in enumerate(normalized_entries):
+            selected_source = self._select_path_specific_return_source(
+                candidate_source,
+                block_path,
+                condition_tracker=condition_tracker,
+                path_conditions=conditions,
+            )
+            if selected_source is None:
+                unresolved_paths.append(path_idx)
+                continue
+
+            path_results = self._recover_explicit_return_from_path_source(
+                selected_source,
+                address,
+                tracer,
+                condition_tracker,
+                list(conditions),
+                return_index * 1000 + path_idx * 100,
+                active_functions=active_functions,
+                current_function=current_function,
+                site_metadata=site_metadata,
+            )
+            if not path_results:
+                unresolved_paths.append(path_idx)
+                continue
+            recovered_results.extend(path_results)
+
+        if recovered_results and not unresolved_paths:
+            return self._merge_equivalent_return_infos(recovered_results)
+
+        if self.debug and unresolved_paths:
+            self._debug_print(
+                "Explicit return path recovery could not resolve source on "
+                f"path(s) {unresolved_paths}"
+            )
+        return None
+
+    def _recover_explicit_return_from_path_source(
+        self,
+        return_source,
+        address: str,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        path_conditions: List[Condition],
+        return_index_base: int,
+        active_functions: Optional[Set[Any]] = None,
+        current_function=None,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        direct_results = self._materialize_direct_path_specific_return_source(
+            return_source,
+            address,
+            tracer,
+            path_conditions,
+            return_index_base,
+            site_metadata=site_metadata,
+        )
+        if direct_results is not None:
+            return direct_results
+
+        tracked_sources = [self._make_tracked_return_value(return_source, tracer)]
+        return self._recover_return_infos_from_tracked_sources(
+            tracked_sources,
+            address,
+            tracer,
+            condition_tracker,
+            list(path_conditions),
+            return_index_base,
+            all_path_conditions=[list(path_conditions)],
+            active_functions=active_functions,
+            current_function=current_function,
+            site_metadata=site_metadata,
+        )
+
+    def _materialize_direct_path_specific_return_source(
+        self,
+        return_source,
+        address: str,
+        tracer: PcodeTracer,
+        path_conditions: List[Condition],
+        return_index_base: int,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        if return_source is None or self._contains_multiequal(return_source):
+            return None
+
+        # get_all_valid_block_paths_to_return() already provides exact feasible path
+        # partitions, so re-simplifying the same guard set here only burns solver time.
+        normalized_conditions = list(path_conditions or [])
+
+        try:
+            tracer.clear_cache()
+        except Exception:
+            pass
+
+        value = tracer.trace_varnode(return_source, use_cache=False)
+        if value is None:
+            return None
+
+        candidate_value = self._fold_constant_expression(
+            value,
+            fallback_expr=value,
+        ) or value
+        candidate_value = self._concretize_readonly_loads(
+            candidate_value,
+            normalized_conditions,
+            self._current_parameters,
+        )
+        if candidate_value is None:
+            return None
+        if (
+            self._expression_contains_unresolved_value(candidate_value)
+            or expression_contains_post_state_reads(candidate_value)
+            or _expression_contains_observed_loads(candidate_value)
+        ):
+            return None
+
+        if not self._expression_contains_phi(candidate_value):
+            return [
+                self._make_return_info(
+                    address=address,
+                    value=candidate_value,
+                    conditions=normalized_conditions,
+                    branch_index=return_index_base,
+                    site_metadata=site_metadata,
+                )
+            ]
+
+        reduced_value = ConditionSimplifier.reduce_expression_under_conditions(
+            candidate_value,
+            normalized_conditions,
+        )
+        candidate_value = self._fold_constant_expression(
+            reduced_value,
+            fallback_expr=candidate_value,
+        ) or reduced_value
+        if (
+            self._expression_contains_unresolved_value(candidate_value)
+            or expression_contains_post_state_reads(candidate_value)
+            or _expression_contains_observed_loads(candidate_value)
+        ):
+            return None
+        if not self._expression_contains_phi(candidate_value):
+            return [
+                self._make_return_info(
+                    address=address,
+                    value=candidate_value,
+                    conditions=normalized_conditions,
+                    branch_index=return_index_base,
+                    site_metadata=site_metadata,
+                )
+            ]
+
+        split_cases = self._split_object_centric_return_case(
+            candidate_value,
+            normalized_conditions,
+        )
+        results: List[ReturnInfo] = []
+        for split_index, (split_value, split_conditions) in enumerate(split_cases or []):
+            normalized_value = self._fold_constant_expression(
+                split_value,
+                fallback_expr=candidate_value,
+            ) or split_value
+            if (
+                self._expression_contains_unresolved_value(normalized_value)
+                or expression_contains_post_state_reads(normalized_value)
+                or _expression_contains_observed_loads(normalized_value)
+            ):
+                return None
+            results.append(
+                self._make_return_info(
+                    address=address,
+                    value=normalized_value,
+                    conditions=list(split_conditions or []),
+                    branch_index=(
+                        return_index_base
+                        if len(split_cases) == 1
+                        else return_index_base * 10 + split_index
+                    ),
+                    site_metadata=site_metadata,
+                )
+            )
+
+        if not results:
+            return None
+        return self._merge_equivalent_return_infos(results)
+
+    def _get_cached_return_path_entries(
+        self,
+        condition_tracker: ConditionTracker,
+        return_op,
+        *,
+        tracer: Optional[PcodeTracer] = None,
+    ) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
+        key = self._pcode_op_identity_key(return_op) or ("id", id(return_op))
+        cached = self._return_path_entry_cache.get(key, None)
+        if key in self._return_path_entry_cache:
+            return cached
+
+        get_paths_to_return = getattr(condition_tracker, "get_all_valid_block_paths_to_return", None)
+        if not callable(get_paths_to_return):
+            self._return_path_entry_cache[key] = None
+            return None
+
+        raw_path_entries = get_paths_to_return(return_op)
+        path_entries = self._coerce_block_path_entries(raw_path_entries)
+        if path_entries and tracer is not None:
+            path_entries = self._filter_noreturn_return_path_entries(path_entries, tracer, return_op)
+
+        self._return_path_entry_cache[key] = path_entries
+        return path_entries
+
+    def _control_region_returns_are_safe(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> bool:
+        if not return_infos:
+            return False
+        for info in return_infos:
+            if self._expression_contains_unresolved_value(info.value):
+                return False
+            if expression_contains_post_state_reads(info.value):
+                return False
+            if _expression_contains_observed_loads(info.value):
+                return False
+        return True
+
+    def _return_infos_have_conflicting_overlap(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> bool:
+        for left_index, left in enumerate(return_infos):
+            for right in return_infos[left_index + 1:]:
+                combined_conditions = ConditionSimplifier.simplify_conditions(
+                    list(left.conditions or []) + list(right.conditions or [])
+                )
+                if ConditionSimplifier.is_contradiction(combined_conditions):
+                    continue
+                if _expressions_equivalent(left.value, right.value):
+                    continue
+                if self.debug:
+                    cond_dump = [
+                        ConditionSimplifier.get_simplified_condition_string(cond)
+                        for cond in combined_conditions
+                    ]
+                    self._debug_print(
+                        "Control-region recovery rejected due to overlapping regions: "
+                        f"left={self._debug_expr_identity_summary(left.value)} "
+                        f"right={self._debug_expr_identity_summary(right.value)} "
+                        f"conditions={cond_dump}"
+                    )
+                return True
+        return False
+
     def _recover_call_wrapper_returns(
         self,
         decompile_results,
@@ -1730,19 +2199,19 @@ class ReturnAnalyzer:
             expanded_values: List[ExpandedValue] = []
             candidate_failed = False
             for address_value, branch_conditions in candidate_entries:
-                resolved = self._resolve_switch_case_target_expansions(
+                resolved = self._resolve_local_code_target_expansions(
                     address_value,
-                    branch_conditions,
-                    tracer,
-                    condition_tracker,
-                    return_ops or [],
-                    active_functions=active_functions or set(),
+                    active_functions or set(),
                     current_function=current_function,
                 )
                 if not resolved:
-                    resolved = self._resolve_local_code_target_expansions(
+                    resolved = self._resolve_switch_case_target_expansions(
                         address_value,
-                        active_functions or set(),
+                        branch_conditions,
+                        tracer,
+                        condition_tracker,
+                        return_ops or [],
+                        active_functions=active_functions or set(),
                         current_function=current_function,
                     )
                 if not resolved:
@@ -1853,19 +2322,19 @@ class ReturnAnalyzer:
             expanded_values: List[ExpandedValue] = []
             candidate_failed = False
             for address_value, branch_conditions in candidate_entries:
-                resolved = self._resolve_switch_case_target_expansions(
+                resolved = self._resolve_local_code_target_expansions(
                     address_value,
-                    branch_conditions,
-                    tracer,
-                    condition_tracker,
-                    return_ops or [],
-                    active_functions=active_functions or set(),
+                    active_functions or set(),
                     current_function=current_function,
                 )
                 if not resolved:
-                    resolved = self._resolve_local_code_target_expansions(
+                    resolved = self._resolve_switch_case_target_expansions(
                         address_value,
-                        active_functions or set(),
+                        branch_conditions,
+                        tracer,
+                        condition_tracker,
+                        return_ops or [],
+                        active_functions=active_functions or set(),
                         current_function=current_function,
                     )
                 if not resolved:
@@ -2016,8 +2485,10 @@ class ReturnAnalyzer:
         )
 
         for return_index, return_op in enumerate(return_ops or []):
-            raw_path_entries = get_paths_to_return(return_op)
-            path_entries = self._coerce_block_path_entries(raw_path_entries)
+            path_entries = self._get_cached_return_path_entries(
+                condition_tracker,
+                return_op,
+            )
             if not path_entries:
                 continue
 

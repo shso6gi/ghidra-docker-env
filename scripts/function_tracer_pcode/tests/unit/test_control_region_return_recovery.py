@@ -1,0 +1,260 @@
+# -*- coding: utf-8 -*-
+
+from unittest.mock import Mock, patch
+
+from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.model import Condition, Expression
+
+
+class _FakeSeq:
+    def __init__(self, target="0x1000", time=1, order=0):
+        self._target = target
+        self._time = time
+        self._order = order
+
+    def getTarget(self):
+        return self._target
+
+    def getTime(self):
+        return self._time
+
+    def getOrder(self):
+        return self._order
+
+
+class _FakeReturnOp:
+    def __init__(self, value_varnode=None):
+        self._value_varnode = value_varnode
+        self._seq = _FakeSeq("0x401000", 9, 2)
+
+    def getNumInputs(self):
+        return 2 if self._value_varnode is not None else 1
+
+    def getInput(self, index):
+        if index == 1 and self._value_varnode is not None:
+            return self._value_varnode
+        raise AssertionError(index)
+
+    def getSeqnum(self):
+        return self._seq
+
+
+class _FakeTracer:
+    def __init__(self, *_args, **_kwargs):
+        self.high_function = Mock()
+        self.debug = False
+        self.unknown_tracker = Mock(events=[])
+        self.record_deferred_call = None
+
+    def find_return_ops(self):
+        return [Mock()]
+
+    def clear_cache(self):
+        return None
+
+
+class _FakeConditionTracker:
+    def __init__(self, _tracer):
+        self.block_by_index = {}
+
+    def build(self):
+        return None
+
+    def refine_branch_conditions(self, **_kwargs):
+        return None
+
+
+def test_materialize_direct_path_specific_return_source_recovers_constant():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer._current_parameters = []
+
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.constant(1000, 4)
+    tracer.clear_cache = Mock()
+
+    condition = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("param_1", 0, size=4),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+
+    results = analyzer._materialize_direct_path_specific_return_source(
+        Mock(getDef=Mock(return_value=None)),
+        "0x401000",
+        tracer,
+        [condition],
+        0,
+        site_metadata={"pcode_identity": "0x401000:t1", "pcode_time": 1, "pcode_order": 0},
+    )
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].value.expr_type.name == "CONSTANT"
+    assert int(results[0].value.value) == 1000
+
+
+def test_materialize_direct_path_specific_return_source_keeps_non_phi_expression():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer._current_parameters = []
+
+    tracer = Mock()
+    tracer.trace_varnode.return_value = Expression.binary_op(
+        "INT_ADD",
+        Expression.parameter("param_1", 0, size=4),
+        Expression.constant(4, 4),
+    )
+    tracer.clear_cache = Mock()
+
+    with patch.object(
+        analyzer,
+        "_split_object_centric_return_case",
+        side_effect=AssertionError("non-PHI expressions should not be split"),
+    ):
+        results = analyzer._materialize_direct_path_specific_return_source(
+            Mock(getDef=Mock(return_value=None)),
+            "0x401000",
+            tracer,
+            [],
+            0,
+            site_metadata={"pcode_identity": "0x401000:t1", "pcode_time": 1, "pcode_order": 0},
+        )
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].value.expr_type.name == "BINARY_OP"
+    assert results[0].value.operator == "INT_ADD"
+
+
+def test_return_infos_have_conflicting_overlap_detects_incompatible_cases():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    shared_condition = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("param_1", 0, size=4),
+            Expression.constant(0, 4),
+        ),
+        False,
+    )
+    left = analyzer._make_return_info(
+        address="0x1",
+        value=Expression.constant(1000, 4),
+        conditions=[shared_condition],
+        branch_index=0,
+    )
+    right = analyzer._make_return_info(
+        address="0x2",
+        value=Expression.constant(1001, 4),
+        conditions=[shared_condition],
+        branch_index=1,
+    )
+
+    assert analyzer._return_infos_have_conflicting_overlap([left, right]) is True
+
+
+def test_recover_control_region_returns_early_prefers_switch_recovery():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    recovered = [
+        analyzer._make_return_info(
+            address="0x1",
+            value=Expression.constant(1000, 4),
+            conditions=[],
+            branch_index=0,
+        )
+    ]
+
+    with patch.object(
+        analyzer,
+        "_recover_switch_like_returns_from_placeholder_analysis",
+        return_value=recovered,
+    ) as switch_mock, patch.object(
+        analyzer,
+        "_recover_control_flow_returns_from_block_paths",
+    ) as path_mock:
+        result, notes = analyzer._recover_control_region_returns_early(
+            Mock(),
+            Mock(),
+            Mock(),
+            [Mock()],
+            active_functions=set(),
+        )
+
+    switch_mock.assert_called_once()
+    path_mock.assert_not_called()
+    assert result == recovered
+    assert notes == ["switch_return_recovery", "control_region_return_recovery"]
+
+
+def test_analyze_function_skips_effect_summary_when_control_region_recovery_succeeds():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer.program.getImageBase.return_value.getOffset.return_value = 0
+
+    function = Mock()
+    function.getName.return_value = "branch_switch_dense"
+    function.getEntryPoint.return_value = "0x401000"
+
+    decompile_results = Mock()
+    decompile_results.decompileCompleted.return_value = True
+    decompile_results.getHighFunction.return_value = Mock(getFunctionPrototype=Mock(return_value=None))
+    analyzer._get_decompiler = Mock(return_value=Mock(decompileFunction=Mock(return_value=decompile_results)))
+
+    recovered = [
+        analyzer._make_return_info(
+            address="0x401000",
+            value=Expression.constant(1000, 4),
+            conditions=[],
+            branch_index=0,
+        )
+    ]
+
+    with patch("scripts.function_tracer_pcode.analysis.analyzer.PcodeTracer", _FakeTracer), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+        _FakeConditionTracker,
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.phi_resolver.PhiHandler",
+        Mock,
+    ), patch.object(
+        analyzer,
+        "_collect_parameters",
+        return_value=[{"name": "param_1", "index": 0, "size": 4}],
+    ), patch.object(
+        analyzer,
+        "_augment_parameters_with_implicit_passthrough",
+        side_effect=lambda params, *_args, **_kwargs: params,
+    ), patch.object(
+        analyzer,
+        "_get_return_type_info",
+        return_value=(None, "int"),
+    ), patch.object(
+        analyzer,
+        "_detect_signedness",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_recover_control_region_returns_early",
+        return_value=(recovered, ["control_region_return_recovery"]),
+    ), patch.object(
+        analyzer,
+        "_build_effect_summary",
+        side_effect=AssertionError("effect_summary should not be built"),
+    ), patch.object(
+        analyzer,
+        "_analyze_return_op",
+        side_effect=AssertionError("generic return analysis should not run"),
+    ), patch.object(
+        analyzer,
+        "_apply_structural_recurrence_summary",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_apply_bounded_call_refinement",
+        return_value=None,
+    ):
+        result = analyzer.analyze_function(function, timeout=1)
+
+    assert result is not None
+    assert len(result.returns) == 1
+    assert int(result.returns[0].value.value) == 1000
+    assert "control_region_return_recovery" in result.analysis_notes
