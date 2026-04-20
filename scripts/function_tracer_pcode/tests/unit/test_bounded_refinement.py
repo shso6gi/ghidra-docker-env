@@ -61,6 +61,44 @@ def test_bounded_call_refiner_runtime_dedup_does_not_require_to_string(monkeypat
     assert len(deduped) == 1
 
 
+def test_bounded_call_refiner_passes_deferred_arguments_to_analysis_provider():
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.binary_op("INT_ADD", _param(), _const(4))],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(deferred), conditions=[])],
+    )
+    caller.deferred_calls = {
+        deferred.deferred_call_ref.stable_key(): deferred,
+    }
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x2000", value=_param("x", 0), conditions=[])],
+    )
+    captured = []
+
+    def _provider(target_ref, args=None):
+        captured.append((target_ref, list(args or [])))
+        if target_ref == CallTargetRef.from_name("callee"):
+            return callee
+        return None
+
+    refiner = BoundedCallRefiner(_provider, max_unroll=1, max_cases=8, debug=False)
+
+    changed = refiner.refine_analysis(caller)
+
+    assert changed is True
+    assert captured
+    assert captured[0][1]
+    assert captured[0][1][0].to_string() == "(n + 4)"
+
+
 def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():
     n = _param()
     recursive_placeholder = "call_out_of_scope:sum#0"

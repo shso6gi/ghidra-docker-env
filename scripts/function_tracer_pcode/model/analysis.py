@@ -231,6 +231,7 @@ class FunctionReturnAnalysis:
     effect_summary: Optional["EffectSummary"] = None
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     comparison_surface: Optional[ComparisonSurface] = None
+    analysis_scope_key: Optional[Tuple[Any, ...]] = None
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -272,6 +273,8 @@ class FunctionReturnAnalysis:
             "incomplete_control_flow": self.incomplete_control_flow,
             "deferred_calls": [info.to_dict() for info in self.deferred_calls.values()],
         }
+        if self.analysis_scope_key is not None:
+            result["analysis_scope_key"] = self.analysis_scope_key
         
         if self.signedness_result:
             result["signedness"] = self.signedness_result.to_dict()

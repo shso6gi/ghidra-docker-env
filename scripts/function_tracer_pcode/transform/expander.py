@@ -1858,6 +1858,8 @@ class ExpressionExpander:
                                 self.parameters,
                                 callee_parameters,
                                 effective_args,
+                                condition_tracker=self.condition_tracker,
+                                current_conditions=merged_target_conditions,
                             )
                     fallback_args_by_target.setdefault(
                         target_ref,
@@ -1985,6 +1987,7 @@ class ExpressionExpander:
             self.parameters,
             callee_parameters,
             deferred_args,
+            condition_tracker=self.condition_tracker,
         )
         if recovered:
             return recovered

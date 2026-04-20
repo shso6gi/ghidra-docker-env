@@ -697,22 +697,27 @@ def summarize_store_effects(
                 if resolve_callee_parameters
                 else []
             )
-            args = _recover_call_argument_expressions(
-                op,
-                tracer,
-                parameters,
-                callee_parameters,
-                explicit_args,
-            )
             if debug:
                 explicit_dump = ", ".join(arg.to_string() for arg in explicit_args)
-                recovered_dump = ", ".join(arg.to_string() for arg in args)
-                print(
-                    "[EffectSummary] call arguments: "
-                    f"target={target_label} explicit=[{explicit_dump}] recovered=[{recovered_dump}]"
-                )
             for path_conditions in path_sets:
                 normalized_path_conditions = ConditionSimplifier.simplify_conditions(list(path_conditions))
+                args = _recover_call_argument_expressions(
+                    op,
+                    tracer,
+                    parameters,
+                    callee_parameters,
+                    explicit_args,
+                    condition_tracker=condition_tracker,
+                    current_conditions=normalized_path_conditions,
+                )
+                if debug:
+                    recovered_dump = ", ".join(arg.to_string() for arg in args)
+                    print(
+                        "[EffectSummary] call arguments: "
+                        f"target={target_label} explicit=[{explicit_dump}] "
+                        f"path=[{', '.join(cond.to_string() for cond in normalized_path_conditions)}] "
+                        f"recovered=[{recovered_dump}]"
+                    )
                 path_reduced_args = [
                     _reduce_expression_under_conditions(arg, normalized_path_conditions)
                     for arg in args
@@ -982,6 +987,9 @@ def _recover_call_argument_expressions(
     caller_parameters: Sequence[Dict],
     callee_parameters: Sequence[Dict],
     explicit_args: Sequence[Expression],
+    *,
+    condition_tracker=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
 ) -> List[Expression]:
     if not callee_parameters:
         return list(explicit_args)
@@ -1015,18 +1023,25 @@ def _recover_call_argument_expressions(
             recovered_args.append(explicit)
             continue
 
+        storage_parameter_match = _parameter_expression_from_matching_storage(
+            callee_param,
+            caller_parameters,
+            size=(explicit.size if explicit is not None else None),
+        )
         recovered = _recover_call_argument_from_storage(
             call_op,
             tracer,
             caller_parameters,
             callee_param,
+            condition_tracker=condition_tracker,
+            current_conditions=current_conditions,
         )
-        if recovered is None:
-            recovered = _parameter_expression_from_matching_storage(
-                callee_param,
-                caller_parameters,
-                size=(explicit.size if explicit is not None else None),
-            )
+        recovered = _prefer_object_centric_parameter_candidate(
+            recovered,
+            storage_parameter_match,
+            caller_parameters,
+            callee_param,
+        )
         if recovered is None and index < len(caller_parameters):
             recovered = _parameter_expression_from_descriptor(
                 caller_parameters[index],
@@ -1040,6 +1055,40 @@ def _recover_call_argument_expressions(
         elif explicit is not None:
             recovered_args.append(explicit)
     return recovered_args
+
+
+def _prefer_object_centric_parameter_candidate(
+    recovered: Optional[Expression],
+    parameter_candidate: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    callee_param: Optional[Dict],
+) -> Optional[Expression]:
+    if parameter_candidate is None:
+        return recovered
+    if recovered is None:
+        return parameter_candidate
+
+    parameter_descriptor = _resolve_parameter_descriptor(parameter_candidate, caller_parameters)
+    if parameter_descriptor is None:
+        return recovered
+
+    recovered_descriptor = _resolve_parameter_descriptor(recovered, caller_parameters)
+    recovered_rank = _call_argument_semantic_rank(recovered, caller_parameters, callee_param)
+    parameter_rank = _call_argument_semantic_rank(parameter_candidate, caller_parameters, callee_param)
+
+    if recovered_descriptor is not None:
+        return recovered if recovered_rank >= parameter_rank else parameter_candidate
+
+    if getattr(parameter_descriptor, "get", None) is not None and parameter_descriptor.get("implicit_passthrough"):
+        if recovered_rank <= parameter_rank:
+            return parameter_candidate
+        if recovered.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL, ExpressionType.PHI}:
+            return parameter_candidate
+
+    if recovered.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
+        return parameter_candidate
+
+    return recovered if recovered_rank > parameter_rank else parameter_candidate
 
 
 def _enumerate_call_argument_variants(
@@ -1247,19 +1296,28 @@ def _recover_preferred_call_argument_expression(
     caller_parameters: Sequence[Dict],
     callee_param: Dict,
     index: int,
+    *,
+    condition_tracker=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
 ) -> Optional[Expression]:
     preferred = _recover_call_argument_from_storage(
         call_op,
         tracer,
         caller_parameters,
         callee_param,
+        condition_tracker=condition_tracker,
+        current_conditions=current_conditions,
     )
-    if preferred is None:
-        preferred = _parameter_expression_from_matching_storage(
+    preferred = _prefer_object_centric_parameter_candidate(
+        preferred,
+        _parameter_expression_from_matching_storage(
             callee_param,
             caller_parameters,
             size=callee_param.get("size"),
-        )
+        ),
+        caller_parameters,
+        callee_param,
+    )
     if preferred is None and index < len(caller_parameters):
         caller_param = caller_parameters[index]
         caller_storage = _coerce_storage_info(caller_param.get("storage"))
@@ -1938,75 +1996,284 @@ def _resolve_call_argument_expression(
     return expr
 
 
-def _recover_call_argument_from_storage(
+def _find_block_info_for_pcode_op(condition_tracker, pcode_op):
+    if condition_tracker is None or pcode_op is None:
+        return None
+    block_index = getattr(condition_tracker, "block_by_index", None)
+    if not isinstance(block_index, dict):
+        return None
+    for block_info in block_index.values():
+        try:
+            pcode_ops = getattr(block_info, "pcode_ops", None) or []
+            if any(candidate is pcode_op for candidate in pcode_ops):
+                return block_info
+        except Exception:
+            continue
+    return None
+
+
+def _iter_path_ops_before_call(path_blocks, call_op) -> Iterator[object]:
+    call_order = _get_order_key(call_op)
+    for block_info in path_blocks or []:
+        for op in getattr(block_info, "pcode_ops", None) or []:
+            if op is call_op:
+                return
+            if _get_order_key(op) >= call_order:
+                continue
+            yield op
+
+
+def _compatible_call_block_paths(
     call_op,
+    condition_tracker,
+    current_conditions: Optional[Sequence[Condition]],
+) -> List[Tuple[List[object], List[Condition]]]:
+    if condition_tracker is None:
+        return []
+    call_block = _find_block_info_for_pcode_op(condition_tracker, call_op)
+    if call_block is None:
+        return []
+    get_paths = getattr(condition_tracker, "get_all_valid_block_paths_to_block", None)
+    if not callable(get_paths):
+        return []
+
+    compatible: List[Tuple[List[object], List[Condition]]] = []
+    for blocks, path_conditions in list(get_paths(call_block) or []):
+        merged = ConditionSimplifier.simplify_conditions(
+            list(path_conditions or []) + list(current_conditions or []),
+        )
+        if ConditionSimplifier.is_contradiction(merged):
+            continue
+        compatible.append((list(blocks or []), list(path_conditions or [])))
+    return compatible
+
+
+def _resolve_multiequal_input_for_path(
+    op,
+    path_blocks,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    current_conditions: Optional[Sequence[Condition]],
+) -> Optional[Expression]:
+    if op is None or getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+        return None
+    if not path_blocks:
+        return None
+
+    op_block = None
+    for idx, block_info in enumerate(path_blocks):
+        try:
+            if any(candidate is op for candidate in (getattr(block_info, "pcode_ops", None) or [])):
+                op_block = (idx, block_info)
+                break
+        except Exception:
+            continue
+    if op_block is None:
+        return None
+
+    path_index, block_info = op_block
+    if path_index <= 0:
+        return None
+    predecessor = path_blocks[path_index - 1]
+    ghidra_block = getattr(block_info, "block", None)
+    if ghidra_block is None:
+        return None
+
+    try:
+        in_size = int(ghidra_block.getInSize())
+    except Exception:
+        return None
+
+    predecessor_block = getattr(predecessor, "block", predecessor)
+    for input_index in range(min(int(op.getNumInputs()), in_size)):
+        try:
+            incoming = ghidra_block.getIn(input_index)
+        except Exception:
+            incoming = None
+        if incoming is None:
+            continue
+        incoming_index = getattr(incoming, "getIndex", lambda: None)()
+        predecessor_index = getattr(predecessor_block, "getIndex", lambda: None)()
+        if incoming is not predecessor_block and incoming_index != predecessor_index:
+            continue
+        try:
+            input_varnode = op.getInput(input_index)
+        except Exception:
+            return None
+        expr = _resolve_call_argument_expression(input_varnode, tracer, caller_parameters)
+        reduced = _reduce_expression_under_conditions(
+            expr,
+            list(current_conditions or []),
+        )
+        return reduced if reduced is not None else expr
+
+    return None
+
+
+def _recover_call_argument_candidate_from_op(
+    op,
+    target_storage: StorageInfo,
     tracer,
     caller_parameters: Sequence[Dict],
     callee_param: Dict,
-) -> Optional[Expression]:
-    target_storage = _coerce_storage_info(callee_param.get("storage"))
-    if target_storage is None:
-        return None
+    *,
+    path_blocks=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Tuple[Expression, int, int]]:
+    op_order = _get_order_key(op)
 
-    call_order = _get_order_key(call_op)
-    best_candidate = None
-    best_order = None
-    best_rank = -1
-    best_semantic_rank = -1
-
-    for op in tracer.get_all_pcode_ops():
-        op_order = _get_order_key(op)
-        if op_order >= call_order:
-            continue
-
-        output = op.getOutput()
-        output_rank = _varnode_storage_match_rank(output, target_storage, tracer)
-        if output is not None and output_rank > 0:
+    output = getattr(op, "getOutput", lambda: None)()
+    output_rank = _varnode_storage_match_rank(output, target_storage, tracer)
+    if output is not None and output_rank > 0:
+        candidate_expr = _resolve_multiequal_input_for_path(
+            op,
+            path_blocks,
+            tracer,
+            caller_parameters,
+            current_conditions,
+        )
+        if candidate_expr is None:
             candidate_expr = _resolve_call_argument_expression(output, tracer, caller_parameters)
-            semantic_rank = _call_argument_semantic_rank(
-                candidate_expr,
-                caller_parameters,
-                callee_param,
-            )
-            if (
-                semantic_rank > best_semantic_rank
-                or (
-                    semantic_rank == best_semantic_rank
-                    and (
-                        output_rank > best_rank
-                        or (output_rank == best_rank and (best_order is None or op_order > best_order))
-                    )
-                )
-            ):
-                best_candidate = candidate_expr
-                best_order = op_order
-                best_rank = output_rank
-                best_semantic_rank = semantic_rank
+        reduced = _reduce_expression_under_conditions(
+            candidate_expr,
+            list(current_conditions or []),
+        )
+        candidate_expr = reduced if reduced is not None else candidate_expr
+        semantic_rank = _call_argument_semantic_rank(
+            candidate_expr,
+            caller_parameters,
+            callee_param,
+        )
+        return candidate_expr, output_rank, semantic_rank
 
-        if not target_storage.is_register and op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
-            if _stack_varnode_matches_storage(op.getInput(1), target_storage):
-                candidate_expr = _resolve_call_argument_expression(op.getInput(2), tracer, caller_parameters)
+    if (
+        not target_storage.is_register
+        and getattr(op, "getMnemonic", lambda: None)() == "STORE"
+        and getattr(op, "getNumInputs", lambda: 0)() >= 3
+    ):
+        try:
+            store_target = op.getInput(1)
+        except Exception:
+            store_target = None
+        if _stack_varnode_matches_storage(store_target, target_storage):
+            try:
+                store_value = op.getInput(2)
+            except Exception:
+                store_value = None
+            if store_value is not None:
+                candidate_expr = _resolve_call_argument_expression(store_value, tracer, caller_parameters)
+                reduced = _reduce_expression_under_conditions(
+                    candidate_expr,
+                    list(current_conditions or []),
+                )
+                candidate_expr = reduced if reduced is not None else candidate_expr
                 semantic_rank = _call_argument_semantic_rank(
                     candidate_expr,
                     caller_parameters,
                     callee_param,
                 )
-                if (
-                    semantic_rank > best_semantic_rank
-                    or (
-                        semantic_rank == best_semantic_rank
-                        and (3 > best_rank or (3 == best_rank and (best_order is None or op_order > best_order)))
-                    )
-                ):
-                    best_candidate = candidate_expr
-                    best_order = op_order
-                    best_rank = 3
-                    best_semantic_rank = semantic_rank
+                return candidate_expr, 3, semantic_rank
 
-    if best_candidate is None:
-        return None
+    return None
+
+
+def _select_best_storage_candidate(
+    ops: Sequence[object],
+    target_storage: StorageInfo,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_param: Dict,
+    *,
+    path_blocks=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    best_candidate = None
+    best_order = None
+    best_rank = -1
+    best_semantic_rank = -1
+
+    for op in ops:
+        candidate = _recover_call_argument_candidate_from_op(
+            op,
+            target_storage,
+            tracer,
+            caller_parameters,
+            callee_param,
+            path_blocks=path_blocks,
+            current_conditions=current_conditions,
+        )
+        if candidate is None:
+            continue
+        candidate_expr, rank, semantic_rank = candidate
+        op_order = _get_order_key(op)
+        if (
+            semantic_rank > best_semantic_rank
+            or (
+                semantic_rank == best_semantic_rank
+                and (
+                    rank > best_rank
+                    or (rank == best_rank and (best_order is None or op_order > best_order))
+                )
+            )
+        ):
+            best_candidate = candidate_expr
+            best_order = op_order
+            best_rank = rank
+            best_semantic_rank = semantic_rank
 
     return best_candidate
+
+
+def _recover_call_argument_from_storage(
+    call_op,
+    tracer,
+    caller_parameters: Sequence[Dict],
+    callee_param: Dict,
+    *,
+    condition_tracker=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[Expression]:
+    target_storage = _coerce_storage_info(callee_param.get("storage"))
+    if target_storage is None:
+        return None
+
+    compatible_paths = _compatible_call_block_paths(
+        call_op,
+        condition_tracker,
+        current_conditions,
+    )
+    if compatible_paths:
+        path_candidates: List[Expression] = []
+        for path_blocks, _path_conditions in compatible_paths:
+            candidate = _select_best_storage_candidate(
+                list(_iter_path_ops_before_call(path_blocks, call_op)),
+                target_storage,
+                tracer,
+                caller_parameters,
+                callee_param,
+                path_blocks=path_blocks,
+                current_conditions=current_conditions,
+            )
+            if candidate is not None:
+                path_candidates.append(candidate)
+        if path_candidates:
+            chosen = path_candidates[0]
+            if all(_expressions_equivalent(chosen, candidate) for candidate in path_candidates[1:]):
+                return chosen
+
+    call_order = _get_order_key(call_op)
+    return _select_best_storage_candidate(
+        [
+            op
+            for op in tracer.get_all_pcode_ops()
+            if _get_order_key(op) < call_order
+        ],
+        target_storage,
+        tracer,
+        caller_parameters,
+        callee_param,
+        current_conditions=current_conditions,
+    )
 
 
 def _parameter_expression_from_matching_storage(
@@ -3662,6 +3929,39 @@ def promote_effect_value_match_to_post_state_read(
         return None
 
     return post_state_read
+
+
+def promote_effect_value_carrier_to_post_state_read(
+    expr: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+    *,
+    symbolic_post_state: bool = False,
+) -> Optional[Expression]:
+    if expr is None:
+        return None
+
+    location = _find_unique_effect_location_for_value(
+        expr,
+        (),
+        effects,
+        parameters,
+    )
+    if location is None:
+        return None
+
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
+        return None
+
+    return resolve_definite_post_state_read_for_location(
+        location,
+        normalized_return_conditions,
+        effects,
+        parameters,
+        symbolic_post_state=symbolic_post_state,
+    )
 
 
 def _expression_matches_value_under_conditions(

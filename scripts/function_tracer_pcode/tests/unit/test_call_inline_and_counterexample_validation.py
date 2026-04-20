@@ -3698,6 +3698,7 @@ def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
         ]
 
     def _build_effect_summary(function, _high_function, _tracer, _condition_tracker, _parameters, active_functions):
+        assert all(isinstance(entry, tuple) for entry in active_functions)
         if function.getName() == "parent":
             child_analysis = analyzer.analyze_function(child, active_functions=active_functions)
             assert child_analysis is not None

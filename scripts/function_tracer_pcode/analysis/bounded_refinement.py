@@ -49,7 +49,7 @@ class BoundedCallRefiner:
 
     def __init__(
         self,
-        analysis_provider: Callable[[object], Optional[FunctionReturnAnalysis]],
+        analysis_provider: Callable[..., Optional[FunctionReturnAnalysis]],
         *,
         max_unroll: int = 2,
         max_cases: int = 128,
@@ -63,6 +63,16 @@ class BoundedCallRefiner:
     def _debug(self, message: str) -> None:
         if self.debug:
             print(f"[BoundedCallRefiner] {message}")
+
+    def _provide_analysis(
+        self,
+        target: object,
+        args: Optional[Sequence[Expression]] = None,
+    ) -> Optional[FunctionReturnAnalysis]:
+        try:
+            return self.analysis_provider(target, args)
+        except TypeError:
+            return self.analysis_provider(target)
 
     def refine_analysis(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis is None or not analysis.returns or not analysis.deferred_calls or self.max_unroll <= 0:
@@ -312,7 +322,7 @@ class BoundedCallRefiner:
         seen = set()
 
         def add_candidate(target_ref: CallTargetRef, conditions: Sequence[Condition]) -> None:
-            callee_analysis = self.analysis_provider(target_ref)
+            callee_analysis = self._provide_analysis(target_ref, deferred.arguments)
             if callee_analysis is None or not callee_analysis.returns:
                 return
             key = (

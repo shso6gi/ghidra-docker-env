@@ -181,6 +181,21 @@ def _eval_constant_raw_internal(
                 return _remember(expr, (normalize_raw_value(left_raw >> right_raw, bits), bits))
             if expr.operator == "INT_SRIGHT":
                 return _remember(expr, (normalize_raw_value(left_signed >> right_raw, bits), bits))
+            if expr.operator == "SUBPIECE":
+                if right_raw < 0:
+                    return _remember(expr, None)
+                output_bits = bits
+                if output_bits <= 0:
+                    output_bits = max(1, left_bits - (int(right_raw) * 8))
+                shift_bits = int(right_raw) * 8
+                narrowed = left_raw >> shift_bits
+                return _remember(expr, (normalize_raw_value(narrowed, output_bits), output_bits))
+            if expr.operator == "PIECE":
+                output_bits = bits
+                if output_bits <= 0:
+                    output_bits = left_bits + right_bits
+                combined = (normalize_raw_value(left_raw, left_bits) << right_bits) | normalize_raw_value(right_raw, right_bits)
+                return _remember(expr, (normalize_raw_value(combined, output_bits), output_bits))
             if expr.operator in ("INT_DIV", "DIV"):
                 if right_raw == 0:
                     return _remember(expr, None)

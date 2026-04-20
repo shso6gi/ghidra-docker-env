@@ -49,6 +49,29 @@ class _FakeDispatchOp:
         return self._inputs[index]
 
 
+class _FakeEntryPoint:
+    def __init__(self, offset):
+        self._offset = offset
+
+    def getOffset(self):
+        return self._offset
+
+    def __str__(self):
+        return hex(self._offset)
+
+
+class _FakeFunction:
+    def __init__(self, name, offset):
+        self._name = name
+        self._entry = _FakeEntryPoint(offset)
+
+    def getName(self):
+        return self._name
+
+    def getEntryPoint(self):
+        return self._entry
+
+
 def _reg_storage(
     register_name: str,
     base_register_name: str,
@@ -411,6 +434,49 @@ def test_return_analyzer_propagates_specialized_deferred_calls_to_parent_context
     assert merged_info.call_target_expr is not None
     assert merged_info.call_target_expr.name == "op"
     assert [arg.name for arg in merged_info.arguments] == ["lhs", "rhs"]
+
+
+def test_return_analyzer_scopes_call_analysis_cache_by_bound_argument_objects():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee = _FakeFunction("callee", 0x401000)
+    target_ref = CallTargetRef.from_name(
+        "callee",
+        entry_offset=0x401000,
+        function_obj=callee,
+    )
+    analyses = [
+        create_mock_analysis(
+            "callee",
+            parameters=[{"name": "param_1", "index": 0, "size": 4}],
+            returns=[ReturnInfo(address="0x401000", value=Expression.parameter("param_1", 0, size=4), conditions=[])],
+        ),
+        create_mock_analysis(
+            "callee",
+            parameters=[{"name": "param_1", "index": 0, "size": 4}],
+            returns=[ReturnInfo(address="0x401000", value=Expression.parameter("param_1", 0, size=4), conditions=[])],
+        ),
+    ]
+    analyzer.analyze_function = Mock(side_effect=analyses)
+
+    first = analyzer._get_or_analyze_call_target(
+        target_ref,
+        set(),
+        args=[Expression.parameter("lhs", index=10, size=4)],
+    )
+    second = analyzer._get_or_analyze_call_target(
+        target_ref,
+        set(),
+        args=[Expression.parameter("lhs", index=10, size=4)],
+    )
+    third = analyzer._get_or_analyze_call_target(
+        target_ref,
+        set(),
+        args=[Expression.parameter("rhs", index=11, size=4)],
+    )
+
+    assert first is second
+    assert third is not None
+    assert analyzer.analyze_function.call_count == 2
 
 
 def test_constant_branch_enumerator_handles_ptrsub_function_targets():

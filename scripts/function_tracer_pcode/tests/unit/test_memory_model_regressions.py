@@ -2523,6 +2523,175 @@ def test_recover_call_argument_expressions_prefers_right_aligned_visible_args_ov
     assert [arg.to_string() for arg in recovered] == ["param_3", "4294967293"]
 
 
+def test_recover_call_argument_expressions_uses_path_sensitive_multiequal_input_for_hidden_arg():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, name):
+            self.name = name
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return 4
+
+        def getHigh(self):
+            return None
+
+    class FakeBlock:
+        def __init__(self, index):
+            self._index = index
+            self._ins = []
+
+        def getIndex(self):
+            return self._index
+
+        def getInSize(self):
+            return len(self._ins)
+
+        def getIn(self, index):
+            return self._ins[index]
+
+    class FakeBlockInfo:
+        def __init__(self, block, pcode_ops):
+            self.block = block
+            self.index = block.getIndex()
+            self.pcode_ops = list(pcode_ops)
+
+    class FakeOp:
+        def __init__(self, mnemonic, order, output=None, inputs=None):
+            self._mnemonic = mnemonic
+            self._seqnum = FakeSeqnum(0x4000, order)
+            self._output = output
+            self._inputs = list(inputs or [])
+
+        def getSeqnum(self):
+            return self._seqnum
+
+        def getOutput(self):
+            return self._output
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeTracer:
+        def __init__(self, expressions, storage_map, ops):
+            self._expressions = expressions
+            self._storage_map = storage_map
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return list(self._ops)
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return self._storage_map.get(varnode)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return self._expressions[varnode]
+
+    class FakeConditionTracker:
+        def __init__(self, block_infos, path_entries):
+            self.block_by_index = {info.index: info for info in block_infos}
+            self._paths = list(path_entries)
+
+        def get_all_valid_block_paths_to_block(self, _target_block):
+            return list(self._paths)
+
+    output = FakeVarnode("out")
+    path_true_input = FakeVarnode("path_true")
+    path_false_input = FakeVarnode("path_false")
+    target_storage = StorageInfo(**_reg_storage("a2", size_bytes=4, register_name="a2"))
+
+    phi_op = FakeOp("MULTIEQUAL", 1, output=output, inputs=[path_false_input, path_true_input])
+    call_op = FakeOp("CALL", 2)
+
+    false_block = FakeBlock(1)
+    true_block = FakeBlock(2)
+    call_block = FakeBlock(3)
+    call_block._ins = [false_block, true_block]
+
+    false_info = FakeBlockInfo(false_block, [])
+    true_info = FakeBlockInfo(true_block, [])
+    call_info = FakeBlockInfo(call_block, [phi_op, call_op])
+
+    selector = Expression.parameter("selector", 0, size=4)
+    true_cond = Condition(
+        Expression.binary_op("INT_NOTEQUAL", selector, Expression.constant(0, 4)),
+        False,
+    )
+    false_cond = Condition(
+        Expression.binary_op("INT_EQUAL", selector, Expression.constant(0, 4)),
+        False,
+    )
+
+    tracer = FakeTracer(
+        {
+            output: Expression.phi([(false_cond, Expression.variable("tmp_x2", size=4)), (true_cond, Expression.parameter("param_3", 2, size=4))]),
+            path_false_input: Expression.variable("tmp_x2", size=4),
+            path_true_input: Expression.parameter("param_3", 2, size=4),
+        },
+        {
+            output: target_storage,
+        },
+        [phi_op, call_op],
+    )
+    condition_tracker = FakeConditionTracker(
+        [false_info, true_info, call_info],
+        [
+            ([false_info, call_info], [false_cond]),
+            ([true_info, call_info], [true_cond]),
+        ],
+    )
+
+    recovered = _recover_call_argument_expressions(
+        call_op,
+        tracer,
+        [
+            _param("selector", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
+            _param("param_3", size=4, is_signed=False, index=2, storage=target_storage),
+        ],
+        [
+            _param("rhs", size=4, is_signed=False, index=0, storage=target_storage),
+        ],
+        [],
+        condition_tracker=condition_tracker,
+        current_conditions=[true_cond],
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].to_string() == "param_3"
+
+
 def test_resolve_call_argument_expression_recovers_parameter_from_storage_alias():
     class FakeVarnode:
         def getSize(self):

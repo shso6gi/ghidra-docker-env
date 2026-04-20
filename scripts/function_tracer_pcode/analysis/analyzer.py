@@ -4,7 +4,7 @@
 import re
 from dataclasses import dataclass
 from contextlib import contextmanager
-from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, cast
+from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, Sequence, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
 from ..model.call_target import CallTargetRef, coerce_call_target_ref
@@ -38,10 +38,12 @@ from .effect_summary import (
     EffectSummary,
     _build_parameter_replacements,
     _expression_location_ref,
+    _expression_reads_location,
     _enumerate_constant_expression_branches,
     _expression_contains_observed_loads,
     _iter_expression_nodes,
     _materialize_existing_effect_value_carrier,
+    _strip_materialized_post_state_value_refs,
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _find_matching_effect_value,
@@ -54,6 +56,7 @@ from .effect_summary import (
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
     locations_match,
+    promote_effect_value_carrier_to_post_state_read,
     promote_effect_value_match_to_post_state_read,
     promote_observed_loads_to_post_state_reads,
     resolve_definite_post_state_read_for_location,
@@ -624,17 +627,30 @@ class ReturnAnalyzer:
         function,
         timeout: int = 60,
         active_functions: Optional[Set[Tuple[Any, ...]]] = None,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
     ) -> Optional[FunctionReturnAnalysis]:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
         ConditionSimplifier.DEBUG = self.debug
         ConditionSimplifier.reset_debug_state()
         
-        active_functions = set(active_functions or set())
+        current_function_ref = CallTargetRef.from_function(function)
+        normalized_bound_parameter_values = self._normalize_bound_parameter_values(
+            bound_parameter_values,
+        )
+        analysis_scope_key = self._analysis_scope_key(
+            current_function_ref,
+            normalized_bound_parameter_values,
+        )
+        cached_analysis = self._call_analysis_cache.get(analysis_scope_key)
+        if cached_analysis is not None:
+            return cached_analysis
+        active_functions = self._extend_active_functions(
+            active_functions,
+            current_function_ref,
+        )
         self._return_path_entry_cache = {}
-        current_active_key = self._target_active_key(CallTargetRef.from_function(function))
-        if current_active_key is not None:
-            active_functions.add(current_active_key)
+        current_active_key = analysis_scope_key
 
         self._debug_print("=" * 60)
         self._debug_print(f"Analyzing function: {function.getName()}")
@@ -655,7 +671,10 @@ class ReturnAnalyzer:
         # Step 1: tracer / CFG infrastructure を先に構築する。
         # implicit passthrough parameter recovery でも CALLIND target を追跡するため、
         # PhiHandler が有効な状態で tracer を使えるようにしておく。
-        tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        tracer = self._make_tracer(
+            high_function,
+            bound_parameter_values=normalized_bound_parameter_values,
+        )
         tracer.record_deferred_call = self._make_deferred_call_recorder(function)
         condition_tracker = ConditionTracker(tracer)
         from .phi_resolver import PhiHandler
@@ -720,20 +739,14 @@ class ReturnAnalyzer:
                 self._current_effect_summary = empty_effect_summary
                 return_infos = list(recovered_control_returns)
             else:
-                effect_summary = self._build_effect_summary(
+                effect_summary = self._invoke_build_effect_summary(
                     function,
                     high_function,
                     tracer,
                     condition_tracker,
                     parameters,
-                    active_functions=(
-                        {function.getName()}
-                        | (
-                            {self._target_active_key(CallTargetRef.from_function(function))}
-                            if self._target_active_key(CallTargetRef.from_function(function)) is not None
-                            else set()
-                        )
-                    ),
+                    active_functions=active_functions,
+                    bound_parameter_values=normalized_bound_parameter_values,
                 )
                 self._current_effect_summary = effect_summary
 
@@ -755,7 +768,8 @@ class ReturnAnalyzer:
                 entry_point=str(function.getEntryPoint()),
                 parameters=parameters,
                 returns=return_infos,
-                function_ref=CallTargetRef.from_function(function),
+                function_ref=current_function_ref,
+                analysis_scope_key=analysis_scope_key,
                 return_type=return_type,
                 return_type_obj=return_type_obj,
                 signedness_result=signedness_result,
@@ -880,6 +894,10 @@ class ReturnAnalyzer:
                 print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
                 print(f"  Use --debug flag for detailed report")
 
+            self._call_analysis_cache[analysis_scope_key] = result
+            function_cache_key = self._function_cache_key(function)
+            if function_cache_key is not None and not normalized_bound_parameter_values:
+                self._call_analysis_cache[function_cache_key] = result
             return result
 
     def _apply_structural_recurrence_summary(
@@ -1529,22 +1547,31 @@ class ReturnAnalyzer:
         ):
             return
 
-        def provide_analysis(target) -> Optional[FunctionReturnAnalysis]:
+        def provide_analysis(
+            target,
+            args: Optional[Sequence[Expression]] = None,
+        ) -> Optional[FunctionReturnAnalysis]:
             target_ref = self._coerce_runtime_target_ref(target)
             if target_ref is None:
                 return None
+            bound_parameter_values = self._bound_parameter_values_from_args(args)
+            scope_key = self._analysis_scope_key(target_ref, bound_parameter_values)
             if (
                 current_function_ref is not None
-                and target_ref.analysis_key() == current_function_ref.analysis_key()
+                and analysis.analysis_scope_key == scope_key
             ):
                 return analysis
-            active_key = self._target_active_key(target_ref)
-            in_progress = self._analysis_in_progress.get(active_key) if active_key is not None else None
+            in_progress = self._analysis_in_progress.get(scope_key)
             if in_progress is not None:
                 return in_progress
+            active_key = self._target_active_key(target_ref)
             if active_key is not None and active_key in active_functions:
                 return None
-            return self._get_or_analyze_call_target(target_ref, active_functions)
+            return self._invoke_get_or_analyze_call_target(
+                target_ref,
+                active_functions,
+                args=args,
+            )
 
         refiner = BoundedCallRefiner(
             provide_analysis,
@@ -1736,7 +1763,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_index: int,
         path_entries,
-        active_functions: Optional[Set[Any]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -1797,7 +1824,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         path_conditions: List[Condition],
         return_index_base: int,
-        active_functions: Optional[Set[Any]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -2014,7 +2041,7 @@ class ReturnAnalyzer:
         tracer: PcodeTracer,
         condition_tracker: ConditionTracker,
         return_ops: List[Any],
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """wrapper らしい unknown return を P-code/CFG ベースでのみ復元する。"""
         if not self._analysis_needs_wrapper_recovery(analysis):
@@ -2048,7 +2075,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_ops: List[Any],
         current_function,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
     ) -> Optional[List[ReturnInfo]]:
         """entry -> RETURN の block path 上の terminal CALL を callee summary から復元する。"""
         if not self._analysis_needs_wrapper_recovery(analysis):
@@ -2150,7 +2177,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_ops: Optional[List[Any]] = None,
         current_function=None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         from ..transform.expander import ExpandedValue
 
@@ -2504,7 +2531,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_ops: List[Any],
         *,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
         current_function=None,
     ):
         from ..transform.expander import ExpandedValue
@@ -3555,10 +3582,77 @@ class ReturnAnalyzer:
         except Exception:
             return None
 
+    def _normalize_bound_parameter_values(
+        self,
+        bound_parameter_values: Optional[Dict[int, Expression]],
+    ) -> Dict[int, Expression]:
+        normalized: Dict[int, Expression] = {}
+        for index, expr in (bound_parameter_values or {}).items():
+            try:
+                normalized_index = int(index)
+            except Exception:
+                continue
+            if normalized_index < 0 or expr is None:
+                continue
+            normalized[normalized_index] = self._clone_expression(expr)
+        return normalized
+
+    def _bound_parameter_values_from_args(
+        self,
+        args: Optional[Sequence[Expression]],
+    ) -> Dict[int, Expression]:
+        return self._normalize_bound_parameter_values(
+            {
+                index: expr
+                for index, expr in enumerate(args or [])
+                if expr is not None
+            }
+        )
+
+    def _analysis_scope_key(
+        self,
+        target,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    ) -> Tuple[Any, ...]:
+        target_ref = self._coerce_runtime_target_ref(target)
+        if target_ref is None and target is not None:
+            try:
+                if hasattr(target, "getEntryPoint"):
+                    target_ref = CallTargetRef.from_function(target)
+            except Exception:
+                target_ref = None
+        target_key = (
+            self._target_active_key(target_ref)
+            if target_ref is not None
+            else self._function_cache_key(target)
+        ) or ("unknown_target",)
+        normalized_bound_parameter_values = self._normalize_bound_parameter_values(
+            bound_parameter_values,
+        )
+        bound_signature = tuple(
+            (
+                int(index),
+                ConditionNormalizer.expression_signature(expr),
+            )
+            for index, expr in sorted(normalized_bound_parameter_values.items())
+        )
+        return ("analysis_scope", target_key, bound_signature)
+
     def _target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[Tuple[Any, ...]]:
         if target_ref is None:
             return None
         return target_ref.analysis_key()
+
+    def _extend_active_functions(
+        self,
+        active_functions: Optional[Set[Tuple[Any, ...]]],
+        target_ref: Optional[CallTargetRef],
+    ) -> Set[Tuple[Any, ...]]:
+        scoped = set(active_functions or set())
+        active_key = self._target_active_key(target_ref)
+        if active_key is not None:
+            scoped.add(active_key)
+        return scoped
 
     def _resolve_target_function(self, target) -> Optional[Any]:
         target_ref = self._coerce_runtime_target_ref(target)
@@ -3604,7 +3698,7 @@ class ReturnAnalyzer:
         self,
         parameters: List[Dict],
         tracer: Any,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
     ) -> List[Dict]:
         augmented = [dict(param) for param in (parameters or [])]
         changed = False
@@ -3786,6 +3880,85 @@ class ReturnAnalyzer:
     def _clone_expression(self, expr: Expression) -> Expression:
         return expr.clone_with(operands=[self._clone_expression(op) for op in expr.operands])
 
+    def _make_tracer(
+        self,
+        high_function,
+        *,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    ) -> PcodeTracer:
+        try:
+            return PcodeTracer(
+                self.program,
+                high_function,
+                debug=self.debug,
+                bound_parameter_values=bound_parameter_values,
+            )
+        except TypeError:
+            return PcodeTracer(
+                self.program,
+                high_function,
+                debug=self.debug,
+            )
+
+    def _invoke_build_effect_summary(
+        self,
+        function,
+        high_function,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        parameters: List[Dict],
+        active_functions: Set[Tuple[Any, ...]],
+        *,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    ):
+        try:
+            return self._build_effect_summary(
+                function,
+                high_function,
+                tracer,
+                condition_tracker,
+                parameters,
+                active_functions=active_functions,
+                bound_parameter_values=bound_parameter_values,
+            )
+        except TypeError:
+            return self._build_effect_summary(
+                function,
+                high_function,
+                tracer,
+                condition_tracker,
+                parameters,
+                active_functions=active_functions,
+            )
+
+    def _invoke_get_or_analyze_call_target(
+        self,
+        target,
+        active_functions: Set[Tuple[Any, ...]],
+        *,
+        minimum_param_count: int = 0,
+        args: Optional[Sequence[Expression]] = None,
+    ) -> Optional[FunctionReturnAnalysis]:
+        try:
+            return self._get_or_analyze_call_target(
+                target,
+                active_functions,
+                minimum_param_count=minimum_param_count,
+                args=args,
+            )
+        except TypeError:
+            try:
+                return self._get_or_analyze_call_target(
+                    target,
+                    active_functions,
+                    minimum_param_count=minimum_param_count,
+                )
+            except TypeError:
+                return self._get_or_analyze_call_target(
+                    target,
+                    active_functions,
+                )
+
     def _build_effect_summary(
         self,
         function,
@@ -3794,12 +3967,17 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         parameters: List[Dict],
         active_functions: Set[Tuple[Any, ...]],
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
     ):
-        cache_key = self._function_cache_key(function)
-        if cache_key is None:
+        function_cache_key = self._function_cache_key(function)
+        if function_cache_key is None:
             return None
-        self._effect_summary_parameter_cache[cache_key] = list(parameters)
-        cached = self._effect_summary_cache.get(cache_key)
+        self._effect_summary_parameter_cache[function_cache_key] = list(parameters)
+        summary_cache_key = self._analysis_scope_key(
+            function,
+            bound_parameter_values,
+        )
+        cached = self._effect_summary_cache.get(summary_cache_key)
         if cached is not None:
             return cached
 
@@ -3813,10 +3991,13 @@ class ReturnAnalyzer:
             callee = self._resolve_target_function(target_ref)
             if callee is None:
                 return None
-            callee_key = self._function_cache_key(callee)
-            if callee_key is None:
+            callee_scope_key = self._analysis_scope_key(
+                callee,
+                self._bound_parameter_values_from_args(args),
+            )
+            if callee_scope_key is None:
                 return None
-            cached_callee = self._effect_summary_cache.get(callee_key)
+            cached_callee = self._effect_summary_cache.get(callee_scope_key)
             if cached_callee is not None:
                 return cached_callee
 
@@ -3828,7 +4009,11 @@ class ReturnAnalyzer:
             if callee_high is None:
                 return None
 
-            callee_tracer = PcodeTracer(self.program, callee_high, debug=self.debug)
+            callee_bound_parameter_values = self._bound_parameter_values_from_args(args)
+            callee_tracer = self._make_tracer(
+                callee_high,
+                bound_parameter_values=callee_bound_parameter_values,
+            )
             callee_tracer.record_deferred_call = self._make_deferred_call_recorder(callee)
             callee_tracker = ConditionTracker(callee_tracer)
             from .phi_resolver import PhiHandler
@@ -3837,7 +4022,9 @@ class ReturnAnalyzer:
             callee_tracer.phi_handler = callee_phi_handler
             callee_tracker.build()
             callee_parameters = self._collect_parameters(callee_high)
-            self._effect_summary_parameter_cache[callee_key] = list(callee_parameters)
+            callee_function_cache_key = self._function_cache_key(callee)
+            if callee_function_cache_key is not None:
+                self._effect_summary_parameter_cache[callee_function_cache_key] = list(callee_parameters)
             image_base = None
             try:
                 image_base = self.program.getImageBase().getOffset()
@@ -3845,7 +4032,7 @@ class ReturnAnalyzer:
                 image_base = None
             callee_tracker.refine_branch_conditions(
                 call_resolver=self._make_call_resolver(
-                    active_functions | ({active_key} if active_key is not None else set()),
+                    self._extend_active_functions(active_functions, target_ref),
                     callee,
                 ),
                 parameters=callee_parameters,
@@ -3853,13 +4040,14 @@ class ReturnAnalyzer:
                 read_memory_value=self._read_memory_value,
                 image_base=image_base,
             )
-            summary = self._build_effect_summary(
+            summary = self._invoke_build_effect_summary(
                 callee,
                 callee_high,
                 callee_tracer,
                 callee_tracker,
                 callee_parameters,
-                active_functions | ({active_key} if active_key is not None else set()),
+                self._extend_active_functions(active_functions, target_ref),
+                bound_parameter_values=callee_bound_parameter_values,
             )
             return summary
 
@@ -3867,7 +4055,6 @@ class ReturnAnalyzer:
             return self._get_freshest_callee_parameters(target)
 
         current_target = CallTargetRef.from_function(function)
-        current_active_key = self._target_active_key(current_target)
         image_base = None
         try:
             image_base = self.program.getImageBase().getOffset()
@@ -3880,7 +4067,7 @@ class ReturnAnalyzer:
             parameters,
             direct_call_summary=summarize_call,
             direct_call_expander=self._make_call_resolver(
-                active_functions | ({current_active_key} if current_active_key is not None else set()),
+                self._extend_active_functions(active_functions, current_target),
                 function,
             ),
             resolve_callee_parameters=resolve_callee_parameters,
@@ -3888,7 +4075,7 @@ class ReturnAnalyzer:
             image_base=image_base,
             debug=self.debug,
         )
-        self._effect_summary_cache[cache_key] = summary
+        self._effect_summary_cache[summary_cache_key] = summary
         return summary
 
     def _make_call_resolver(self, active_functions: Set[Tuple[Any, ...]], current_function=None):
@@ -3924,7 +4111,11 @@ class ReturnAnalyzer:
             self._debug_print(f"Skipping recursive call expansion for '{target_label}'")
             return None
 
-        analysis = self._get_or_analyze_call_target(target_ref, active_functions)
+        analysis = self._invoke_get_or_analyze_call_target(
+            target_ref,
+            active_functions,
+            args=args,
+        )
         if analysis is None:
             self._debug_print(f"Call expansion skipped for '{target_label}': analysis unavailable")
             return None
@@ -3985,7 +4176,7 @@ class ReturnAnalyzer:
     def _resolve_local_code_target_expansions(
         self,
         address_value: int,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
         current_function=None,
         args: Optional[List[Expression]] = None,
     ):
@@ -4055,10 +4246,8 @@ class ReturnAnalyzer:
             self._local_target_cache[cache_key] = None
             return None
 
-        tracer = PcodeTracer(
-            self.program,
+        tracer = self._make_tracer(
             high_function,
-            debug=self.debug,
             bound_parameter_values={
                 index: self._clone_expression(arg)
                 for index, arg in enumerate(args or [])
@@ -4751,34 +4940,39 @@ class ReturnAnalyzer:
     def _get_or_analyze_call_target(
         self,
         target,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
         minimum_param_count: int = 0,
+        args: Optional[Sequence[Expression]] = None,
     ) -> Optional[FunctionReturnAnalysis]:
         target_ref = self._coerce_runtime_target_ref(target)
         callee = self._resolve_target_function(target_ref)
         if callee is None:
             return None
 
-        cache_key = self._function_cache_key(callee)
-        if cache_key is None:
-            return None
+        bound_parameter_values = self._bound_parameter_values_from_args(args)
+        cache_key = self._analysis_scope_key(callee, bound_parameter_values)
+        generic_cache_key = self._function_cache_key(callee)
         cached = self._call_analysis_cache.get(cache_key)
         if cached is not None and len(getattr(cached, "parameters", []) or []) >= minimum_param_count:
             return cached
 
-        active_key = self._target_active_key(target_ref)
         analysis = self.analyze_function(
             callee,
             timeout=60,
-            active_functions=active_functions | ({active_key} if active_key is not None else set()),
+            active_functions=self._extend_active_functions(active_functions, target_ref),
+            bound_parameter_values=bound_parameter_values,
         )
         if cached is None:
             self._call_analysis_cache[cache_key] = analysis
+            if generic_cache_key is not None and not bound_parameter_values:
+                self._call_analysis_cache[generic_cache_key] = analysis
             return analysis
         if analysis is None:
             return cached
         if len(getattr(analysis, "parameters", []) or []) >= len(getattr(cached, "parameters", []) or []):
             self._call_analysis_cache[cache_key] = analysis
+            if generic_cache_key is not None and not bound_parameter_values:
+                self._call_analysis_cache[generic_cache_key] = analysis
             return analysis
         return cached
 
@@ -4922,6 +5116,7 @@ class ReturnAnalyzer:
             effect_summary=analysis.effect_summary,
             signature_hypotheses=list(getattr(analysis, "signature_hypotheses", []) or []),
             comparison_surface=analysis.comparison_surface,
+            analysis_scope_key=analysis.analysis_scope_key,
         )
 
     def _merge_deferred_calls_into_current_analysis(
@@ -5309,7 +5504,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_index: int,
         current_function,
-        active_functions: Set[str],
+        active_functions: Set[Tuple[Any, ...]],
     ) -> List[ReturnInfo]:
         """単一のRETURNを解析"""
         site_metadata = self._describe_pcode_site(return_op, "unknown")
@@ -5587,7 +5782,7 @@ class ReturnAnalyzer:
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
         path_entries=None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -5649,7 +5844,7 @@ class ReturnAnalyzer:
         condition_tracker: ConditionTracker,
         return_index: int,
         path_entries,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -5714,7 +5909,7 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index_base: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -5748,7 +5943,7 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -5995,7 +6190,7 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> Optional[List[ReturnInfo]]:
@@ -6068,7 +6263,7 @@ class ReturnAnalyzer:
         path_conditions: List[Condition],
         return_index: int,
         all_path_conditions: Optional[List[List[Condition]]] = None,
-        active_functions: Optional[Set[str]] = None,
+        active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         current_function=None,
         site_metadata: Optional[Dict[str, Optional[object]]] = None,
     ) -> List[ReturnInfo]:
@@ -6708,6 +6903,17 @@ class ReturnAnalyzer:
                 ),
             )
         yield (
+            "wrapper-preserving effect-sensitive",
+            normalize_post_state_expression(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                prefer_canonical_post_state=False,
+                preserve_composite_location_wrappers=True,
+            ),
+        )
+        yield (
             "generic effect-sensitive",
             rewrite_loads_from_effects(
                 value,
@@ -6726,6 +6932,14 @@ class ReturnAnalyzer:
     ) -> Optional[Expression]:
         if original is None or rewritten is None:
             return rewritten
+        rebuilt_wrapper = self._rebuild_effect_sensitive_case_wrapper(
+            original,
+            rewritten,
+            conditions,
+            effect_summary,
+        )
+        if rebuilt_wrapper is not None:
+            return rebuilt_wrapper
         if (
             original.expr_type != ExpressionType.BINARY_OP
             or rewritten.expr_type != ExpressionType.BINARY_OP
@@ -6783,6 +6997,84 @@ class ReturnAnalyzer:
                 return post_state_read or rewritten_operand
 
         return rewritten
+
+    def _rebuild_effect_sensitive_case_wrapper(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+        conditions: List[Condition],
+        effect_summary: EffectSummary,
+    ) -> Optional[Expression]:
+        if (
+            original is None
+            or rewritten is None
+            or original.expr_type != ExpressionType.BINARY_OP
+            or len(original.operands) != 2
+        ):
+            return None
+        if (
+            rewritten.expr_type == ExpressionType.BINARY_OP
+            and rewritten.operator == original.operator
+            and len(rewritten.operands) == 2
+        ):
+            return None
+
+        rewritten_runtime_ref = getattr(rewritten, "runtime_ref", None)
+        if not isinstance(rewritten_runtime_ref, PostStateValueRef):
+            return None
+
+        original_operands = list(original.operands)
+        for original_index, original_operand in enumerate(original_operands):
+            location = canonicalize_expr_read_location(
+                original_operand,
+                self._current_parameters,
+            )
+            if location is None:
+                continue
+            rewritten_without_carrier_ref = _strip_materialized_post_state_value_refs(rewritten)
+            if _expression_reads_location(
+                rewritten_without_carrier_ref,
+                location,
+                conditions,
+                self._current_parameters,
+            ):
+                continue
+            shared_original = original_operands[1 - original_index]
+            if self._wrapper_preserves_collapsed_operand(
+                original.operator,
+                shared_original,
+                kept_operand_index=original_index,
+            ):
+                continue
+            if (
+                _find_matching_effect_value(
+                    rewritten,
+                    location,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                )
+                is None
+            ):
+                continue
+            rebuilt_operands = [shared_original, shared_original]
+            rebuilt_operands[original_index] = rewritten
+            rebuilt_operands[1 - original_index] = shared_original
+            rebuilt = original.clone_with(operands=rebuilt_operands)
+            rebuilt = ConditionSimplifier.reduce_expression_under_conditions(
+                rebuilt,
+                conditions,
+            )
+            rebuilt = self._fold_constant_expression(rebuilt, fallback_expr=original)
+            if self.debug:
+                self._debug_print(
+                    "Rebuilt effect-sensitive wrapper around branch-local effect value: "
+                    f"{self._debug_expr_identity_summary(rewritten)} -> "
+                    f"{self._debug_expr_identity_summary(rebuilt)}"
+                )
+            return rebuilt
+
+        return None
 
     def _wrapper_preserves_collapsed_operand(
         self,
@@ -7734,6 +8026,13 @@ class ReturnAnalyzer:
         conditions: List[Condition],
         effect_summary: EffectSummary,
     ) -> Optional[Expression]:
+        carrier_post_state_read = promote_effect_value_carrier_to_post_state_read(
+            value,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+            symbolic_post_state=True,
+        )
         atomic_object_state_value = _materialize_existing_effect_value_carrier(
             value,
             conditions,
@@ -7765,12 +8064,76 @@ class ReturnAnalyzer:
             conditions,
             effect_summary,
         )
-        canonicalized = _materialize_existing_effect_value_carrier(
+        materialized_canonicalized = _materialize_existing_effect_value_carrier(
             canonicalized,
             conditions,
             effect_summary.effects,
             self._current_parameters,
         )
+        original_location = canonicalize_expr_read_location(
+            value,
+            self._current_parameters,
+        )
+        carrier_matches_wrapped_object = (
+            carrier_post_state_read is not None
+            and original_location is not None
+            and self._expression_has_nontrivial_location_wrapper(value, original_location)
+        )
+        if carrier_matches_wrapped_object:
+            materialized_canonicalized = carrier_post_state_read
+            drops_composite_wrapper = False
+        else:
+            drops_composite_wrapper = self._rewrite_drops_composite_location_wrapper(
+                value,
+                materialized_canonicalized,
+                conditions,
+            )
+        if (
+            not drops_composite_wrapper
+            and original_location is not None
+            and self._expression_has_nontrivial_location_wrapper(value, original_location)
+            and isinstance(getattr(materialized_canonicalized, "runtime_ref", None), PostStateValueRef)
+        ):
+            distinct_read_locations = {
+                location.stable_key()
+                for node in _iter_expression_nodes(value, include_phi_conditions=False)
+                for location in (
+                    canonicalize_expr_read_location(
+                        node,
+                        self._current_parameters,
+                    ),
+                )
+                if location is not None
+            }
+            if len(distinct_read_locations) == 1:
+                lowered_materialized = lower_post_state_expression_for_smt(
+                    materialized_canonicalized,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                )
+                if lowered_materialized is None or not _expressions_equivalent_under_conditions(
+                    lowered_materialized,
+                    value,
+                    conditions,
+                    self._current_parameters,
+                ):
+                    drops_composite_wrapper = True
+        if drops_composite_wrapper:
+            wrapper_preserving = normalize_post_state_expression(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+                prefer_canonical_post_state=False,
+                preserve_composite_location_wrappers=True,
+            )
+            canonicalized = wrapper_preserving if wrapper_preserving is not None else canonicalized
+        else:
+            if carrier_post_state_read is not None:
+                canonicalized = carrier_post_state_read
+            else:
+                canonicalized = materialized_canonicalized
         canonicalized = self._prefer_lossless_materialized_post_state_roundtrip(
             canonicalized,
             value,
@@ -7796,7 +8159,9 @@ class ReturnAnalyzer:
                     f"{self._debug_expr_summary(canonicalized)}"
                 )
             fallback_replayed = None
-            if value.expr_type == ExpressionType.MEMORY:
+            if carrier_post_state_read is not None:
+                fallback_replayed = carrier_post_state_read
+            if fallback_replayed is None and value.expr_type == ExpressionType.MEMORY:
                 fallback_replayed = materialize_definite_post_state_expression(
                     value,
                     conditions,
@@ -7833,6 +8198,19 @@ class ReturnAnalyzer:
         if canonicalized.expr_type == ExpressionType.MEMORY:
             return canonicalized
         if not expression_contains_post_state_reads(canonicalized):
+            return canonicalized
+
+        carrier_post_state_read = promote_effect_value_carrier_to_post_state_read(
+            original,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+            symbolic_post_state=True,
+        )
+        if (
+            carrier_post_state_read is not None
+            and _expressions_equivalent(canonicalized, carrier_post_state_read)
+        ):
             return canonicalized
 
         lowered_roundtrip = lower_post_state_expression_for_smt(

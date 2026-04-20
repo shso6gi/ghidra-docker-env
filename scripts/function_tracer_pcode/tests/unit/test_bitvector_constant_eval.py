@@ -26,3 +26,22 @@ def test_eval_constant_raw_preserves_simple_constant_arithmetic():
     )
 
     assert eval_constant_raw(expr) == (8, 32)
+
+
+def test_eval_constant_raw_handles_subpiece_and_piece_constants():
+    low_word = Expression.binary_op(
+        "SUBPIECE",
+        Expression.constant(0x1122334455667788, 8),
+        Expression.constant(0, 8),
+    )
+    high_word = Expression.binary_op(
+        "SUBPIECE",
+        Expression.constant(0x1122334455667788, 8),
+        Expression.constant(4, 8),
+    )
+    rebuilt = Expression.binary_op("PIECE", high_word, low_word)
+    rebuilt.size = 8
+
+    assert eval_constant_raw(low_word) == (0x55667788, 32)
+    assert eval_constant_raw(high_word) == (0x11223344, 32)
+    assert eval_constant_raw(rebuilt) == (0x1122334455667788, 64)
