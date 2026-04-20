@@ -1593,8 +1593,8 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
     analyzer = ReturnAnalyzer(program=None, debug=False)
     captured = []
 
-    def _fake_local(address_value, active_functions, current_function=None):
-        captured.append((address_value, active_functions, current_function))
+    def _fake_local(address_value, active_functions, current_function=None, args=None):
+        captured.append((address_value, active_functions, current_function, args))
         return ["ok"]
 
     analyzer._resolve_local_code_target_expansions = _fake_local
@@ -1606,7 +1606,7 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
     )
 
     assert resolved == ["ok"]
-    assert captured == [(0x102528, {"branch_switch_dense"}, None)]
+    assert captured == [(0x102528, {"branch_switch_dense"}, None, [])]
 
 
 def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
@@ -2666,7 +2666,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",
-            side_effect=lambda addr, _active_functions, current_function=None: target_returns.get(addr),
+            side_effect=lambda addr, _active_functions, current_function=None, args=None: target_returns.get(addr),
         ):
             recovered = analyzer._recover_switch_like_returns_from_pcode(
                 analysis,
@@ -2803,7 +2803,7 @@ def test_return_analyzer_declines_switch_recovery_when_any_target_is_not_safely_
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",
-            side_effect=lambda addr, _active_functions, current_function=None: (
+            side_effect=lambda addr, _active_functions, current_function=None, args=None: (
                 [ExpandedValue(Expression.constant(1000, 4), [])] if addr == 0x401000 else None
             ),
         ):

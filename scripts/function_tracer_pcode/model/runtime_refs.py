@@ -77,6 +77,8 @@ class LocationBaseRef:
     kind: str
     parameter_name: Optional[str] = None
     parameter_index: Optional[int] = None
+    owner_program_id: Optional[int] = None
+    owner_entry_offset: Optional[int] = None
     storage_space_id: Optional[int] = None
     storage_space: Optional[str] = None
     storage_offset: Optional[int] = None
@@ -93,11 +95,15 @@ class LocationBaseRef:
         name: str,
         *,
         index: Optional[int] = None,
+        owner_program_id: Optional[int] = None,
+        owner_entry_offset: Optional[int] = None,
     ) -> "LocationBaseRef":
         return cls(
             kind="parameter",
             parameter_name=name or None,
             parameter_index=index,
+            owner_program_id=owner_program_id,
+            owner_entry_offset=owner_entry_offset,
             display_hint=name or None,
         )
 
@@ -143,6 +149,17 @@ class LocationBaseRef:
             return False
         if self.is_parameter():
             if self.parameter_index is not None and other.parameter_index is not None:
+                if (
+                    self.owner_program_id is not None
+                    or self.owner_entry_offset is not None
+                    or other.owner_program_id is not None
+                    or other.owner_entry_offset is not None
+                ):
+                    return (
+                        self.owner_program_id == other.owner_program_id
+                        and self.owner_entry_offset == other.owner_entry_offset
+                        and int(self.parameter_index) == int(other.parameter_index)
+                    )
                 return int(self.parameter_index) == int(other.parameter_index)
             return False
         if self.is_stack_frame():
@@ -156,6 +173,13 @@ class LocationBaseRef:
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_parameter():
             if self.parameter_index is not None:
+                if self.owner_program_id is not None or self.owner_entry_offset is not None:
+                    return (
+                        "parameter",
+                        self.owner_program_id,
+                        self.owner_entry_offset,
+                        int(self.parameter_index),
+                    )
                 return ("parameter", int(self.parameter_index))
             return ("parameter", None)
         if self.is_stack_frame():
@@ -184,6 +208,12 @@ class LocationBaseRef:
         try:
             param_index = param.get("index")
             if self.parameter_index is not None and param_index is not None:
+                if self.owner_program_id is not None or self.owner_entry_offset is not None:
+                    return (
+                        int(param_index) == int(self.parameter_index)
+                        and param.get("owner_program_id") == self.owner_program_id
+                        and param.get("owner_entry_offset") == self.owner_entry_offset
+                    )
                 return int(param_index) == int(self.parameter_index)
         except Exception:
             pass
@@ -198,6 +228,10 @@ class LocationBaseRef:
             result["parameter_name"] = self.parameter_name
         if self.parameter_index is not None:
             result["parameter_index"] = self.parameter_index
+        if self.owner_program_id is not None:
+            result["owner_program_id"] = self.owner_program_id
+        if self.owner_entry_offset is not None:
+            result["owner_entry_offset"] = self.owner_entry_offset
         if self.storage_space is not None:
             result["storage_space"] = self.storage_space
         if self.storage_space_id is not None:

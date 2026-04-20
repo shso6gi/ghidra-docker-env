@@ -112,6 +112,10 @@ class SemanticWidthNormalizer:
                 collapsed = self._normalize_subpiece(expr)
                 if collapsed is not None:
                     return collapsed
+            if expr.operator in SAFE_TRUNCATING_BINARY_OPS:
+                collapsed = self._normalize_semantic_binary(expr)
+                if collapsed is not None:
+                    return collapsed
             if expr.operator in COMPARISON_OPS:
                 collapsed = self._normalize_comparison(expr)
                 if collapsed is not None:
@@ -270,6 +274,76 @@ class SemanticWidthNormalizer:
         rebuilt = Expression.binary_op(expr.operator, left_info["expr"], right_info["expr"])
         rebuilt.size = expr.size
         return rebuilt
+
+    def _normalize_semantic_binary(self, expr: Expression) -> Optional[Expression]:
+        if len(expr.operands) != 2:
+            return None
+
+        left, right = expr.operands
+        left_info = self._match_semantic_low_expr(left)
+        right_info = self._match_semantic_low_expr(right)
+
+        if left_info is not None and right.expr_type == ExpressionType.CONSTANT:
+            narrowed = self._narrow_constant(
+                right,
+                left_info["bits"],
+                left_info["signedness"],
+            )
+            if narrowed is not None:
+                if self._is_all_ones_mask(narrowed, left_info["bits"]) and expr.operator == "INT_AND":
+                    return left_info["expr"]
+                right_info = {
+                    "expr": narrowed,
+                    "bits": left_info["bits"],
+                    "signedness": left_info["signedness"],
+                }
+
+        if right_info is not None and left.expr_type == ExpressionType.CONSTANT:
+            narrowed = self._narrow_constant(
+                left,
+                right_info["bits"],
+                right_info["signedness"],
+            )
+            if narrowed is not None:
+                if self._is_all_ones_mask(narrowed, right_info["bits"]) and expr.operator == "INT_AND":
+                    return right_info["expr"]
+                left_info = {
+                    "expr": narrowed,
+                    "bits": right_info["bits"],
+                    "signedness": right_info["signedness"],
+                }
+
+        if left_info is None or right_info is None:
+            return None
+        if left_info["bits"] != right_info["bits"]:
+            return None
+
+        narrow_bits = left_info["bits"]
+        if narrow_bits <= 0 or narrow_bits >= expr.get_bit_width():
+            return None
+
+        if expr.operator in SIGNED_BINARY_OPS:
+            if left_info["signedness"] != "signed" or right_info["signedness"] != "signed":
+                return None
+        if expr.operator in UNSIGNED_BINARY_OPS:
+            if left_info["signedness"] != "unsigned" or right_info["signedness"] != "unsigned":
+                return None
+
+        rebuilt = Expression.binary_op(
+            expr.operator,
+            left_info["expr"],
+            right_info["expr"],
+        )
+        rebuilt.size = max(1, narrow_bits // 8)
+        rebuilt.data_type = expr.data_type
+        return rebuilt
+
+    def _is_all_ones_mask(self, expr: Expression, bits: int) -> bool:
+        if expr.expr_type != ExpressionType.CONSTANT or bits <= 0:
+            return False
+        mask = (1 << bits) - 1
+        value = int(expr.value)
+        return (value & mask) == mask
 
     def _match_comparison_operand(self, expr: Expression):
         widened = self._match_semantic_extension(expr)

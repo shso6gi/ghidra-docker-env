@@ -148,6 +148,58 @@ def test_recursive_abstraction_matches_structurally_equivalent_arguments_without
     assert left_value.name == right_value.name
 
 
+def test_recursive_abstraction_matches_unknown_targets_via_call_target_expression():
+    callback1 = _param("callback", 0, size=8)
+    callback2 = _param("fn", 0, size=8)
+    placeholder1 = "call_out_of_scope:left#0"
+    placeholder2 = "call_out_of_scope:right#0"
+    info1 = DeferredCallInfo(
+        placeholder1,
+        CallTargetRef.unknown(),
+        [_param("lhs", 1), _param("rhs", 2)],
+        call_target_expr=callback1,
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        placeholder2,
+        CallTargetRef.unknown(),
+        [_param("a", 1), _param("b", 2)],
+        call_target_expr=callback2,
+        sequence=0,
+    )
+
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[
+            {"name": "callback", "index": 0, "data_type": "void *", "size": 8},
+            {"name": "lhs", "index": 1, "data_type": "int", "size": 4},
+            {"name": "rhs", "index": 2, "data_type": "int", "size": 4},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(info1), conditions=[])],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[
+            {"name": "fn", "index": 0, "data_type": "void *", "size": 8},
+            {"name": "a", "index": 1, "data_type": "int", "size": 4},
+            {"name": "b", "index": 2, "data_type": "int", "size": 4},
+        ],
+        returns=[ReturnInfo(address="0x2000", value=_deferred_unknown(info2), conditions=[])],
+    )
+    analysis1.deferred_calls = {placeholder1: info1}
+    analysis2.deferred_calls = {placeholder2: info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, debug=False)
+
+    assert result.applied is True
+    assert len(result.matches) == 1
+    left_value = result.analysis1.returns[0].value
+    right_value = result.analysis2.returns[0].value
+    assert left_value.expr_type == ExpressionType.PARAMETER
+    assert right_value.expr_type == ExpressionType.PARAMETER
+    assert left_value.name == right_value.name
+
+
 def test_checker_uses_recursive_abstraction_stage_after_pairwise_unknown():
     checker = EquivalenceChecker(debug=False)
     analysis1 = create_mock_analysis("left")

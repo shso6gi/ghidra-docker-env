@@ -45,6 +45,7 @@ from .effect_summary import (
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _find_matching_effect_value,
+    _resolve_call_argument_expression,
     _resolve_call_target_ref,
     _reduce_expression_under_conditions,
     canonicalize_expr_read_location,
@@ -149,7 +150,7 @@ class ReturnAnalyzer:
         self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
         self._effect_summary_parameter_cache: Dict[Tuple[Any, ...], List[Dict]] = {}
         self._call_analysis_cache: Dict[Tuple[Any, ...], Optional[FunctionReturnAnalysis]] = {}
-        self._local_target_cache: Dict[int, Optional[List[Any]]] = {}
+        self._local_target_cache: Dict[Tuple[object, ...], Optional[List[Any]]] = {}
         self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
         self._deferred_call_counter: int = 0
         self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
@@ -833,6 +834,8 @@ class ReturnAnalyzer:
             if summary is not None:
                 result.returns = summary[0]
                 result.analysis_notes.append(summary[1])
+
+            result.deferred_calls = dict(self._current_deferred_calls)
 
             if current_active_key is not None:
                 self._analysis_in_progress[current_active_key] = result
@@ -2196,6 +2199,7 @@ class ReturnAnalyzer:
             if not candidate_entries or len(candidate_entries) < 2:
                 continue
 
+            dispatch_args = self._recover_dispatch_call_arguments(dispatch_op, tracer)
             expanded_values: List[ExpandedValue] = []
             candidate_failed = False
             for address_value, branch_conditions in candidate_entries:
@@ -2203,6 +2207,7 @@ class ReturnAnalyzer:
                     address_value,
                     active_functions or set(),
                     current_function=current_function,
+                    args=dispatch_args,
                 )
                 if not resolved:
                     resolved = self._resolve_switch_case_target_expansions(
@@ -2319,6 +2324,7 @@ class ReturnAnalyzer:
             if not candidate_entries or len(candidate_entries) < 2:
                 continue
 
+            dispatch_args = self._recover_dispatch_call_arguments(indirect_op, tracer)
             expanded_values: List[ExpandedValue] = []
             candidate_failed = False
             for address_value, branch_conditions in candidate_entries:
@@ -2326,6 +2332,7 @@ class ReturnAnalyzer:
                     address_value,
                     active_functions or set(),
                     current_function=current_function,
+                    args=dispatch_args,
                 )
                 if not resolved:
                     resolved = self._resolve_switch_case_target_expansions(
@@ -2455,6 +2462,39 @@ class ReturnAnalyzer:
                 )
             return []
         return resolved_targets
+
+    def _recover_dispatch_call_arguments(
+        self,
+        dispatch_op,
+        tracer: PcodeTracer,
+    ) -> List[Expression]:
+        if dispatch_op is None:
+            return []
+        try:
+            mnemonic = dispatch_op.getMnemonic()
+        except Exception:
+            mnemonic = None
+        if mnemonic != "CALLIND":
+            return []
+
+        recovered: List[Expression] = []
+        try:
+            num_inputs = int(dispatch_op.getNumInputs())
+        except Exception:
+            num_inputs = 0
+        for input_index in range(1, max(0, num_inputs)):
+            try:
+                varnode = dispatch_op.getInput(input_index)
+            except Exception:
+                continue
+            recovered.append(
+                _resolve_call_argument_expression(
+                    varnode,
+                    tracer,
+                    self._current_parameters or [],
+                )
+            )
+        return recovered
 
     def _resolve_switch_case_target_expansions(
         self,
@@ -3876,6 +3916,7 @@ class ReturnAnalyzer:
                 target_ref.address_offset,
                 active_functions,
                 current_function,
+                args=args,
             )
 
         active_key = self._target_active_key(target_ref)
@@ -3902,6 +3943,7 @@ class ReturnAnalyzer:
                 active_functions,
                 analysis.function_ref,
             )
+            self._merge_deferred_calls_into_current_analysis(specialized.deferred_calls)
 
         expanded = []
         for ret in specialized.returns:
@@ -3945,18 +3987,21 @@ class ReturnAnalyzer:
         address_value: int,
         active_functions: Set[str],
         current_function=None,
+        args: Optional[List[Expression]] = None,
     ):
         from ..transform.expander import ExpandedValue
 
-        if address_value in self._local_target_cache:
-            return self._local_target_cache[address_value]
+        args = list(args or [])
+        cache_key = self._local_target_cache_key(address_value, args)
+        if cache_key in self._local_target_cache:
+            return self._local_target_cache[cache_key]
 
         try:
             default_space = self.program.getAddressFactory().getDefaultAddressSpace()
             addr = default_space.getAddress(address_value)
         except Exception:
             self._debug_print(f"Local target resolution failed: invalid address 0x{address_value:x}")
-            self._local_target_cache[address_value] = None
+            self._local_target_cache[cache_key] = None
             return None
 
         function_manager = self.program.getFunctionManager()
@@ -3993,7 +4038,7 @@ class ReturnAnalyzer:
             )
         if containing is None:
             self._debug_print(f"Local target resolution failed: no containing function for 0x{address_value:x}")
-            self._local_target_cache[address_value] = None
+            self._local_target_cache[cache_key] = None
             return None
 
         decompiler = self._get_decompiler()
@@ -4002,19 +4047,95 @@ class ReturnAnalyzer:
             self._debug_print(
                 f"Local target resolution failed: decompilation incomplete for 0x{address_value:x}"
             )
-            self._local_target_cache[address_value] = None
+            self._local_target_cache[cache_key] = None
             return None
         high_function = results.getHighFunction()
         if high_function is None:
             self._debug_print(f"Local target resolution failed: HighFunction unavailable for 0x{address_value:x}")
-            self._local_target_cache[address_value] = None
+            self._local_target_cache[cache_key] = None
             return None
 
-        tracer = PcodeTracer(self.program, high_function, debug=self.debug)
+        tracer = PcodeTracer(
+            self.program,
+            high_function,
+            debug=self.debug,
+            bound_parameter_values={
+                index: self._clone_expression(arg)
+                for index, arg in enumerate(args or [])
+                if arg is not None
+            },
+        )
         tracer.record_deferred_call = self._make_deferred_call_recorder(containing)
         expanded = self._expand_linear_code_target(addr, tracer, containing)
-        self._local_target_cache[address_value] = expanded
+        if expanded:
+            expanded = self._specialize_local_target_expansions(expanded, tracer, args)
+        self._local_target_cache[cache_key] = expanded
         return expanded
+
+    def _local_target_cache_key(
+        self,
+        address_value: int,
+        args: List[Expression],
+    ) -> Tuple[object, ...]:
+        return (
+            "local_target",
+            int(address_value),
+            tuple(
+                ConditionNormalizer.expression_signature(arg)
+                for arg in (args or [])
+                if arg is not None
+            ),
+        )
+
+    def _specialize_local_target_expansions(
+        self,
+        expanded: List[Any],
+        tracer: PcodeTracer,
+        args: List[Expression],
+    ) -> List[Any]:
+        if not expanded or not getattr(tracer, "_parameter_descriptors", None):
+            return expanded
+        if not args:
+            return expanded
+        owner_scope: Dict[str, Optional[int]] = {}
+        get_owner_scope = getattr(tracer, "get_parameter_owner_scope", None)
+        if callable(get_owner_scope):
+            try:
+                maybe_scope = get_owner_scope() or {}
+            except Exception:
+                maybe_scope = {}
+            if isinstance(maybe_scope, dict):
+                owner_scope = maybe_scope
+
+        callee_params = [
+            {
+                "name": descriptor.name,
+                "index": descriptor.index,
+                "size": descriptor.size_bytes,
+                "data_type": descriptor.data_type,
+                "is_signed": descriptor.is_signed,
+                **owner_scope,
+            }
+            for descriptor in getattr(tracer, "_parameter_descriptors", [])
+        ]
+        if not callee_params:
+            return expanded
+
+        replacements = _build_parameter_replacements(callee_params, args)
+        specialized: List[Any] = []
+        for item in expanded:
+            value = substitute_expression(item.value, replacements, callee_params)
+            conditions = [
+                substitute_condition(cond, replacements, callee_params)
+                for cond in (item.conditions or [])
+            ]
+            specialized.append(
+                item.__class__(
+                    value=value,
+                    conditions=conditions,
+                )
+            )
+        return specialized
 
     def _expand_linear_code_target(self, addr, tracer, current_function=None):
         from ..transform.expander import ExpandedValue
@@ -4803,6 +4924,38 @@ class ReturnAnalyzer:
             comparison_surface=analysis.comparison_surface,
         )
 
+    def _merge_deferred_calls_into_current_analysis(
+        self,
+        deferred_calls: Optional[Dict[Tuple[object, ...], DeferredCallInfo]],
+    ) -> None:
+        if not deferred_calls:
+            return
+
+        for info in deferred_calls.values():
+            if info is None or getattr(info, "deferred_call_ref", None) is None:
+                continue
+            deferred_key = info.deferred_call_ref.stable_key()
+            if deferred_key in self._current_deferred_calls:
+                continue
+
+            cloned_target_expr = (
+                self._normalize_call_target_expression(
+                    self._clone_expression(info.call_target_expr)
+                )
+                if info.call_target_expr is not None
+                else None
+            )
+            self._current_deferred_calls[deferred_key] = DeferredCallInfo(
+                placeholder_name=info.placeholder_name,
+                target_ref=info.target_ref,
+                arguments=[
+                    self._clone_expression(arg)
+                    for arg in (info.arguments or [])
+                ],
+                call_target_expr=cloned_target_expr,
+                deferred_call_ref=info.deferred_call_ref,
+            )
+
     def _normalize_call_target_expression(
         self,
         expr: Optional[Expression],
@@ -5042,6 +5195,21 @@ class ReturnAnalyzer:
         """パラメータ情報を収集（ストレージ情報付き）"""
         params = []
         local_map = high_function.getLocalSymbolMap()
+        owner_program_id = None
+        owner_entry_offset = None
+        try:
+            if self.program is not None and hasattr(self.program, "getUniqueProgramID"):
+                owner_program_id = int(self.program.getUniqueProgramID())
+        except Exception:
+            owner_program_id = None
+        try:
+            function = getattr(high_function, "getFunction", lambda: None)()
+            if function is not None and hasattr(function, "getEntryPoint"):
+                entry_point = function.getEntryPoint()
+                if entry_point is not None:
+                    owner_entry_offset = int(entry_point.getOffset())
+        except Exception:
+            owner_entry_offset = None
         
         if local_map:
             for sym in local_map.getSymbols():
@@ -5054,6 +5222,8 @@ class ReturnAnalyzer:
                         "size": sym.getSize(),
                         "is_signed": self._is_signed_type(data_type),
                         "storage": self._get_storage_info(sym),
+                        "owner_program_id": owner_program_id,
+                        "owner_entry_offset": owner_entry_offset,
                     }
                     try:
                         param_info["index"] = sym.getCategoryIndex()

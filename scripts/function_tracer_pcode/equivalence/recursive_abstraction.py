@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, DeferredCallInfo, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
+from ..model.structural import expression_key_or_identity
 from ..model.runtime_refs import UnknownValueRef
 
 
@@ -38,10 +39,11 @@ def abstract_recursive_calls(
     """
     未解決の再帰呼び出しプレースホルダを、共有サマリ変数へ抽象化する。
 
-    soundness を大きく崩さないよう、現時点では
+    soundness を大きく崩さないよう、Ghidra が与える object identity に
+    依拠して以下を対応対象にする。
     - self-recursive call
-    - もしくは target 名が一致する deferred call
-    のみを対応対象にする。
+    - call_target_expr が object-centric に一致する deferred call
+    - direct target の function identity が一致する deferred call
     """
 
     analysis1.normalize_deferred_calls()
@@ -105,15 +107,12 @@ def _deferred_call_key(
     analysis: FunctionReturnAnalysis,
     info: DeferredCallInfo,
 ) -> Optional[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]]]:
-    if info is None or info.target_ref is None:
+    if info is None:
         return None
 
-    function_ref = getattr(analysis, "function_ref", None)
-    if function_ref is not None and info.target_ref.analysis_key() == function_ref.analysis_key():
-        target_key = ("self_recursive",)
-    else:
-        target_key = info.target_ref.stable_key()
-
+    target_key = _recursive_target_key(analysis, info)
+    if target_key is None:
+        return None
     arg_key = tuple(_recursive_argument_key(arg) for arg in (info.arguments or []))
     return target_key, arg_key
 
@@ -121,36 +120,148 @@ def _deferred_call_key(
 def _recursive_argument_key(expr: Optional[Expression]) -> Tuple[object, ...]:
     if expr is None:
         return ("none",)
+    return _object_centric_expression_key(expr, for_call_target=False)
+
+
+def _recursive_target_key(
+    analysis: FunctionReturnAnalysis,
+    info: DeferredCallInfo,
+) -> Optional[Tuple[object, ...]]:
+    target_ref = getattr(info, "target_ref", None)
+    function_ref = getattr(analysis, "function_ref", None)
+    if (
+        function_ref is not None
+        and target_ref is not None
+        and target_ref.analysis_key() == function_ref.analysis_key()
+    ):
+        return ("self_recursive",)
+    if (
+        target_ref is not None
+        and getattr(target_ref, "function_name", None)
+        and getattr(target_ref, "function_name", None) == getattr(analysis, "function_name", None)
+    ):
+        return ("self_recursive",)
+
+    target_expr_key = _call_target_expression_key(getattr(info, "call_target_expr", None))
+    if target_expr_key is not None:
+        return ("target_expr", target_expr_key)
+
+    function_name = getattr(target_ref, "function_name", None)
+    if function_name:
+        return ("target_name", function_name)
+
+    if target_ref is None:
+        return None
+
+    stable_key = target_ref.stable_key()
+    if stable_key and stable_key[0] != "unknown":
+        return ("target_ref", stable_key)
+    return None
+
+
+def _call_target_expression_key(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
+    if expr is None:
+        return None
+    return _object_centric_expression_key(expr, for_call_target=True)
+
+
+def _call_target_runtime_display_name(runtime_ref) -> Optional[str]:
+    if runtime_ref is None:
+        return None
+
+    can_execute = getattr(runtime_ref, "can_execute", None)
+    if can_execute is False:
+        return None
+
+    for attr in ("symbol_name", "display_hint"):
+        value = getattr(runtime_ref, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    display_name = getattr(runtime_ref, "display_name", None)
+    if callable(display_name):
+        try:
+            value = display_name()
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _object_centric_expression_key(
+    expr: Optional[Expression],
+    *,
+    for_call_target: bool,
+) -> Tuple[object, ...]:
+    if expr is None:
+        return ("none",)
+
     if expr.expr_type == ExpressionType.PARAMETER:
         index = expr.value if isinstance(expr.value, int) else -1
         return ("parameter", index, int(expr.size or 0))
+
     if expr.expr_type == ExpressionType.CONSTANT:
-        return ("const", int(expr.value), int(expr.size or 0))
+        if for_call_target:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            display_name = _call_target_runtime_display_name(runtime_ref)
+            if display_name:
+                return ("call_target_object", display_name, int(expr.size or 0))
+        try:
+            value = int(expr.value)
+        except Exception:
+            value = expr.value
+        return ("const", value, int(expr.size or 0))
+
     if expr.expr_type == ExpressionType.UNKNOWN:
         runtime_ref = getattr(expr, "runtime_ref", None)
+        runtime_key = (
+            runtime_ref.stable_key()
+            if hasattr(runtime_ref, "stable_key")
+            else None
+        )
+        return ("unknown", runtime_key, int(expr.size or 0))
+
+    if expr.expr_type == ExpressionType.VARIABLE:
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key = (
+            storage_info.storage_identity_key()
+            if hasattr(storage_info, "storage_identity_key")
+            else None
+        )
         return (
-            "unknown",
-            runtime_ref.stable_key() if hasattr(runtime_ref, "stable_key") else None,
+            "variable",
+            storage_key if storage_key is not None else (expr.name or ""),
             int(expr.size or 0),
         )
-    if expr.expr_type == ExpressionType.VARIABLE:
-        return ("variable", expr.name or "", int(expr.size or 0))
+
     if expr.expr_type == ExpressionType.UNARY_OP:
         operand = expr.operands[0] if expr.operands else None
         return (
             "unary",
             expr.operator or "",
             int(expr.size or 0),
-            _recursive_argument_key(operand),
+            _object_centric_expression_key(operand, for_call_target=for_call_target),
         )
+
     if expr.expr_type == ExpressionType.BINARY_OP:
         left = expr.operands[0] if expr.operands else None
         right = expr.operands[1] if len(expr.operands) > 1 else None
-        left_key = _recursive_argument_key(left)
-        right_key = _recursive_argument_key(right)
-        if (expr.operator or "") in {"INT_ADD", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR", "INT_EQUAL", "INT_NOTEQUAL"}:
-            if right_key < left_key:
-                left_key, right_key = right_key, left_key
+        left_key = _object_centric_expression_key(left, for_call_target=for_call_target)
+        right_key = _object_centric_expression_key(right, for_call_target=for_call_target)
+        if (expr.operator or "") in {
+            "INT_ADD",
+            "INT_MULT",
+            "INT_AND",
+            "INT_OR",
+            "INT_XOR",
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        } and right_key < left_key:
+            left_key, right_key = right_key, left_key
         return (
             "binary",
             expr.operator or "",
@@ -158,9 +269,15 @@ def _recursive_argument_key(expr: Optional[Expression]) -> Tuple[object, ...]:
             left_key,
             right_key,
         )
+
     if expr.expr_type == ExpressionType.MEMORY:
         address = expr.operands[0] if expr.operands else None
-        return ("memory", int(expr.size or 0), _recursive_argument_key(address))
+        return (
+            "memory",
+            int(expr.size or 0),
+            _object_centric_expression_key(address, for_call_target=for_call_target),
+        )
+
     if expr.expr_type == ExpressionType.PHI and expr.value:
         branches = []
         for cond, value in expr.value:
@@ -169,18 +286,31 @@ def _recursive_argument_key(expr: Optional[Expression]) -> Tuple[object, ...]:
             else:
                 cond_key = (
                     "condition",
-                    _recursive_argument_key(cond.expression),
+                    _object_centric_expression_key(
+                        cond.expression,
+                        for_call_target=for_call_target,
+                    ),
                     bool(cond.negated),
                 )
-            branches.append((cond_key, _recursive_argument_key(value)))
+            branches.append(
+                (
+                    cond_key,
+                    _object_centric_expression_key(
+                        value,
+                        for_call_target=for_call_target,
+                    ),
+                )
+            )
         return ("phi", int(expr.size or 0), tuple(branches))
+
     return (
         "expr",
-        expr.expr_type.name,
-        expr.operator or "",
-        expr.name or "",
-        int(expr.size or 0),
-        tuple(_recursive_argument_key(op) for op in (expr.operands or [])),
+        expression_key_or_identity(
+            expr,
+            strip_width_adapters=True,
+            collapse_full_masks=True,
+            include_memory_read_order=False,
+        ),
     )
 
 

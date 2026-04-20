@@ -80,7 +80,6 @@ def _eval_constant_raw_internal(
         ExpressionType.PARAMETER,
         ExpressionType.VARIABLE,
         ExpressionType.CALL,
-        ExpressionType.INTRINSIC,
         ExpressionType.MEMORY,
         ExpressionType.PHI,
         ExpressionType.UNKNOWN,
@@ -118,6 +117,36 @@ def _eval_constant_raw_internal(
                 return _remember(expr, (normalize_raw_value(-operand_signed, bits), bits))
             if expr.operator == "BOOL_NEGATE":
                 return _remember(expr, (0 if operand_raw else 1, 1))
+            return _remember(expr, None)
+
+        if expr_type == ExpressionType.INTRINSIC and expr.operands:
+            operand_evals = [
+                _eval_constant_raw_internal(operand, visiting)
+                for operand in expr.operands
+            ]
+            if any(value is None for value in operand_evals):
+                return _remember(expr, None)
+
+            resolved = [value for value in operand_evals if value is not None]
+            raw_values = [raw for raw, _bits in resolved]
+            signed_values = [to_signed_value(raw, bits) for raw, bits in resolved]
+            bits = _default_bits(expr)
+            name = getattr(expr, "name", None) or ""
+
+            if name in ("COPY", "CAST", "INT_ZEXT") and raw_values:
+                return _remember(expr, (normalize_raw_value(raw_values[0], bits), bits))
+            if name == "INT_SEXT" and raw_values:
+                return _remember(expr, (normalize_raw_value(signed_values[0], bits), bits))
+            if name in {"INT_ADD", "PTRSUB"} and len(raw_values) >= 2:
+                return _remember(expr, (normalize_raw_value(raw_values[0] + raw_values[1], bits), bits))
+            if name == "PTRADD":
+                if len(raw_values) >= 3:
+                    return _remember(
+                        expr,
+                        (normalize_raw_value(raw_values[0] + (raw_values[1] * raw_values[2]), bits), bits),
+                    )
+                if len(raw_values) >= 2:
+                    return _remember(expr, (normalize_raw_value(raw_values[0] + raw_values[1], bits), bits))
             return _remember(expr, None)
 
         if expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:

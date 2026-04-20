@@ -3,11 +3,12 @@
 
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Dict, Set, Optional, Tuple
-from ...model import Expression, Condition, ExpressionType
+from ...model import Expression, Condition, ExpressionType, condition_key, key_contains_placeholder
 from ..debug import summarize_expression, summarize_condition
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
 from .normalizer import ConditionNormalizer
 from .scalar import ScalarConstraint, extract_scalar_constraint
+from .smt_oracle import ConditionSMTOracle
 
 
 BooleanAtom = Tuple[object, str, object]
@@ -29,6 +30,7 @@ class ConditionConstraintSet:
     conditions: Tuple[Condition, ...]
     contradiction_indices: Tuple[int, ...]
     implied_norms: frozenset
+    solver_backed: bool = False
 
     @classmethod
     def from_conditions(cls, conditions: Iterable[Condition]) -> "ConditionConstraintSet":
@@ -37,6 +39,7 @@ class ConditionConstraintSet:
             conditions=tuple(normalized["conditions"]),
             contradiction_indices=tuple(sorted(normalized["contradiction_indices"])),
             implied_norms=frozenset(normalized["implied_norms"]),
+            solver_backed=bool(normalized.get("solver_backed", False)),
         )
 
     @property
@@ -54,6 +57,7 @@ class ConditionConstraintSet:
             condition,
             list(self.conditions),
             set(self.implied_norms),
+            prefer_solver=self.solver_backed,
         )
 
     def implies_all(self, conditions: Iterable[Condition]) -> bool:
@@ -100,6 +104,7 @@ class ConditionSimplifier:
     _debug_suppressed: bool = False
     _DEBUG_REPEAT_LIMIT: int = 8
     _debug_repeat_counts: Dict[Tuple[str, str], int] = {}
+    _active_normalization_keys: Set[Tuple[object, ...]] = set()
     
     @classmethod
     def reset_debug_state(cls) -> None:
@@ -444,7 +449,16 @@ class ConditionSimplifier:
         cls,
         conditions: Iterable[Condition],
     ) -> Optional[bool]:
-        clauses = cls._conditions_to_cnf_clauses(conditions)
+        condition_list = list(conditions or [])
+        if cls._should_use_solver_reasoning(condition_list):
+            cache_key = ("unsat", cls._condition_cache_key(condition_list))
+            solver_result = ConditionSMTOracle.conjunction_is_unsat(
+                condition_list,
+                cache_key=cache_key,
+            )
+            if solver_result is not None:
+                return solver_result
+        clauses = cls._conditions_to_cnf_clauses(condition_list)
         if clauses is None:
             return None
         clause_literals = [clause.literals for clause in clauses]
@@ -456,9 +470,21 @@ class ConditionSimplifier:
         context_conditions: Iterable[Condition],
         condition: Condition,
     ) -> Optional[bool]:
-        clauses = cls._conditions_to_cnf_clauses(
-            list(context_conditions or []) + [condition.negate()]
-        )
+        context_list = list(context_conditions or [])
+        implication_conditions = context_list + [condition.negate()]
+        if cls._should_use_solver_reasoning(implication_conditions):
+            cache_key = (
+                "implies",
+                cls._condition_cache_key(context_list),
+                condition_key(condition.negate(), budget=96),
+            )
+            solver_result = ConditionSMTOracle.conjunction_is_unsat(
+                implication_conditions,
+                cache_key=cache_key,
+            )
+            if solver_result is not None:
+                return solver_result
+        clauses = cls._conditions_to_cnf_clauses(implication_conditions)
         if clauses is None:
             return None
         clause_literals = [clause.literals for clause in clauses]
@@ -871,6 +897,7 @@ class ConditionSimplifier:
         condition: Condition,
         context_conditions: Optional[List[Condition]] = None,
         implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
+        prefer_solver: bool = False,
     ) -> bool:
         formula_result: Optional[bool] = None
         if context_conditions:
@@ -1220,204 +1247,356 @@ class ConditionSimplifier:
                 "conditions": [],
                 "contradiction_indices": set(),
                 "implied_norms": set(),
+                "solver_backed": False,
             }
 
+        guard_key = cls._condition_object_cache_key(conditions)
+        use_nonrecursive = (
+            guard_key in cls._active_normalization_keys
+            or cls._should_skip_contextual_reduction(conditions)
+        )
+        if use_nonrecursive:
+            return cls._normalize_condition_list_nonrecursive(conditions)
+
+        cls._active_normalization_keys.add(guard_key)
+        try:
+            flattened: List[Condition] = []
+            contradiction_indices: Set[int] = set()
+
+            for cond in conditions:
+                truth_value = cls.evaluate_condition_truth(cond)
+                if truth_value is True:
+                    continue
+                flattened.extend(cls.flatten_condition(cond))
+
+            original_flattened = list(flattened)
+            flattened = cls._contextually_reduce_conditions(flattened)
+            if (
+                len(original_flattened) > 1
+                and any(cls.evaluate_condition_truth(cond) is False for cond in flattened)
+            ):
+                preserve_direct_witness = False
+                for i in range(len(original_flattened)):
+                    for j in range(i + 1, len(original_flattened)):
+                        if ConditionNormalizer.are_contradictory(
+                            original_flattened[i],
+                            original_flattened[j],
+                        ):
+                            preserve_direct_witness = True
+                            break
+                    if preserve_direct_witness:
+                        break
+                if preserve_direct_witness:
+                    flattened = original_flattened
+
+            unique_conditions: List[Condition] = []
+            unique_canonicals: Dict[Tuple[str, str, str, bool], int] = {}
+            comparison_map: Dict[Tuple[str, str, str], Dict[bool, int]] = {}
+            fallback_conditions: List[Tuple[int, Condition]] = []
+            scalar_groups: Dict[Tuple[str, int], Dict[str, Any]] = {}
+            unsupported_indices: List[int] = []
+
+            for cond in flattened:
+                truth_value = cls.evaluate_condition_truth(cond)
+                if truth_value is True:
+                    continue
+
+                canonical = ConditionNormalizer.normalize_for_contradiction(cond)
+                if canonical in unique_canonicals:
+                    continue
+
+                current_index = len(unique_conditions)
+                unique_canonicals[canonical] = current_index
+                unique_conditions.append(cond)
+
+                if truth_value is False:
+                    contradiction_indices.add(current_index)
+
+                left, op, right, polarity = canonical
+                if op:
+                    polarity_map = comparison_map.setdefault((left, op, right), {})
+                    prior_index = polarity_map.get(polarity)
+                    if prior_index is not None:
+                        contradiction_indices.update({prior_index, current_index})
+                    opposite_index = polarity_map.get(not polarity)
+                    if opposite_index is not None:
+                        contradiction_indices.update({opposite_index, current_index})
+                    polarity_map[polarity] = current_index
+                else:
+                    fallback_conditions.append((current_index, cond))
+
+                fact = cls._extract_scalar_constraint(cond)
+                if fact is None:
+                    unsupported_indices.append(current_index)
+                    continue
+
+                group = scalar_groups.setdefault(
+                    fact.key,
+                    {
+                        "eq": {},
+                        "ne": {},
+                        "lower": {False: None, True: None},
+                        "upper": {False: None, True: None},
+                    },
+                )
+
+                if fact.kind == "eq":
+                    existing = group["eq"].get(fact.raw_value)
+                    if existing is not None:
+                        contradiction_indices.update({existing, current_index})
+                    group["eq"].setdefault(fact.raw_value, current_index)
+                elif fact.kind == "ne":
+                    existing = group["ne"].get(fact.raw_value)
+                    if existing is not None:
+                        contradiction_indices.update({existing, current_index})
+                    group["ne"].setdefault(fact.raw_value, current_index)
+                elif fact.kind == "lower":
+                    signed = fact.signed
+                    if fact.value is None or fact.inclusive is None:
+                        continue
+                    candidate = (fact.value, fact.inclusive, current_index)
+                    current = group["lower"][signed]
+                    group["lower"][signed] = cls._select_stronger_lower(current, candidate)
+                elif fact.kind == "upper":
+                    signed = fact.signed
+                    if fact.value is None or fact.inclusive is None:
+                        continue
+                    candidate = (fact.value, fact.inclusive, current_index)
+                    current = group["upper"][signed]
+                    group["upper"][signed] = cls._select_stronger_upper(current, candidate)
+
+            for i in range(len(fallback_conditions)):
+                for j in range(i + 1, len(fallback_conditions)):
+                    index_i, cond_i = fallback_conditions[i]
+                    index_j, cond_j = fallback_conditions[j]
+                    if ConditionNormalizer.are_contradictory(cond_i, cond_j):
+                        contradiction_indices.update({index_i, index_j})
+
+            formula_unsat = cls._formula_is_unsat(unique_conditions)
+            if formula_unsat:
+                contradiction_indices.update(range(len(unique_conditions)))
+
+            keep_indices: Set[int] = set(unsupported_indices)
+
+            for key, group in scalar_groups.items():
+                bits = key[1]
+                eq_items = sorted(group["eq"].items(), key=lambda item: item[1])
+                ne_items = sorted(group["ne"].items(), key=lambda item: item[1])
+
+                if len(eq_items) > 1:
+                    contradiction_indices.update(index for _raw, index in eq_items)
+                if eq_items:
+                    eq_raw, eq_index = eq_items[0]
+                    keep_indices.add(eq_index)
+
+                    ne_index = group["ne"].get(eq_raw)
+                    if ne_index is not None:
+                        contradiction_indices.update({eq_index, ne_index})
+                        keep_indices.add(ne_index)
+
+                    for signed in (False, True):
+                        lower = group["lower"][signed]
+                        upper = group["upper"][signed]
+                        eq_value = cls._to_signed_value(eq_raw, bits) if signed else eq_raw
+                        if lower is not None:
+                            lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
+                            if eq_value < lower_effective:
+                                contradiction_indices.update({eq_index, lower[2]})
+                                keep_indices.add(lower[2])
+                        if upper is not None:
+                            upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
+                            if eq_value > upper_effective:
+                                contradiction_indices.update({eq_index, upper[2]})
+                                keep_indices.add(upper[2])
+                    continue
+
+                keep_indices.update(index for _raw, index in ne_items)
+                for signed in (False, True):
+                    lower = group["lower"][signed]
+                    upper = group["upper"][signed]
+                    if lower is not None:
+                        keep_indices.add(lower[2])
+                    if upper is not None:
+                        keep_indices.add(upper[2])
+
+                    if lower is None or upper is None:
+                        continue
+
+                    if cls._bounds_contradict(
+                        (lower[0], lower[1]),
+                        (upper[0], upper[1]),
+                        signed,
+                        bits,
+                    ):
+                        contradiction_indices.update({lower[2], upper[2]})
+                        continue
+
+                    lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
+                    upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
+                    if lower_effective == upper_effective:
+                        singleton_raw = cls._normalize_raw_value(lower_effective, bits)
+                        ne_index = group["ne"].get(singleton_raw)
+                        if ne_index is not None:
+                            contradiction_indices.update({lower[2], upper[2], ne_index})
+                            keep_indices.add(ne_index)
+
+            selected_indices = keep_indices
+            if contradiction_indices:
+                selected_indices = set(unsupported_indices) | set(contradiction_indices)
+                if not selected_indices:
+                    selected_indices = set(contradiction_indices)
+
+            selected = [
+                condition
+                for index, condition in enumerate(unique_conditions)
+                if index in selected_indices
+            ]
+
+            return {
+                "conditions": selected,
+                "contradiction_indices": contradiction_indices,
+                "implied_norms": cls._collect_implied_condition_norms(selected),
+                "solver_backed": False,
+            }
+        finally:
+            cls._active_normalization_keys.discard(guard_key)
+
+    @classmethod
+    def _normalize_condition_list_nonrecursive(
+        cls,
+        conditions: List[Condition],
+    ) -> Dict[str, object]:
         flattened: List[Condition] = []
         contradiction_indices: Set[int] = set()
+        seen_keys: Set[Tuple[object, ...]] = set()
+        selected: List[Condition] = []
 
         for cond in conditions:
             truth_value = cls.evaluate_condition_truth(cond)
             if truth_value is True:
                 continue
-            flattened.extend(cls.flatten_condition(cond))
-
-        original_flattened = list(flattened)
-        flattened = cls._contextually_reduce_conditions(flattened)
-        if (
-            len(original_flattened) > 1
-            and any(cls.evaluate_condition_truth(cond) is False for cond in flattened)
-        ):
-            preserve_direct_witness = False
-            for i in range(len(original_flattened)):
-                for j in range(i + 1, len(original_flattened)):
-                    if ConditionNormalizer.are_contradictory(
-                        original_flattened[i],
-                        original_flattened[j],
-                    ):
-                        preserve_direct_witness = True
-                        break
-                if preserve_direct_witness:
-                    break
-            if preserve_direct_witness:
-                flattened = original_flattened
-
-        unique_conditions: List[Condition] = []
-        unique_canonicals: Dict[Tuple[str, str, str, bool], int] = {}
-        comparison_map: Dict[Tuple[str, str, str], Dict[bool, int]] = {}
-        fallback_conditions: List[Tuple[int, Condition]] = []
-        scalar_groups: Dict[Tuple[str, int], Dict[str, Any]] = {}
-        unsupported_indices: List[int] = []
+            for flat in cls.flatten_condition(cond):
+                flat_truth = cls.evaluate_condition_truth(flat)
+                if flat_truth is True:
+                    continue
+                flattened.append(flat)
 
         for cond in flattened:
-            truth_value = cls.evaluate_condition_truth(cond)
-            if truth_value is True:
+            key = condition_key(cond, budget=128)
+            if key in seen_keys:
                 continue
+            seen_keys.add(key)
+            if cls.evaluate_condition_truth(cond) is False:
+                contradiction_indices.add(len(selected))
+            for other_index, other in enumerate(selected):
+                if ConditionNormalizer.are_contradictory(cond, other):
+                    contradiction_indices.update({other_index, len(selected)})
+                    break
+            selected.append(cond)
 
-            canonical = ConditionNormalizer.normalize_for_contradiction(cond)
-            if canonical in unique_canonicals:
-                continue
-
-            current_index = len(unique_conditions)
-            unique_canonicals[canonical] = current_index
-            unique_conditions.append(cond)
-
-            if truth_value is False:
-                contradiction_indices.add(current_index)
-
-            left, op, right, polarity = canonical
-            if op:
-                polarity_map = comparison_map.setdefault((left, op, right), {})
-                prior_index = polarity_map.get(polarity)
-                if prior_index is not None:
-                    contradiction_indices.update({prior_index, current_index})
-                opposite_index = polarity_map.get(not polarity)
-                if opposite_index is not None:
-                    contradiction_indices.update({opposite_index, current_index})
-                polarity_map[polarity] = current_index
-            else:
-                fallback_conditions.append((current_index, cond))
-
-            fact = cls._extract_scalar_constraint(cond)
-            if fact is None:
-                unsupported_indices.append(current_index)
-                continue
-
-            group = scalar_groups.setdefault(
-                fact.key,
-                {
-                    "eq": {},
-                    "ne": {},
-                    "lower": {False: None, True: None},
-                    "upper": {False: None, True: None},
-                },
-            )
-
-            if fact.kind == "eq":
-                existing = group["eq"].get(fact.raw_value)
-                if existing is not None:
-                    contradiction_indices.update({existing, current_index})
-                group["eq"].setdefault(fact.raw_value, current_index)
-            elif fact.kind == "ne":
-                existing = group["ne"].get(fact.raw_value)
-                if existing is not None:
-                    contradiction_indices.update({existing, current_index})
-                group["ne"].setdefault(fact.raw_value, current_index)
-            elif fact.kind == "lower":
-                signed = fact.signed
-                if fact.value is None or fact.inclusive is None:
-                    continue
-                candidate = (fact.value, fact.inclusive, current_index)
-                current = group["lower"][signed]
-                group["lower"][signed] = cls._select_stronger_lower(current, candidate)
-            elif fact.kind == "upper":
-                signed = fact.signed
-                if fact.value is None or fact.inclusive is None:
-                    continue
-                candidate = (fact.value, fact.inclusive, current_index)
-                current = group["upper"][signed]
-                group["upper"][signed] = cls._select_stronger_upper(current, candidate)
-
-        for i in range(len(fallback_conditions)):
-            for j in range(i + 1, len(fallback_conditions)):
-                index_i, cond_i = fallback_conditions[i]
-                index_j, cond_j = fallback_conditions[j]
-                if ConditionNormalizer.are_contradictory(cond_i, cond_j):
-                    contradiction_indices.update({index_i, index_j})
-
-        formula_unsat = cls._formula_is_unsat(unique_conditions)
-        if formula_unsat:
-            contradiction_indices.update(range(len(unique_conditions)))
-
-        keep_indices: Set[int] = set(unsupported_indices)
-
-        for key, group in scalar_groups.items():
-            bits = key[1]
-            eq_items = sorted(group["eq"].items(), key=lambda item: item[1])
-            ne_items = sorted(group["ne"].items(), key=lambda item: item[1])
-
-            if len(eq_items) > 1:
-                contradiction_indices.update(index for _raw, index in eq_items)
-            if eq_items:
-                eq_raw, eq_index = eq_items[0]
-                keep_indices.add(eq_index)
-
-                ne_index = group["ne"].get(eq_raw)
-                if ne_index is not None:
-                    contradiction_indices.update({eq_index, ne_index})
-                    keep_indices.add(ne_index)
-
-                for signed in (False, True):
-                    lower = group["lower"][signed]
-                    upper = group["upper"][signed]
-                    eq_value = cls._to_signed_value(eq_raw, bits) if signed else eq_raw
-                    if lower is not None:
-                        lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
-                        if eq_value < lower_effective:
-                            contradiction_indices.update({eq_index, lower[2]})
-                            keep_indices.add(lower[2])
-                    if upper is not None:
-                        upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
-                        if eq_value > upper_effective:
-                            contradiction_indices.update({eq_index, upper[2]})
-                            keep_indices.add(upper[2])
-                continue
-
-            keep_indices.update(index for _raw, index in ne_items)
-            for signed in (False, True):
-                lower = group["lower"][signed]
-                upper = group["upper"][signed]
-                if lower is not None:
-                    keep_indices.add(lower[2])
-                if upper is not None:
-                    keep_indices.add(upper[2])
-
-                if lower is None or upper is None:
-                    continue
-
-                if cls._bounds_contradict(
-                    (lower[0], lower[1]),
-                    (upper[0], upper[1]),
-                    signed,
-                    bits,
-                ):
-                    contradiction_indices.update({lower[2], upper[2]})
-                    continue
-
-                lower_effective = cls._effective_lower_bound(lower[0], lower[1], signed, bits)
-                upper_effective = cls._effective_upper_bound(upper[0], upper[1], signed, bits)
-                if lower_effective == upper_effective:
-                    singleton_raw = cls._normalize_raw_value(lower_effective, bits)
-                    ne_index = group["ne"].get(singleton_raw)
-                    if ne_index is not None:
-                        contradiction_indices.update({lower[2], upper[2], ne_index})
-                        keep_indices.add(ne_index)
-
-        selected_indices = keep_indices
-        if contradiction_indices:
-            selected_indices = set(unsupported_indices) | set(contradiction_indices)
-            if not selected_indices:
-                selected_indices = set(contradiction_indices)
-
-        selected = [
-            condition
-            for index, condition in enumerate(unique_conditions)
-            if index in selected_indices
-        ]
+        solver_backed = cls._can_use_solver_reasoning(selected)
+        if not contradiction_indices and solver_backed:
+            solver_unsat = cls._formula_is_unsat(selected)
+            if solver_unsat is True:
+                contradiction_indices.add(0)
 
         return {
             "conditions": selected,
             "contradiction_indices": contradiction_indices,
             "implied_norms": cls._collect_implied_condition_norms(selected),
+            "solver_backed": solver_backed,
+        }
+
+    @classmethod
+    def _condition_cache_key(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> Tuple[object, ...]:
+        keys = [condition_key(cond, budget=96) for cond in (conditions or []) if cond is not None]
+        keys.sort()
+        return tuple(keys)
+
+    @classmethod
+    def _condition_object_cache_key(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> Tuple[int, ...]:
+        keys = [id(cond) for cond in (conditions or []) if cond is not None]
+        keys.sort()
+        return tuple(keys)
+
+    @classmethod
+    def _should_skip_contextual_reduction(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> bool:
+        for cond in conditions or []:
+            if cond is None:
+                continue
+            key = condition_key(cond, budget=96)
+            if key_contains_placeholder(key):
+                return True
+            metrics = cls._condition_metrics(cond)
+            if metrics["has_unknown"] and metrics["phi_depth"] > 0 and metrics["node_count"] > 24:
+                return True
+            if metrics["phi_depth"] > 1 and metrics["node_count"] > 32:
+                return True
+            if metrics["phi_depth"] > 0 and metrics["node_count"] > 96:
+                return True
+        return False
+
+    @classmethod
+    def _should_use_solver_reasoning(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> bool:
+        condition_list = [cond for cond in (conditions or []) if cond is not None]
+        if not condition_list:
+            return False
+        if not cls._should_skip_contextual_reduction(condition_list):
+            return False
+        return cls._can_use_solver_reasoning(condition_list)
+
+    @classmethod
+    def _can_use_solver_reasoning(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> bool:
+        if not list(conditions or []):
+            return False
+        return ConditionSMTOracle.is_available()
+
+    @classmethod
+    def _condition_metrics(
+        cls,
+        condition: Condition,
+    ) -> Dict[str, int | bool]:
+        node_count = 0
+        phi_depth = 0
+        has_unknown = False
+        pending: List[Tuple[Expression, int]] = [(condition.expression, 0)]
+        while pending:
+            expr, depth = pending.pop()
+            if expr is None:
+                continue
+            node_count += 1
+            if expr.expr_type == ExpressionType.UNKNOWN:
+                has_unknown = True
+            if expr.expr_type == ExpressionType.PHI:
+                phi_depth = max(phi_depth, depth + 1)
+                for branch_cond, branch_value in reversed(expr.value or []):
+                    if branch_value is not None:
+                        pending.append((branch_value, depth + 1))
+                    cond_expr = getattr(branch_cond, "expression", None) if branch_cond is not None else None
+                    if cond_expr is not None:
+                        pending.append((cond_expr, depth + 1))
+                continue
+            for operand in reversed(list(getattr(expr, "operands", None) or [])):
+                pending.append((operand, depth))
+        return {
+            "node_count": node_count,
+            "phi_depth": phi_depth,
+            "has_unknown": has_unknown,
         }
 
     @classmethod

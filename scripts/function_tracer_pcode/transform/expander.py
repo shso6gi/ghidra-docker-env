@@ -2157,7 +2157,7 @@ class ExpressionExpander:
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
-        if requires_recursive_expansion and self.effect_summary is not None and getattr(self.effect_summary, "effects", None) and self.parameters:
+        if requires_recursive_expansion and self.parameters:
             output = pcode_op.getOutput()
             output_size = output.getSize() if output else 0
             traced_shortcut = self._expand_whole_operation_object_centrically(

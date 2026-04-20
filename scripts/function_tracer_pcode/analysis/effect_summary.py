@@ -1677,13 +1677,42 @@ def _evaluate_constant_expression(expr: Optional[Expression]) -> Optional[int]:
             return shifted & ((1 << target_bits) - 1)
         return None
 
+    if expr.expr_type == ExpressionType.INTRINSIC:
+        intrinsic_name = getattr(expr, "name", None) or ""
+        operand_values = [_evaluate_constant_expression(operand) for operand in (expr.operands or [])]
+        if any(value is None for value in operand_values):
+            return None
+        resolved_values = [int(value) for value in operand_values if value is not None]
+
+        if intrinsic_name in {"PTRSUB", "INT_ADD"} and len(resolved_values) >= 2:
+            return _mask_to_expr_width(expr, resolved_values[0] + resolved_values[1])
+        if intrinsic_name == "PTRADD":
+            if len(resolved_values) >= 3:
+                return _mask_to_expr_width(
+                    expr,
+                    resolved_values[0] + (resolved_values[1] * resolved_values[2]),
+                )
+            if len(resolved_values) >= 2:
+                return _mask_to_expr_width(expr, resolved_values[0] + resolved_values[1])
+        if intrinsic_name in {"CAST", "COPY", "INT_ZEXT"} and resolved_values:
+            target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+            return resolved_values[0] & ((1 << target_bits) - 1)
+        if intrinsic_name == "INT_SEXT" and resolved_values:
+            target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+            return _sign_extend_value(
+                resolved_values[0],
+                expr.operands[0].get_bit_width(),
+                target_bits,
+            )
+        return None
+
     if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
         left_value = _evaluate_constant_expression(expr.operands[0])
         right_value = _evaluate_constant_expression(expr.operands[1])
         if left_value is None or right_value is None:
             return None
 
-        if expr.operator == "INT_ADD":
+        if expr.operator in {"INT_ADD", "PTRSUB", "PTRADD"}:
             return _mask_to_expr_width(expr, left_value + right_value)
         if expr.operator == "INT_SUB":
             return _mask_to_expr_width(expr, left_value - right_value)
@@ -1716,7 +1745,7 @@ def _apply_unary_constant_op(expr: Expression, operand_value: int) -> Optional[i
 
 
 def _apply_binary_constant_op(expr: Expression, left_value: int, right_value: int) -> Optional[int]:
-    if expr.operator == "INT_ADD":
+    if expr.operator in {"INT_ADD", "PTRSUB", "PTRADD"}:
         return _mask_to_expr_width(expr, left_value + right_value)
     if expr.operator == "INT_SUB":
         return _mask_to_expr_width(expr, left_value - right_value)
@@ -2172,6 +2201,13 @@ def _parameter_identity_key_from_base_ref(
         return None
     if base_ref.parameter_index is None:
         return None
+    if base_ref.owner_program_id is not None or base_ref.owner_entry_offset is not None:
+        return (
+            "parameter",
+            base_ref.owner_program_id,
+            base_ref.owner_entry_offset,
+            int(base_ref.parameter_index),
+        )
     return ("parameter", int(base_ref.parameter_index))
 
 
@@ -2181,6 +2217,10 @@ def _parameter_identity_keys_from_descriptor(param: Optional[Dict]) -> Set[Tuple
     keys: Set[Tuple[object, ...]] = set()
     param_index = _normalize_parameter_index(param.get("index"))
     if param_index is not None:
+        owner_program_id = param.get("owner_program_id")
+        owner_entry_offset = param.get("owner_entry_offset")
+        if owner_program_id is not None or owner_entry_offset is not None:
+            keys.add(("parameter", owner_program_id, owner_entry_offset, param_index))
         keys.add(("parameter", param_index))
     storage_key = _storage_identity_key(_coerce_storage_info(param.get("storage")))
     if storage_key is not None:
@@ -2196,29 +2236,36 @@ def _parameter_identity_keys_from_expression(
         return set()
 
     keys: Set[Tuple[object, ...]] = set()
+    explicit_parameter_identity = False
+    explicit_scoped_parameter_identity = False
 
     runtime_ref = getattr(expr, "runtime_ref", None)
     if isinstance(runtime_ref, LocationBaseRef):
         base_key = _parameter_identity_key_from_base_ref(runtime_ref)
         if base_key is not None:
             keys.add(base_key)
+            explicit_parameter_identity = True
+            explicit_scoped_parameter_identity = len(base_key) > 2
     elif isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
         location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
         base_key = _parameter_identity_key_from_base_ref(location_ref.base_ref)
         if base_key is not None and not location_ref.steps and int(location_ref.offset) == 0:
             keys.add(base_key)
+            explicit_parameter_identity = True
+            explicit_scoped_parameter_identity = len(base_key) > 2
 
-    if expr.expr_type == ExpressionType.PARAMETER:
+    if expr.expr_type == ExpressionType.PARAMETER and not explicit_parameter_identity:
         param_index = _normalize_parameter_index(getattr(expr, "value", None))
         if param_index is not None:
             keys.add(("parameter", param_index))
 
     storage_key = _storage_identity_key(_coerce_storage_info(getattr(expr, "storage_info", None)))
-    if storage_key is not None:
+    if storage_key is not None and not explicit_scoped_parameter_identity:
         keys.add(storage_key)
 
-    descriptor = _resolve_parameter_descriptor(expr, parameters)
-    keys.update(_parameter_identity_keys_from_descriptor(descriptor))
+    if not explicit_scoped_parameter_identity:
+        descriptor = _resolve_parameter_descriptor(expr, parameters)
+        keys.update(_parameter_identity_keys_from_descriptor(descriptor))
     return keys
 
 
@@ -2246,12 +2293,24 @@ def _coerce_callee_parameter_ref(param: object, index: int) -> LocationBaseRef:
     if isinstance(param, LocationBaseRef) and param.is_parameter():
         normalized_index = _normalize_parameter_index(param.parameter_index)
         if normalized_index is not None:
-            return LocationBaseRef.parameter(param.parameter_name, index=normalized_index)
-        return LocationBaseRef.parameter(param.parameter_name, index=index)
+            return LocationBaseRef.parameter(
+                param.parameter_name,
+                index=normalized_index,
+                owner_program_id=param.owner_program_id,
+                owner_entry_offset=param.owner_entry_offset,
+            )
+        return LocationBaseRef.parameter(
+            param.parameter_name,
+            index=index,
+            owner_program_id=param.owner_program_id,
+            owner_entry_offset=param.owner_entry_offset,
+        )
     if isinstance(param, dict):
         return _parameter_base_ref(
             name=param.get("name"),
             index=param.get("index", index),
+            owner_program_id=param.get("owner_program_id"),
+            owner_entry_offset=param.get("owner_entry_offset"),
         )
     if isinstance(param, str):
         return LocationBaseRef.parameter(param, index=index)
@@ -2262,15 +2321,99 @@ def _coerce_callee_parameter_refs(params: Sequence[object]) -> List[LocationBase
     return [_coerce_callee_parameter_ref(param, index) for index, param in enumerate(params)]
 
 
+def _clone_expression_tree(expr: Optional[Expression]) -> Optional[Expression]:
+    if expr is None:
+        return None
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        branches = []
+        for cond, value in expr.value:
+            cloned_cond = None
+            if cond is not None:
+                cloned_expression = _clone_expression_tree(cond.expression)
+                cloned_cond = None if cloned_expression is None else Condition(cloned_expression, cond.negated)
+            branches.append((cloned_cond, _clone_expression_tree(value)))
+        cloned = Expression.phi(branches)
+        cloned.size = expr.size
+        cloned.data_type = expr.data_type
+        cloned.data_type_obj = getattr(expr, "data_type_obj", None)
+        cloned.storage_info = getattr(expr, "storage_info", None)
+        cloned.read_order_key = getattr(expr, "read_order_key", None)
+        cloned.runtime_ref = getattr(expr, "runtime_ref", None)
+        cloned.opcode = getattr(expr, "opcode", None)
+        return cloned
+    return expr.clone_with(
+        operands=[_clone_expression_tree(op) for op in (expr.operands or [])]
+    )
+
+
+def _coerce_argument_to_callee_parameter(
+    arg: Optional[Expression],
+    callee_param: object,
+) -> Optional[Expression]:
+    if arg is None:
+        return None
+
+    descriptor = callee_param if isinstance(callee_param, dict) else None
+    target_size = None
+    is_signed = True
+    if descriptor is not None:
+        try:
+            target_size = int(descriptor.get("size") or 0)
+        except Exception:
+            target_size = None
+        try:
+            is_signed = bool(descriptor.get("is_signed", True))
+        except Exception:
+            is_signed = True
+
+        storage = _coerce_storage_info(descriptor.get("storage"))
+        if (not target_size or target_size <= 0) and storage is not None:
+            try:
+                target_size = int(storage.size or 0)
+            except Exception:
+                target_size = None
+
+    if not target_size or target_size <= 0:
+        cloned = _clone_expression_tree(arg)
+        return cloned if cloned is not None else arg
+
+    cloned = _clone_expression_tree(arg)
+    if cloned is None:
+        return arg
+
+    current_size = int(getattr(cloned, "size", 0) or 0)
+    if current_size <= 0 or current_size == target_size:
+        cloned.size = target_size
+        return cloned
+
+    if current_size > target_size:
+        narrowed = Expression.binary_op(
+            "SUBPIECE",
+            cloned,
+            Expression.constant(0, size=max(1, current_size)),
+        )
+        narrowed.size = target_size
+        return narrowed
+
+    widened = Expression.unary_op(
+        "INT_SEXT" if is_signed else "INT_ZEXT",
+        cloned,
+    )
+    widened.size = target_size
+    return widened
+
+
 def _build_parameter_replacements(
     callee_params: Sequence[object],
     args: Sequence[Expression],
 ) -> Dict[Tuple[object, ...], Expression]:
     replacements: Dict[Tuple[object, ...], Expression] = {}
-    for param_ref, arg in zip(_coerce_callee_parameter_refs(callee_params), args):
+    for param, param_ref, arg in zip(callee_params, _coerce_callee_parameter_refs(callee_params), args):
         key = _parameter_identity_key_from_base_ref(param_ref)
         if key is not None:
-            replacements[key] = arg
+            coerced_arg = _coerce_argument_to_callee_parameter(arg, param)
+            if coerced_arg is not None:
+                replacements[key] = coerced_arg
     return replacements
 
 
@@ -2278,12 +2421,28 @@ def _parameter_base_ref(
     *,
     name: Optional[object] = None,
     index: Optional[object] = None,
+    owner_program_id: Optional[object] = None,
+    owner_entry_offset: Optional[object] = None,
 ) -> LocationBaseRef:
     normalized_name = str(name) if isinstance(name, str) and name else None
+    normalized_owner_program_id = None
+    normalized_owner_entry_offset = None
+    try:
+        if owner_program_id is not None:
+            normalized_owner_program_id = int(owner_program_id)
+    except Exception:
+        normalized_owner_program_id = None
+    try:
+        if owner_entry_offset is not None:
+            normalized_owner_entry_offset = int(owner_entry_offset)
+    except Exception:
+        normalized_owner_entry_offset = None
     return LocationBaseRef(
         kind="parameter",
         parameter_name=normalized_name,
         parameter_index=_normalize_parameter_index(index),
+        owner_program_id=normalized_owner_program_id,
+        owner_entry_offset=normalized_owner_entry_offset,
         display_hint=normalized_name,
     )
 
@@ -2321,7 +2480,12 @@ def _bind_location_to_parameter_identity(
     return _bind_location_to_parameter_refs(
         location,
         [
-            _parameter_base_ref(name=param.get("name"), index=param.get("index"))
+            _parameter_base_ref(
+                name=param.get("name"),
+                index=param.get("index"),
+                owner_program_id=param.get("owner_program_id"),
+                owner_entry_offset=param.get("owner_entry_offset"),
+            )
             for param in (parameters or [])
         ],
     )
@@ -2438,7 +2602,12 @@ def _parameter_expression_from_descriptor(param: Dict, size: Optional[int] = Non
         param.get("data_type_obj"),
         param_size,
         storage_info=_coerce_storage_info(param.get("storage")),
-        runtime_ref=_parameter_base_ref(name=name, index=param_index),
+        runtime_ref=_parameter_base_ref(
+            name=name,
+            index=param_index,
+            owner_program_id=param.get("owner_program_id"),
+            owner_entry_offset=param.get("owner_entry_offset"),
+        ),
     )
 
 

@@ -42,6 +42,24 @@ def test_location_base_parameter_identity_uses_index_not_name():
     assert left.stable_key() == right.stable_key()
 
 
+def test_location_base_parameter_identity_is_scoped_by_function_when_available():
+    caller = LocationBaseRef.parameter(
+        "param_2",
+        index=1,
+        owner_program_id=100,
+        owner_entry_offset=0x401000,
+    )
+    callee = LocationBaseRef.parameter(
+        "param_2",
+        index=1,
+        owner_program_id=100,
+        owner_entry_offset=0x402000,
+    )
+
+    assert caller != callee
+    assert caller.stable_key() != callee.stable_key()
+
+
 def test_storage_info_register_identity_uses_numeric_base_metadata():
     left = StorageInfo(
         is_register=True,

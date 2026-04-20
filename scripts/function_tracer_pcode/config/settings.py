@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """設定ファイル"""
 
+import importlib
 import os
+import site
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, MutableMapping, Optional
@@ -68,6 +71,39 @@ def _discover_java_home(repo_root: Path) -> Optional[str]:
     return None
 
 
+def _discover_optional_python_paths(repo_root: Path) -> list[str]:
+    candidates: list[str] = []
+    seen = set()
+
+    def add_candidate(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        resolved = path.expanduser()
+        if not resolved.is_dir():
+            return
+        if not (resolved / "z3").exists():
+            return
+        value = str(resolved)
+        if value in seen:
+            return
+        seen.add(value)
+        candidates.append(value)
+
+    try:
+        add_candidate(Path(site.getusersitepackages()))
+    except Exception:
+        pass
+    add_candidate(Path.home() / f".local/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages")
+    add_candidate(
+        repo_root
+        / ".venv-pyghidra"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    return candidates
+
+
 def discover_runtime_environment(
     repo_root: Optional[Path] = None,
     environ: Optional[Mapping[str, str]] = None,
@@ -107,6 +143,25 @@ def apply_runtime_environment(
         path_entries = current_path.split(os.pathsep) if current_path else []
         if java_bin not in path_entries:
             target_env["PATH"] = os.pathsep.join([java_bin, *path_entries]) if path_entries else java_bin
+
+    pythonpath_entries = (
+        target_env.get("PYTHONPATH", "").split(os.pathsep)
+        if target_env.get("PYTHONPATH")
+        else []
+    )
+    updated_pythonpath = list(pythonpath_entries)
+    for candidate in _discover_optional_python_paths(_repo_root()):
+        if candidate not in updated_pythonpath:
+            updated_pythonpath.append(candidate)
+        if candidate not in sys.path:
+            sys.path.append(candidate)
+    if updated_pythonpath:
+        target_env["PYTHONPATH"] = os.pathsep.join(updated_pythonpath)
+    for module_name in ("z3",):
+        try:
+            importlib.import_module(module_name)
+        except Exception:
+            pass
 
     return resolved_env
 

@@ -2,6 +2,7 @@
 """P-codeトレースロジック"""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
 from ..model import (
     Expression,
@@ -17,6 +18,7 @@ from ..model import (
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
 )
+from ..model.signature import get_data_type_display_name, is_unsigned_data_type
 from ..config.settings import MAX_TRACE_DEPTH, DEBUG_MODE
 from .debug.unknown_trace import (
     UnknownTracker, UnknownEvent, UnknownReason,
@@ -62,12 +64,32 @@ class VarnodeKey:
         )
 
 
+@dataclass(frozen=True)
+class ParameterStorageDescriptor:
+    """Storage-backed parameter identity collected from Ghidra objects."""
+
+    name: str
+    index: int
+    size_bytes: int
+    is_signed: bool
+    data_type: Optional[str]
+    data_type_obj: Any
+    storage_info: Optional[StorageInfo]
+
+
 class PcodeTracer:
     """
     P-codeのデータフロー解析とトレースを行うクラス
     """
     
-    def __init__(self, program, high_function, debug: bool = False):
+    def __init__(
+        self,
+        program,
+        high_function,
+        debug: bool = False,
+        *,
+        bound_parameter_values: Optional[Dict[int, Expression]] = None,
+    ):
         self.program = program
         self.high_function = high_function
         self.debug = debug
@@ -91,8 +113,376 @@ class PcodeTracer:
         
         # PHI handler（analyzerから設定される）
         self.phi_handler: Optional['PhiHandler'] = None
+        self._parameter_descriptors: List[ParameterStorageDescriptor] = []
+        self._bound_parameter_values: Dict[int, Expression] = {
+            int(index): self._clone_expression(expr)
+            for index, expr in (bound_parameter_values or {}).items()
+            if expr is not None
+        }
+        self._function_program_id, self._function_entry_offset = self._resolve_current_function_scope()
+        self._parameter_descriptors = self._collect_parameter_descriptors()
         
         self._collect_debug_info()
+
+    def _clone_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            cloned_branches = []
+            for cond, value in expr.value:
+                cloned_cond = None
+                if cond is not None:
+                    cloned_cond = Condition(
+                        self._clone_expression(cond.expression),
+                        cond.negated,
+                    )
+                cloned_branches.append((cloned_cond, self._clone_expression(value)))
+            cloned = Expression.phi(cloned_branches)
+            cloned.size = expr.size
+            cloned.data_type = expr.data_type
+            cloned.data_type_obj = getattr(expr, "data_type_obj", None)
+            cloned.storage_info = getattr(expr, "storage_info", None)
+            cloned.read_order_key = getattr(expr, "read_order_key", None)
+            cloned.runtime_ref = getattr(expr, "runtime_ref", None)
+            cloned.opcode = getattr(expr, "opcode", None)
+            return cloned
+
+        cloned = Expression(
+            expr.expr_type,
+            value=expr.value,
+            operator=expr.operator,
+            operands=[
+                self._clone_expression(operand)
+                for operand in (expr.operands or [])
+            ],
+            size=expr.size,
+            name=expr.name,
+            data_type=expr.data_type,
+            data_type_obj=getattr(expr, "data_type_obj", None),
+            storage_info=getattr(expr, "storage_info", None),
+            read_order_key=getattr(expr, "read_order_key", None),
+            runtime_ref=getattr(expr, "runtime_ref", None),
+            opcode=getattr(expr, "opcode", None),
+        )
+        return cloned
+
+    def _coerce_descriptor_signedness(
+        self,
+        data_type_obj: Any,
+        display_name: Optional[str],
+    ) -> bool:
+        try:
+            return not is_unsigned_data_type(
+                data_type_obj,
+                display_name,
+                program=self.program,
+            )
+        except Exception:
+            return True
+
+    def _resolve_current_function_scope(self) -> Tuple[Optional[int], Optional[int]]:
+        program_id = None
+        entry_offset = None
+
+        try:
+            if self.program is not None and hasattr(self.program, "getUniqueProgramID"):
+                program_id = int(self.program.getUniqueProgramID())
+        except Exception:
+            program_id = None
+
+        function = getattr(self.high_function, "getFunction", lambda: None)()
+        try:
+            if function is not None and hasattr(function, "getEntryPoint"):
+                entry_point = function.getEntryPoint()
+                if entry_point is not None:
+                    entry_offset = int(entry_point.getOffset())
+        except Exception:
+            entry_offset = None
+
+        return program_id, entry_offset
+
+    def get_parameter_owner_scope(self) -> Dict[str, Optional[int]]:
+        return {
+            "owner_program_id": self._function_program_id,
+            "owner_entry_offset": self._function_entry_offset,
+        }
+
+    def _make_parameter_location_ref(
+        self,
+        name: Optional[str],
+        *,
+        index: Optional[int] = None,
+    ) -> LocationBaseRef:
+        return LocationBaseRef.parameter(
+            name or None,
+            index=index,
+            owner_program_id=self._function_program_id,
+            owner_entry_offset=self._function_entry_offset,
+        )
+
+    def _get_storage_info_from_variable_storage(self, variable_storage) -> Optional[StorageInfo]:
+        if variable_storage is None:
+            return None
+        get_varnodes = getattr(variable_storage, "getVarnodes", None)
+        if callable(get_varnodes):
+            try:
+                for varnode in get_varnodes():
+                    if varnode is None:
+                        continue
+                    storage = self._get_storage_info_from_varnode(varnode)
+                    if storage is not None:
+                        return storage
+            except Exception:
+                pass
+        get_registers = getattr(variable_storage, "getRegisters", None)
+        if callable(get_registers):
+            try:
+                registers = list(get_registers() or [])
+            except Exception:
+                registers = []
+            if registers:
+                reg = registers[0]
+                try:
+                    base_reg = reg.getBaseRegister() or reg
+                except Exception:
+                    base_reg = reg
+                try:
+                    storage = StorageInfo(
+                        is_register=True,
+                        space_name="register",
+                        offset=int(reg.getOffset()),
+                        size=int(reg.getNumBytes()),
+                        size_bits=int(reg.getBitLength()),
+                        register_offset=int(reg.getOffset()),
+                        register_size=int(reg.getNumBytes()),
+                        register_size_bits=int(reg.getBitLength()),
+                        register_name=reg.getName(),
+                        base_register_name=base_reg.getName(),
+                        base_register_offset=int(base_reg.getOffset()),
+                        base_register_size=max(1, int(base_reg.getBitLength()) // 8),
+                        base_register_size_bits=int(base_reg.getBitLength()),
+                        bit_offset_in_base=max(
+                            0,
+                            (int(reg.getOffset()) - int(base_reg.getOffset())) * 8,
+                        ),
+                    )
+                    return storage
+                except Exception:
+                    return None
+        return None
+
+    def _collect_parameter_descriptors(self) -> List[ParameterStorageDescriptor]:
+        descriptors: Dict[int, ParameterStorageDescriptor] = {}
+        local_map = getattr(self.high_function, "getLocalSymbolMap", lambda: None)()
+        if local_map is not None:
+            try:
+                symbols = list(local_map.getSymbols() or [])
+            except Exception:
+                symbols = []
+            for symbol in symbols:
+                try:
+                    if not symbol.isParameter():
+                        continue
+                    index = int(symbol.getCategoryIndex())
+                except Exception:
+                    continue
+                try:
+                    data_type_obj = symbol.getDataType() if symbol.getDataType() else None
+                except Exception:
+                    data_type_obj = None
+                display_name = get_data_type_display_name(data_type_obj)
+                high_var = getattr(symbol, "getHighVariable", lambda: None)()
+                representative = getattr(high_var, "getRepresentative", lambda: None)() if high_var is not None else None
+                storage_info = (
+                    self._get_storage_info_from_varnode(representative)
+                    if representative is not None
+                    else None
+                )
+                if storage_info is None:
+                    try:
+                        storage_info = self._get_storage_info_from_variable_storage(symbol.getStorage())
+                    except Exception:
+                        storage_info = None
+                size_bytes = 0
+                try:
+                    size_bytes = int(symbol.getSize())
+                except Exception:
+                    size_bytes = 0
+                if size_bytes <= 0 and data_type_obj is not None:
+                    try:
+                        size_bytes = int(data_type_obj.getLength())
+                    except Exception:
+                        size_bytes = 0
+                if size_bytes <= 0 and storage_info is not None:
+                    size_bytes = max(1, int(storage_info.size or 0))
+                descriptors[index] = ParameterStorageDescriptor(
+                    name=str(symbol.getName()),
+                    index=index,
+                    size_bytes=max(1, size_bytes or 1),
+                    is_signed=self._coerce_descriptor_signedness(data_type_obj, display_name),
+                    data_type=display_name,
+                    data_type_obj=data_type_obj,
+                    storage_info=storage_info,
+                )
+        return [descriptors[index] for index in sorted(descriptors)]
+
+    def _storage_contains(self, outer: StorageInfo, inner: StorageInfo) -> bool:
+        if not outer.shares_base_register_with(inner):
+            return False
+        outer_low = int(getattr(outer, "bit_offset_in_base", 0) or 0)
+        outer_high = outer_low + int(getattr(outer, "size_bits", 0) or 0)
+        inner_low = int(getattr(inner, "bit_offset_in_base", 0) or 0)
+        inner_high = inner_low + int(getattr(inner, "size_bits", 0) or 0)
+        if outer_high <= outer_low or inner_high <= inner_low:
+            return False
+        return outer_low <= inner_low and inner_high <= outer_high
+
+    def _coerce_expression_width(
+        self,
+        expr: Expression,
+        source_storage: Optional[StorageInfo],
+        target_storage: Optional[StorageInfo],
+        *,
+        is_signed: bool,
+    ) -> Expression:
+        if source_storage is None or target_storage is None:
+            cloned = self._clone_expression(expr)
+            return cloned if cloned is not None else Expression.unknown("coerce_missing_storage")
+
+        source_bits = int(getattr(source_storage, "size_bits", 0) or 0)
+        target_bits = int(getattr(target_storage, "size_bits", 0) or 0)
+        if source_bits <= 0 or target_bits <= 0:
+            cloned = self._clone_expression(expr)
+            return cloned if cloned is not None else Expression.unknown("coerce_missing_bits")
+
+        cloned = self._clone_expression(expr)
+        if cloned is None:
+            return Expression.unknown("coerce_missing_expr")
+
+        source_low = int(getattr(source_storage, "bit_offset_in_base", 0) or 0)
+        target_low = int(getattr(target_storage, "bit_offset_in_base", 0) or 0)
+
+        if source_bits == target_bits and source_low == target_low:
+            cloned.size = max(1, target_bits // 8)
+            cloned.storage_info = target_storage
+            return cloned
+
+        if self._storage_contains(source_storage, target_storage):
+            byte_offset = max(0, (target_low - source_low) // 8)
+            offset_expr = Expression.constant(byte_offset, size=max(1, cloned.size or 1))
+            narrowed = Expression.binary_op("SUBPIECE", cloned, offset_expr)
+            narrowed.size = max(1, target_bits // 8)
+            narrowed.storage_info = target_storage
+            return narrowed
+
+        if self._storage_contains(target_storage, source_storage):
+            op = "INT_SEXT" if is_signed else "INT_ZEXT"
+            widened = Expression.unary_op(op, cloned)
+            widened.size = max(1, target_bits // 8)
+            widened.storage_info = target_storage
+            return widened
+
+        cloned.size = max(1, target_bits // 8)
+        cloned.storage_info = target_storage
+        return cloned
+
+    def _coerce_bound_argument_to_parameter(
+        self,
+        expr: Expression,
+        descriptor: ParameterStorageDescriptor,
+    ) -> Expression:
+        cloned = self._clone_expression(expr)
+        if cloned is None:
+            return Expression.unknown("bound_arg_missing")
+
+        target_bits = max(1, int(descriptor.size_bytes) * 8)
+        source_bits = max(1, int(getattr(cloned, "size", 0) or 0) * 8)
+        if source_bits == target_bits:
+            cloned.size = max(1, target_bits // 8)
+            return cloned
+
+        if source_bits > target_bits:
+            narrowed = Expression.binary_op(
+                "SUBPIECE",
+                cloned,
+                Expression.constant(0, size=max(1, cloned.size or 1)),
+            )
+            narrowed.size = max(1, target_bits // 8)
+            return narrowed
+
+        op = "INT_SEXT" if descriptor.is_signed else "INT_ZEXT"
+        widened = Expression.unary_op(op, cloned)
+        widened.size = max(1, target_bits // 8)
+        return widened
+
+    def _resolve_storage_backed_parameter_expression(
+        self,
+        storage_info: Optional[StorageInfo],
+    ) -> Optional[Expression]:
+        if storage_info is None or not getattr(storage_info, "is_register", False):
+            return None
+
+        best_descriptor: Optional[ParameterStorageDescriptor] = None
+        best_score: Optional[Tuple[int, int, int]] = None
+        for descriptor in self._parameter_descriptors:
+            descriptor_storage = descriptor.storage_info
+            if descriptor_storage is None or not getattr(descriptor_storage, "is_register", False):
+                continue
+            if not descriptor_storage.shares_base_register_with(storage_info):
+                continue
+
+            exact = int(descriptor_storage.register_identity_key() == storage_info.register_identity_key())
+            contains_target = int(self._storage_contains(descriptor_storage, storage_info))
+            contains_descriptor = int(self._storage_contains(storage_info, descriptor_storage))
+            if exact == 0 and contains_target == 0 and contains_descriptor == 0:
+                continue
+            score = (
+                exact,
+                contains_target,
+                -abs(
+                    int(getattr(descriptor_storage, "size_bits", 0) or 0)
+                    - int(getattr(storage_info, "size_bits", 0) or 0)
+                ),
+            )
+            if best_score is not None and score <= best_score:
+                continue
+            best_descriptor = descriptor
+            best_score = score
+
+        if best_descriptor is None:
+            return None
+
+        source_expr = self._bound_parameter_values.get(best_descriptor.index)
+        if source_expr is None:
+            source_expr = Expression.parameter(
+                best_descriptor.name,
+                best_descriptor.index,
+                best_descriptor.data_type,
+                best_descriptor.data_type_obj,
+                best_descriptor.size_bytes,
+                storage_info=best_descriptor.storage_info,
+                runtime_ref=self._make_parameter_location_ref(
+                    best_descriptor.name,
+                    index=best_descriptor.index,
+                ),
+            )
+        else:
+            source_expr = self._coerce_bound_argument_to_parameter(
+                source_expr,
+                best_descriptor,
+            )
+
+        resolved = self._coerce_expression_width(
+            source_expr,
+            best_descriptor.storage_info,
+            storage_info,
+            is_signed=best_descriptor.is_signed,
+        )
+        resolved.runtime_ref = self._make_parameter_location_ref(
+            best_descriptor.name,
+            index=best_descriptor.index,
+        )
+        return resolved
 
     def _recover_call_argument_expressions(
         self,
@@ -922,7 +1312,10 @@ class PcodeTracer:
                     return Expression.parameter(
                         sym_name, param_idx, dtype, dtype_obj, varnode.getSize(),
                         storage_info=storage_info,
-                        runtime_ref=LocationBaseRef.parameter(sym_name, index=param_idx),
+                        runtime_ref=self._make_parameter_location_ref(
+                            sym_name,
+                            index=param_idx,
+                        ),
                     )
                 else:
                     dtype_obj = symbol.getDataType() if symbol.getDataType() else None
@@ -984,6 +1377,17 @@ class PcodeTracer:
                     storage_info=storage_info,
                     runtime_ref=runtime_ref,
                 )
+
+        storage_backed_param = self._resolve_storage_backed_parameter_expression(
+            storage_info,
+        )
+        if storage_backed_param is not None:
+            if self._debug_available():
+                self._debug_print(
+                    "  -> Parameter (storage-backed fallback): "
+                    f"{storage_backed_param.to_string()}"
+                )
+            return storage_backed_param
         
         # 4. レジスタの場合（入力変数として扱う）
         if varnode.isRegister():

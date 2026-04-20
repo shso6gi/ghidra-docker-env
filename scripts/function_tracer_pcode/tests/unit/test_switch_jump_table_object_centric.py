@@ -495,7 +495,7 @@ def test_return_analyzer_recovers_switch_like_returns_from_jump_table_callind_ta
     with patch.object(
         analyzer,
         "_resolve_local_code_target_expansions",
-        side_effect=lambda addr, _active_functions, current_function=None: target_returns.get(addr),
+        side_effect=lambda addr, _active_functions, current_function=None, args=None: target_returns.get(addr),
     ):
         recovered = analyzer._recover_switch_like_returns_from_pcode(
             analysis,
@@ -594,7 +594,7 @@ def test_return_analyzer_falls_back_to_legacy_switch_recovery_without_jump_table
         with patch.object(
             analyzer,
             "_resolve_local_code_target_expansions",
-            side_effect=lambda addr, _active_functions, current_function=None: (
+            side_effect=lambda addr, _active_functions, current_function=None, args=None: (
                 [ExpandedValue(Expression.constant(1000, 4), [])]
                 if addr == 0x401000
                 else [ExpandedValue(Expression.constant(1001, 4), [])]

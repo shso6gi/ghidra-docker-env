@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.equivalence.formula.variable import (
 from scripts.function_tracer_pcode.equivalence.semantic_width import (
     normalize_analysis_semantic_width,
 )
+from scripts.function_tracer_pcode.equivalence.param_semantics import ParameterSemanticHint
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -143,6 +144,40 @@ def test_normalize_analysis_collapses_widened_signed_division_back_to_32bit():
 
     assert "(bvsdiv param_1 param_2)" in value_smt
     assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1) ((_ sign_extend 32) param_2)))" not in value_smt
+
+
+def test_normalize_analysis_rewrites_raw_wide_xor_of_semantically_narrow_params():
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_wide_xor_wrapper_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": False},
+            {"name": "param_2", "data_type": "long", "size": 8, "index": 1, "is_signed": True},
+            {"name": "param_3", "data_type": "long", "size": 8, "index": 2, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[Condition(_binary("INT_NOTEQUAL", _binary("INT_AND", _param("param_1", 8), _const(1, 8), 8), _const(0, 8), 1))],
+                value=_binary("INT_XOR", _param("param_2", 8), _param("param_3", 8), 8),
+            )
+        ],
+        return_type="long",
+    )
+
+    normalized = normalize_analysis_semantic_width(
+        analysis,
+        hints={
+            1: ParameterSemanticHint(32, "signed"),
+            2: ParameterSemanticHint(32, "signed"),
+        },
+    )
+
+    value = normalized.returns[0].value
+    assert value.operator == "INT_XOR"
+    assert value.size == 4
+    assert value.operands[0].operator == "SUBPIECE"
+    assert value.operands[1].operator == "SUBPIECE"
 
 
 def test_normalize_analysis_collapses_fragment_backed_widening_patterns():
