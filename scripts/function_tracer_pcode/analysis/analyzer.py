@@ -1442,7 +1442,10 @@ class ReturnAnalyzer:
             base_expr = base_expr.operands[0]
 
         return (
-            ConditionNormalizer.expression_signature(base_expr),
+            ConditionNormalizer.expression_signature(
+                base_expr,
+                include_memory_read_order=False,
+            ),
             displacement,
             deref_depth,
         )
@@ -2112,7 +2115,7 @@ class ReturnAnalyzer:
                             f"found on path {path_index} to RETURN #{return_index} "
                             f"(blocks={block_indexes})"
                         )
-                    return None
+                    continue
 
                 path_recovered = self._recover_implicit_return_from_terminal_call(
                     terminal_call,
@@ -2132,7 +2135,7 @@ class ReturnAnalyzer:
                             "P-code call-wrapper recovery aborted: terminal call expansion "
                             f"failed on path {path_index} to RETURN #{return_index}"
                         )
-                    return None
+                    continue
                 return_results.extend(path_recovered)
 
             if not return_results:
@@ -3632,7 +3635,10 @@ class ReturnAnalyzer:
         bound_signature = tuple(
             (
                 int(index),
-                ConditionNormalizer.expression_signature(expr),
+                ConditionNormalizer.expression_signature(
+                    expr,
+                    include_memory_read_order=False,
+                ),
             )
             for index, expr in sorted(normalized_bound_parameter_values.items())
         )
@@ -4137,9 +4143,11 @@ class ReturnAnalyzer:
             self._merge_deferred_calls_into_current_analysis(specialized.deferred_calls)
 
         expanded = []
+        rejected_returns = 0
         for ret in specialized.returns:
             simplified_conditions = ConditionSimplifier.simplify_conditions(ret.conditions)
             if ConditionSimplifier.is_contradiction(simplified_conditions):
+                rejected_returns += 1
                 continue
 
             reduced_value = _reduce_expression_under_conditions(
@@ -4153,8 +4161,10 @@ class ReturnAnalyzer:
                     f"Call expansion rejected for '{target_label}': "
                     "summary not safe enough for inlining"
                 )
-                return None
+                rejected_returns += 1
+                continue
 
+            # Keep safe return candidates even if others are rejected.
             expanded.append(
                 ExpandedValue(
                     value=effective_value,
@@ -4162,6 +4172,12 @@ class ReturnAnalyzer:
                 )
             )
 
+        if not expanded and rejected_returns:
+            self._debug_print(
+                f"Call expansion for '{target_label}' dropped all "
+                f"({rejected_returns}) inlining candidates; keeping unresolved"
+            )
+            return None
         return expanded
 
     def _decompile_function(self, function, timeout: int = 60):
@@ -4270,7 +4286,10 @@ class ReturnAnalyzer:
             "local_target",
             int(address_value),
             tuple(
-                ConditionNormalizer.expression_signature(arg)
+                ConditionNormalizer.expression_signature(
+                    arg,
+                    include_memory_read_order=False,
+                )
                 for arg in (args or [])
                 if arg is not None
             ),
@@ -4450,7 +4469,10 @@ class ReturnAnalyzer:
 
     def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
         return (
-            ConditionNormalizer.expression_signature(addr_expr),
+            ConditionNormalizer.expression_signature(
+                addr_expr,
+                include_memory_read_order=False,
+            ),
             int(size),
         )
 
@@ -5280,7 +5302,9 @@ class ReturnAnalyzer:
     ) -> None:
         if expr is None:
             return
-        out.add(expression_key_safe(expr))
+        key = expression_key_safe(expr, include_memory_read_order=False)
+        if key is not None:
+            out.add(key)
         if expr.expr_type == ExpressionType.PHI and expr.value:
             for cond, value in expr.value:
                 if cond is not None:
@@ -5310,12 +5334,12 @@ class ReturnAnalyzer:
     ) -> bool:
         if expr is None:
             return True
-        if self._expression_contains_unknown_or_call(expr):
-            return False
-
-        expr_key = expression_key_safe(expr)
+        expr_key = expression_key_safe(expr, include_memory_read_order=False)
         if expr_key in allowed_subtrees:
             return True
+
+        if self._expression_contains_unknown_or_call(expr):
+            return False
 
         if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.LITERAL}:
             return True

@@ -4,6 +4,7 @@
 from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionConstraintSet,
     ConditionSimplifier,
+    ConditionSMTOracle,
 )
 from scripts.function_tracer_pcode.model import Condition, Expression
 
@@ -71,3 +72,35 @@ def test_solver_backed_implication_handles_phi_with_unknown_branch():
     assert constraint_set.solver_backed is True
     assert constraint_set.implies_condition(Condition(selected_branch, False)) is True
     assert constraint_set.implies_condition(Condition(selected_branch, True)) is False
+
+
+def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monkeypatch):
+    cond = Condition(
+        Expression.unary_op(
+            "BOOL_NEGATE",
+            Expression.binary_op(
+                "BOOL_AND",
+                Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0)),
+                Expression.binary_op("INT_EQUAL", _param("param_2"), _const(1)),
+            ),
+        ),
+        False,
+    )
+
+    invoked = {"count": 0}
+
+    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+        invoked["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_can_use_solver_reasoning",
+        classmethod(lambda _cls, _conditions: True),
+    )
+    monkeypatch.setattr(ConditionSMTOracle, "conjunction_is_unsat", _fake_conjunction_is_unsat)
+
+    constraint_set = ConditionConstraintSet.from_conditions([cond])
+
+    assert constraint_set.solver_backed is True
+    assert invoked["count"] == 1

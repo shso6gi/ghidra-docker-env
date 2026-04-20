@@ -24,15 +24,23 @@ class ConditionNormalizer:
     _EXPR_KEY_MAX_NODES = 48
     _EXPR_KEY_CACHE_LIMIT = 4096
     _CONTRADICTION_CACHE_LIMIT = 8192
-    _expr_key_cache: Dict[Expression, StructuralKey] = {}
+    _expr_key_cache: Dict[Tuple[object, bool], StructuralKey] = {}
     _contradiction_cache: Dict[Tuple[Expression, bool], Tuple[StructuralKey, str, StructuralKey, bool]] = {}
 
     @classmethod
-    def expression_signature(cls, expr: Optional[Expression]) -> StructuralKey:
+    def expression_signature(
+        cls,
+        expr: Optional[Expression],
+        *,
+        include_memory_read_order: bool = True,
+    ) -> StructuralKey:
         """Stable structural key suitable for caches and deduplication."""
         if expr is None:
             return ("none",)
-        return cls._condition_expr_key(expr)
+        return cls._condition_expr_key(
+            expr,
+            include_memory_read_order=include_memory_read_order,
+        )
 
     @classmethod
     def conditions_signature(cls, conditions):
@@ -396,11 +404,16 @@ class ConditionNormalizer:
         cls._contradiction_cache[key] = value
 
     @classmethod
-    def _expr_key(cls, expr: Optional[Expression]) -> StructuralKey:
+    def _expr_key(
+        cls,
+        expr: Optional[Expression],
+        *,
+        include_memory_read_order: bool = True,
+    ) -> StructuralKey:
         if expr is None:
             return ("none",)
 
-        cache_key = expr
+        cache_key = (id(expr), bool(include_memory_read_order))
         cached = cls._expr_key_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -409,6 +422,7 @@ class ConditionNormalizer:
             expr,
             budget=cls._EXPR_KEY_MAX_NODES,
             normalize_commutative=True,
+            include_memory_read_order=include_memory_read_order,
         )
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
@@ -416,10 +430,17 @@ class ConditionNormalizer:
         return rendered
 
     @staticmethod
-    def _condition_expr_key(expr: Optional[Expression]) -> StructuralKey:
+    def _condition_expr_key(
+        expr: Optional[Expression],
+        *,
+        include_memory_read_order: bool = True,
+    ) -> StructuralKey:
         if expr is None:
             return ("none",)
-        key = ConditionNormalizer._expr_key(expr)
+        key = ConditionNormalizer._expr_key(
+            expr,
+            include_memory_read_order=include_memory_read_order,
+        )
         if key_is_comparable(key):
             return key
         return expression_key_or_identity(expr)

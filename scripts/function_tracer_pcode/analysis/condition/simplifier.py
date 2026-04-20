@@ -1451,12 +1451,13 @@ class ConditionSimplifier:
                 for index, condition in enumerate(unique_conditions)
                 if index in selected_indices
             ]
+            solver_backed = cls._can_use_solver_reasoning(selected)
 
             return {
                 "conditions": selected,
                 "contradiction_indices": contradiction_indices,
                 "implied_norms": cls._collect_implied_condition_norms(selected),
-                "solver_backed": False,
+                "solver_backed": solver_backed,
             }
         finally:
             cls._active_normalization_keys.discard(guard_key)
@@ -1546,6 +1547,40 @@ class ConditionSimplifier:
         return False
 
     @classmethod
+    def _has_boolean_connective_structure(cls, conditions: Iterable[Condition]) -> bool:
+        for cond in conditions or []:
+            expr = cond.expression
+            if expr is None:
+                continue
+            pending = [expr]
+            visited: int = 0
+            while pending:
+                current = pending.pop()
+                if current is None:
+                    continue
+                visited += 1
+                if visited > 72:
+                    break
+                expr_type = current.expr_type
+                if expr_type == ExpressionType.BINARY_OP and current.operator in {
+                    "BOOL_AND",
+                    "BOOL_OR",
+                }:
+                    return True
+                if expr_type == ExpressionType.UNARY_OP and current.operator == "BOOL_NEGATE":
+                    return True
+                if expr_type == ExpressionType.PHI and current.value:
+                    for branch_cond, branch_value in current.value:
+                        if branch_cond is not None:
+                            pending.append(branch_cond.expression)
+                        if branch_value is not None:
+                            pending.append(branch_value)
+                    continue
+                for operand in current.operands or []:
+                    pending.append(operand)
+        return False
+
+    @classmethod
     def _should_use_solver_reasoning(
         cls,
         conditions: Iterable[Condition],
@@ -1553,7 +1588,11 @@ class ConditionSimplifier:
         condition_list = [cond for cond in (conditions or []) if cond is not None]
         if not condition_list:
             return False
-        if not cls._should_skip_contextual_reduction(condition_list):
+        if cls._should_skip_contextual_reduction(condition_list):
+            return cls._can_use_solver_reasoning(condition_list)
+        if len(condition_list) > 12:
+            return False
+        if not cls._has_boolean_connective_structure(condition_list):
             return False
         return cls._can_use_solver_reasoning(condition_list)
 

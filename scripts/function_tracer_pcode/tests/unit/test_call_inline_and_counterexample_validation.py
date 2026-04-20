@@ -1609,6 +1609,48 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
     assert captured == [(0x102528, {"branch_switch_dense"}, None, [])]
 
 
+def test_return_analyzer_keeps_safe_call_summary_when_others_are_rejected():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x401000",
+        parameters=[{"name": "x", "size": 4, "index": 0}],
+        returns=[
+            ReturnInfo(
+                address="0x401010",
+                value=Expression.constant(11, 4),
+                conditions=[],
+                branch_index=0,
+            ),
+            ReturnInfo(
+                address="0x401010",
+                value=Expression.constant(22, 4),
+                conditions=[],
+                branch_index=1,
+            ),
+        ],
+        return_type="int",
+    )
+
+    def _is_safe(value, _conditions, _args):
+        return value.value != 22
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis), patch.object(
+        analyzer,
+        "_call_summary_is_safe",
+        side_effect=_is_safe,
+    ):
+        expanded = analyzer._resolve_call_expansions(
+            CallTargetRef.from_name("callee"),
+            [_param_expr("arg0", 0, size=4)],
+            active_functions=set(),
+        )
+
+    assert expanded is not None
+    assert len(expanded) == 1
+    assert expanded[0].value.value == 11
+
+
 def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     current_function = Mock()
@@ -2544,6 +2586,87 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     assert recovered == recovered_then + recovered_else
     assert mock_recover.call_args_list[0].args[0] is call_then
     assert mock_recover.call_args_list[1].args[0] is call_else
+
+
+def test_return_analyzer_recovers_call_wrapper_when_some_paths_are_not_recoverable():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="ptr_select_path",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "size": 4, "data_type": "int"}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown("void"),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="void",
+        unknown_event_reasons=["callind_out_of_scope"],
+        unknown_event_count=1,
+    )
+
+    class _FakeSequenceInfo:
+        def __init__(self):
+            self._seqnum = Mock()
+            self._seqnum.getTarget = Mock(return_value="0x1000")
+
+    class _FakeReturn:
+        def getSeqnum(self):
+            return _FakeSequenceInfo()
+
+    condition_tracker = Mock()
+    tracer = Mock()
+    current_function = Mock()
+    current_function.getReturn.return_value.getVariableStorage.return_value.getVarnodes.return_value = [Mock()]
+    return_op = _FakeReturn()
+
+    good_call_op = Mock()
+    bad_path = Mock(index=1, pcode_ops=[Mock(getMnemonic=Mock(return_value="CALL"))])
+    good_path = Mock(index=2, pcode_ops=[good_call_op])
+
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        (
+            [bad_path, return_op],
+            [Condition(Expression.binary_op("INT_NOTEQUAL", _param_expr("param_1", 0), Expression.constant(0, 4)), False)],
+        ),
+        (
+            [good_path, return_op],
+            [Condition(Expression.binary_op("INT_EQUAL", _param_expr("param_1", 0), Expression.constant(0, 4)), False)],
+        ),
+    ]
+
+    recovered_else = [
+        ReturnInfo(
+            address="0x1000",
+            value=Expression.constant(1234, 4),
+            conditions=[],
+            branch_index=0,
+        )
+    ]
+
+    with patch.object(
+        analyzer,
+        "_find_terminal_call_on_block_path",
+        side_effect=[None, good_call_op],
+    ) as mock_terminal:
+        with patch.object(
+            analyzer,
+            "_recover_implicit_return_from_terminal_call",
+            return_value=recovered_else,
+        ):
+            recovered = analyzer._recover_call_wrapper_returns_from_pcode(
+                analysis,
+                tracer,
+                condition_tracker,
+                [return_op],
+                current_function,
+                set(),
+            )
+
+    assert recovered == recovered_else
+    assert mock_terminal.call_count == 2
 
 
 def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():

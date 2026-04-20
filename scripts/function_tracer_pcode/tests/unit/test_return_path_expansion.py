@@ -662,6 +662,16 @@ def test_return_analyzer_local_memory_key_does_not_require_string_render(monkeyp
     )
 
 
+def test_return_analyzer_local_memory_key_ignores_read_order_for_same_address():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+
+    base = Expression.parameter("param_1", index=0, size=8)
+    key_a = analyzer._local_memory_key(Expression.memory(base, size=4, read_order_key=11), 8)
+    key_b = analyzer._local_memory_key(Expression.memory(base, size=4, read_order_key=22), 8)
+
+    assert key_a == key_b
+
+
 def test_implicit_return_path_recovery_prefers_terminal_call_producer_over_older_output_varnode():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
 
