@@ -6,6 +6,11 @@ from typing import Any, Iterable, List, Dict, Set, Optional, Tuple
 from ...model import Expression, Condition, ExpressionType, condition_key, key_contains_placeholder
 from ..debug import summarize_expression, summarize_condition
 from .bitvector import eval_constant_raw, normalize_raw_value, to_signed_value
+from ...model.render_smt import (
+    expression_contains_unsupported_smt_ops,
+    expression_returns_bool,
+    expression_smt_bit_width,
+)
 from .normalizer import ConditionNormalizer
 from .scalar import ScalarConstraint, extract_scalar_constraint
 from .smt_oracle import ConditionSMTOracle
@@ -1581,6 +1586,29 @@ class ConditionSimplifier:
         return False
 
     @classmethod
+    def _is_solver_compatible_condition(cls, condition: Condition) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return False
+
+        if not expression_returns_bool(expr):
+            expr_bits = expression_smt_bit_width(expr)
+            if expr_bits > 1:
+                return False
+
+        if expression_contains_unsupported_smt_ops(expr, allow_call=True):
+            return False
+
+        metrics = cls._condition_metrics(condition)
+        if metrics["phi_depth"] > 3:
+            return False
+        if metrics["node_count"] > 192:
+            return False
+        if metrics["has_unknown"] and metrics["node_count"] > 96:
+            return False
+        return True
+
+    @classmethod
     def _should_use_solver_reasoning(
         cls,
         conditions: Iterable[Condition],
@@ -1588,11 +1616,16 @@ class ConditionSimplifier:
         condition_list = [cond for cond in (conditions or []) if cond is not None]
         if not condition_list:
             return False
-        if cls._should_skip_contextual_reduction(condition_list):
-            return cls._can_use_solver_reasoning(condition_list)
-        if len(condition_list) > 12:
+        if len(condition_list) > 32:
             return False
-        if not cls._has_boolean_connective_structure(condition_list):
+        if not ConditionSMTOracle.is_available():
+            return False
+        total_nodes = 0
+        for condition in condition_list:
+            if not cls._is_solver_compatible_condition(condition):
+                return False
+            total_nodes += cls._condition_metrics(condition).get("node_count", 0)
+        if total_nodes > 640:
             return False
         return cls._can_use_solver_reasoning(condition_list)
 

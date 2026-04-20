@@ -2,6 +2,7 @@
 """SMT-LIB rendering helpers for Expression."""
 
 import hashlib
+import re
 from typing import Any, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
@@ -35,6 +36,7 @@ _SIGNED_COMPARISON_OPERATORS = {
 }
 
 _MEMORY_ARRAY_WIDTHS = {8, 16, 32, 64}
+_SMT_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ARITHMETIC_BINARY_OPERATORS = {
     "INT_AND",
     "INT_OR",
@@ -160,6 +162,15 @@ def expression_smt_bit_width(expr) -> int:
     return expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
 
 
+def normalize_call_symbol_name(name: Optional[str]) -> str:
+    """CALL 名を SMT-LIB で安全な識別子に変換する。"""
+    raw_name = str(name or "call")
+    if _SMT_IDENTIFIER_RE.fullmatch(raw_name):
+        return f"call_{raw_name}"
+    digest = hashlib.sha1(raw_name.encode("utf-8")).hexdigest()[:16]
+    return f"call_{digest}_{len(raw_name)}"
+
+
 def expression_contains_signed_comparison(expr) -> bool:
     """式木のどこかに signed 比較が含まれるか判定する。"""
     if expr is None:
@@ -189,7 +200,7 @@ def expression_contains_signed_comparison(expr) -> bool:
     return False
 
 
-def expression_contains_unsupported_smt_ops(expr) -> bool:
+def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -> bool:
     """SMT renderer が直接扱えない演算子を含むか判定する。"""
     if expr is None:
         return False
@@ -197,13 +208,13 @@ def expression_contains_unsupported_smt_ops(expr) -> bool:
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
 
+    if expr_type == expr_kind.CALL and not allow_call:
+        return True
+
     if expr_type == expr_kind.BINARY_OP and expr.operator not in _SUPPORTED_BINARY_OPERATORS:
         return True
 
     if expr_type == expr_kind.UNARY_OP and expr.operator not in _SUPPORTED_UNARY_OPERATORS:
-        return True
-
-    if expr_type == expr_kind.CALL:
         return True
 
     if expr_type == expr_kind.INTRINSIC and not is_supported_pcode_intrinsic(
@@ -214,14 +225,17 @@ def expression_contains_unsupported_smt_ops(expr) -> bool:
 
     if getattr(expr, "operands", None):
         for operand in expr.operands:
-            if expression_contains_unsupported_smt_ops(operand):
+            if expression_contains_unsupported_smt_ops(operand, allow_call=allow_call):
                 return True
 
     if expr_type == expr_kind.PHI and expr.value:
         for cond, branch_value in expr.value:
-            if cond is not None and expression_contains_unsupported_smt_ops(cond.expression):
+            if cond is not None and expression_contains_unsupported_smt_ops(
+                cond.expression,
+                allow_call=allow_call,
+            ):
                 return True
-            if expression_contains_unsupported_smt_ops(branch_value):
+            if expression_contains_unsupported_smt_ops(branch_value, allow_call=allow_call):
                 return True
 
     return False
@@ -673,9 +687,18 @@ def _to_smt_internal(
             )
             for operand in expr.operands
         )
+        raw_func_name = getattr(expr, "name", None)
+        func_name = normalize_call_symbol_name(raw_func_name)
+        if symbol_name_mapping is not None:
+            func_name = (
+                symbol_name_mapping.get(raw_func_name, func_name)
+                if raw_func_name is not None
+                else func_name
+            )
+            func_name = symbol_name_mapping.get(func_name, func_name)
         if args:
-            return f"({expr.name} {args})"
-        return f"{expr.name}"
+            return f"({func_name} {args})"
+        return f"{func_name}"
 
     if expr_type == expr_kind.MEMORY:
         mem_bits = expression_smt_bit_width(expr) or 32

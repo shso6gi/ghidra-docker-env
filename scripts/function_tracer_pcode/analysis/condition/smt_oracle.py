@@ -8,7 +8,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...model.render_smt import (
     collect_unknown_smt_declarations,
+    normalize_call_symbol_name,
     expression_contains_unsupported_smt_ops,
+    expression_returns_bool,
     expression_smt_bit_width,
 )
 
@@ -93,13 +95,15 @@ class ConditionSMTOracle:
         var_widths: Dict[str, int] = {}
         memory_widths = set()
         unknown_decls = set()
+        call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
 
         for condition in conditions:
             expr = getattr(condition, "expression", None)
             if expr is None:
                 return False, None
-            if expression_contains_unsupported_smt_ops(expr):
+            if expression_contains_unsupported_smt_ops(expr, allow_call=True):
                 return False, None
+
             for node in cls._iter_expression_nodes(expr):
                 expr_type = getattr(node, "expr_type", None)
                 expr_kind = getattr(expr_type, "__class__", None)
@@ -121,6 +125,15 @@ class ConditionSMTOracle:
                     if mem_bits not in {8, 16, 32, 64}:
                         return False, None
                     memory_widths.add(mem_bits)
+                elif expr_type == expr_kind.CALL:
+                    call_decl = cls._collect_call_declaration(node)
+                    if call_decl is None:
+                        return False, None
+                    call_name, arg_sorts, ret_bits = call_decl
+                    prior = call_declarations.get(call_name)
+                    if prior is not None and prior != (arg_sorts, ret_bits):
+                        return False, None
+                    call_declarations[call_name] = (arg_sorts, ret_bits)
 
             for decl in collect_unknown_smt_declarations(expr):
                 unknown_decls.add(decl)
@@ -134,8 +147,22 @@ class ConditionSMTOracle:
             )
         for symbol_name, bit_width in sorted(unknown_decls):
             lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
+        for call_name, (arg_sorts, ret_bits) in sorted(call_declarations.items()):
+            args = " ".join(f"(_ BitVec {bits})" for bits in arg_sorts)
+            lines.append(
+                f"(declare-fun {call_name} ({args}) (_ BitVec {ret_bits}))"
+            )
         for condition in conditions:
-            lines.append(f"(assert {condition.to_smt()})")
+            condition_expr = getattr(condition, "expression", None)
+            if condition_expr is None:
+                return False, None
+            condition_smt = condition.to_smt()
+            if not expression_returns_bool(condition_expr):
+                bits = max(1, int(expression_smt_bit_width(condition_expr) or 0))
+                if bits <= 0:
+                    return False, None
+                condition_smt = f"(not (= {condition_smt} (_ bv0 {bits})))"
+            lines.append(f"(assert {condition_smt})")
         return True, "\n".join(lines)
 
     @classmethod
@@ -150,7 +177,36 @@ class ConditionSMTOracle:
             return f"param_{getattr(expr, 'value', -1)}"
         if expr_type == expr_kind.VARIABLE:
             return getattr(expr, "name", None) or "var"
+        if expr_type == expr_kind.CALL:
+            return normalize_call_symbol_name(getattr(expr, "name", None))
         return None
+
+    @classmethod
+    def _collect_call_declaration(
+        cls,
+        node: Any,
+    ) -> Optional[Tuple[str, Tuple[int, ...], int]]:
+        expr_type = getattr(node, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is None or expr_kind is None or expr_type != expr_kind.CALL:
+            return None
+
+        call_name = cls._symbol_name(node)
+        if not call_name:
+            return None
+
+        arg_sorts = []
+        for arg in getattr(node, "operands", None) or []:
+            bits = max(1, int(expression_smt_bit_width(arg) or 0))
+            if bits <= 0:
+                return None
+            arg_sorts.append(bits)
+
+        return_bits = max(1, int(expression_smt_bit_width(node) or 0))
+        if return_bits <= 0:
+            return None
+
+        return call_name, tuple(arg_sorts), return_bits
 
     @classmethod
     def _iter_expression_nodes(cls, expr) -> Iterable[Any]:

@@ -2,7 +2,7 @@
 """Scalar constraint extraction regressions."""
 
 from scripts.function_tracer_pcode.analysis.condition.scalar import extract_scalar_constraint
-from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
 
 
 def test_extract_scalar_constraint_handles_simple_affine_parameter():
@@ -16,8 +16,24 @@ def test_extract_scalar_constraint_handles_simple_affine_parameter():
 
     assert fact is not None
     assert fact.kind == "upper"
-    assert fact.key[0][0] == "binary"
-    assert fact.key[0][1] == "INT_ADD"
+    assert fact.expr.expr_type == ExpressionType.PARAMETER
+    assert fact.expr.name == "n"
+
+
+def test_extract_scalar_constraint_handles_subtract_affine_parameter():
+    expr = Expression.binary_op(
+        "INT_LESSEQUAL",
+        Expression.binary_op("INT_SUB", Expression.parameter("n"), Expression.constant(2, 4)),
+        Expression.constant(6, 4),
+    )
+
+    fact = extract_scalar_constraint(Condition(expr, negated=False))
+
+    assert fact is not None
+    assert fact.kind == "upper"
+    assert fact.value == 8
+    assert fact.expr.expr_type == ExpressionType.PARAMETER
+    assert fact.expr.name == "n"
 
 
 def test_extract_scalar_constraint_skips_overly_complex_expression_without_to_string(monkeypatch):
@@ -35,3 +51,24 @@ def test_extract_scalar_constraint_skips_overly_complex_expression_without_to_st
     fact = extract_scalar_constraint(Condition(expr, negated=False))
 
     assert fact is None
+
+
+def test_extract_scalar_constraint_handles_right_hand_side_affine_form():
+    expr = Expression.binary_op(
+        "INT_LESS",
+        Expression.constant(10, 4),
+        Expression.binary_op(
+            "INT_ADD",
+            Expression.parameter("n"),
+            Expression.constant(3, 4),
+        ),
+    )
+
+    fact = extract_scalar_constraint(Condition(expr, negated=False))
+
+    assert fact is not None
+    assert fact.kind == "lower"
+    assert fact.inclusive is False
+    assert fact.value == 7
+    assert fact.expr.expr_type == ExpressionType.PARAMETER
+    assert fact.expr.name == "n"

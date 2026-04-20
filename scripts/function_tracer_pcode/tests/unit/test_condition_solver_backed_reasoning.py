@@ -7,6 +7,8 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionSMTOracle,
 )
 from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.model.render_smt import normalize_call_symbol_name
+from scripts.function_tracer_pcode.model.render_smt import expression_contains_unsupported_smt_ops
 
 
 def _const(value: int, size: int = 4) -> Expression:
@@ -104,3 +106,81 @@ def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monk
 
     assert constraint_set.solver_backed is True
     assert invoked["count"] == 1
+
+
+def test_solver_backed_reasoning_activates_for_non_connective_comparison(monkeypatch):
+    cond = Condition(Expression.binary_op("INT_LESS", _param("param_1"), _const(1)), False)
+
+    invoked = {"count": 0}
+
+    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+        invoked["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_can_use_solver_reasoning",
+        classmethod(lambda _cls, _conditions: True),
+    )
+    monkeypatch.setattr(ConditionSMTOracle, "conjunction_is_unsat", _fake_conjunction_is_unsat)
+
+    constraint_set = ConditionConstraintSet.from_conditions([cond])
+
+    assert constraint_set.solver_backed is True
+    assert invoked["count"] == 1
+
+
+def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
+    cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.call("callee", [_param("param_1")]),
+            _const(0),
+        ),
+        False,
+    )
+
+    invoked = {"count": 0}
+
+    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+        invoked["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        ConditionSimplifier,
+        "_can_use_solver_reasoning",
+        classmethod(lambda _cls, _conditions: True),
+    )
+    monkeypatch.setattr(ConditionSMTOracle, "conjunction_is_unsat", _fake_conjunction_is_unsat)
+
+    constraint_set = ConditionConstraintSet.from_conditions([cond])
+
+    assert constraint_set.solver_backed is True
+    assert invoked["count"] == 1
+
+
+def test_call_expression_supported_when_enabled_in_smt_op_filtering():
+    expr = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.call("callee", [_param("param_1")]),
+        _const(0),
+    )
+
+    assert expression_contains_unsupported_smt_ops(expr, allow_call=False) is True
+    assert expression_contains_unsupported_smt_ops(expr, allow_call=True) is False
+
+
+def test_solver_backed_script_sanitizes_call_symbols():
+    cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.call("call-foo*", [_param("param_1")]),
+            _const(0),
+        ),
+        False,
+    )
+
+    usable, script = ConditionSMTOracle._build_script([cond])
+    assert usable is True
+    assert script is not None
+    assert normalize_call_symbol_name("call-foo*") in script
