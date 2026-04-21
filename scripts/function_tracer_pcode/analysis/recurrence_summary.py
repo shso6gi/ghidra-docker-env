@@ -12,6 +12,7 @@ from ..model.runtime_refs import UnknownValueRef
 from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     CanonicalLocation,
+    _expressions_equivalent_under_conditions,
     _reduce_expression_under_conditions,
     canonicalize_location,
 )
@@ -333,7 +334,7 @@ class StructuralRecurrenceSummarizer:
             ReturnInfo(
                 address=base_case.address,
                 value=loop_even_value,
-                conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [even_start_cond]),
+                conditions=ConditionSimplifier.simplify_conditions_object_centric(loop_conditions_common + [even_start_cond]),
                 branch_index=10_100,
                 pcode_identity=base_case.pcode_identity,
                 pcode_order=base_case.pcode_order,
@@ -344,7 +345,7 @@ class StructuralRecurrenceSummarizer:
             ReturnInfo(
                 address=base_case.address,
                 value=loop_odd_value,
-                conditions=ConditionSimplifier.simplify_conditions(loop_conditions_common + [odd_start_cond]),
+                conditions=ConditionSimplifier.simplify_conditions_object_centric(loop_conditions_common + [odd_start_cond]),
                 branch_index=10_101,
                 pcode_identity=base_case.pcode_identity,
                 pcode_order=base_case.pcode_order,
@@ -498,7 +499,7 @@ class StructuralRecurrenceSummarizer:
 
         grouped: Dict[Tuple[object, ...], List] = {}
         for effect in effect_summary.effects or []:
-            conds = ConditionSimplifier.simplify_conditions(effect.conditions or [])
+            conds = ConditionSimplifier.simplify_conditions_object_centric(effect.conditions or [])
             key = _runtime_conditions_signature(conds)
             grouped.setdefault(key, []).append((conds, effect))
 
@@ -537,8 +538,8 @@ class StructuralRecurrenceSummarizer:
                 ),
                 False,
             )
-            step_context = ConditionSimplifier.simplify_conditions(list(conds) + [step_eq])
-            if ConditionSimplifier.is_contradiction(step_context):
+            step_context = ConditionSimplifier.simplify_conditions_object_centric(list(conds) + [step_eq])
+            if ConditionSimplifier.object_centric_is_contradiction(step_context):
                 self._debug(
                     "Skipping effect-derived one-step candidate: one-step context is contradictory "
                     f"for conditions {[cond.to_string() for cond in conds]}"
@@ -684,7 +685,7 @@ class StructuralRecurrenceSummarizer:
         right: Expression,
         parameters: Sequence[dict],
     ) -> bool:
-        if left.equals(right):
+        if _expressions_equivalent_under_conditions(left, right, [], parameters):
             return True
         if (
             left.expr_type == ExpressionType.MEMORY

@@ -288,7 +288,7 @@ def _return_defs_require_relation(return_defs: List[Dict[str, object]]) -> bool:
             if left["value_key"] == right["value_key"]:
                 continue
             combined = list(left["raw_conditions"]) + list(right["raw_conditions"])
-            if not ConditionSimplifier.is_contradiction(combined):
+            if not ConditionSimplifier.object_centric_is_contradiction(combined):
                 left_implies_right = left["condition_set"].implies_all(right["raw_conditions"])
                 right_implies_left = right["condition_set"].implies_all(left["raw_conditions"])
                 if left_implies_right != right_implies_left:
@@ -343,14 +343,13 @@ def build_return_definition(
     return_defs: List[Dict[str, object]] = []
     seen_defs = set()
     for ret in analysis.returns:
-        condition_set = ConditionSimplifier.build_constraint_set(ret.conditions)
-        if condition_set.is_contradictory:
+        raw_conditions = ConditionSimplifier.simplify_conditions_object_centric(ret.conditions)
+        if ConditionSimplifier.object_centric_is_contradiction(raw_conditions):
             continue
-        normalized_conditions = condition_set.simplified_conditions()
 
-        if normalized_conditions:
+        if raw_conditions:
             cond_parts = []
-            for condition in normalized_conditions:
+            for condition in raw_conditions:
                 cond_smt = condition.to_smt(symbol_name_mapping=symbol_name_mapping)
                 cond_parts.append(cond_smt)
             cond_str = cond_parts[0] if len(cond_parts) == 1 else f"(and {' '.join(cond_parts)})"
@@ -365,7 +364,7 @@ def build_return_definition(
         ):
             lowered_value = lower_post_state_expression_for_smt_if_needed(
                 ret.value,
-                ret.conditions,
+                raw_conditions,
                 effect_summary.effects,
                 analysis.parameters,
             )
@@ -380,7 +379,7 @@ def build_return_definition(
             use_sign_extension = should_sign_extend_value(
                 comparison_type_name,
                 rendered_value,
-                normalized_conditions,
+                raw_conditions,
                 return_type_obj=comparison_type_obj,
             )
         value_smt = coerce_value_to_bitvec_width(
@@ -390,7 +389,11 @@ def build_return_definition(
             use_sign_extension=use_sign_extension,
         )
         value_key = ConditionNormalizer.expression_signature(rendered_value)
-        dedup_key = (condition_set.signature(), value_key)
+        condition_set = ConditionSimplifier.build_constraint_set(raw_conditions)
+        dedup_key = (
+            ConditionSimplifier.object_centric_conditions_signature(raw_conditions),
+            value_key,
+        )
         if dedup_key in seen_defs:
             continue
         seen_defs.add(dedup_key)
@@ -399,25 +402,22 @@ def build_return_definition(
                 "index": len(return_defs),
                 "condition": cond_str,
                 "value": value_smt,
-                "raw_conditions": normalized_conditions,
+                "raw_conditions": raw_conditions,
                 "condition_set": condition_set,
                 "value_key": value_key,
             }
         )
 
-    return_defs = _order_return_defs_by_specificity(return_defs)
-    if _return_defs_require_relation(return_defs):
-        lines.extend(
-            _build_relation_return_definition(
-                return_defs,
-                return_var_name,
-                return_size,
-            )
+    ordered_return_defs = _order_return_defs_by_specificity(return_defs)
+    if _return_defs_require_relation(ordered_return_defs):
+        return _build_relation_return_definition(
+            ordered_return_defs,
+            return_var_name,
+            return_size,
         )
-        return lines
 
     unified_return = build_ite_expression(
-        [{"condition": str(ret_def["condition"]), "value": str(ret_def["value"])} for ret_def in return_defs],
+        [{"condition": str(ret_def["condition"]), "value": str(ret_def["value"])} for ret_def in ordered_return_defs],
         return_size,
     )
     lines.append(f"(define-fun {return_var_name} () (_ BitVec {return_size})")

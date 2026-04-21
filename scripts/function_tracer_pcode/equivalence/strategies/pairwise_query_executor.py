@@ -123,7 +123,35 @@ def solve_query_twostage(
     stage2_result.last_query = full_query
     stage2_result.pair_stage = "with-ineq"
 
-    if stage2_result.is_equivalent is None:
+    if (
+        stage2_result.is_equivalent is None
+        and getattr(strategy, "enable_solver_proven_rewrite_fallback", False)
+    ):
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["solver_proven_rewrite_attempts"] += 1
+        rewrite_result = strategy._try_solver_proven_rewrite_equivalence(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+        )
+        if rewrite_result.is_equivalent is True:
+            if getattr(strategy, "_active_normalization_stats", None) is not None:
+                strategy._active_normalization_stats["solver_proven_rewrite_successes"] += 1
+            return rewrite_result
+        if rewrite_result.is_equivalent is False:
+            if getattr(strategy, "_active_normalization_stats", None) is not None:
+                strategy._active_normalization_stats["solver_proven_rewrite_successes"] += 1
+            return rewrite_result
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["solver_proven_rewrite_failures"] += 1
+
+    if (
+        stage2_result.is_equivalent is None
+        and getattr(strategy, "enable_normalization_fallback", False)
+    ):
         if getattr(strategy, "_active_normalization_stats", None) is not None:
             strategy._active_normalization_stats["timeout_fallback_attempts"] += 1
         norm_result = strategy._try_normalization_equivalence(

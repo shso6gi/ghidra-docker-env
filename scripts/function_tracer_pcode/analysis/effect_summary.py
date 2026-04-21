@@ -21,6 +21,8 @@ from ..model import (
     PostStateReadRef,
     PostStateSnapshotRef,
     PostStateValueRef,
+    PTRADD_OPCODE,
+    PTRSUB_OPCODE,
     StorageInfo,
     coerce_call_target_ref,
     expression_key_or_identity,
@@ -763,6 +765,7 @@ def summarize_store_effects(
                             parameters,
                         )
                         if substituted_location is None:
+                            has_unsupported_call = True
                             if debug:
                                 arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
                                 print(
@@ -2511,6 +2514,9 @@ def _parameter_identity_keys_from_expression(
         base_key = _parameter_identity_key_from_base_ref(runtime_ref)
         if base_key is not None:
             keys.add(base_key)
+            param_index = _normalize_parameter_index(runtime_ref.parameter_index)
+            if param_index is not None:
+                keys.add(("parameter", param_index))
             explicit_parameter_identity = True
             explicit_scoped_parameter_identity = len(base_key) > 2
     elif isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
@@ -2518,6 +2524,9 @@ def _parameter_identity_keys_from_expression(
         base_key = _parameter_identity_key_from_base_ref(location_ref.base_ref)
         if base_key is not None and not location_ref.steps and int(location_ref.offset) == 0:
             keys.add(base_key)
+            param_index = _normalize_parameter_index(location_ref.base_ref.parameter_index)
+            if param_index is not None:
+                keys.add(("parameter", param_index))
             explicit_parameter_identity = True
             explicit_scoped_parameter_identity = len(base_key) > 2
 
@@ -2681,6 +2690,9 @@ def _build_parameter_replacements(
             coerced_arg = _coerce_argument_to_callee_parameter(arg, param)
             if coerced_arg is not None:
                 replacements[key] = coerced_arg
+                param_index = _normalize_parameter_index(param_ref.parameter_index)
+                if param_index is not None:
+                    replacements.setdefault(("parameter", param_index), coerced_arg)
     return replacements
 
 
@@ -3404,7 +3416,7 @@ def _rewrite_canonical_location_read(
     definite_post_state: bool = False,
     preserve_symbolic_fallback: bool = True,
 ) -> Expression:
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     active_blocked_locations = list(blocked_locations or [])
     active_cycle_components = cycle_components
     if active_cycle_components is None:
@@ -3428,12 +3440,12 @@ def _rewrite_canonical_location_read(
 
     matched = []
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
         if max_order_key is not None and effect.order_key >= max_order_key:
             continue
         if effect.location.size != location.size:
             continue
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
             continue
         if not locations_match(location, effect.location, normalized_return_conditions + normalized_effect_conditions):
             continue
@@ -3737,12 +3749,12 @@ def _find_matching_effect_value(
     parameters: Sequence[Dict],
     max_order_key: Optional[int] = None,
 ) -> Optional[Tuple[int, Expression]]:
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
         if max_order_key is not None and effect.order_key >= max_order_key:
             continue
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
             continue
         if not locations_match(location, effect.location, normalized_return_conditions):
             continue
@@ -3764,30 +3776,29 @@ def _find_unique_effect_location_for_value(
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
 ) -> Optional[CanonicalLocation]:
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     normalized_expr = _canonicalize_expression_for_effect_value_identity(expr, parameters)
-    normalized_expr_key = expression_key_safe(
-        normalized_expr,
-        include_memory_read_order=True,
-        include_semantic_runtime_refs=False,
-    )
-    if normalized_expr_key is None:
+    if normalized_expr is None:
         return None
     matched_location: Optional[CanonicalLocation] = None
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
+        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+            continue
+        if subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions):
             continue
         normalized_effect_value = _canonicalize_expression_for_effect_value_identity(
             effect.value,
             parameters,
         )
-        effect_value_key = expression_key_safe(
+        if normalized_effect_value is None:
+            continue
+        if not _expression_matches_value_under_conditions(
+            normalized_expr,
             normalized_effect_value,
-            include_memory_read_order=True,
-            include_semantic_runtime_refs=False,
-        )
-        if effect_value_key is None or effect_value_key != normalized_expr_key:
+            normalized_return_conditions + normalized_effect_conditions,
+            parameters,
+        ):
             continue
         if matched_location is None:
             matched_location = effect.location
@@ -3809,7 +3820,7 @@ def resolve_definite_post_state_read_for_location(
         _normalize_canonical_location(location),
         parameters,
     )
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     active_effects = [
         StoreEffect(
             location=_bind_location_to_parameter_identity(effect.location, parameters),
@@ -3867,16 +3878,18 @@ def promote_effect_value_match_to_post_state_read(
         return None
     effects = _normalize_effect_locations_for_parameters(effects, parameters)
 
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+        list(return_conditions)
+    )
     if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
         return None
 
     matched_definite_effect = False
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
         if effect.location.size != location.size:
             continue
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
             continue
         if not locations_match(
             location,
@@ -3920,7 +3933,7 @@ def promote_effect_value_match_to_post_state_read(
     )
     if lowered_post_state_read is None:
         return None
-    if _expressions_equivalent_under_conditions(
+    if not _expressions_equivalent_under_conditions(
         lowered_post_state_read,
         expr,
         normalized_return_conditions,
@@ -3944,14 +3957,14 @@ def promote_effect_value_carrier_to_post_state_read(
 
     location = _find_unique_effect_location_for_value(
         expr,
-        (),
+        return_conditions,
         effects,
         parameters,
     )
     if location is None:
         return None
 
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
         return None
 
@@ -3980,7 +3993,7 @@ def _expression_matches_value_under_conditions(
         combined = list(conditions)
         if cond is not None:
             combined.append(cond)
-        if ConditionSimplifier.is_contradiction(combined):
+        if ConditionSimplifier.object_centric_is_contradiction(combined):
             continue
         if _expression_matches_value_under_conditions(reduced_expr, branch_value, combined, parameters):
             return True
@@ -4348,13 +4361,13 @@ def _latest_definite_effect_value_for_location(
     parameters: Sequence[Dict],
 ) -> Optional[Expression]:
     effects = _normalize_effect_locations_for_parameters(effects, parameters)
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(return_conditions))
     latest_effect: Optional[StoreEffect] = None
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
         if effect.location.size != location.size:
             continue
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
             continue
         if not locations_match(
             location,
@@ -4944,6 +4957,17 @@ def normalize_post_state_expression(
     allow_observed_snapshot_promotion = _count_observed_loads(expr) >= 2
 
     def _normalize_candidate(candidate_expr: Expression) -> Expression:
+        if prefer_canonical_post_state and symbolic_post_state:
+            carrier_post_state_read = promote_effect_value_carrier_to_post_state_read(
+                candidate_expr,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=True,
+            )
+            if carrier_post_state_read is not None:
+                return carrier_post_state_read
+
         if (
             allow_observed_snapshot_promotion
             and prefer_canonical_post_state
@@ -5423,7 +5447,9 @@ def _replay_definite_active_effects_for_location(
     parameters: Sequence[Dict],
 ) -> Optional[Expression]:
     effects = _normalize_effect_locations_for_parameters(effects, parameters)
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+        list(return_conditions)
+    )
     tracked_locations = sorted(
         {location, *[effect.location for effect in effects]},
         key=_location_sort_key,
@@ -5478,11 +5504,17 @@ def _collect_definite_active_effects(
     return_conditions: Sequence[Condition],
     effects: Sequence[StoreEffect],
 ) -> List[StoreEffect]:
-    normalized_return_conditions = ConditionSimplifier.simplify_conditions(list(return_conditions))
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+        list(return_conditions)
+    )
     active_effects: List[StoreEffect] = []
     for effect in effects:
-        normalized_effect_conditions = ConditionSimplifier.simplify_conditions(list(effect.conditions))
-        if ConditionSimplifier.is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(effect.conditions)
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(
+            normalized_return_conditions + normalized_effect_conditions
+        ):
             continue
         residual = subtract_implied_conditions(normalized_effect_conditions, normalized_return_conditions)
         if residual:
@@ -5818,72 +5850,21 @@ def subtract_implied_conditions(
     effect_conditions: Sequence[Condition],
     return_conditions: Sequence[Condition],
 ) -> List[Condition]:
-    implied = _collect_implied_condition_norms(return_conditions)
-    residual = []
-    for cond in effect_conditions:
-        if not _condition_is_implied(cond, implied):
-            residual.append(cond)
-    return residual
-
-
-def _collect_implied_condition_norms(
-    conditions: Sequence[Condition],
-):
-    implied = set()
-    stack = list(conditions or [])
-    while stack:
-        condition = stack.pop()
-        if condition is None:
-            continue
-        normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-        implied.add(normalized)
-
-        expr = condition.expression
-        if (
-            not condition.negated
-            and expr is not None
-            and expr.expr_type == ExpressionType.BINARY_OP
-            and expr.operator == "BOOL_AND"
-        ):
-            stack.append(Condition(expr.operands[0], False))
-            stack.append(Condition(expr.operands[1], False))
-
-    return implied
-
-
-def _condition_is_implied(
-    condition: Condition,
-    implied_conditions,
-) -> bool:
-    normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-    if normalized in implied_conditions:
-        return True
-
-    expr = condition.expression
-    if (
-        not condition.negated
-        and expr is not None
-        and expr.expr_type == ExpressionType.BINARY_OP
-        and expr.operator == "BOOL_AND"
+    context_basis = ConditionSimplifier.simplify_conditions_object_centric(
+        list(return_conditions or [])
+    )
+    residual: List[Condition] = []
+    for condition in ConditionSimplifier.simplify_conditions_object_centric(
+        list(effect_conditions or [])
     ):
-        stack = [Condition(expr.operands[0], False), Condition(expr.operands[1], False)]
-        while stack:
-            current = stack.pop()
-            current_expr = current.expression
-            if (
-                not current.negated
-                and current_expr is not None
-                and current_expr.expr_type == ExpressionType.BINARY_OP
-                and current_expr.operator == "BOOL_AND"
-            ):
-                stack.append(Condition(current_expr.operands[0], False))
-                stack.append(Condition(current_expr.operands[1], False))
-                continue
-            if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
-                return False
-        return True
-
-    return False
+        if any(condition.equals(existing) for existing in context_basis):
+            continue
+        if ConditionSimplifier.object_centric_is_contradiction(
+            context_basis + [condition.negate()]
+        ):
+            continue
+        residual.append(condition)
+    return residual
 
 
 def substitute_condition(
@@ -6285,6 +6266,35 @@ def _extract_location_root_and_steps(
             return base_ref, steps
         return None
 
+    if expr.expr_type == ExpressionType.INTRINSIC:
+        mnemonic = getattr(expr, "name", None) or ""
+        opcode = getattr(expr, "opcode", None)
+        operands = getattr(expr, "operands", None) or []
+
+        if (opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB") and len(operands) == 2:
+            base_parsed = _extract_location_root_and_steps(operands[0], parameters)
+            offset_value = _constant_factor(operands[1])
+            if base_parsed is None or offset_value is None:
+                return None
+            base_ref, steps = base_parsed
+            steps = list(steps)
+            if int(offset_value) != 0:
+                steps.append(LocationStep("offset", int(offset_value)))
+            return base_ref, steps
+
+        if (opcode == PTRADD_OPCODE or mnemonic == "PTRADD") and len(operands) == 3:
+            base_parsed = _extract_location_root_and_steps(operands[0], parameters)
+            index_value = _constant_factor(operands[1])
+            elem_value = _constant_factor(operands[2])
+            if base_parsed is None or index_value is None or elem_value is None:
+                return None
+            base_ref, steps = base_parsed
+            delta = int(index_value) * int(elem_value)
+            steps = list(steps)
+            if delta != 0:
+                steps.append(LocationStep("offset", delta))
+            return base_ref, steps
+
     if (
         expr.expr_type == ExpressionType.BINARY_OP
         and expr.operator == "INT_MULT"
@@ -6360,6 +6370,26 @@ def _flatten_location_addition(
             return _flatten_location_addition(expr.operands[1], parameters)
         if right_const == 1:
             return _flatten_location_addition(expr.operands[0], parameters)
+
+    if expr.expr_type == ExpressionType.INTRINSIC:
+        mnemonic = getattr(expr, "name", None) or ""
+        opcode = getattr(expr, "opcode", None)
+        operands = getattr(expr, "operands", None) or []
+
+        if (opcode == PTRSUB_OPCODE or mnemonic == "PTRSUB") and len(operands) == 2:
+            base_const, base_bases = _flatten_location_addition(operands[0], parameters)
+            offset_value = _constant_factor(operands[1])
+            if base_const is None or offset_value is None:
+                return None, []
+            return int(base_const) + int(offset_value), base_bases
+
+        if (opcode == PTRADD_OPCODE or mnemonic == "PTRADD") and len(operands) == 3:
+            base_const, base_bases = _flatten_location_addition(operands[0], parameters)
+            index_value = _constant_factor(operands[1])
+            elem_value = _constant_factor(operands[2])
+            if base_const is None or index_value is None or elem_value is None:
+                return None, []
+            return int(base_const) + (int(index_value) * int(elem_value)), base_bases
 
     if expr.expr_type == ExpressionType.CONSTANT and isinstance(expr.value, int):
         return expr.value, []

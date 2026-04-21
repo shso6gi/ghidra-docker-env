@@ -11,6 +11,7 @@ from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
 from .pairwise_models import QueryResult, ReturnCase
 from .pairwise_normalization import try_normalization_equivalence
+from .pairwise_solver_proven_rewrite import try_solver_proven_rewrite_equivalence
 from .pairwise_query_builder import (
     build_condition_only_query,
     build_single_case_condition_query,
@@ -67,6 +68,9 @@ class PairwiseStrategy(CheckStrategy):
         self.save_unknown_queries = False
         self.unknown_query_dir = "/tmp"
         self.normalization_settings = normalization_settings or NormalizationSettings.safe()
+        self.solver_proven_rewrite_settings = self.normalization_settings
+        self.enable_solver_proven_rewrite_fallback = True
+        self.enable_normalization_fallback = False
         self._active_safety_checker = None
 
     def check(
@@ -77,17 +81,6 @@ class PairwiseStrategy(CheckStrategy):
     ) -> StrategyResult:
         start_time = time.time()
 
-        hints1 = infer_parameter_semantics(analysis1)
-        hints2 = infer_parameter_semantics(analysis2)
-        analysis1 = normalize_analysis_semantic_width(
-            analysis1,
-            hints1,
-        )
-        analysis2 = normalize_analysis_semantic_width(
-            analysis2,
-            hints2,
-        )
-
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
         safety_checker = ExpressionSafetyChecker(
             solver_runner=self.solver_runner,
@@ -96,16 +89,6 @@ class PairwiseStrategy(CheckStrategy):
             base_ctx=base_ctx,
         )
         self._active_safety_checker = safety_checker
-        analysis1 = normalize_analysis_semantic_width(
-            analysis1,
-            hints1,
-            base_ctx.get("extra_vars1", []),
-        )
-        analysis2 = normalize_analysis_semantic_width(
-            analysis2,
-            hints2,
-            base_ctx.get("extra_vars2", []),
-        )
         sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
             analysis1,
             analysis2,
@@ -195,6 +178,9 @@ class PairwiseStrategy(CheckStrategy):
         last_formula = None
         all_normalization_rules = []
         normalization_stats = {
+            "solver_proven_rewrite_attempts": 0,
+            "solver_proven_rewrite_successes": 0,
+            "solver_proven_rewrite_failures": 0,
             "timeout_fallback_attempts": 0,
             "changed_pairs": 0,
             "no_change_pairs": 0,
@@ -409,6 +395,25 @@ class PairwiseStrategy(CheckStrategy):
             are_structurally_equivalent_fn=are_structurally_equivalent,
             get_structural_summary_fn=get_structural_summary,
             normalization_rule_application_cls=NormalizationRuleApplication,
+        )
+
+    def _try_solver_proven_rewrite_equivalence(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str,
+    ) -> QueryResult:
+        return try_solver_proven_rewrite_equivalence(
+            self,
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
         )
 
     def _solve_query_internal(
@@ -749,13 +754,12 @@ class PairwiseStrategy(CheckStrategy):
             if not changed:
                 continue
 
-            case.conditions = ConditionSimplifier.simplify_conditions(rewritten_conditions)
+            case.update_conditions(rewritten_conditions, summary_conditions=rewritten_conditions)
             case.value_expr = rewritten_value
             case.normalized_value_expr = normalize_expression(
                 rewritten_value,
                 NormalizationContext(settings=self.normalization_settings),
             )
-            case.conditions_smt = None
             case._value_smt_cache.clear()
 
     def _rewrite_expr_with_parameter_fragments(

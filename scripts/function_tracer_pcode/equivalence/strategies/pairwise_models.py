@@ -27,9 +27,11 @@ class ReturnCase:
         parameters: Optional[List[Dict]] = None,
         effect_summary=None,
         comparison_surface=None,
+        summary_conditions: Optional[List[Condition]] = None,
     ):
         self.index = index
-        self.conditions = conditions
+        self.conditions = list(conditions or [])
+        self.summary_conditions = list(summary_conditions or self.conditions)
         self.value_expr = value_expr
         self.normalized_value_expr = normalized_value_expr if normalized_value_expr is not None else value_expr
         self.return_info = return_info
@@ -41,6 +43,16 @@ class ReturnCase:
         self.comparison_surface = comparison_surface
         self.conditions_smt: Optional[List[str]] = None
         self._value_smt_cache: Dict[tuple, str] = {}
+
+    def update_conditions(
+        self,
+        conditions: List[Condition],
+        *,
+        summary_conditions: Optional[List[Condition]] = None,
+    ) -> None:
+        self.conditions = list(conditions or [])
+        self.summary_conditions = list(summary_conditions or self.conditions)
+        self.conditions_smt = None
 
     @staticmethod
     def _coerce_rendered_smt(rendered) -> str:
@@ -122,11 +134,12 @@ class ReturnCase:
         )
 
     def get_condition_summary(self) -> str:
-        if not self.conditions:
+        conditions = self.summary_conditions if self.summary_conditions is not None else self.conditions
+        if not conditions:
             return "unconditional"
 
         cond_strs = []
-        for cond in self.conditions[:3]:
+        for cond in conditions[:3]:
             cond_str = ConditionSimplifier.get_simplified_condition_string(cond)
             if cond_str:
                 cond_strs.append(cond_str)

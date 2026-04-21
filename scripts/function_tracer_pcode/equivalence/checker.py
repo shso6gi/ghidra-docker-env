@@ -180,36 +180,15 @@ class EquivalenceChecker:
     ) -> Tuple[FunctionReturnAnalysis, FunctionReturnAnalysis, RewriteInfo]:
         """両方の解析結果にリライトを適用"""
         rewrite_info = RewriteInfo()
-        
+
         if not self.enable_rewrite:
             self._debug_print("Rewrite is disabled")
             return analysis1, analysis2, rewrite_info
-        
-        self._debug_print(f"Applying rewrite with direction: {self.rewrite_direction}")
-        
-        rewriter = ExpressionRewriter(
-            debug=self.debug,
-            direction=self.rewrite_direction
+
+        self._debug_print(
+            "Object-centric solver-only policy: skipping rewrite stage "
+            f"(requested direction: {self.rewrite_direction})"
         )
-        
-        # Function 1 のリライト
-        rewritten1, results1 = rewrite_analysis_returns(analysis1, rewriter)
-        rewrite_info.function1_rewrites = results1
-        
-        if any(r.was_rewritten for r in results1):
-            self._debug_print("Function 1 was rewritten")
-            rewrite_info.applied = True
-            analysis1 = rewritten1
-        
-        # Function 2 のリライト
-        rewritten2, results2 = rewrite_analysis_returns(analysis2, rewriter)
-        rewrite_info.function2_rewrites = results2
-        
-        if any(r.was_rewritten for r in results2):
-            self._debug_print("Function 2 was rewritten")
-            rewrite_info.applied = True
-            analysis2 = rewritten2
-        
         return analysis1, analysis2, rewrite_info
     
     def _get_params_via_decompile(

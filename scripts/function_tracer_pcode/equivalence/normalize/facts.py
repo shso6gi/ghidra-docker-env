@@ -5,7 +5,7 @@ from typing import List
 
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...model import Condition, ExpressionType
-from .fact_helpers import normalize_fact_expr
+from .fact_helpers import is_integral_expression, normalize_fact_expr, record_integral_expr_fact
 from .fact_patterns import extract_and_comparison_facts
 from .fact_scalar import record_scalar_fact
 from .fact_types import SignFacts
@@ -24,7 +24,7 @@ def extract_sign_facts(
     - 補助的に AND を含むビットパターンから facts を推論
     """
     facts = SignFacts()
-    simplified_conditions = ConditionSimplifier.simplify_conditions(conditions)
+    simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(conditions)
 
     for cond in simplified_conditions:
         expr = cond.expression
@@ -37,6 +37,18 @@ def extract_sign_facts(
 
         left = normalize_fact_expr(expr.operands[0])
         right = normalize_fact_expr(expr.operands[1])
+        if (
+            expr.operator == "INT_SLESS"
+            and left.expr_type == ExpressionType.CONSTANT
+            and int(left.value or 0) == -1
+            and is_integral_expression(right)
+        ):
+            record_integral_expr_fact(
+                facts.nonneg_exprs,
+                right,
+                debug,
+                "expr is nonneg (-1 < expr, direct comparison)",
+            )
         extract_and_comparison_facts(expr.operator, left, right, facts, debug)
 
     return facts

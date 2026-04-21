@@ -1679,6 +1679,60 @@ class ConditionSimplifier:
         return ConditionConstraintSet.from_conditions(list(conditions or []))
 
     @classmethod
+    def build_object_centric_condition_basis(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> List[Condition]:
+        basis: List[Condition] = []
+        for condition in list(conditions or []):
+            if condition is None:
+                continue
+            truth_value = cls.evaluate_condition_truth(condition)
+            if truth_value is True:
+                continue
+            if any(condition.equals(existing) for existing in basis):
+                continue
+            basis.append(condition)
+        return basis
+
+    @classmethod
+    def object_centric_conditions_signature(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> Tuple[object, ...]:
+        signature = []
+        for condition in cls.build_object_centric_condition_basis(conditions):
+            signature.append(condition.structural_key(budget=256))
+        signature.sort()
+        return tuple(signature)
+
+    @classmethod
+    def object_centric_is_contradiction(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> bool:
+        basis = cls.build_object_centric_condition_basis(conditions)
+        if not basis:
+            return False
+
+        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
+            basis,
+            cache_key=("raw-unsat", cls._condition_cache_key(basis)),
+        )
+        if solver_unsat is not None:
+            return solver_unsat
+
+        normalized = cls._normalize_condition_list_nonrecursive(basis)
+        return bool(normalized["contradiction_indices"])
+
+    @classmethod
+    def simplify_conditions_object_centric(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> List[Condition]:
+        return cls.build_object_centric_condition_basis(conditions)
+
+    @classmethod
     def subtract_implied_conditions(
         cls,
         conditions: Iterable[Condition],

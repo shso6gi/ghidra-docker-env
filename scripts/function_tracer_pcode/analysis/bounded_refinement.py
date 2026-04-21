@@ -38,6 +38,33 @@ def _runtime_conditions_signature(conditions: Sequence[Condition]):
     return ConditionNormalizer.conditions_signature(conditions)
 
 
+def _expression_is_fully_resolved(expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return True
+    if expr.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
+        return False
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and not _expression_is_fully_resolved(cond.expression):
+                return False
+            if not _expression_is_fully_resolved(value):
+                return False
+        return True
+    for operand in getattr(expr, "operands", []) or []:
+        if not _expression_is_fully_resolved(operand):
+            return False
+    return True
+
+
+def _return_info_is_concrete_fallback(ret: Optional[ReturnInfo]) -> bool:
+    if ret is None or not _expression_is_fully_resolved(getattr(ret, "value", None)):
+        return False
+    for condition in getattr(ret, "conditions", []) or []:
+        if condition is None or not _expression_is_fully_resolved(condition.expression):
+            return False
+    return True
+
+
 class BoundedCallRefiner:
     """
     未解決 CALL プレースホルダを、有限回の inlining で保守的に展開する。
@@ -87,6 +114,13 @@ class BoundedCallRefiner:
             if len(refined_returns) >= self.max_cases:
                 refined_returns = refined_returns[: self.max_cases]
                 break
+
+        if analysis.unknown_event_count or analysis.incomplete_control_flow:
+            refined_returns.extend(
+                ret
+                for ret in (analysis.returns or [])
+                if _return_info_is_concrete_fallback(ret)
+            )
 
         deduped = self._deduplicate_return_infos(refined_returns)
         if not deduped:

@@ -48,7 +48,10 @@ class ExpandedValue:
     
     def is_valid(self) -> bool:
         """条件が矛盾していないかチェック"""
-        return not ConditionSimplifier.is_contradiction(self.conditions)
+        return not (
+            ConditionSimplifier.object_centric_is_contradiction(self.conditions)
+            or ConditionSimplifier.is_contradiction(self.conditions)
+        )
     
     def get_condition_signature(self) -> Hashable:
         """
@@ -56,7 +59,7 @@ class ExpandedValue:
         
         条件を正規化して、ソート済みの文字列として返す
         """
-        return ConditionNormalizer.conditions_signature(self.conditions)
+        return ConditionSimplifier.object_centric_conditions_signature(self.conditions)
     
     def __repr__(self):
         conds = [c.to_string() for c in self.conditions]
@@ -160,10 +163,22 @@ class ExpressionExpander:
         self,
         conditions: List[Condition],
     ) -> List[Condition]:
-        """PHI を含む条件も文脈に応じて簡約した上で展開に流す。"""
+        """PHI 展開で使う raw object-centric condition basis。"""
         if not conditions:
             return []
-        return ConditionSimplifier.simplify_conditions(list(conditions))
+        rewritten: List[Condition] = []
+        source_conditions = list(conditions)
+        for index, condition in enumerate(source_conditions):
+            reduced_expr = _reduce_expression_under_conditions(
+                condition.expression,
+                source_conditions[:index] + source_conditions[index + 1 :],
+            )
+            rewritten.append(
+                Condition(reduced_expr, condition.negated)
+                if reduced_expr is not None
+                else condition
+            )
+        return ConditionSimplifier.simplify_conditions_object_centric(rewritten)
 
     def _expansion_expression_signature(self, expr: Optional[Expression]):
         """展開中の重複排除に使う、可換結合演算を吸収した式シグネチャ。"""
@@ -210,10 +225,10 @@ class ExpressionExpander:
         self,
         ev: ExpandedValue,
     ) -> ExpandedValue:
-        normalized_conditions = ConditionSimplifier.simplify_conditions(list(ev.conditions))
-        reduced_value = _reduce_expression_under_conditions(ev.value, normalized_conditions)
-        normalized_value = reduced_value if reduced_value is not None else ev.value
-        return ExpandedValue(normalized_value, normalized_conditions)
+        normalized_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(ev.conditions)
+        )
+        return ExpandedValue(ev.value, normalized_conditions)
 
     def _prefer_expanded_value(
         self,
@@ -440,7 +455,7 @@ class ExpressionExpander:
                     for pc in path_conditions:
                         pc_str = ConditionNormalizer.get_simplified_string(pc)
                         self._debug_print(f"    - {pc_str}", depth + 2)
-                if ConditionSimplifier.is_contradiction(input_conditions):
+                if ConditionSimplifier.object_centric_is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
 
@@ -1160,6 +1175,8 @@ class ExpressionExpander:
                     0,
                 )
             rewritten_base = rewritten_observed if rewritten_observed is not None else expr
+            if self._observed_load_rewrite_preserves_wrapper_shape(expr, rewritten_base):
+                return rewritten_base
             rewrite_retains_phi = self._expression_contains_phi(rewritten_base)
             normalized = normalize_post_state_expression(
                 rewritten_base,
@@ -1183,6 +1200,8 @@ class ExpressionExpander:
             ):
                 return normalized_original
             if normalized is not None and expression_contains_post_state_reads(normalized):
+                if expr.expr_type != ExpressionType.MEMORY and normalized.expr_type == ExpressionType.MEMORY:
+                    return expr
                 return normalized
             if rewrite_retains_phi:
                 if (
@@ -1204,6 +1223,8 @@ class ExpressionExpander:
                 normalized_original is not None
                 and expression_contains_post_state_reads(normalized_original)
             ):
+                if expr.expr_type != ExpressionType.MEMORY and normalized_original.expr_type == ExpressionType.MEMORY:
+                    return expr
                 return normalized_original
             if (
                 normalized is not None
@@ -1259,6 +1280,42 @@ class ExpressionExpander:
             if concretized is not None:
                 resolved = concretized
         return resolved
+
+    def _observed_load_rewrite_preserves_wrapper_shape(
+        self,
+        original: Optional[Expression],
+        rewritten: Optional[Expression],
+    ) -> bool:
+        if original is None or rewritten is None:
+            return False
+        if original.expr_type != rewritten.expr_type:
+            return False
+        if original.expr_type == ExpressionType.MEMORY:
+            original_location = canonicalize_expr_read_location(original, self.parameters)
+            rewritten_location = canonicalize_expr_read_location(rewritten, self.parameters)
+            return (
+                original_location is not None
+                and rewritten_location is not None
+                and original_location == rewritten_location
+                and int(original.size or 0) == int(rewritten.size or 0)
+            )
+        if original.expr_type in {
+            ExpressionType.CONSTANT,
+            ExpressionType.PARAMETER,
+            ExpressionType.VARIABLE,
+            ExpressionType.UNKNOWN,
+        }:
+            return _expressions_equivalent(original, rewritten)
+        if getattr(original, "operator", None) != getattr(rewritten, "operator", None):
+            return False
+        original_operands = list(getattr(original, "operands", []) or [])
+        rewritten_operands = list(getattr(rewritten, "operands", []) or [])
+        if len(original_operands) != len(rewritten_operands):
+            return False
+        return all(
+            self._observed_load_rewrite_preserves_wrapper_shape(lhs, rhs)
+            for lhs, rhs in zip(original_operands, rewritten_operands)
+        )
 
     def _collapse_root_object_state_if_safe(
         self,
@@ -1373,9 +1430,10 @@ class ExpressionExpander:
         if traced_value is None or self._expression_contains_call(traced_value):
             return values
 
-        simplified_conditions = ConditionSimplifier.simplify_conditions(list(base_conditions))
-        reduced_value = _reduce_expression_under_conditions(traced_value, simplified_conditions)
-        normalized_value = reduced_value if reduced_value is not None else traced_value
+        simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(base_conditions)
+        )
+        normalized_value = traced_value
         if self._expression_contains_call(normalized_value):
             return values
         if self._expression_contains_budget_unknown(normalized_value):
@@ -1412,8 +1470,10 @@ class ExpressionExpander:
                 if cond is not None:
                     combined_conditions.append(cond)
                     prior_guards.append(cond)
-                simplified = ConditionSimplifier.simplify_conditions(combined_conditions)
-                if ConditionSimplifier.is_contradiction(simplified):
+                simplified = ConditionSimplifier.simplify_conditions_object_centric(
+                    combined_conditions
+                )
+                if ConditionSimplifier.object_centric_is_contradiction(simplified):
                     continue
                 expanded.extend(
                     self._expand_expression_cases(
@@ -1427,11 +1487,18 @@ class ExpressionExpander:
         if expr.expr_type == ExpressionType.MEMORY and expr.operands:
             addr_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
             if not addr_cases:
-                return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+                return [
+                    ExpandedValue(
+                        expr,
+                        ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                    )
+                ]
             expanded = []
             for addr_case in addr_cases:
-                simplified = ConditionSimplifier.simplify_conditions(addr_case.conditions)
-                if ConditionSimplifier.is_contradiction(simplified):
+                simplified = ConditionSimplifier.simplify_conditions_object_centric(
+                    addr_case.conditions
+                )
+                if ConditionSimplifier.object_centric_is_contradiction(simplified):
                     continue
                 rebuilt = Expression.memory(
                     addr_case.value,
@@ -1445,11 +1512,18 @@ class ExpressionExpander:
         if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
             operand_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
             if not operand_cases:
-                return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+                return [
+                    ExpandedValue(
+                        expr,
+                        ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                    )
+                ]
             expanded = []
             for operand_case in operand_cases:
-                simplified = ConditionSimplifier.simplify_conditions(operand_case.conditions)
-                if ConditionSimplifier.is_contradiction(simplified):
+                simplified = ConditionSimplifier.simplify_conditions_object_centric(
+                    operand_case.conditions
+                )
+                if ConditionSimplifier.object_centric_is_contradiction(simplified):
                     continue
                 if expr.operator is None:
                     continue
@@ -1462,9 +1536,19 @@ class ExpressionExpander:
             left_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
             right_cases = self._expand_expression_cases(expr.operands[1], base_conditions, depth + 1)
             if not left_cases:
-                left_cases = [ExpandedValue(expr.operands[0], ConditionSimplifier.simplify_conditions(base_conditions))]
+                left_cases = [
+                    ExpandedValue(
+                        expr.operands[0],
+                        ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                    )
+                ]
             if not right_cases:
-                right_cases = [ExpandedValue(expr.operands[1], ConditionSimplifier.simplify_conditions(base_conditions))]
+                right_cases = [
+                    ExpandedValue(
+                        expr.operands[1],
+                        ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                    )
+                ]
             if expr.operator is None:
                 return []
             expanded = self._combine_input_expansions_with_conditions(
@@ -1484,7 +1568,13 @@ class ExpressionExpander:
             normalized_cases = []
             for operand, cases in zip(expr.operands, operand_cases):
                 normalized_cases.append(
-                    cases or [ExpandedValue(operand, ConditionSimplifier.simplify_conditions(base_conditions))]
+                    cases
+                    or [
+                        ExpandedValue(
+                            operand,
+                            ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                        )
+                    ]
                 )
             expanded = self._combine_input_expansions_with_conditions(
                 expr.name or "INTRINSIC",
@@ -1496,7 +1586,12 @@ class ExpressionExpander:
             )
             return self._deduplicate_expanded_values(expanded, depth) if expanded else []
 
-        return [ExpandedValue(expr, ConditionSimplifier.simplify_conditions(base_conditions))]
+        return [
+            ExpandedValue(
+                expr,
+                ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+            )
+        ]
 
     def _trace_operation_expression(
         self,
@@ -2328,7 +2423,7 @@ class ExpressionExpander:
                 if pre_key in seen_keys:
                     continue
                 seen_keys.add(pre_key)
-                if not ConditionSimplifier.is_contradiction(combined_conds):
+                if not ConditionSimplifier.object_centric_is_contradiction(combined_conds):
                     if mnemonic in ("INT_NEGATE", "INT_2COMP", "BOOL_NEGATE", "INT_ZEXT", "INT_SEXT"):
                         new_value = Expression.unary_op(mnemonic, ev.value)
                     else:
@@ -2377,7 +2472,10 @@ class ExpressionExpander:
                         continue
                     seen_pairs.add(pre_key)
                     
-                    if ConditionSimplifier.is_contradiction(combined_conds):
+                    if (
+                        ConditionSimplifier.object_centric_is_contradiction(combined_conds)
+                        or ConditionSimplifier.is_contradiction(combined_conds)
+                    ):
                         self._debug_print(f"  Combination contradictory, skip", depth)
                         continue
                     
@@ -2402,9 +2500,10 @@ class ExpressionExpander:
                             output_size=output_size,
                             opcode=opcode,
                         )
-                    simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
-                    reduced_value = _reduce_expression_under_conditions(new_value, simplified_conds)
-                    normalized_value = reduced_value if reduced_value is not None else new_value
+                    simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                        combined_conds
+                    )
+                    normalized_value = new_value
                     normalized_ev = ExpandedValue(normalized_value, simplified_conds)
                     result_key = (
                         self._expansion_expression_signature(normalized_ev.value),
@@ -2453,18 +2552,19 @@ class ExpressionExpander:
                 combined_conds.extend(expanded.conditions)
                 operands.append(expanded.value)
 
-            if ConditionSimplifier.is_contradiction(combined_conds):
+            if ConditionSimplifier.object_centric_is_contradiction(combined_conds):
                 continue
 
-            simplified_conds = ConditionSimplifier.simplify_conditions(combined_conds)
+            simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                combined_conds
+            )
             new_value = self._build_combined_operation_expression(
                 mnemonic,
                 operands,
                 output_size=output_size,
                 opcode=opcode,
             )
-            reduced_value = _reduce_expression_under_conditions(new_value, simplified_conds)
-            normalized_value = reduced_value if reduced_value is not None else new_value
+            normalized_value = new_value
             normalized_ev = ExpandedValue(normalized_value, simplified_conds)
             result_key = (
                 self._expansion_expression_signature(normalized_ev.value),

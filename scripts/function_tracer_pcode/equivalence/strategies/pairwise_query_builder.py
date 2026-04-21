@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple
 from ...model import FunctionReturnAnalysis
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.normalizer import ConditionNormalizer
+from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ..normalize import normalize_expression, NormalizationContext, NormalizationSettings
 from ..formula.returns import (
     coerce_value_to_bitvec_width,
@@ -24,10 +25,9 @@ def extract_return_cases(
     settings = normalization_settings or NormalizationSettings.safe()
 
     for index, ret_info in enumerate(analysis.returns):
-        condition_set = ConditionSimplifier.build_constraint_set(ret_info.conditions)
-        if condition_set.is_contradictory:
+        query_conditions = _build_object_centric_condition_basis(ret_info.conditions)
+        if _condition_region_is_unsat(query_conditions):
             continue
-        simplified_conditions = condition_set.simplified_conditions()
         normalized_value = normalize_expression(
             ret_info.value,
             NormalizationContext(settings=settings),
@@ -35,7 +35,7 @@ def extract_return_cases(
 
         case = ReturnCase(
             index=index,
-            conditions=simplified_conditions,
+            conditions=query_conditions,
             value_expr=ret_info.value,
             normalized_value_expr=normalized_value,
             return_info=ret_info,
@@ -44,6 +44,7 @@ def extract_return_cases(
             parameters=list(analysis.parameters or []),
             effect_summary=getattr(analysis, "effect_summary", None),
             comparison_surface=analysis.get_comparison_surface(),
+            summary_conditions=query_conditions,
         )
         key = _build_return_case_key(case)
         existing = merged_cases.get(key)
@@ -59,10 +60,46 @@ def extract_return_cases(
 
 def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
-    cond_key = ConditionSimplifier.build_constraint_set(case.conditions).signature()
+    cond_key = _build_object_centric_condition_signature(case.conditions)
     key_expr = getattr(case, "normalized_value_expr", None) or case.value_expr
     value_key = ConditionNormalizer.expression_signature(key_expr)
     return cond_key, value_key
+
+
+def _build_object_centric_condition_basis(conditions) -> List[Any]:
+    unique = []
+    for condition in list(conditions or []):
+        if condition is None:
+            continue
+        truth_value = ConditionSimplifier.evaluate_condition_truth(condition)
+        if truth_value is True:
+            continue
+        if any(condition.equals(existing) for existing in unique):
+            continue
+        unique.append(condition)
+    return unique
+
+
+def _condition_region_is_unsat(conditions) -> bool:
+    condition_list = list(conditions or [])
+    if not condition_list:
+        return False
+
+    solver_unsat = ConditionSMTOracle.conjunction_is_unsat(condition_list)
+    if solver_unsat is not None:
+        return solver_unsat
+
+    return ConditionSimplifier.is_contradiction(condition_list)
+
+
+def _build_object_centric_condition_signature(conditions) -> Tuple[tuple, ...]:
+    signature = []
+    for condition in list(conditions or []):
+        if condition is None:
+            continue
+        signature.append(condition.structural_key(budget=256))
+    signature.sort()
+    return tuple(signature)
 
 
 def build_condition_only_query(

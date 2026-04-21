@@ -47,9 +47,11 @@ from .effect_summary import (
     _expressions_equivalent,
     _expressions_equivalent_under_conditions,
     _find_matching_effect_value,
+    _find_unique_effect_location_for_value,
     _resolve_call_argument_expression,
     _resolve_call_target_ref,
     _reduce_expression_under_conditions,
+    _replay_definite_active_effects_for_location,
     canonicalize_expr_read_location,
     expression_contains_post_state_reads,
     lower_post_state_expression_for_smt,
@@ -4142,21 +4144,40 @@ class ReturnAnalyzer:
             )
             self._merge_deferred_calls_into_current_analysis(specialized.deferred_calls)
 
+        preserve_non_exhaustive_returns = bool(
+            specialized.deferred_calls
+            or specialized.unknown_event_count
+            or specialized.incomplete_control_flow
+        )
+
         expanded = []
         rejected_returns = 0
         for ret in specialized.returns:
-            simplified_conditions = ConditionSimplifier.simplify_conditions(ret.conditions)
-            if ConditionSimplifier.is_contradiction(simplified_conditions):
+            simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                ret.conditions
+            )
+            contradictory_conditions = ConditionSimplifier.object_centric_is_contradiction(
+                simplified_conditions
+            )
+            if contradictory_conditions and not preserve_non_exhaustive_returns:
                 rejected_returns += 1
                 continue
 
-            reduced_value = _reduce_expression_under_conditions(
-                ret.value,
-                simplified_conditions,
+            effective_conditions = (
+                list(ret.conditions)
+                if contradictory_conditions and preserve_non_exhaustive_returns
+                else simplified_conditions
             )
-            effective_value = reduced_value if reduced_value is not None else ret.value
+            if contradictory_conditions and preserve_non_exhaustive_returns:
+                effective_value = ret.value
+            else:
+                reduced_value = _reduce_expression_under_conditions(
+                    ret.value,
+                    effective_conditions,
+                )
+                effective_value = reduced_value if reduced_value is not None else ret.value
 
-            if not self._call_summary_is_safe(effective_value, simplified_conditions, args):
+            if not self._call_summary_is_safe(effective_value, effective_conditions, args):
                 self._debug_print(
                     f"Call expansion rejected for '{target_label}': "
                     "summary not safe enough for inlining"
@@ -4168,7 +4189,7 @@ class ReturnAnalyzer:
             expanded.append(
                 ExpandedValue(
                     value=effective_value,
-                    conditions=simplified_conditions,
+                    conditions=effective_conditions,
                 )
             )
 
@@ -4286,10 +4307,7 @@ class ReturnAnalyzer:
             "local_target",
             int(address_value),
             tuple(
-                ConditionNormalizer.expression_signature(
-                    arg,
-                    include_memory_read_order=False,
-                )
+                arg.structural_key(budget=256)
                 for arg in (args or [])
                 if arg is not None
             ),
@@ -4468,10 +4486,17 @@ class ReturnAnalyzer:
             return ("synthetic", id(varnode), int(getattr(varnode, "getSize", lambda: 0)()))
 
     def _local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
+        key_expr = (
+            addr_expr.operands[0]
+            if getattr(addr_expr, "expr_type", None) == ExpressionType.MEMORY
+            and getattr(addr_expr, "operands", None)
+            else addr_expr
+        )
         return (
-            ConditionNormalizer.expression_signature(
-                addr_expr,
-                include_memory_read_order=False,
+            key_expr.structural_key(
+                normalize_commutative=True,
+                strip_width_adapters=True,
+                collapse_full_masks=True,
             ),
             int(size),
         )
@@ -5601,7 +5626,9 @@ class ReturnAnalyzer:
             if implicit_results is not None:
                 return implicit_results
             # void return
-            simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
+            simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                path_conditions
+            )
             return [self._make_return_info(
                 address=address,
                 value=Expression.unknown("void"),
@@ -6069,26 +6096,52 @@ class ReturnAnalyzer:
             return None
 
         current_condition_keys = self._build_condition_signature_set(path_conditions or [])
+        exact_matches = []
         best_input = None
         best_score: Optional[Tuple[int, int, int]] = None
+        exact_best_input = None
+        exact_best_score: Optional[Tuple[int, int, int]] = None
 
         try:
             for index in range(int(get_in_size())):
                 incoming = get_in(index)
+                candidate_input = multiequal_op.getInput(index)
+                if candidate_input is None:
+                    continue
+                is_exact_match = self._blocks_match(incoming, predecessor)
+                if is_exact_match:
+                    exact_matches.append(candidate_input)
                 score = self._score_multiequal_incoming_for_return_path(
                     incoming,
                     predecessor,
                     condition_tracker,
                     current_condition_keys,
                 )
-                candidate_input = multiequal_op.getInput(index)
-                if candidate_input is None:
-                    continue
+                if is_exact_match and (exact_best_score is None or score > exact_best_score):
+                    exact_best_score = score
+                    exact_best_input = candidate_input
                 if best_score is None or score > best_score:
                     best_score = score
                     best_input = candidate_input
         except Exception:
             return None
+
+        if exact_best_input is not None:
+            if (
+                best_input is not None
+                and best_input is not exact_best_input
+                and best_score is not None
+                and exact_best_score is not None
+                and bool(current_condition_keys)
+                and best_score[0] == len(current_condition_keys)
+                and best_score[0] > exact_best_score[0]
+            ):
+                return best_input
+            return exact_best_input
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if exact_matches:
+            return exact_matches[0]
 
         return best_input
 
@@ -6101,16 +6154,16 @@ class ReturnAnalyzer:
     ) -> Tuple[int, int, int]:
         predecessor_match = 1 if self._blocks_match(incoming_block, predecessor) else 0
         if condition_tracker is None or not current_condition_keys:
-            return (predecessor_match, 0, 0)
+            return (0, predecessor_match, 0)
 
         block_info = condition_tracker.get_block_by_hash(incoming_block)
         if block_info is None:
-            return (predecessor_match, 0, 0)
+            return (0, predecessor_match, 0)
 
         incoming_conditions = condition_tracker.get_path_conditions_to_block(block_info)
         incoming_keys = self._build_condition_signature_set(incoming_conditions)
         if not incoming_keys:
-            return (predecessor_match, 0, 0)
+            return (0, predecessor_match, 0)
 
         matched = len(incoming_keys & current_condition_keys)
         specificity = len(incoming_keys)
@@ -6120,10 +6173,10 @@ class ReturnAnalyzer:
         signatures: Set[object] = set()
         for condition in conditions:
             try:
-                signatures.add(ConditionNormalizer.normalize_for_contradiction(condition))
+                signatures.add(condition.structural_key(budget=256))
             except Exception:
                 try:
-                    signatures.add(ConditionNormalizer.expression_signature(condition.expression))
+                    signatures.add(ConditionNormalizer.normalize_for_contradiction(condition))
                 except Exception:
                     continue
         return signatures
@@ -6313,23 +6366,7 @@ class ReturnAnalyzer:
                 image_base=self.program.getImageBase().getOffset(),
                 record_deferred_call=self._make_deferred_call_recorder(current_function),
             )
-            path_condition_sets = all_path_conditions or []
-            if not path_condition_sets:
-                path_condition_sets = [path_conditions] if path_conditions else [[]]
-
-            expanded_values = []
-            for path_idx, conds in enumerate(path_condition_sets):
-                if self.debug and len(path_condition_sets) > 1:
-                    cond_strs = [
-                        ConditionSimplifier.get_simplified_condition_string(c)
-                        for c in conds
-                    ]
-                    self._debug_print(
-                        f"Expanding PHI return with path[{path_idx}]: {cond_strs}"
-                    )
-                expanded_values.extend(
-                    expander.expand_from_varnode(return_varnode, conds)
-                )
+            expanded_values = expander.expand_from_varnode(return_varnode, [])
         else:
             self._debug_print("Return value has no MULTIEQUAL - using path conditions")
             expander = ExpressionExpander(
@@ -6374,7 +6411,9 @@ class ReturnAnalyzer:
         if not results:
             self._debug_print("WARNING: No valid expansions, falling back to simple trace")
             value = tracer.trace_varnode(return_varnode, use_cache=False)
-            simplified_conds = ConditionSimplifier.simplify_conditions(path_conditions)
+            simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                path_conditions
+            )
             resolved_value = self._concretize_readonly_loads(value, simplified_conds, self._current_parameters)
             return [self._make_return_info(
                 address=address,
@@ -6399,7 +6438,9 @@ class ReturnAnalyzer:
                 self._debug_print(f"Skipping contradictory expansion {i}")
                 continue
 
-            simplified_conds = ConditionSimplifier.simplify_conditions(ev.conditions)
+            simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                ev.conditions
+            )
             if self.debug:
                 cond_strs = [
                     ConditionSimplifier.get_simplified_condition_string(c)
@@ -6502,19 +6543,12 @@ class ReturnAnalyzer:
 
         normalized: List[Tuple[Expression, List[Condition]]] = []
         for case_value, case_conditions in expanded:
-            simplified_conditions = ConditionSimplifier.simplify_conditions(
+            simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(
                 list(case_conditions or [])
             )
-            if ConditionSimplifier.is_contradiction(simplified_conditions):
+            if ConditionSimplifier.object_centric_is_contradiction(simplified_conditions):
                 continue
-            reduced_value = ConditionSimplifier.reduce_expression_under_conditions(
-                case_value,
-                simplified_conditions,
-            )
-            folded_value = self._fold_constant_expression(
-                reduced_value,
-                fallback_expr=case_value,
-            )
+            folded_value = self._fold_constant_expression(case_value, fallback_expr=case_value)
             normalized.append((folded_value, simplified_conditions))
 
         deduplicated = self._deduplicate_expression_cases(normalized)
@@ -7004,14 +7038,27 @@ class ReturnAnalyzer:
                     is None
                 ):
                     continue
-                post_state_read = promote_effect_value_match_to_post_state_read(
+                post_state_read = promote_effect_value_carrier_to_post_state_read(
                     rewritten_operand,
-                    location,
                     conditions,
                     effect_summary.effects,
                     self._current_parameters,
                     symbolic_post_state=True,
                 )
+                if post_state_read is not None:
+                    final_replayed = _replay_definite_active_effects_for_location(
+                        location,
+                        conditions,
+                        effect_summary.effects,
+                        self._current_parameters,
+                    )
+                    if final_replayed is not None and _expressions_equivalent_under_conditions(
+                        final_replayed,
+                        rewritten_operand,
+                        conditions,
+                        self._current_parameters,
+                    ):
+                        post_state_read = None
                 if self.debug:
                     self._debug_print(
                         "Collapsed duplicate effect-sensitive binary wrapper: "
@@ -7401,16 +7448,12 @@ class ReturnAnalyzer:
         if expr is None:
             return []
 
-        simplified_base = ConditionSimplifier.simplify_conditions(base_conditions)
-        if ConditionSimplifier.is_contradiction(simplified_base):
+        simplified_base = ConditionSimplifier.simplify_conditions_object_centric(base_conditions)
+        if ConditionSimplifier.object_centric_is_contradiction(simplified_base):
             return []
 
-        reduced_expr = ConditionSimplifier.reduce_expression_under_conditions(
-            expr,
-            simplified_base,
-        )
         folded_expr = self._fold_constant_expression(
-            reduced_expr,
+            expr,
             fallback_expr=expr,
         )
         if folded_expr is not None:
@@ -7433,8 +7476,10 @@ class ReturnAnalyzer:
                 if cond is not None:
                     combined_conditions.append(cond)
                     prior_guards.append(cond)
-                nested_conditions = ConditionSimplifier.simplify_conditions(combined_conditions)
-                if ConditionSimplifier.is_contradiction(nested_conditions):
+                nested_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                    combined_conditions
+                )
+                if ConditionSimplifier.object_centric_is_contradiction(nested_conditions):
                     continue
                 expanded.extend(
                     self._expand_object_centric_expression_cases(
@@ -7454,7 +7499,7 @@ class ReturnAnalyzer:
             expanded = [
                 (expr.clone_with(operands=[address]), case_conditions)
                 for address, case_conditions in address_cases
-                if not ConditionSimplifier.is_contradiction(case_conditions)
+                if not ConditionSimplifier.object_centric_is_contradiction(case_conditions)
             ]
             return self._deduplicate_expression_cases(expanded)
 
@@ -7467,13 +7512,9 @@ class ReturnAnalyzer:
                 return [(expr, simplified_base)]
             expanded = []
             for operand, case_conditions in operand_cases:
-                if ConditionSimplifier.is_contradiction(case_conditions):
+                if ConditionSimplifier.object_centric_is_contradiction(case_conditions):
                     continue
                 rebuilt = expr.clone_with(operands=[operand])
-                rebuilt = ConditionSimplifier.reduce_expression_under_conditions(
-                    rebuilt,
-                    case_conditions,
-                )
                 rebuilt = self._fold_constant_expression(rebuilt, fallback_expr=expr)
                 expanded.append((rebuilt, case_conditions))
             return self._deduplicate_expression_cases(expanded)
@@ -7495,24 +7536,12 @@ class ReturnAnalyzer:
             expanded: List[Tuple[Expression, List[Condition]]] = []
             for left_value, left_conditions in left_cases:
                 for right_value, right_conditions in right_cases:
-                    left_residual = ConditionSimplifier.subtract_implied_conditions(
-                        left_conditions,
-                        simplified_base,
+                    combined_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                        list(simplified_base) + list(left_conditions) + list(right_conditions)
                     )
-                    right_residual = ConditionSimplifier.subtract_implied_conditions(
-                        right_conditions,
-                        simplified_base,
-                    )
-                    combined_conditions = ConditionSimplifier.simplify_conditions(
-                        list(simplified_base) + list(left_residual) + list(right_residual)
-                    )
-                    if ConditionSimplifier.is_contradiction(combined_conditions):
+                    if ConditionSimplifier.object_centric_is_contradiction(combined_conditions):
                         continue
                     rebuilt = expr.clone_with(operands=[left_value, right_value])
-                    rebuilt = ConditionSimplifier.reduce_expression_under_conditions(
-                        rebuilt,
-                        combined_conditions,
-                    )
                     rebuilt = self._fold_constant_expression(rebuilt, fallback_expr=expr)
                     expanded.append(
                         (
@@ -7532,24 +7561,27 @@ class ReturnAnalyzer:
         if expr is None or not self._is_boolean_expression(expr):
             return None
 
-        constraint_set = ConditionSimplifier.build_constraint_set(base_conditions)
         condition = Condition(expr, False)
-        if constraint_set.implies_condition(condition):
+        if ConditionSimplifier.object_centric_is_contradiction(
+            list(base_conditions) + [condition.negate()]
+        ):
             return [(Expression.constant(1, size=max(1, expr.size or 1)), base_conditions)]
-        if constraint_set.implies_condition(condition.negate()):
+        if ConditionSimplifier.object_centric_is_contradiction(
+            list(base_conditions) + [condition]
+        ):
             return [(Expression.constant(0, size=max(1, expr.size or 1)), base_conditions)]
 
-        true_conditions = ConditionSimplifier.simplify_conditions(
+        true_conditions = ConditionSimplifier.simplify_conditions_object_centric(
             list(base_conditions) + [condition]
         )
-        false_conditions = ConditionSimplifier.simplify_conditions(
+        false_conditions = ConditionSimplifier.simplify_conditions_object_centric(
             list(base_conditions) + [condition.negate()]
         )
 
         cases: List[Tuple[Expression, List[Condition]]] = []
-        if not ConditionSimplifier.is_contradiction(true_conditions):
+        if not ConditionSimplifier.object_centric_is_contradiction(true_conditions):
             cases.append((Expression.constant(1, size=max(1, expr.size or 1)), true_conditions))
-        if not ConditionSimplifier.is_contradiction(false_conditions):
+        if not ConditionSimplifier.object_centric_is_contradiction(false_conditions):
             cases.append((Expression.constant(0, size=max(1, expr.size or 1)), false_conditions))
         if not cases:
             return []
@@ -7578,8 +7610,10 @@ class ReturnAnalyzer:
     ) -> List[Tuple[Expression, List[Condition]]]:
         deduplicated: List[Tuple[Expression, List[Condition]]] = []
         for value, conditions in cases:
-            simplified_conditions = ConditionSimplifier.simplify_conditions(conditions)
-            if ConditionSimplifier.is_contradiction(simplified_conditions):
+            simplified_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                conditions
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(simplified_conditions):
                 continue
             duplicate = False
             for existing_value, existing_conditions in deduplicated:
@@ -7673,62 +7707,48 @@ class ReturnAnalyzer:
         self,
         return_infos: List[ReturnInfo],
     ) -> List[ReturnInfo]:
-        if len(return_infos) < 2:
-            return return_infos
-
-        exclusivized: List[ReturnInfo] = []
-        covered_regions: List[List[Condition]] = []
-
-        for original_index, info in enumerate(return_infos):
-            base_conditions = ConditionSimplifier.simplify_conditions(info.conditions or [])
-            if ConditionSimplifier.is_contradiction(base_conditions):
+        preserved: List[ReturnInfo] = []
+        for index, info in enumerate(return_infos):
+            current_regions: List[List[Condition]] = [
+                ConditionSimplifier.simplify_conditions_object_centric(info.conditions or [])
+            ]
+            if ConditionSimplifier.object_centric_is_contradiction(current_regions[0]):
                 continue
 
-            residual_regions: List[List[Condition]] = [base_conditions]
-            for covered in covered_regions:
+            for other_index, other in enumerate(return_infos):
+                if other_index >= index:
+                    break
+                if _expressions_equivalent(other.value, info.value):
+                    continue
+
                 next_regions: List[List[Condition]] = []
-                for residual in residual_regions:
+                for region in current_regions:
+                    if ConditionSimplifier.object_centric_is_contradiction(region):
+                        continue
+                    if not ConditionSimplifier.build_constraint_set(region).overlaps_with(other.conditions or []):
+                        next_regions.append(region)
+                        continue
                     next_regions.extend(
                         self._subtract_return_region_conjunction(
-                            residual,
-                            covered,
+                            region,
+                            other.conditions or [],
                         )
                     )
-                residual_regions = next_regions
-                if not residual_regions:
+                current_regions = [
+                    region
+                    for region in next_regions
+                    if not ConditionSimplifier.object_centric_is_contradiction(region)
+                ]
+                if not current_regions:
                     break
 
-            if not residual_regions:
-                if self.debug:
-                    self._debug_print(
-                        "Dropped fully shadowed return region: "
-                        f"value={self._debug_expr_identity_summary(info.value)}"
-                    )
-                continue
-
-            for split_index, residual in enumerate(residual_regions):
-                normalized = ConditionSimplifier.simplify_conditions(residual)
-                if ConditionSimplifier.is_contradiction(normalized):
-                    continue
-
-                covered_regions.append(normalized)
-                if (
-                    len(residual_regions) == 1
-                    and self._condition_lists_equivalent(normalized, base_conditions)
-                ):
-                    exclusivized.append(info)
-                    continue
-
-                exclusivized.append(
+            for split_index, region in enumerate(current_regions):
+                preserved.append(
                     self._make_return_info(
                         address=info.address,
                         value=info.value,
-                        conditions=normalized,
-                        branch_index=self._split_branch_index(
-                            info.branch_index,
-                            original_index,
-                            split_index,
-                        ),
+                        conditions=region,
+                        branch_index=self._split_branch_index(info.branch_index, index, split_index),
                         site_metadata={
                             "pcode_identity": info.pcode_identity,
                             "pcode_order": info.pcode_order,
@@ -7736,39 +7756,42 @@ class ReturnAnalyzer:
                         },
                     )
                 )
-
-        return exclusivized
+        return preserved
 
     def _subtract_return_region_conjunction(
         self,
         base_conditions: List[Condition],
         subtract_conditions: List[Condition],
     ) -> List[List[Condition]]:
-        base = ConditionSimplifier.simplify_conditions(base_conditions or [])
-        subtract = ConditionSimplifier.simplify_conditions(subtract_conditions or [])
+        base = ConditionSimplifier.simplify_conditions_object_centric(base_conditions or [])
+        subtract = ConditionSimplifier.simplify_conditions_object_centric(subtract_conditions or [])
 
         if not subtract:
-            return []
+            return [base]
 
-        overlap = ConditionSimplifier.simplify_conditions(base + subtract)
-        if ConditionSimplifier.is_contradiction(overlap):
+        overlap = ConditionSimplifier.simplify_conditions_object_centric(base + subtract)
+        if ConditionSimplifier.object_centric_is_contradiction(overlap):
             return [base]
 
         base_constraint_set = ConditionSimplifier.build_constraint_set(base)
         if base_constraint_set.implies_all(subtract):
             return []
 
+        subtract_constraint_set = ConditionSimplifier.build_constraint_set(subtract)
+        subtract_residual = subtract_constraint_set.residual_against(base)
+        if not subtract_residual:
+            return []
+
         residual_regions: List[List[Condition]] = []
         required_prefix: List[Condition] = []
 
-        for condition in subtract:
-            candidate = ConditionSimplifier.simplify_conditions(
+        for condition in subtract_residual:
+            candidate = ConditionSimplifier.simplify_conditions_object_centric(
                 list(base) + list(required_prefix) + [condition.negate()]
             )
-            if not ConditionSimplifier.is_contradiction(candidate):
+            if not ConditionSimplifier.object_centric_is_contradiction(candidate):
                 residual_regions.append(candidate)
-            if not base_constraint_set.implies_condition(condition):
-                required_prefix.append(condition)
+            required_prefix.append(condition)
 
         return residual_regions
 
@@ -7874,23 +7897,23 @@ class ReturnAnalyzer:
         if not left_residual and not right_residual:
             return self._make_merged_return_info(left, right, shared_conditions, "deduplicated identical return case")
 
-        if len(left_residual) == 1 and len(right_residual) == 1:
-            if ConditionSimplifier.are_contradictory_conditions(left_residual[0], right_residual[0]):
-                if not self._can_safely_collapse_complementary_return_pair(
-                    left,
-                    right,
-                    shared_conditions,
-                    all_infos or [],
-                    left_index,
-                    right_index,
-                ):
-                    return None
-                return self._make_merged_return_info(
-                    left,
-                    right,
-                    shared_conditions,
-                    "collapsed complementary same-valued return cases",
-                )
+        if (
+            self._condition_sets_are_complementary(left_residual, right_residual)
+            and self._can_safely_collapse_complementary_return_pair(
+                left,
+                right,
+                shared_conditions,
+                all_infos or [],
+                left_index,
+                right_index,
+            )
+        ):
+            return self._make_merged_return_info(
+                left,
+                right,
+                shared_conditions,
+                "collapsed complementary return cases",
+            )
 
         return None
 
@@ -7906,7 +7929,7 @@ class ReturnAnalyzer:
         if not all_infos:
             return True
 
-        merged_scope = ConditionSimplifier.simplify_conditions(list(merged_conditions))
+        merged_scope = ConditionSimplifier.simplify_conditions_object_centric(list(merged_conditions))
         for index, other in enumerate(all_infos):
             if index == left_index or index == right_index:
                 continue
@@ -7915,10 +7938,10 @@ class ReturnAnalyzer:
             if _expressions_equivalent(other.value, left.value):
                 continue
 
-            overlap_conditions = ConditionSimplifier.simplify_conditions(
+            overlap_conditions = ConditionSimplifier.simplify_conditions_object_centric(
                 list(merged_scope) + list(other.conditions)
             )
-            if ConditionSimplifier.is_contradiction(overlap_conditions):
+            if ConditionSimplifier.object_centric_is_contradiction(overlap_conditions):
                 continue
 
             if self.debug:
@@ -7935,6 +7958,28 @@ class ReturnAnalyzer:
 
         return True
 
+    def _condition_sets_are_complementary(
+        self,
+        left_conditions: List[Condition],
+        right_conditions: List[Condition],
+    ) -> bool:
+        if not left_conditions or not right_conditions:
+            return False
+        if len(left_conditions) != len(right_conditions):
+            return False
+
+        unmatched = list(right_conditions)
+        for left_condition in left_conditions:
+            match_index = None
+            for index, right_condition in enumerate(unmatched):
+                if left_condition.equals(right_condition.negate()) or left_condition.negate().equals(right_condition):
+                    match_index = index
+                    break
+            if match_index is None:
+                return False
+            unmatched.pop(match_index)
+        return not unmatched
+
     def _partition_return_conditions(
         self,
         left_conditions: List[Condition],
@@ -7949,7 +7994,7 @@ class ReturnAnalyzer:
             for index, right_cond in enumerate(right_conditions):
                 if index in right_used:
                     continue
-                if ConditionSimplifier.are_equivalent_conditions(left_cond, right_cond):
+                if left_cond.equals(right_cond):
                     match_index = index
                     break
             if match_index is None:
@@ -7962,9 +8007,9 @@ class ReturnAnalyzer:
             cond for index, cond in enumerate(right_conditions) if index not in right_used
         ]
         return (
-            ConditionSimplifier.simplify_conditions(shared),
-            ConditionSimplifier.simplify_conditions(left_residual),
-            ConditionSimplifier.simplify_conditions(right_residual),
+            ConditionSimplifier.simplify_conditions_object_centric(shared),
+            ConditionSimplifier.simplify_conditions_object_centric(left_residual),
+            ConditionSimplifier.simplify_conditions_object_centric(right_residual),
         )
 
     def _make_merged_return_info(
@@ -7974,7 +8019,9 @@ class ReturnAnalyzer:
         merged_conditions: List[Condition],
         reason: str,
     ) -> ReturnInfo:
-        normalized_conditions = ConditionSimplifier.simplify_conditions(list(merged_conditions))
+        normalized_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(merged_conditions)
+        )
         if self.debug:
             cond_dump = [
                 ConditionSimplifier.get_simplified_condition_string(cond)
@@ -8067,10 +8114,7 @@ class ReturnAnalyzer:
             atomic_object_state_value is not None
             and atomic_object_state_value is not value
             and isinstance(getattr(atomic_object_state_value, "runtime_ref", None), PostStateValueRef)
-            and (
-                _expression_contains_observed_loads(value)
-                or self._count_memory_reads(value) > 1
-            )
+            and self._count_memory_reads(value) > 1
         ):
             return atomic_object_state_value
 
@@ -8088,6 +8132,8 @@ class ReturnAnalyzer:
             conditions,
             effect_summary,
         )
+        if carrier_post_state_read is not None and expression_contains_post_state_reads(canonicalized):
+            return canonicalized
         materialized_canonicalized = _materialize_existing_effect_value_carrier(
             canonicalized,
             conditions,
@@ -8098,10 +8144,20 @@ class ReturnAnalyzer:
             value,
             self._current_parameters,
         )
+        if original_location is None:
+            original_location = _find_unique_effect_location_for_value(
+                value,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            )
         carrier_matches_wrapped_object = (
             carrier_post_state_read is not None
             and original_location is not None
-            and self._expression_has_nontrivial_location_wrapper(value, original_location)
+            and (
+                self._expression_has_nontrivial_location_wrapper(value, original_location)
+                or value.expr_type != ExpressionType.MEMORY
+            )
         )
         if carrier_matches_wrapped_object:
             materialized_canonicalized = carrier_post_state_read

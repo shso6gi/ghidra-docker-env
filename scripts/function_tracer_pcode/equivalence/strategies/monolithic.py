@@ -38,21 +38,7 @@ class MonolithicStrategy(CheckStrategy):
         if not counterexample_raw:
             return True
 
-        hints1 = infer_parameter_semantics(analysis1)
-        hints2 = infer_parameter_semantics(analysis2)
-        analysis1 = normalize_analysis_semantic_width(analysis1, hints1)
-        analysis2 = normalize_analysis_semantic_width(analysis2, hints2)
         base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
-        analysis1 = normalize_analysis_semantic_width(
-            analysis1,
-            hints1,
-            base_ctx.get("extra_vars1", []),
-        )
-        analysis2 = normalize_analysis_semantic_width(
-            analysis2,
-            hints2,
-            base_ctx.get("extra_vars2", []),
-        )
 
         cases1 = extract_return_cases(analysis1, self.normalization_settings)
         cases2 = extract_return_cases(analysis2, self.normalization_settings)
