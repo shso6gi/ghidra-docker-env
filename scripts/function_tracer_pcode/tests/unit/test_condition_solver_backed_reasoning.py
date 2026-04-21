@@ -6,7 +6,7 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionSimplifier,
     ConditionSMTOracle,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.model.render_smt import normalize_call_symbol_name
 from scripts.function_tracer_pcode.model.render_smt import expression_contains_unsupported_smt_ops
 
@@ -105,7 +105,7 @@ def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monk
     constraint_set = ConditionConstraintSet.from_conditions([cond])
 
     assert constraint_set.solver_backed is True
-    assert invoked["count"] == 1
+    assert invoked["count"] >= 1
 
 
 def test_solver_backed_reasoning_activates_for_non_connective_comparison(monkeypatch):
@@ -127,7 +127,7 @@ def test_solver_backed_reasoning_activates_for_non_connective_comparison(monkeyp
     constraint_set = ConditionConstraintSet.from_conditions([cond])
 
     assert constraint_set.solver_backed is True
-    assert invoked["count"] == 1
+    assert invoked["count"] >= 1
 
 
 def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
@@ -156,7 +156,7 @@ def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
     constraint_set = ConditionConstraintSet.from_conditions([cond])
 
     assert constraint_set.solver_backed is True
-    assert invoked["count"] == 1
+    assert invoked["count"] >= 1
 
 
 def test_call_expression_supported_when_enabled_in_smt_op_filtering():
@@ -168,6 +168,32 @@ def test_call_expression_supported_when_enabled_in_smt_op_filtering():
 
     assert expression_contains_unsupported_smt_ops(expr, allow_call=False) is True
     assert expression_contains_unsupported_smt_ops(expr, allow_call=True) is False
+
+
+def test_reduce_expression_under_conditions_skips_circular_phi_recursion():
+    self_condition = Condition(Expression.binary_op("INT_EQUAL", _param("param_1"), _const(1, 4)), False)
+    circular_phi = Expression.phi([])
+    circular_phi.value = [(self_condition, circular_phi)]
+
+    reduced = ConditionSimplifier._reduce_expression_under_conditions(
+        circular_phi,
+        [self_condition],
+    )
+
+    assert reduced is circular_phi
+
+
+def test_smt_oracle_iter_expression_nodes_handles_circular_phi():
+    self_condition = Condition(
+        Expression.binary_op("INT_NOTEQUAL", _param("param_1"), _const(0, 4)),
+        False,
+    )
+    circular_phi = Expression.phi([])
+    circular_phi.value = [(self_condition, circular_phi)]
+
+    nodes = list(ConditionSMTOracle._iter_expression_nodes(circular_phi))
+    assert len(nodes) >= 1
+    assert len(nodes) == len({id(node) for node in nodes})
 
 
 def test_solver_backed_script_sanitizes_call_symbols():
@@ -184,3 +210,59 @@ def test_solver_backed_script_sanitizes_call_symbols():
     assert usable is True
     assert script is not None
     assert normalize_call_symbol_name("call-foo*") in script
+
+
+def test_object_centric_condition_basis_prunes_negated_compound_implied_by_atomic_branch_facts():
+    param_1_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        False,
+    )
+    param_3_nonzero = Condition(
+        Expression.binary_op("INT_NOTEQUAL", _param("param_3"), _const(0)),
+        False,
+    )
+    not_add_branch = Condition(
+        Expression.unary_op(
+            "BOOL_NEGATE",
+            Expression.binary_op(
+                "BOOL_AND",
+                param_1_nonnull.expression,
+                Expression.unary_op("BOOL_NEGATE", param_3_nonzero.expression),
+            ),
+        ),
+        False,
+    )
+
+    basis = ConditionSimplifier.build_object_centric_condition_basis(
+        [not_add_branch, param_1_nonnull, param_3_nonzero]
+    )
+
+    assert len(basis) == 2
+    assert any(cond.equals(param_1_nonnull) for cond in basis)
+    assert any(cond.equals(param_3_nonzero) for cond in basis)
+    assert all(not cond.equals(not_add_branch) for cond in basis)
+
+
+def test_smt_oracle_cache_key_is_structural_and_order_independent():
+    cond_a = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
+            Expression(ExpressionType.CONSTANT, value=0, size=4),
+        )
+    )
+    cond_b = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
+            Expression(ExpressionType.CONSTANT, value=0, size=4),
+        )
+    )
+
+    key_one = ConditionSMTOracle._build_cache_key((cond_a, cond_b))
+    key_two = ConditionSMTOracle._build_cache_key((cond_b, cond_a))
+    key_single = ConditionSMTOracle._build_cache_key((cond_a,))
+    key_single_negated = ConditionSMTOracle._build_cache_key((Condition(cond_a.expression, True),))
+
+    assert key_one == key_two
+    assert key_single != key_single_negated

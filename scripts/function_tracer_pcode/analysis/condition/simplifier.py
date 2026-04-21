@@ -110,6 +110,15 @@ class ConditionSimplifier:
     _DEBUG_REPEAT_LIMIT: int = 8
     _debug_repeat_counts: Dict[Tuple[str, str], int] = {}
     _active_normalization_keys: Set[Tuple[object, ...]] = set()
+    _active_reduction_keys: Set[Tuple[int, Tuple[int, ...]]] = set()
+    _active_implied_keys: Set[Tuple[Tuple[int, ...], Tuple[int, ...]]] = set()
+    _active_formula_implies_keys: Set[Tuple[object, ...]] = set()
+    _formula_implies_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
+    _implied_cache: Dict[Tuple[Tuple[int, ...], int], Optional[bool]] = {}
+    _FORMULA_IMPLIES_CACHE_LIMIT: int = 8192
+    _IMPLIED_CACHE_LIMIT: int = 8192
+    _CONTEXTUAL_REDUCTION_MAX_ITERATIONS: int = 4
+    _CONTEXTUAL_REDUCTION_MAX_CONDITIONS: int = 64
     
     @classmethod
     def reset_debug_state(cls) -> None:
@@ -149,6 +158,54 @@ class ConditionSimplifier:
         if not cls._debug_available():
             return "<debug-suppressed>"
         return summarize_condition(condition, max_depth=max_depth)
+
+    @classmethod
+    def _safe_condition_id(cls, condition: Optional[Condition]) -> int:
+        try:
+            return 0 if condition is None else id(condition)
+        except Exception:
+            return 0
+
+    @classmethod
+    def _safe_condition_ids(cls, conditions: Iterable[Condition]) -> Tuple[int, ...]:
+        keys: List[int] = []
+        for condition in (conditions or []):
+            keys.append(cls._safe_condition_id(condition))
+        return tuple(sorted(keys))
+
+    @classmethod
+    def _safe_condition_cache_key(cls, conditions: Iterable[Condition], budget: int = 96) -> Tuple[object, ...]:
+        keys: List[object] = []
+        for condition in (conditions or []):
+            try:
+                key = condition_key(condition, budget=budget)
+                if key_contains_placeholder(key):
+                    key = ("placeholder", cls._safe_condition_id(condition))
+            except Exception:
+                key = ("unsafe", cls._safe_condition_id(condition))
+            keys.append(key)
+        keys.sort(key=repr)
+        return tuple(keys)
+
+    @classmethod
+    def _safe_condition_set_signature(
+        cls,
+        conditions: Iterable[Condition],
+        *,
+        budget: int = 96,
+    ) -> Tuple[Tuple[object, ...], ...]:
+        signatures: List[Tuple[object, ...]] = []
+        for condition in (conditions or []):
+            if condition is None:
+                signatures.append(("none",))
+                continue
+            try:
+                signature = condition.structural_key(budget=budget)
+            except Exception:
+                signature = ("unsafe", cls._safe_condition_id(condition))
+            signatures.append(signature)
+        signatures.sort()
+        return tuple(signatures)
 
     @classmethod
     def _debug_condition_event(
@@ -456,11 +513,17 @@ class ConditionSimplifier:
     ) -> Optional[bool]:
         condition_list = list(conditions or [])
         if cls._should_use_solver_reasoning(condition_list):
-            cache_key = ("unsat", cls._condition_cache_key(condition_list))
-            solver_result = ConditionSMTOracle.conjunction_is_unsat(
-                condition_list,
-                cache_key=cache_key,
-            )
+            try:
+                cache_key = ("unsat", cls._safe_condition_cache_key(condition_list))
+            except Exception:
+                cache_key = ("unsat",)
+            try:
+                solver_result = ConditionSMTOracle.conjunction_is_unsat(
+                    condition_list,
+                    cache_key=cache_key,
+                )
+            except Exception:
+                solver_result = None
             if solver_result is not None:
                 return solver_result
         clauses = cls._conditions_to_cnf_clauses(condition_list)
@@ -475,25 +538,78 @@ class ConditionSimplifier:
         context_conditions: Iterable[Condition],
         condition: Condition,
     ) -> Optional[bool]:
-        context_list = list(context_conditions or [])
-        implication_conditions = context_list + [condition.negate()]
-        if cls._should_use_solver_reasoning(implication_conditions):
+        try:
+            context_list = list(context_conditions or [])
+            negated_condition = condition.negate()
+            implication_conditions = context_list + [negated_condition]
             cache_key = (
                 "implies",
-                cls._condition_cache_key(context_list),
-                condition_key(condition.negate(), budget=96),
+                cls._safe_condition_cache_key(context_list),
+                cls._safe_condition_cache_key([negated_condition]),
             )
-            solver_result = ConditionSMTOracle.conjunction_is_unsat(
-                implication_conditions,
-                cache_key=cache_key,
-            )
-            if solver_result is not None:
-                return solver_result
-        clauses = cls._conditions_to_cnf_clauses(implication_conditions)
-        if clauses is None:
+        except Exception:
             return None
-        clause_literals = [clause.literals for clause in clauses]
-        return not cls._clauses_are_satisfiable(clause_literals)
+
+        if cache_key in cls._formula_implies_cache:
+            return cls._formula_implies_cache[cache_key]
+        if cache_key in cls._active_formula_implies_keys:
+            cls._debug_print(
+                "Skipping recursive _formula_implies guard hit",
+                0,
+            )
+            return None
+        cls._active_formula_implies_keys.add(cache_key)
+        result: Optional[bool]
+
+        try:
+            try:
+                use_solver = cls._should_use_solver_reasoning(implication_conditions)
+            except Exception:
+                use_solver = False
+
+            if use_solver:
+                try:
+                    solver_result = ConditionSMTOracle.conjunction_is_unsat(
+                        implication_conditions,
+                        cache_key=cache_key,
+                    )
+                except Exception:
+                    solver_result = None
+                if solver_result is not None:
+                    result = solver_result
+                else:
+                    try:
+                        clauses = cls._conditions_to_cnf_clauses(implication_conditions)
+                    except Exception:
+                        clauses = None
+                    if clauses is None:
+                        result = None
+                    else:
+                        try:
+                            clause_literals = [clause.literals for clause in clauses]
+                            result = not cls._clauses_are_satisfiable(clause_literals)
+                        except Exception:
+                            result = None
+            else:
+                try:
+                    clauses = cls._conditions_to_cnf_clauses(implication_conditions)
+                except Exception:
+                    clauses = None
+                if clauses is None:
+                    result = None
+                else:
+                    try:
+                        clause_literals = [clause.literals for clause in clauses]
+                        result = not cls._clauses_are_satisfiable(clause_literals)
+                    except Exception:
+                        result = None
+        finally:
+            cls._active_formula_implies_keys.discard(cache_key)
+
+        if len(cls._formula_implies_cache) >= cls._FORMULA_IMPLIES_CACHE_LIMIT:
+            cls._formula_implies_cache.clear()
+        cls._formula_implies_cache[cache_key] = result
+        return result
 
     @classmethod
     def _conditions_structurally_equal(cls, left: Condition, right: Condition) -> bool:
@@ -867,32 +983,64 @@ class ConditionSimplifier:
     @classmethod
     def _collect_implied_condition_norms(cls, conditions: List[Condition]) -> Set[Tuple[str, str, str, bool]]:
         implied: Set[Tuple[str, str, str, bool]] = set()
-        stack = list(conditions or [])
+        stack: List[Condition] = list(conditions or [])
+        seen: Set[int] = set()
+
         while stack:
             condition = stack.pop()
             if condition is None:
                 continue
-            normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+            cond_id = id(condition)
+            if cond_id in seen:
+                continue
+            seen.add(cond_id)
+
+            try:
+                normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+            except Exception:
+                continue
             implied.add(normalized)
 
-            expr = condition.expression
+            try:
+                expr = getattr(condition, "expression", None)
+            except Exception:
+                expr = None
             if (
-                not condition.negated
+                not getattr(condition, "negated", False)
                 and expr is not None
-                and expr.expr_type == ExpressionType.BINARY_OP
-                and expr.operator == "BOOL_AND"
+                and getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+                and getattr(expr, "operator", None) == "BOOL_AND"
             ):
-                    stack.append(Condition(expr.operands[0], False))
-                    stack.append(Condition(expr.operands[1], False))
+                operands = list(getattr(expr, "operands", None) or [])
+                for operand in operands[:2]:
+                    if operand is not None:
+                        try:
+                            stack.append(Condition(operand, False))
+                        except Exception:
+                            continue
 
-        clauses = cls._conditions_to_cnf_clauses(conditions)
+        clauses = []
+        try:
+            clauses = cls._conditions_to_cnf_clauses(conditions)
+        except Exception:
+            clauses = None
         if clauses is not None:
             for clause in clauses:
-                if len(clause.literals) != 1:
+                if not clause or len(clause.literals) != 1:
                     continue
-                (atom, polarity) = clause.literals[0]
-                left, op, right = atom
-                implied.add((left, op, right, polarity))
+                atom = clause.literals[0]
+                if not isinstance(atom, tuple) or len(atom) != 2:
+                    continue
+                lhs, polarity = atom
+                if not isinstance(lhs, tuple) or len(lhs) != 3:
+                    continue
+                left, op, right = lhs
+                if not isinstance(polarity, bool):
+                    continue
+                try:
+                    implied.add((left, op, right, polarity))
+                except Exception:
+                    pass
 
         return implied
 
@@ -904,47 +1052,96 @@ class ConditionSimplifier:
         implied_conditions: Optional[Set[Tuple[str, str, str, bool]]] = None,
         prefer_solver: bool = False,
     ) -> bool:
-        formula_result: Optional[bool] = None
-        if context_conditions:
-            formula_result = cls._formula_implies(context_conditions, condition)
-            if formula_result is True:
-                return True
+        context_list = list(context_conditions or [])
+        context_signature = tuple(cls._safe_condition_ids(context_list))
+        condition_signature = cls._safe_condition_id(condition)
+        cache_key = (context_signature, condition_signature)
+        if cache_key in cls._active_implied_keys:
+            return False
+        if len(cache_key[0]) > cls._CONTEXTUAL_REDUCTION_MAX_CONDITIONS:
+            return False
+        if cache_key in cls._implied_cache:
+            return bool(cls._implied_cache[cache_key])
 
-        implied_conditions = implied_conditions or set()
-        normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-        if normalized in implied_conditions:
-            return True
+        def _store_implied_cache(result: bool) -> bool:
+            if len(cls._implied_cache) >= cls._IMPLIED_CACHE_LIMIT:
+                cls._implied_cache.clear()
+            cls._implied_cache[cache_key] = result
+            return result
 
-        scalar_fact = cls._extract_scalar_constraint(condition)
-        if scalar_fact is not None and context_conditions:
-            if cls._scalar_constraint_is_implied(scalar_fact, list(context_conditions or [])):
-                return True
+        cls._active_implied_keys.add(cache_key)
+        try:
+            formula_result: Optional[bool] = None
+            if context_list:
+                formula_result = cls._formula_implies(context_list, condition)
+                if formula_result is True:
+                    return _store_implied_cache(True)
 
-        expr = condition.expression
-        if (
-            not condition.negated
-            and expr is not None
-            and expr.expr_type == ExpressionType.BINARY_OP
-            and expr.operator == "BOOL_AND"
-        ):
-            stack = [Condition(expr.operands[0], False), Condition(expr.operands[1], False)]
-            while stack:
-                current = stack.pop()
-                current_expr = current.expression
-                if (
-                    not current.negated
-                    and current_expr is not None
-                    and current_expr.expr_type == ExpressionType.BINARY_OP
-                    and current_expr.operator == "BOOL_AND"
-                ):
-                    stack.append(Condition(current_expr.operands[0], False))
-                    stack.append(Condition(current_expr.operands[1], False))
-                    continue
-                if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
-                    return False
-            return True
+            implied_conditions = implied_conditions or set()
+            try:
+                normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+            except Exception:
+                normalized = None
+            if normalized is not None and normalized in implied_conditions:
+                return _store_implied_cache(True)
 
-        return formula_result is True
+            scalar_fact = cls._extract_scalar_constraint(condition)
+            if scalar_fact is not None and context_list:
+                try:
+                    scalar_implied = cls._scalar_constraint_is_implied(
+                        scalar_fact,
+                        list(context_list or []),
+                    )
+                except Exception:
+                    scalar_implied = False
+                if scalar_implied:
+                    return _store_implied_cache(True)
+
+            expr = getattr(condition, "expression", None)
+            if (
+                getattr(condition, "negated", False) is False
+                and expr is not None
+                and getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+                and getattr(expr, "operator", None) == "BOOL_AND"
+            ):
+                stack = [Condition(condition.expression.operands[0], False), Condition(condition.expression.operands[1], False)]
+                visited_ids: Set[int] = set()
+                while stack:
+                    current = stack.pop()
+                    if current is None:
+                        continue
+                    if id(current) in visited_ids:
+                        continue
+                    visited_ids.add(id(current))
+                    current_expr = getattr(current, "expression", None)
+                    if (
+                        getattr(current, "negated", False) is False
+                        and current_expr is not None
+                        and getattr(current_expr, "expr_type", None) == ExpressionType.BINARY_OP
+                        and getattr(current_expr, "operator", None) == "BOOL_AND"
+                    ):
+                        operands = list(getattr(current_expr, "operands", None) or [])
+                        if len(operands) >= 2:
+                            try:
+                                left = Condition(operands[0], False)
+                                right = Condition(operands[1], False)
+                            except Exception:
+                                return _store_implied_cache(False)
+                            stack.append(left)
+                            stack.append(right)
+                        continue
+
+                    try:
+                        if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
+                            return _store_implied_cache(False)
+                    except Exception:
+                        return _store_implied_cache(False)
+                return _store_implied_cache(True)
+
+            implied_result = formula_result is True
+            return _store_implied_cache(implied_result)
+        finally:
+            cls._active_implied_keys.discard(cache_key)
 
     @classmethod
     def _collect_scalar_context(
@@ -952,8 +1149,15 @@ class ConditionSimplifier:
         conditions: List[Condition],
     ) -> Dict[Tuple[object, int], Dict[str, object]]:
         context: Dict[Tuple[object, int], Dict[str, object]] = {}
-        for cond in cls.build_constraint_set(list(conditions or [])).conditions:
-            fact = cls._extract_scalar_constraint(cond)
+        for index, cond in enumerate(conditions or []):
+            if cond is None:
+                continue
+
+            try:
+                fact = cls._extract_scalar_constraint(cond)
+            except Exception:
+                continue
+
             if fact is None:
                 continue
             entry = context.setdefault(
@@ -975,7 +1179,7 @@ class ConditionSimplifier:
             if fact.value is None or fact.inclusive is None:
                 continue
 
-            candidate = (fact.value, fact.inclusive, 0)
+            candidate = (fact.value, fact.inclusive, index)
             if fact.kind == "lower":
                 entry["lower"][fact.signed] = cls._select_stronger_lower(
                     entry["lower"][fact.signed],
@@ -987,6 +1191,18 @@ class ConditionSimplifier:
                     candidate,
                 )
         return context
+
+    @classmethod
+    def _reduction_context_key(
+        cls,
+        expr,
+        conditions: Optional[List[Condition]],
+    ) -> Tuple[int, Tuple[int, ...]]:
+        context_ids = set()
+        for condition in conditions or ():
+            if condition is not None:
+                context_ids.add(id(condition))
+        return id(expr), tuple(sorted(context_ids))
 
     @classmethod
     def _scalar_constraint_is_implied(
@@ -1135,92 +1351,131 @@ class ConditionSimplifier:
         cls,
         expr: Expression,
         conditions: List[Condition],
+        *,
+        _active_reduction_keys: Optional[Set[Tuple[int, Tuple[int, ...]]]] = None,
     ) -> Expression:
         if expr is None:
             return expr
 
-        if cls._expression_can_collapse_to_boolean_constant(expr):
-            constraint_set = cls.build_constraint_set(conditions or [])
-            true_condition = Condition(expr, False)
-            if constraint_set.implies_condition(true_condition):
-                return cls._constant_expression_from_eval(expr, 1, max(1, expr.get_bit_width()))
-            if constraint_set.implies_condition(true_condition.negate()):
-                return cls._constant_expression_from_eval(expr, 0, max(1, expr.get_bit_width()))
+        active_reduction_keys = set() if _active_reduction_keys is None else _active_reduction_keys
+        reduction_key = cls._reduction_context_key(expr, conditions)
+        if reduction_key in active_reduction_keys:
+            cls._debug_print(
+                f"Detected circular reduction context; skip recursion for {cls._debug_expr_summary(expr)}",
+                2,
+            )
+            return expr
+        active_reduction_keys.add(reduction_key)
+        try:
+            if cls._expression_can_collapse_to_boolean_constant(expr):
+                try:
+                    true_condition = Condition(expr, False)
+                    if cls._formula_implies(conditions, true_condition):
+                        return cls._constant_expression_from_eval(
+                            expr,
+                            1,
+                            max(1, expr.get_bit_width()),
+                        )
+                    if cls._formula_implies(conditions, true_condition.negate()):
+                        return cls._constant_expression_from_eval(
+                            expr,
+                            0,
+                            max(1, expr.get_bit_width()),
+                        )
+                except Exception:
+                    pass
 
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            implied = cls._collect_implied_condition_norms(conditions)
+            if expr.expr_type == ExpressionType.PHI and expr.value:
+                implied = cls._collect_implied_condition_norms(conditions)
 
-            for cond, value in expr.value:
-                if cond is None:
-                    continue
-                if cls._condition_is_implied(cond, conditions, implied):
-                    return cls._reduce_expression_under_conditions(value, list(conditions) + [cond])
+                for cond, value in expr.value:
+                    if cond is None:
+                        continue
+                    if cls._condition_is_implied(cond, conditions, implied):
+                        return cls._reduce_expression_under_conditions(
+                            value,
+                            list(conditions) + [cond],
+                            _active_reduction_keys=active_reduction_keys,
+                        )
 
-            surviving = []
-            for cond, value in expr.value:
-                if cond is not None and cls._condition_is_contradicted(cond, conditions, implied):
-                    continue
-                combined = list(conditions)
-                if cond is not None:
-                    combined.append(cond)
-                reduced_value = cls._reduce_expression_under_conditions(value, combined)
-                surviving.append((cond, reduced_value))
+                surviving = []
+                for cond, value in expr.value:
+                    if cond is not None and cls._condition_is_contradicted(cond, conditions, implied):
+                        continue
+                    combined = list(conditions)
+                    if cond is not None:
+                        combined.append(cond)
+                    reduced_value = cls._reduce_expression_under_conditions(
+                        value,
+                        combined,
+                        _active_reduction_keys=active_reduction_keys,
+                    )
+                    surviving.append((cond, reduced_value))
 
-            if not surviving:
-                return expr
-            if len(surviving) == 1:
-                return surviving[0][1]
+                if not surviving:
+                    return expr
+                if len(surviving) == 1:
+                    return surviving[0][1]
 
-            changed = len(surviving) != len(expr.value)
-            if not changed:
-                for (orig_cond, orig_value), (new_cond, new_value) in zip(expr.value, surviving):
-                    if orig_cond != new_cond or orig_value is not new_value:
-                        changed = True
-                        break
-            if not changed:
-                return expr
+                changed = len(surviving) != len(expr.value)
+                if not changed:
+                    for (orig_cond, orig_value), (new_cond, new_value) in zip(expr.value, surviving):
+                        if orig_cond != new_cond or orig_value is not new_value:
+                            changed = True
+                            break
+                if not changed:
+                    return expr
 
-            rebuilt = Expression.phi(surviving)
-            rebuilt.size = expr.size
-            return rebuilt
+                rebuilt = Expression.phi(surviving)
+                rebuilt.size = expr.size
+                return rebuilt
 
-        if expr.expr_type in (
-            ExpressionType.BINARY_OP,
-            ExpressionType.UNARY_OP,
-            ExpressionType.CALL,
-            ExpressionType.INTRINSIC,
-            ExpressionType.MEMORY,
-        ):
-            new_operands = [cls._reduce_expression_under_conditions(op, conditions) for op in expr.operands]
-            if all(new is old for new, old in zip(new_operands, expr.operands)):
-                rebuilt = expr
-            else:
-                rebuilt = Expression(
-                    expr_type=expr.expr_type,
-                    value=expr.value,
-                    operator=expr.operator,
-                    operands=new_operands,
-                    size=expr.size,
-                    name=expr.name,
-                    data_type=expr.data_type,
-                    data_type_obj=getattr(expr, "data_type_obj", None),
-                    storage_info=expr.storage_info,
-                    read_order_key=expr.read_order_key,
-                    runtime_ref=getattr(expr, "runtime_ref", None),
-                    opcode=getattr(expr, "opcode", None),
-                )
-            evaluated = cls._eval_constant_raw(rebuilt)
-            if evaluated is not None:
-                raw_value, bits = evaluated
-                return cls._constant_expression_from_eval(rebuilt, raw_value, bits)
-            return rebuilt
+            if expr.expr_type in (
+                ExpressionType.BINARY_OP,
+                ExpressionType.UNARY_OP,
+                ExpressionType.CALL,
+                ExpressionType.INTRINSIC,
+                ExpressionType.MEMORY,
+            ):
+                new_operands = [
+                    cls._reduce_expression_under_conditions(
+                        op,
+                        conditions,
+                        _active_reduction_keys=active_reduction_keys,
+                    )
+                    for op in expr.operands
+                ]
+                if all(new is old for new, old in zip(new_operands, expr.operands)):
+                    rebuilt = expr
+                else:
+                    rebuilt = Expression(
+                        expr_type=expr.expr_type,
+                        value=expr.value,
+                        operator=expr.operator,
+                        operands=new_operands,
+                        size=expr.size,
+                        name=expr.name,
+                        data_type=expr.data_type,
+                        data_type_obj=getattr(expr, "data_type_obj", None),
+                        storage_info=expr.storage_info,
+                        read_order_key=expr.read_order_key,
+                        runtime_ref=getattr(expr, "runtime_ref", None),
+                        opcode=getattr(expr, "opcode", None),
+                    )
+                evaluated = cls._eval_constant_raw(rebuilt)
+                if evaluated is not None:
+                    raw_value, bits = evaluated
+                    return cls._constant_expression_from_eval(rebuilt, raw_value, bits)
+                return rebuilt
 
-        return expr
+            return expr
+        finally:
+            active_reduction_keys.discard(reduction_key)
 
     @classmethod
     def _contextually_reduce_conditions(cls, conditions: List[Condition]) -> List[Condition]:
         current = list(conditions)
-        for _ in range(4):
+        for _ in range(cls._CONTEXTUAL_REDUCTION_MAX_ITERATIONS):
             reduced: List[Condition] = []
             changed = False
             for index, cond in enumerate(current):
@@ -1306,7 +1561,15 @@ class ConditionSimplifier:
                 if truth_value is True:
                     continue
 
-                canonical = ConditionNormalizer.normalize_for_contradiction(cond)
+                try:
+                    canonical = ConditionNormalizer.normalize_for_contradiction(cond)
+                except Exception:
+                    canonical = None
+                if canonical is None:
+                    current_index = len(unique_conditions)
+                    unique_conditions.append(cond)
+                    unsupported_indices.append(current_index)
+                    continue
                 if canonical in unique_canonicals:
                     continue
 
@@ -1488,7 +1751,10 @@ class ConditionSimplifier:
                 flattened.append(flat)
 
         for cond in flattened:
-            key = condition_key(cond, budget=128)
+            try:
+                key = cls._safe_condition_cache_key([cond], budget=128)[0]
+            except Exception:
+                key = ("unsafe", cls._safe_condition_id(cond))
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -1518,8 +1784,11 @@ class ConditionSimplifier:
         cls,
         conditions: Iterable[Condition],
     ) -> Tuple[object, ...]:
-        keys = [condition_key(cond, budget=96) for cond in (conditions or []) if cond is not None]
-        keys.sort()
+        try:
+            keys = list(cls._safe_condition_cache_key((conditions or []), budget=96))
+        except Exception:
+            keys = [("unsafe",)]
+        keys.sort(key=lambda value: repr(value))
         return tuple(keys)
 
     @classmethod
@@ -1527,7 +1796,7 @@ class ConditionSimplifier:
         cls,
         conditions: Iterable[Condition],
     ) -> Tuple[int, ...]:
-        keys = [id(cond) for cond in (conditions or []) if cond is not None]
+        keys = [cls._safe_condition_id(cond) for cond in (conditions or []) if cond is not None]
         keys.sort()
         return tuple(keys)
 
@@ -1539,7 +1808,10 @@ class ConditionSimplifier:
         for cond in conditions or []:
             if cond is None:
                 continue
-            key = condition_key(cond, budget=96)
+            try:
+                key = condition_key(cond, budget=96)
+            except Exception:
+                key = ("unsafe", cls._safe_condition_id(cond))
             if key_contains_placeholder(key):
                 return True
             metrics = cls._condition_metrics(cond)
@@ -1553,18 +1825,24 @@ class ConditionSimplifier:
 
     @classmethod
     def _has_boolean_connective_structure(cls, conditions: Iterable[Condition]) -> bool:
+        visited: Set[int] = set()
+        visit_count = 0
         for cond in conditions or []:
             expr = cond.expression
             if expr is None:
                 continue
             pending = [expr]
-            visited: int = 0
             while pending:
                 current = pending.pop()
                 if current is None:
                     continue
-                visited += 1
-                if visited > 72:
+                current_id = id(current)
+                if current_id in visited:
+                    continue
+                visited.add(current_id)
+
+                visit_count += 1
+                if visit_count > 72:
                     break
                 expr_type = current.expr_type
                 if expr_type == ExpressionType.BINARY_OP and current.operator in {
@@ -1646,11 +1924,16 @@ class ConditionSimplifier:
         node_count = 0
         phi_depth = 0
         has_unknown = False
+        active: Set[int] = set()
         pending: List[Tuple[Expression, int]] = [(condition.expression, 0)]
         while pending:
             expr, depth = pending.pop()
             if expr is None:
                 continue
+            expr_id = id(expr)
+            if expr_id in active:
+                continue
+            active.add(expr_id)
             node_count += 1
             if expr.expr_type == ExpressionType.UNKNOWN:
                 has_unknown = True
@@ -1683,17 +1966,59 @@ class ConditionSimplifier:
         cls,
         conditions: Iterable[Condition],
     ) -> List[Condition]:
-        basis: List[Condition] = []
+        flattened: List[Condition] = []
         for condition in list(conditions or []):
             if condition is None:
                 continue
-            truth_value = cls.evaluate_condition_truth(condition)
-            if truth_value is True:
-                continue
-            if any(condition.equals(existing) for existing in basis):
+            for flat in cls.flatten_condition(condition):
+                truth_value = cls.evaluate_condition_truth(flat)
+                if truth_value is True:
+                    continue
+                if any(flat.equals(existing) for existing in flattened):
+                    continue
+                flattened.append(flat)
+
+        ranked_conditions = sorted(
+            enumerate(flattened),
+            key=lambda item: (cls._condition_complexity_key(item[1]), item[0]),
+        )
+
+        basis: List[Condition] = []
+        for _index, condition in ranked_conditions:
+            if cls._condition_is_implied(
+                condition,
+                list(basis),
+                prefer_solver=True,
+            ):
                 continue
             basis.append(condition)
         return basis
+
+    @classmethod
+    def _condition_complexity_key(
+        cls,
+        condition: Condition,
+    ) -> Tuple[int, int, int]:
+        expr = getattr(condition, "expression", None)
+
+        def expr_cost(node: Optional[Expression]) -> Tuple[int, int]:
+            if node is None:
+                return (0, 0)
+            bool_ops = 1 if (
+                node.expr_type == ExpressionType.BINARY_OP
+                and str(getattr(node, "operator", "")).startswith("BOOL_")
+            ) else 0
+            child_nodes = list(getattr(node, "operands", []) or [])
+            total_nodes = 1
+            for child in child_nodes:
+                child_bool_ops, child_total_nodes = expr_cost(child)
+                bool_ops += child_bool_ops
+                total_nodes += child_total_nodes
+            return bool_ops, total_nodes
+
+        bool_ops, total_nodes = expr_cost(expr)
+        negation_penalty = 1 if getattr(condition, "negated", False) else 0
+        return (bool_ops + negation_penalty, total_nodes, negation_penalty)
 
     @classmethod
     def object_centric_conditions_signature(
@@ -1702,8 +2027,11 @@ class ConditionSimplifier:
     ) -> Tuple[object, ...]:
         signature = []
         for condition in cls.build_object_centric_condition_basis(conditions):
-            signature.append(condition.structural_key(budget=256))
-        signature.sort()
+            try:
+                signature.append(condition.structural_key(budget=256))
+            except Exception:
+                signature.append(("unsafe", cls._safe_condition_id(condition)))
+        signature.sort(key=repr)
         return tuple(signature)
 
     @classmethod
@@ -1715,9 +2043,13 @@ class ConditionSimplifier:
         if not basis:
             return False
 
+        try:
+            unsat_cache_key = ("raw-unsat", cls._safe_condition_cache_key(basis))
+        except Exception:
+            unsat_cache_key = ("raw-unsat",)
         solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
             basis,
-            cache_key=("raw-unsat", cls._condition_cache_key(basis)),
+            cache_key=unsat_cache_key,
         )
         if solver_unsat is not None:
             return solver_unsat

@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     collapse_post_state_expr_to_canonical_memory,
     collapse_pruned_post_state_memory_leaf_to_canonical_memory,
     expression_contains_post_state_reads,
+    expression_matches_stale_post_state_replay,
     lower_post_state_expression_for_smt,
     memory_expression_for_location,
     normalize_post_state_expression,
@@ -8655,6 +8656,226 @@ def test_return_analyzer_normalizes_single_arithmetic_update_rhs_to_post_state()
 
     assert lowered_zero.to_string() == "(MEM[value] + delta)"
     assert lowered_nonzero.to_string() == "(delta - MEM[value])"
+
+
+def test_expression_matches_stale_post_state_replay_for_same_location_self_update():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+    effects = [
+        StoreEffect(
+            location=_loc("value", 0, 4),
+            value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+            conditions=[value_nonnull, negate_zero],
+            order_key=5,
+        ),
+    ]
+    params = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    symbolic_post_state = post_state_read_expression_for_location(
+        _loc("value", 0, 4),
+        params,
+        symbolic=True,
+    )
+    stale_replay = Expression.binary_op(
+        "INT_ADD",
+        delta,
+        Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+    )
+
+    assert expression_matches_stale_post_state_replay(
+        stale_replay,
+        symbolic_post_state,
+        [value_nonnull, negate_zero],
+        effects,
+        params,
+    )
+
+
+def test_return_analyzer_accepts_symbolic_post_state_for_stale_self_update_replay():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[value_nonnull, negate_zero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    stale_replay = Expression.binary_op(
+        "INT_ADD",
+        delta,
+        Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+    )
+
+    normalized = analyzer._normalize_expanded_return_value(
+        stale_replay,
+        [value_nonnull, negate_zero],
+    )
+
+    assert normalized.to_string() == "MEM[value]"
+    assert _runtime_location(normalized) == _loc("value", 0, 4)
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [value_nonnull, negate_zero],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered.to_string() == "(MEM[value] + delta)"
+
+
+def test_return_analyzer_accepts_symbolic_post_state_for_negate_effect_value_wrapper():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_nonzero = Condition(
+        Expression.binary_op("INT_NOTEQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[value_nonnull, negate_nonzero],
+                order_key=5,
+            ),
+        ],
+    )
+
+    negate_effect_wrapper = Expression.binary_op(
+        "INT_ADD",
+        Expression.unary_op("INT_2COMP", Expression.memory(value, size=4)),
+        delta,
+    )
+
+    normalized = analyzer._normalize_expanded_return_value(
+        negate_effect_wrapper,
+        [value_nonnull, negate_nonzero],
+    )
+
+    assert normalized.to_string() == "MEM[value]"
+    assert _runtime_location(normalized) == _loc("value", 0, 4)
+
+    lowered = lower_post_state_expression_for_smt(
+        normalized,
+        [value_nonnull, negate_nonzero],
+        analyzer._current_effect_summary.effects,
+        analyzer._current_parameters,
+    )
+
+    assert lowered.to_string() == "(delta - MEM[value])"
+
+
+def test_return_analyzer_does_not_merge_complementary_symbolic_post_state_cases_when_lowerings_differ():
+    value = Expression.parameter("value", 0, size=8)
+    delta = Expression.parameter("delta", 1, size=4)
+    negate = Expression.parameter("negate", 2, size=4)
+    value_nonnull = Condition(
+        Expression.binary_op("INT_NOTEQUAL", value, Expression.constant(0, 8)),
+        False,
+    )
+    negate_zero = Condition(
+        Expression.binary_op("INT_EQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+    negate_nonzero = Condition(
+        Expression.binary_op("INT_NOTEQUAL", negate, Expression.constant(0, 4)),
+        False,
+    )
+
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = [
+        _param("value", size=8, is_signed=False),
+        _param("delta", size=4, index=1),
+        _param("negate", size=4, index=2),
+    ]
+    analyzer._current_effect_summary = EffectSummary(
+        parameter_names=["value", "delta", "negate"],
+        effects=[
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_ADD", Expression.memory(value, size=4), delta),
+                conditions=[value_nonnull, negate_zero],
+                order_key=5,
+            ),
+            StoreEffect(
+                location=_loc("value", 0, 4),
+                value=Expression.binary_op("INT_SUB", delta, Expression.memory(value, size=4)),
+                conditions=[value_nonnull, negate_nonzero],
+                order_key=6,
+            ),
+        ],
+    )
+
+    symbolic_post_state = post_state_read_expression_for_location(
+        _loc("value", 0, 4),
+        analyzer._current_parameters,
+        symbolic=True,
+    )
+
+    left = ReturnInfo(
+        address="ret",
+        value=symbolic_post_state,
+        conditions=[value_nonnull, negate_zero],
+        branch_index=1,
+        pcode_identity="ret:t1",
+    )
+    right = ReturnInfo(
+        address="ret",
+        value=symbolic_post_state,
+        conditions=[value_nonnull, negate_nonzero],
+        branch_index=2,
+        pcode_identity="ret:t1",
+    )
+
+    assert analyzer._merge_return_info_pair(left, right, [left, right], 0, 1) is None
 
 
 def test_return_analyzer_accepts_semantically_lossless_swap_snapshot_rewrite():

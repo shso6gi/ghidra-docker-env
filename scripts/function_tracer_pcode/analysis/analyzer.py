@@ -54,6 +54,7 @@ from .effect_summary import (
     _replay_definite_active_effects_for_location,
     canonicalize_expr_read_location,
     expression_contains_post_state_reads,
+    expression_matches_stale_post_state_replay,
     lower_post_state_expression_for_smt,
     materialize_definite_post_state_expression,
     normalize_post_state_expression,
@@ -6976,6 +6977,31 @@ class ReturnAnalyzer:
             return False
         if not self._is_direct_location_carrier(rewritten):
             return False
+        current_effect_summary = self._current_effect_summary
+        if (
+            current_effect_summary is not None
+            and (
+                (
+                    promote_effect_value_match_to_post_state_read(
+                        original,
+                        original_location,
+                        conditions,
+                        current_effect_summary.effects,
+                        self._current_parameters,
+                        symbolic_post_state=True,
+                    )
+                    is not None
+                )
+                or expression_matches_stale_post_state_replay(
+                    original,
+                    rewritten,
+                    conditions,
+                    current_effect_summary.effects,
+                    self._current_parameters,
+                )
+            )
+        ):
+            return False
         return self._expression_has_nontrivial_location_wrapper(
             original,
             original_location,
@@ -8045,6 +8071,48 @@ class ReturnAnalyzer:
         left_index: Optional[int],
         right_index: Optional[int],
     ) -> bool:
+        current_effect_summary = self._current_effect_summary
+        if (
+            current_effect_summary is not None
+            and (
+                expression_contains_post_state_reads(left.value)
+                or expression_contains_post_state_reads(right.value)
+            )
+        ):
+            lowered_left = lower_post_state_expression_for_smt(
+                left.value,
+                left.conditions,
+                current_effect_summary.effects,
+                self._current_parameters,
+            )
+            lowered_right = lower_post_state_expression_for_smt(
+                right.value,
+                right.conditions,
+                current_effect_summary.effects,
+                self._current_parameters,
+            )
+            if (
+                lowered_left is None
+                or lowered_right is None
+                or expression_contains_post_state_reads(lowered_left)
+                or expression_contains_post_state_reads(lowered_right)
+            ):
+                return False
+            if not _expressions_equivalent_under_conditions(
+                lowered_left,
+                lowered_right,
+                merged_conditions,
+                self._current_parameters,
+            ):
+                if self.debug:
+                    self._debug_print(
+                        "skipping complementary return-case collapse because symbolic post-state "
+                        "lowers differently across branches: "
+                        f"left={self._debug_expr_summary(lowered_left)} "
+                        f"right={self._debug_expr_summary(lowered_right)}"
+                    )
+                return False
+
         if not all_infos:
             return True
 
@@ -8339,6 +8407,14 @@ class ReturnAnalyzer:
             conditions,
             effect_summary,
         )
+        if expression_matches_stale_post_state_replay(
+            value,
+            canonicalized,
+            conditions,
+            effect_summary.effects,
+            self._current_parameters,
+        ):
+            return canonicalized
         if self._should_replay_canonicalized_return(canonicalized, value):
             replayed = normalize_post_state_expression(
                 canonicalized,
@@ -8559,6 +8635,14 @@ class ReturnAnalyzer:
                 )
                 if promoted is not None and _expressions_equivalent(promoted, target_post_state):
                     return True
+            if expression_matches_stale_post_state_replay(
+                current,
+                target_post_state,
+                conditions,
+                effect_summary.effects,
+                self._current_parameters,
+            ):
+                return True
         return False
 
     def _expression_contains_unresolved_value(self, expr: Optional[Expression]) -> bool:

@@ -3865,6 +3865,125 @@ def resolve_definite_post_state_read_for_location(
     )
 
 
+def expression_matches_stale_post_state_replay(
+    expr: Optional[Expression],
+    target_post_state: Optional[Expression],
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None or target_post_state is None:
+        return False
+
+    target_location = _expression_location_ref(target_post_state)
+    if target_location is None:
+        target_location = canonicalize_expr_read_location(target_post_state, parameters)
+    if target_location is None:
+        return False
+
+    normalized_return_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+        list(return_conditions)
+    )
+    active_effects = _collect_definite_active_effects(normalized_return_conditions, effects)
+    if not active_effects:
+        return False
+
+    tracked_locations = sorted(
+        {target_location, *[effect.location for effect in active_effects]},
+        key=_location_sort_key,
+    )
+    alias_representatives = _build_alias_representative_map(
+        tracked_locations,
+        normalized_return_conditions,
+    )
+    if not alias_representatives:
+        return False
+
+    target_rep = _resolve_alias_representative(
+        target_location,
+        alias_representatives,
+        normalized_return_conditions,
+    )
+    if target_rep is None:
+        return False
+
+    final_raw_state: Dict[CanonicalLocation, Expression] = {}
+    for representative in sorted(set(alias_representatives.values()), key=_location_sort_key):
+        final_value = _replay_definite_active_effects_for_location(
+            representative,
+            normalized_return_conditions,
+            active_effects,
+            parameters,
+        )
+        if final_value is None:
+            return False
+        reduced_final_value = _reduce_expression_under_conditions(
+            final_value,
+            normalized_return_conditions,
+        )
+        final_raw_state[representative] = (
+            reduced_final_value if reduced_final_value is not None else final_value
+        )
+
+    def _matches_candidate(candidate: Optional[Expression]) -> bool:
+        if candidate is None:
+            return False
+        reduced = _reduce_expression_under_conditions(candidate, normalized_return_conditions)
+        normalized_candidate = reduced if reduced is not None else candidate
+        return _expressions_equivalent_under_conditions(
+            expr,
+            normalized_candidate,
+            normalized_return_conditions,
+            parameters,
+        )
+
+    ordered_active_effects = sorted(active_effects, key=lambda effect: effect.order_key)
+    for effect in ordered_active_effects:
+        effect_rep = _resolve_alias_representative(
+            effect.location,
+            alias_representatives,
+            normalized_return_conditions,
+        )
+        if effect_rep != target_rep:
+            continue
+        stale_candidate = _rewrite_expression_with_replayed_state(
+            effect.value,
+            normalized_return_conditions,
+            final_raw_state,
+            alias_representatives,
+            parameters,
+        )
+        if _matches_candidate(stale_candidate):
+            return True
+
+    replayed_state = dict(final_raw_state)
+    for effect in ordered_active_effects:
+        effect_rep = _resolve_alias_representative(
+            effect.location,
+            alias_representatives,
+            normalized_return_conditions,
+        )
+        if effect_rep is None:
+            continue
+        replayed_value = _rewrite_expression_with_replayed_state(
+            effect.value,
+            normalized_return_conditions,
+            replayed_state,
+            alias_representatives,
+            parameters,
+        )
+        if replayed_value is None:
+            continue
+        reduced_value = _reduce_expression_under_conditions(
+            replayed_value,
+            normalized_return_conditions,
+        )
+        replayed_state[effect_rep] = reduced_value if reduced_value is not None else replayed_value
+
+    full_replay = replayed_state.get(target_rep)
+    return _matches_candidate(full_replay)
+
+
 def promote_effect_value_match_to_post_state_read(
     expr: Optional[Expression],
     location: CanonicalLocation,
@@ -5050,6 +5169,22 @@ def normalize_post_state_expression(
             and not expression_contains_post_state_reads(candidate_expr)
         )
         candidate_location = canonicalize_expr_read_location(candidate_expr, parameters)
+        if prefer_canonical_post_state and candidate_location is not None:
+            stale_post_state_read = resolve_definite_post_state_read_for_location(
+                candidate_location,
+                return_conditions,
+                effects,
+                parameters,
+                symbolic_post_state=symbolic_post_state,
+            )
+            if expression_matches_stale_post_state_replay(
+                candidate_expr,
+                stale_post_state_read,
+                return_conditions,
+                effects,
+                parameters,
+            ):
+                return stale_post_state_read
         candidate_is_stale_effect_carrier = False
         if candidate_location is not None and candidate_expr.expr_type in (
             ExpressionType.BINARY_OP,
