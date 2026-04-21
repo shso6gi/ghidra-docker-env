@@ -11,7 +11,7 @@ from .intrinsics import (
     is_supported_pcode_intrinsic,
 )
 from .signature import get_declared_type_signedness
-from .runtime_refs import AddressValueRef
+from .runtime_refs import AddressValueRef, CanonicalLocation, PostStateReadRef, PostStateValueRef
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -249,9 +249,20 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
         if node is None or getattr(node, "expr_type", None) is None:
             continue
         expr_kind = node.expr_type.__class__
-        if node.expr_type != expr_kind.UNKNOWN:
+        runtime_ref = getattr(node, "runtime_ref", None)
+        decl = None
+        if node.expr_type == expr_kind.UNKNOWN:
+            decl = _unknown_smt_declaration(node)
+        elif (
+            node.expr_type == expr_kind.VARIABLE
+            and isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef))
+        ):
+            decl = (
+                node.to_smt(),
+                max(1, int(expression_smt_bit_width(node) or 1)),
+            )
+        if decl is None:
             continue
-        decl = _unknown_smt_declaration(node)
         if decl in seen:
             continue
         seen.add(decl)

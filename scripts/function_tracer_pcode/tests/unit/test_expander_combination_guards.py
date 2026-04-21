@@ -4,7 +4,8 @@
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
-from scripts.function_tracer_pcode.model import Expression, UnknownValueRef
+from scripts.function_tracer_pcode.model import CanonicalLocation, Expression, LocationBaseRef, UnknownValueRef
+from scripts.function_tracer_pcode.model.runtime_refs import PostStateReadRef
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
 
@@ -313,3 +314,117 @@ def test_budget_results_remain_when_traced_fallback_contains_call(monkeypatch):
     assert len(result) == 1
     assert result[0].value.expr_type.name == "UNKNOWN"
     assert result[0].value.name == "INT_ADD_budget_exceeded"
+
+
+def test_expand_operation_prefers_whole_object_shortcut_for_post_state_reads_without_effect_summary(monkeypatch):
+    tracer = Mock()
+    expander = ExpressionExpander(tracer, Mock(), debug=False)
+
+    post_state_expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable(
+            "poststate_stackframe_tail_n32_size_4",
+            size=4,
+            runtime_ref=PostStateReadRef(
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.stack_frame(),
+                    offset=-32,
+                    size=4,
+                )
+            ),
+        ),
+        Expression.constant(1, 4),
+    )
+
+    monkeypatch.setattr(expander, "_op_requires_recursive_expansion", lambda _op: True)
+    monkeypatch.setattr(
+        expander,
+        "_expand_whole_operation_object_centrically",
+        lambda _op, _conds, _depth, output_size=0, context_label="operation": [
+            ExpandedValue(post_state_expr, list(_conds))
+        ],
+    )
+
+    class _FakeOutput:
+        def getSize(self):
+            return 4
+
+    class _FakeLeaf:
+        def getDef(self):
+            return None
+
+    class _FakeIndirectDef:
+        def getMnemonic(self):
+            return "INDIRECT"
+
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            return _FakeLeaf()
+
+    class _FakeInput:
+        def getDef(self):
+            return _FakeIndirectDef()
+
+    class _FakeOp:
+        def getMnemonic(self):
+            return "INT_ADD"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return _FakeInput()
+
+        def getOutput(self):
+            return _FakeOutput()
+
+    result = expander._expand_operation(_FakeOp(), [], depth=0)
+
+    assert len(result) == 1
+    assert result[0].value == post_state_expr
+
+
+def test_expand_expression_cases_preserves_post_state_object_graph_without_recursive_split():
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+    expr = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable(
+            "poststate_stackframe_tail_n32_size_4",
+            size=4,
+            runtime_ref=PostStateReadRef(
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.stack_frame(),
+                    offset=-32,
+                    size=4,
+                )
+            ),
+        ),
+        Expression.constant(1, 4),
+    )
+
+    result = expander._expand_expression_cases(expr, [], depth=0)
+
+    assert len(result) == 1
+    assert result[0].value == expr
+
+
+def test_operation_shortcut_detects_indirect_op_itself_without_recursive_input_markers():
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+
+    class _FakeLeaf:
+        def getDef(self):
+            return None
+
+    class _FakeIndirectOp:
+        def getMnemonic(self):
+            return "INDIRECT"
+
+        def getNumInputs(self):
+            return 2
+
+        def getInput(self, index):
+            return _FakeLeaf()
+
+    assert expander._operation_may_benefit_from_whole_object_shortcut(_FakeIndirectOp())

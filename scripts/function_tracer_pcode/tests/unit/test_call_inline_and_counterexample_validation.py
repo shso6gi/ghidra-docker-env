@@ -3161,6 +3161,51 @@ def test_return_analyzer_detects_noreturn_target_from_object_centric_resolved_co
             assert analyzer._is_noreturn_call_op(call_op, tracer) is True
 
 
+def test_return_analyzer_detects_noreturn_target_from_object_centric_readonly_indirect_branch_slot():
+    function = Mock()
+    function.hasNoReturn.return_value = True
+
+    function_manager = Mock()
+    function_manager.getFunctionAt.return_value = function
+
+    address_space = Mock()
+    address_token = Mock()
+    address_space.getAddress.return_value = address_token
+
+    address_factory = Mock()
+    address_factory.getDefaultAddressSpace.return_value = address_space
+
+    image_base = Mock()
+    image_base.getOffset.return_value = 0
+
+    program = Mock()
+    program.getFunctionManager.return_value = function_manager
+    program.getAddressFactory.return_value = address_factory
+    program.getImageBase.return_value = image_base
+
+    analyzer = ReturnAnalyzer(program=program, debug=False)
+    analyzer._read_memory_value = lambda addr, size: 0x401234 if addr == 0x500000 else None
+
+    tracer = Mock()
+    tracer.resolve_call_target_ref = lambda *_args, **_kwargs: None
+    tracer.trace_varnode.return_value = Expression.binary_op(
+        "INDIRECT",
+        _addr_var("PTR___stack_chk_fail", 0x500000, size=8),
+        Expression.constant(0x4A, 4),
+    )
+    tracer.trace_varnode.return_value.size = 8
+
+    target_varnode = Mock()
+    target_varnode.getAddress.return_value = None
+
+    call_op = Mock()
+    call_op.getMnemonic.return_value = "BRANCHIND"
+    call_op.getNumInputs.return_value = 1
+    call_op.getInput.return_value = target_varnode
+
+    assert analyzer._is_noreturn_call_op(call_op, tracer) is True
+
+
 def test_return_analyzer_prunes_noreturn_paths_before_return_expansion():
     function = Mock()
     function.hasNoReturn.return_value = True

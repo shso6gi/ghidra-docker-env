@@ -470,6 +470,12 @@ class FunctionReturnAnalysis:
             reasons.append("overlapping_unconditional_returns")
         if self.incomplete_control_flow and not self.recovered_from_decompiler:
             reasons.append("incomplete_control_flow")
+        effect_summary = getattr(self, "effect_summary", None)
+        if (
+            effect_summary is not None
+            and getattr(effect_summary, "has_unsupported_call", False)
+        ):
+            reasons.append("unsupported_call_effect_summary")
 
         for note in self.analysis_notes:
             if note in {

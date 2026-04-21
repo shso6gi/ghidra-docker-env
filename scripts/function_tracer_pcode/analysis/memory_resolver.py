@@ -196,7 +196,59 @@ def _try_resolve_direct_readonly_scalar(
     address_context: bool,
     debug: bool,
 ) -> Optional[Expression]:
-    if address_context or expr.expr_type != ExpressionType.VARIABLE or not expr.name:
+    if address_context:
+        return None
+
+    if (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator == "INDIRECT"
+        and getattr(expr, "operands", None)
+    ):
+        load_size = expr.size if expr.size else (expr.operands[0].size if expr.operands else 8)
+        direct_addr = _resolve_direct_readonly_address(
+            expr.operands[0],
+            load_size,
+            read_memory_value,
+            image_base,
+        )
+        if direct_addr is None:
+            return None
+        mem_value = read_memory_value(direct_addr, load_size)
+        if mem_value is None:
+            return None
+        if debug:
+            print(
+                "[MemoryResolver] concretized direct readonly binary INDIRECT "
+                f"addr=0x{direct_addr:x} size={load_size} -> 0x{mem_value:x}"
+            )
+        return Expression.constant(mem_value, load_size)
+
+    if expr.expr_type != ExpressionType.VARIABLE or not expr.name:
+        if address_context:
+            return None
+        if (
+            expr.expr_type == ExpressionType.INTRINSIC
+            and (getattr(expr, "name", None) or "") == "INDIRECT"
+            and getattr(expr, "operands", None)
+        ):
+            load_size = expr.size if expr.size else (expr.operands[0].size if expr.operands else 8)
+            direct_addr = _resolve_direct_readonly_address(
+                expr.operands[0],
+                load_size,
+                read_memory_value,
+                image_base,
+            )
+            if direct_addr is None:
+                return None
+            mem_value = read_memory_value(direct_addr, load_size)
+            if mem_value is None:
+                return None
+            if debug:
+                print(
+                    "[MemoryResolver] concretized direct readonly INDIRECT "
+                    f"addr=0x{direct_addr:x} size={load_size} -> 0x{mem_value:x}"
+                )
+            return Expression.constant(mem_value, load_size)
         return None
 
     direct_addr = _resolve_direct_readonly_address(

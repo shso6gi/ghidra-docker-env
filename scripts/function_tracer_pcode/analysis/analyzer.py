@@ -160,6 +160,7 @@ class ReturnAnalyzer:
         self._deferred_call_counter: int = 0
         self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
         self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
+        self._current_blocked_return_path_conditions: List[List[Condition]] = []
         self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
         self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
@@ -5568,8 +5569,9 @@ class ReturnAnalyzer:
             raw_path_entries = get_block_paths(return_op)
 
         path_entries = self._coerce_block_path_entries(raw_path_entries)
+        blocked_path_conditions: List[List[Condition]] = []
         if path_entries:
-            path_entries = self._filter_noreturn_return_path_entries(
+            path_entries, blocked_path_conditions = self._filter_noreturn_return_path_entries(
                 path_entries,
                 tracer,
                 return_op,
@@ -5594,48 +5596,54 @@ class ReturnAnalyzer:
             self._debug_print(
                 f"RETURN has {len(all_valid_path_conditions)} valid path variants",
             )
-        
-        if num_inputs >= 2:
-            return_varnode = return_op.getInput(1)
-            return self._analyze_return_value(
-                return_varnode,
-                address,
-                tracer,
-                condition_tracker,
-                path_conditions,
-                return_index,
-                all_path_conditions=all_valid_path_conditions,
-                active_functions=active_functions,
-                current_function=current_function,
-                site_metadata=site_metadata,
-            )
-        else:
-            implicit_results = self._analyze_implicit_return_value(
-                return_op,
-                address,
-                tracer,
-                condition_tracker,
-                path_conditions,
-                return_index,
-                all_path_conditions=all_valid_path_conditions,
-                path_entries=path_entries,
-                active_functions=active_functions,
-                current_function=current_function,
-                site_metadata=site_metadata,
-            )
-            if implicit_results is not None:
-                return implicit_results
-            # void return
-            simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
-                path_conditions
-            )
-            return [self._make_return_info(
-                address=address,
-                value=Expression.unknown("void"),
-                conditions=simplified_conds,
-                branch_index=return_index,
-                site_metadata=site_metadata,
-            )]
+
+        previous_blocked = list(self._current_blocked_return_path_conditions)
+        self._current_blocked_return_path_conditions = [
+            list(conditions) for conditions in blocked_path_conditions
+        ]
+        try:
+            if num_inputs >= 2:
+                return_varnode = return_op.getInput(1)
+                return self._analyze_return_value(
+                    return_varnode,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    path_conditions,
+                    return_index,
+                    all_path_conditions=all_valid_path_conditions,
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+            else:
+                implicit_results = self._analyze_implicit_return_value(
+                    return_op,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    path_conditions,
+                    return_index,
+                    all_path_conditions=all_valid_path_conditions,
+                    path_entries=path_entries,
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+                if implicit_results is not None:
+                    return implicit_results
+                simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+                    path_conditions
+                )
+                return [self._make_return_info(
+                    address=address,
+                    value=Expression.unknown("void"),
+                    conditions=simplified_conds,
+                    branch_index=return_index,
+                    site_metadata=site_metadata,
+                )]
+        finally:
+            self._current_blocked_return_path_conditions = previous_blocked
 
     def _coerce_block_path_entries(self, path_entries) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
         if not isinstance(path_entries, (list, tuple)):
@@ -5660,11 +5668,13 @@ class ReturnAnalyzer:
         return_op,
     ):
         if not path_entries:
-            return path_entries
+            return path_entries, []
 
         filtered = []
+        blocked_conditions: List[List[Condition]] = []
         for block_path, conditions in path_entries:
             if self._block_path_contains_noreturn_call(block_path, tracer, return_op):
+                blocked_conditions.append(list(conditions))
                 if self.debug:
                     cond_strs = [
                         ConditionSimplifier.get_simplified_condition_string(c)
@@ -5678,7 +5688,7 @@ class ReturnAnalyzer:
                 continue
             filtered.append((block_path, conditions))
 
-        return filtered
+        return filtered, blocked_conditions
 
     def _block_path_contains_noreturn_call(
         self,
@@ -5690,21 +5700,62 @@ class ReturnAnalyzer:
             for pcode_op in getattr(block_info, "pcode_ops", []) or []:
                 if self._pcode_ops_match(pcode_op, return_op):
                     return False
-                if self._is_noreturn_call_op(pcode_op, tracer):
+                if self._is_noreturn_control_transfer_op(pcode_op, tracer):
                     return True
         return False
 
     def _is_noreturn_call_op(self, pcode_op, tracer: PcodeTracer) -> bool:
-        if pcode_op is None or pcode_op.getMnemonic() not in {"CALL", "CALLIND"}:
+        return self._is_noreturn_control_transfer_op(pcode_op, tracer)
+
+    def _is_noreturn_control_transfer_op(self, pcode_op, tracer: PcodeTracer) -> bool:
+        if pcode_op is None or pcode_op.getMnemonic() not in {"CALL", "CALLIND", "BRANCHIND"}:
             return False
 
-        for target_ref in self._resolve_object_centric_call_targets(pcode_op, tracer):
+        resolved_targets = self._resolve_object_centric_transfer_targets(pcode_op, tracer)
+        if self.debug and not resolved_targets:
+            try:
+                traced_target = tracer.trace_varnode(pcode_op.getInput(0), use_cache=False)
+                traced_summary = traced_target.to_string()
+            except Exception:
+                traced_summary = "<unavailable>"
+            self._debug_print(
+                f"CALL noreturn resolution failed to resolve targets for {pcode_op.getMnemonic()} "
+                f"target={traced_summary}"
+            )
+
+        if not resolved_targets:
+            return False
+
+        resolved_functions = []
+        for target_ref in resolved_targets:
             target_function = self._resolve_function_from_call_target_ref(target_ref)
-            if target_function is not None and self._function_has_no_return(target_function):
-                return True
+            if target_function is None:
+                if self.debug:
+                    self._debug_print(
+                        "Control-transfer target stayed unresolved for noreturn pruning: "
+                        f"{target_ref.display_name()}"
+                    )
+                return False
+            resolved_functions.append((target_ref, target_function))
+
+        if resolved_functions and all(self._function_has_no_return(function) for _target_ref, function in resolved_functions):
+            if self.debug:
+                names = ", ".join(target_ref.display_name() for target_ref, _function in resolved_functions)
+                self._debug_print(
+                    "Detected noreturn control transfer via object-centric resolution: "
+                    f"{names}"
+                )
+            return True
         return False
 
     def _resolve_object_centric_call_targets(
+        self,
+        pcode_op,
+        tracer: Optional[PcodeTracer],
+    ) -> List[CallTargetRef]:
+        return self._resolve_object_centric_transfer_targets(pcode_op, tracer)
+
+    def _resolve_object_centric_transfer_targets(
         self,
         pcode_op,
         tracer: Optional[PcodeTracer],
@@ -5715,22 +5766,65 @@ class ReturnAnalyzer:
         resolved: List[CallTargetRef] = []
 
         try:
-            image_base = None
-            if self.program is not None:
-                image_base = self.program.getImageBase().getOffset()
-            for target_ref, _conditions in resolve_call_targets(
-                tracer,
-                pcode_op,
-                conditions=[],
-                parameters=list(self._current_parameters or []),
-                read_memory_value=self._read_memory_value if self.program is not None else None,
-                image_base=image_base,
-                debug=self.debug,
-            ):
-                if target_ref is not None:
-                    resolved.append(target_ref)
+            mnemonic = str(pcode_op.getMnemonic())
         except Exception:
-            pass
+            mnemonic = ""
+
+        if mnemonic in {"CALL", "CALLIND"}:
+            try:
+                image_base = None
+                if self.program is not None:
+                    image_base = self.program.getImageBase().getOffset()
+                for target_ref, _conditions in resolve_call_targets(
+                    tracer,
+                    pcode_op,
+                    conditions=[],
+                    parameters=list(self._current_parameters or []),
+                    read_memory_value=self._read_memory_value if self.program is not None else None,
+                    image_base=image_base,
+                    debug=self.debug,
+                ):
+                    if target_ref is not None:
+                        resolved.append(target_ref)
+            except Exception:
+                pass
+        elif mnemonic == "BRANCHIND":
+            try:
+                target_varnode = pcode_op.getInput(0)
+            except Exception:
+                target_varnode = None
+
+            if target_varnode is not None:
+                resolver = getattr(tracer, "resolve_call_target_ref", None)
+                if callable(resolver):
+                    try:
+                        direct_target = resolver(
+                            target_varnode,
+                            allow_containing=True,
+                            allow_code_address=True,
+                        )
+                    except Exception:
+                        direct_target = None
+                    direct_target_ref = coerce_call_target_ref(direct_target)
+                    if direct_target_ref is not None:
+                        resolved.append(direct_target_ref)
+
+                try:
+                    target_expr = tracer.trace_varnode(target_varnode, use_cache=False)
+                except Exception:
+                    target_expr = None
+                if target_expr is not None:
+                    target_expr = self._concretize_readonly_loads(
+                        target_expr,
+                        [],
+                        self._current_parameters,
+                    )
+                    for _branch_conditions, address_value in _enumerate_constant_expression_branches(target_expr):
+                        target_function = self._resolve_function_from_program_offset(int(address_value))
+                        if target_function is not None:
+                            resolved.append(CallTargetRef.from_function(target_function))
+                        else:
+                            resolved.append(CallTargetRef.from_code_address(int(address_value)))
 
         if not resolved:
             fallback_target = _resolve_call_target_ref(tracer, pcode_op)
@@ -6513,6 +6607,13 @@ class ReturnAnalyzer:
                     )
                     self._debug_print(f"  conditions={cond_strs}")
 
+                if self._matches_blocked_return_path_conditions(split_conditions):
+                    if self.debug:
+                        self._debug_print(
+                            f"Skipping expansion {i}.{split_index} because its conditions match a blocked noreturn path"
+                        )
+                    continue
+
                 results.append(
                     self._make_return_info(
                         address=address,
@@ -6528,6 +6629,24 @@ class ReturnAnalyzer:
                 )
         pruned = self._prune_less_precise_return_infos(results)
         return self._merge_equivalent_return_infos(pruned)
+
+    def _matches_blocked_return_path_conditions(
+        self,
+        conditions: List[Condition],
+    ) -> bool:
+        blocked_sets = getattr(self, "_current_blocked_return_path_conditions", None) or []
+        if not blocked_sets:
+            return False
+
+        condition_keys = self._build_condition_signature_set(conditions)
+        if not condition_keys:
+            return False
+
+        for blocked_conditions in blocked_sets:
+            blocked_keys = self._build_condition_signature_set(blocked_conditions)
+            if blocked_keys and blocked_keys.issubset(condition_keys):
+                return True
+        return False
 
     def _split_object_centric_return_case(
         self,

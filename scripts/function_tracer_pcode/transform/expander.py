@@ -1460,6 +1460,21 @@ class ExpressionExpander:
         if expr is None:
             return []
 
+        if (
+            not self._expression_contains_unknown_or_call(expr)
+            and not self._expression_contains_phi(expr)
+            and (
+                expression_contains_post_state_reads(expr)
+                or _expression_contains_observed_loads(expr)
+            )
+        ):
+            return [
+                ExpandedValue(
+                    expr,
+                    ConditionSimplifier.simplify_conditions_object_centric(base_conditions),
+                )
+            ]
+
         if expr.expr_type == ExpressionType.PHI and expr.value:
             expanded: List[ExpandedValue] = []
             prior_guards: List[Condition] = []
@@ -1679,7 +1694,7 @@ class ExpressionExpander:
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
-        if requires_recursive_expansion and self.effect_summary is not None and getattr(self.effect_summary, "effects", None) and self.parameters:
+        if requires_recursive_expansion and self._operation_may_benefit_from_whole_object_shortcut(pcode_op):
             traced_shortcut = self._expand_whole_operation_object_centrically(
                 pcode_op,
                 conditions,
@@ -2255,7 +2270,7 @@ class ExpressionExpander:
         # MULTIEQUAL / CALL が含まれるかチェック
         requires_recursive_expansion = self._op_requires_recursive_expansion(pcode_op)
 
-        if requires_recursive_expansion and self.parameters:
+        if requires_recursive_expansion and self._operation_may_benefit_from_whole_object_shortcut(pcode_op):
             output = pcode_op.getOutput()
             output_size = output.getSize() if output else 0
             traced_shortcut = self._expand_whole_operation_object_centrically(
@@ -2329,6 +2344,72 @@ class ExpressionExpander:
             depth,
             output_size=output_size,
         )
+
+    def _operation_may_benefit_from_whole_object_shortcut(self, pcode_op, max_depth: int = 4) -> bool:
+        if pcode_op is None or max_depth <= 0:
+            return False
+        target_mnemonics = {"INDIRECT", "LOAD", "MULTIEQUAL"}
+        try:
+            if str(pcode_op.getMnemonic()) in target_mnemonics:
+                return True
+        except Exception:
+            pass
+        seen_ops: Set[int] = set()
+        try:
+            num_inputs = int(pcode_op.getNumInputs())
+        except Exception:
+            num_inputs = 0
+        for index in range(num_inputs):
+            try:
+                varnode = pcode_op.getInput(index)
+            except Exception:
+                continue
+            if self._varnode_subgraph_contains_mnemonics(varnode, target_mnemonics, max_depth, seen_ops):
+                return True
+        return False
+
+    def _varnode_subgraph_contains_mnemonics(
+        self,
+        varnode,
+        target_mnemonics: Set[str],
+        remaining_depth: int,
+        seen_ops: Set[int],
+    ) -> bool:
+        if varnode is None or remaining_depth <= 0:
+            return False
+        try:
+            def_op = varnode.getDef()
+        except Exception:
+            def_op = None
+        if def_op is None:
+            return False
+        op_identity = id(def_op)
+        if op_identity in seen_ops:
+            return False
+        seen_ops.add(op_identity)
+        try:
+            mnemonic = str(def_op.getMnemonic())
+        except Exception:
+            mnemonic = ""
+        if mnemonic in target_mnemonics:
+            return True
+        try:
+            num_inputs = int(def_op.getNumInputs())
+        except Exception:
+            num_inputs = 0
+        for index in range(num_inputs):
+            try:
+                child = def_op.getInput(index)
+            except Exception:
+                continue
+            if self._varnode_subgraph_contains_mnemonics(
+                child,
+                target_mnemonics,
+                remaining_depth - 1,
+                seen_ops,
+            ):
+                return True
+        return False
 
     def _expand_whole_operation_object_centrically(
         self,

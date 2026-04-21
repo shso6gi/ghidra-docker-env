@@ -28,7 +28,7 @@ include = ["function_tracer_pcode*"]
 [tool.pytest.ini_options]
 # Repository checkout では `scripts.function_tracer_pcode` を維持しつつ、
 # 配布パッケージでは `function_tracer_pcode` を正規 import path とする。
-pythonpath = ["../.."]
+pythonpath = ["..", "../.."]
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"

@@ -208,6 +208,81 @@ def test_memory_resolver_concretizes_intrinsic_ptrsub_got_anchor_via_image_relat
     assert values == [5, 5, 7, 11]
 
 
+def test_memory_resolver_concretizes_intrinsic_indirect_code_pointer_slot() -> None:
+    slot_ref = AddressValueRef(
+        address_offset=0x120013158,
+        source="unit_test",
+        display_hint="stack_chk_fail_slot",
+        space_name="ram",
+        symbol_name="PTR___stack_chk_fail",
+        block_name=".got",
+        is_initialized=True,
+        can_read=True,
+        can_write=False,
+        can_execute=False,
+        is_volatile=False,
+    )
+    slot_expr = Expression.constant(
+        slot_ref.address_offset,
+        size=8,
+        runtime_ref=slot_ref,
+    )
+    expr = Expression.intrinsic(
+        "INDIRECT",
+        [slot_expr, Expression.constant(0x4A, 4)],
+        size=8,
+    )
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda addr, size: 0x1200007D0 if addr == slot_ref.address_offset else None,
+        debug=False,
+    )
+
+    assert resolved.expr_type == ExpressionType.CONSTANT
+    assert resolved.value == 0x1200007D0
+
+
+def test_memory_resolver_concretizes_binary_indirect_code_pointer_slot() -> None:
+    slot_ref = AddressValueRef(
+        address_offset=0x120013158,
+        source="unit_test",
+        display_hint="stack_chk_fail_slot",
+        space_name="ram",
+        symbol_name="PTR___stack_chk_fail",
+        block_name=".got",
+        is_initialized=True,
+        can_read=True,
+        can_write=False,
+        can_execute=False,
+        is_volatile=False,
+    )
+    slot_expr = Expression.constant(
+        slot_ref.address_offset,
+        size=8,
+        runtime_ref=slot_ref,
+    )
+    expr = Expression.binary_op(
+        "INDIRECT",
+        slot_expr,
+        Expression.constant(0x4A, 4),
+    )
+    expr.size = 8
+
+    resolved = concretize_readonly_loads(
+        expr,
+        [],
+        [],
+        lambda addr, size: 0x1200007D0 if addr == slot_ref.address_offset else None,
+        debug=False,
+    )
+
+    assert resolved.expr_type == ExpressionType.CONSTANT
+    assert resolved.value == 0x1200007D0
+
+
 def test_normalize_expression_preserves_phi_fallback_branch_without_condition() -> None:
     param = Expression.parameter("param_1", 0, size=4)
     cond = Condition(

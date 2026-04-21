@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
 from ..model import (
+    CanonicalLocation,
     Expression,
     ExpressionType,
     Condition,
@@ -15,6 +16,8 @@ from ..model import (
     LocationBaseRef,
     ObservedMemoryReadRef,
     PcodeOpRef,
+    PostStateReadRef,
+    PostStateSnapshotRef,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
 )
@@ -882,6 +885,147 @@ class PcodeTracer:
             display_name=display_name,
         )
 
+    def _canonical_location_for_varnode(
+        self,
+        varnode,
+        value_size: int,
+    ) -> Optional[CanonicalLocation]:
+        if varnode is None or value_size <= 0:
+            return None
+
+        storage_info = None
+        try:
+            storage_info = self._get_storage_info_from_varnode(varnode)
+        except Exception:
+            storage_info = None
+
+        if storage_info is None:
+            try:
+                addr = varnode.getAddress()
+                if addr is not None:
+                    space = addr.getAddressSpace()
+                    if space is not None:
+                        space_name = space.getName()
+                        size = max(1, int(value_size or varnode.getSize() or 0))
+                        if space_name == "stack":
+                            storage_info = StorageInfo(
+                                is_register=False,
+                                space_name="stack",
+                                offset=int(varnode.getOffset()),
+                                size=size,
+                                size_bits=size * 8,
+                            )
+                        elif space_name == "register":
+                            storage_info = StorageInfo(
+                                is_register=True,
+                                space_name="register",
+                                offset=int(varnode.getOffset()),
+                                size=size,
+                                size_bits=size * 8,
+                            )
+            except Exception:
+                storage_info = None
+
+        if storage_info is None:
+            return None
+
+        size = max(1, int(value_size or getattr(storage_info, "size", 0) or 0))
+        if not storage_info.is_register and (
+            storage_info.space_name == "stack"
+            or bool(getattr(storage_info, "is_stack_pointer", False))
+        ):
+            return CanonicalLocation(
+                base_ref=LocationBaseRef.stack_frame(),
+                offset=int(storage_info.offset),
+                size=size,
+            )
+
+        return CanonicalLocation(
+            base_ref=LocationBaseRef.storage(
+                space_id=storage_info.space_id,
+                space_name=storage_info.space_name or ("register" if storage_info.is_register else "mem"),
+                offset=int(
+                    storage_info.base_register_offset
+                    if storage_info.is_register
+                    else storage_info.offset
+                ),
+                size=max(
+                    1,
+                    int(
+                        storage_info.base_register_size
+                        if storage_info.is_register
+                        else storage_info.size
+                    ) or size,
+                ),
+                display_hint=storage_info.register_name if storage_info.is_register else None,
+            ),
+            offset=0,
+            size=size,
+        )
+
+    def _symbolic_post_state_read_for_output_varnode(
+        self,
+        varnode,
+        output_size: int,
+    ) -> Optional[Expression]:
+        location = self._canonical_location_for_varnode(varnode, output_size)
+        if location is None:
+            return None
+        if not self._varnode_supports_symbolic_post_state_promotion(varnode, location):
+            return None
+        snapshot_ref = PostStateSnapshotRef.function_return()
+        runtime_ref = PostStateReadRef(
+            location=location,
+            snapshot_ref=snapshot_ref,
+        )
+        return Expression.variable(
+            f"poststate_{abs(int(location.offset))}_{int(location.size)}",
+            size=max(1, int(output_size or location.size)),
+            runtime_ref=runtime_ref,
+        )
+
+    def _varnode_supports_symbolic_post_state_promotion(
+        self,
+        varnode,
+        location: Optional[CanonicalLocation],
+    ) -> bool:
+        if varnode is None or location is None:
+            return False
+
+        base_ref = getattr(location, "base_ref", None)
+        if base_ref is None:
+            return False
+        if base_ref.is_stack_frame():
+            return True
+        if base_ref.is_storage() and str(getattr(base_ref, "storage_space", "") or "").lower() == "register":
+            return True
+
+        try:
+            addr = varnode.getAddress()
+        except Exception:
+            addr = None
+        if addr is None or self.program is None:
+            return False
+
+        try:
+            memory = self.program.getMemory()
+        except Exception:
+            memory = None
+        if memory is None:
+            return False
+
+        try:
+            block = memory.getBlock(addr)
+        except Exception:
+            block = None
+        if block is None:
+            return False
+
+        try:
+            return bool(block.isWrite()) and not bool(block.isVolatile())
+        except Exception:
+            return False
+
     def _lookup_symbol_name_for_address(self, address) -> Optional[str]:
         if address is None:
             return None
@@ -1731,7 +1875,50 @@ class PcodeTracer:
         # その他
         if self._debug_available():
             self._debug_print(f"  -> Unhandled opcode: {mnemonic}")
-        
+
+        if mnemonic == "INDIRECT":
+            output = pcode_op.getOutput()
+            output_size = output.getSize() if output is not None else 0
+            output_location = (
+                self._canonical_location_for_varnode(output, output_size)
+                if output is not None
+                else None
+            )
+            input_location = None
+            if inputs:
+                try:
+                    input_location = self._canonical_location_for_varnode(
+                        inputs[0],
+                        inputs[0].getSize(),
+                    )
+                except Exception:
+                    input_location = None
+            if (
+                output is not None
+                and output_location is not None
+                and input_location is not None
+                and output_location == input_location
+            ):
+                promoted = self._symbolic_post_state_read_for_output_varnode(
+                    output,
+                    output_size,
+                )
+                if promoted is not None:
+                    return promoted
+            base_expr = self.trace_varnode(inputs[0], depth, use_cache) if inputs else None
+            if (
+                base_expr is not None
+                and base_expr.expr_type == ExpressionType.CONSTANT
+                and int(getattr(base_expr, "value", 1)) == 0
+                and output is not None
+            ):
+                promoted = self._symbolic_post_state_read_for_output_varnode(
+                    output,
+                    output_size,
+                )
+                if promoted is not None:
+                    return promoted
+
         if inputs:
             traced_inputs = [self.trace_varnode(inp, depth, use_cache) for inp in inputs]
             if len(traced_inputs) == 1:

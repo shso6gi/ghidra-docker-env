@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import Condition, DeferredCallInfo, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from ..model.structural import expression_key_or_identity
-from ..model.runtime_refs import UnknownValueRef
+from ..model.runtime_refs import CanonicalLocation, PostStateReadRef, PostStateValueRef, UnknownValueRef
 
 
 @dataclass(frozen=True)
@@ -222,6 +222,15 @@ def _object_centric_expression_key(
         )
         return ("unknown", runtime_key, int(expr.size or 0))
 
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)):
+        stable_key = (
+            runtime_ref.stable_key()
+            if hasattr(runtime_ref, "stable_key")
+            else runtime_ref
+        )
+        return ("runtime_object", stable_key, int(expr.size or 0))
+
     if expr.expr_type == ExpressionType.VARIABLE:
         storage_info = getattr(expr, "storage_info", None)
         storage_key = (
@@ -233,6 +242,19 @@ def _object_centric_expression_key(
             "variable",
             storage_key if storage_key is not None else (expr.name or ""),
             int(expr.size or 0),
+        )
+
+    if expr.expr_type == ExpressionType.INTRINSIC:
+        operands = getattr(expr, "operands", None) or []
+        operand_keys = tuple(
+            _object_centric_expression_key(operand, for_call_target=for_call_target)
+            for operand in operands
+        )
+        return (
+            "intrinsic",
+            getattr(expr, "name", None) or "",
+            int(expr.size or 0),
+            operand_keys,
         )
 
     if expr.expr_type == ExpressionType.UNARY_OP:
@@ -271,6 +293,14 @@ def _object_centric_expression_key(
         )
 
     if expr.expr_type == ExpressionType.MEMORY:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)):
+            stable_key = (
+                runtime_ref.stable_key()
+                if hasattr(runtime_ref, "stable_key")
+                else runtime_ref
+            )
+            return ("memory_runtime_object", stable_key, int(expr.size or 0))
         address = expr.operands[0] if expr.operands else None
         return (
             "memory",
