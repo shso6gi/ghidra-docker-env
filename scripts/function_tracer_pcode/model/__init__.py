@@ -18,9 +18,11 @@ from .runtime_refs import (
     PostStateSnapshotRef,
     PostStateValueRef,
     PcodeOpRef,
+    ReadonlyReductionRef,
     UnknownValueRef,
 )
 from .intrinsics import (
+    READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
     PcodeIntrinsicSpec,
@@ -69,7 +71,9 @@ __all__ = [
     "PostStateSnapshotRef",
     "PostStateValueRef",
     "PcodeOpRef",
+    "ReadonlyReductionRef",
     "UnknownValueRef",
+    "READONLY_SUM_OPCODE",
     "PTRADD_OPCODE",
     "PTRSUB_OPCODE",
     "PcodeIntrinsicSpec",

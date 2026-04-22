@@ -162,9 +162,15 @@ class ConditionSimplifier:
     @classmethod
     def _safe_condition_id(cls, condition: Optional[Condition]) -> int:
         try:
-            return 0 if condition is None else id(condition)
+            if condition is None:
+                return 0
+            return hash(condition.structural_key(budget=96))
         except Exception:
-            return 0
+            try:
+                expr = getattr(condition, "expression", None)
+                return hash((bool(getattr(condition, "negated", False)), id(expr)))
+            except Exception:
+                return 0
 
     @classmethod
     def _safe_condition_ids(cls, conditions: Iterable[Condition]) -> Tuple[int, ...]:
@@ -1020,9 +1026,12 @@ class ConditionSimplifier:
                             continue
 
         clauses = []
-        try:
-            clauses = cls._conditions_to_cnf_clauses(conditions)
-        except Exception:
+        if not any(cls._condition_contains_solver_opaque_node(condition) for condition in (conditions or [])):
+            try:
+                clauses = cls._conditions_to_cnf_clauses(conditions)
+            except Exception:
+                clauses = None
+        else:
             clauses = None
         if clauses is not None:
             for clause in clauses:
@@ -1043,6 +1052,33 @@ class ConditionSimplifier:
                     pass
 
         return implied
+
+    @classmethod
+    def _condition_contains_solver_opaque_node(cls, condition: Optional[Condition]) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return False
+        pending = [expr]
+        while pending:
+            current = pending.pop()
+            if current is None:
+                continue
+            expr_type = getattr(current, "expr_type", None)
+            expr_kind = getattr(expr_type, "__class__", None)
+            if expr_type is None or expr_kind is None:
+                continue
+            if expr_type in {expr_kind.UNKNOWN, expr_kind.CALL, expr_kind.PHI}:
+                return True
+            operands = list(getattr(current, "operands", None) or [])
+            pending.extend(operand for operand in operands if operand is not None)
+            if expr_type == expr_kind.PHI:
+                for phi_condition, phi_value in getattr(current, "value", None) or []:
+                    phi_expr = getattr(phi_condition, "expression", None) if phi_condition is not None else None
+                    if phi_expr is not None:
+                        pending.append(phi_expr)
+                    if phi_value is not None:
+                        pending.append(phi_value)
+        return False
 
     @classmethod
     def _condition_is_implied(

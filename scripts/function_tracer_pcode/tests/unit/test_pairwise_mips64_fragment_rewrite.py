@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.equivalence.formula.types import ExtraVariableInfo
 from scripts.function_tracer_pcode.equivalence.formula.variable import (
@@ -15,6 +15,9 @@ from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
     FunctionReturnAnalysis,
+    LocationBaseRef,
+    READONLY_SUM_OPCODE,
+    ReadonlyReductionRef,
     ReturnInfo,
 )
 
@@ -40,6 +43,31 @@ def _wide_param(fragment_name: str, param_name: str) -> Expression:
         "INT_OR",
         _binary("INT_LEFT", _fragment_var(fragment_name), _const(32, size=8)),
         _param(param_name),
+    )
+
+
+def _readonly_sum_value(
+    name: str,
+    *,
+    stride: int,
+    element_size: int,
+    signed_counter: bool = True,
+) -> Expression:
+    return Expression.intrinsic(
+        "READONLY_SUM",
+        [Expression.parameter(name, index=0, size=8), Expression.parameter("param_2", index=1, size=4)],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter(name, index=0),
+            count_parameter_name="param_2",
+            count_parameter_index=1,
+            stride=stride,
+            element_size=element_size,
+            result_size=4,
+            signed_counter=signed_counter,
+        ),
+        opcode=READONLY_SUM_OPCODE,
     )
 
 
@@ -187,6 +215,157 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
         "params2": [],
         "extra_vars1": [],
         "extra_vars2": [_fragment_info("in_a1_hi", "param_2", 1)],
+    }
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_extracts_cases_from_solver_view_consistently():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    raw_left = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 8, "index": 0, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1001", value=_const(0), conditions=[])],
+        return_type="int",
+    )
+    raw_right = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 8, "index": 0, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1002", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    solver_left = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1001", value=_const(0), conditions=[])],
+        return_type="int",
+    )
+    solver_right = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1002", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    with patch(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.normalize_analysis_semantic_width",
+        side_effect=[solver_left, solver_right],
+    ), patch.object(strategy, "_extract_return_cases", side_effect=[[], []]) as extract_cases:
+        result = strategy.check(raw_left, raw_right)
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 0
+    assert extract_cases.call_args_list[0].args[0] is solver_left
+    assert extract_cases.call_args_list[1].args[0] is solver_right
+
+
+def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
+        ],
+        returns=[ReturnInfo(address="0x1001", value=_readonly_sum_value("param_1", stride=4, element_size=4), conditions=[])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "undefined8 *", "size": 8, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": True},
+        ],
+        returns=[ReturnInfo(address="0x1002", value=_readonly_sum_value("param_1", stride=16, element_size=8), conditions=[])],
+        return_type="int",
+    )
+
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_treats_counter_signedness_as_nonsemantic_for_readonly_reductions():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int *", "size": 8, "index": 0, "is_signed": False},
+            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_readonly_sum_value("param_1", stride=4, element_size=4, signed_counter=True),
+                conditions=[Condition(_binary("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, size=4)))],
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int *", "size": 8, "index": 0, "is_signed": False},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False),
+                conditions=[Condition(_binary("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, size=4)))],
+            )
+        ],
+        return_type="int",
+    )
+
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
     }
 
     result = strategy.check(analysis1, analysis2)

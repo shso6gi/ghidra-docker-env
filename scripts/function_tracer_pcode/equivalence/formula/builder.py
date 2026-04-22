@@ -4,7 +4,10 @@
 from typing import List, Dict, Optional, Tuple, Set, Any
 
 from ...model import FunctionReturnAnalysis
-from ...model.render_smt import collect_unknown_smt_declarations
+from ...model.render_smt import (
+    collect_intrinsic_smt_declarations,
+    collect_unknown_smt_declarations,
+)
 from .params import (
     build_fragment_backed_parameter_constraint,
     collect_fragment_infos_by_param_index,
@@ -296,6 +299,13 @@ class FormulaBuilder:
         if runtime_unknown_decls:
             lines.extend(self._build_runtime_unknown_declarations(runtime_unknown_decls))
 
+        intrinsic_decls = self._collect_intrinsic_smt_declarations(
+            analysis1,
+            analysis2,
+        )
+        if intrinsic_decls:
+            lines.extend(self._build_intrinsic_smt_declarations(intrinsic_decls))
+
         semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
         if semantic_lines:
             lines.extend(semantic_lines)
@@ -523,6 +533,19 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
+    def _build_intrinsic_smt_declarations(
+        self,
+        declarations: List[str],
+    ) -> List[str]:
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Intrinsic function declarations")
+        lines.append("; Structured object-centric summaries lowered as SMT functions")
+        lines.append("; " + "-" * 40)
+        lines.extend(declarations)
+        lines.append("")
+        return lines
+
     def _collect_runtime_unknown_declarations(
         self,
         *analyses: FunctionReturnAnalysis,
@@ -559,6 +582,40 @@ class FormulaBuilder:
                 extend_from_expression(getattr(deferred, "call_target_expr", None))
                 for arg in getattr(deferred, "arguments", []) or []:
                     extend_from_expression(arg)
+
+        return declarations
+
+    def _collect_intrinsic_smt_declarations(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[str]:
+        declarations: List[str] = []
+        seen = set()
+
+        def extend_from_expression(expr) -> None:
+            for decl in collect_intrinsic_smt_declarations(expr):
+                if decl in seen:
+                    continue
+                seen.add(decl)
+                declarations.append(decl)
+
+        def extend_from_conditions(conditions) -> None:
+            for condition in conditions or []:
+                extend_from_expression(getattr(condition, "expression", None))
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for ret in getattr(analysis, "returns", []) or []:
+                extend_from_expression(getattr(ret, "value", None))
+                extend_from_conditions(getattr(ret, "conditions", None))
+
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                extend_from_expression(getattr(effect_summary, "synthetic_expr", None))
+                for effect in getattr(effect_summary, "effects", []) or []:
+                    extend_from_expression(getattr(effect, "value", None))
+                    extend_from_conditions(getattr(effect, "conditions", None))
 
         return declarations
     

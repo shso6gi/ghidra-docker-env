@@ -6,7 +6,15 @@ from __future__ import annotations
 from collections import Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..model import Condition, Expression, ExpressionType, ReturnInfo
+from ..model import (
+    READONLY_SUM_OPCODE,
+    Condition,
+    Expression,
+    ExpressionType,
+    LocationBaseRef,
+    ReadonlyReductionRef,
+    ReturnInfo,
+)
 from ..model.signature import is_integral_data_type, is_pointer_data_type
 from ..model.runtime_refs import UnknownValueRef
 from .condition import ConditionSimplifier, ConditionNormalizer
@@ -57,6 +65,10 @@ class StructuralRecurrenceSummarizer:
             summary = self._try_summarize_linear_self_recursion(function, high_function, analysis)
             if summary is not None:
                 return summary
+
+        summary = self._try_summarize_readonly_pointer_reduction(function, high_function, analysis)
+        if summary is not None:
+            return summary
 
         summary = self._try_summarize_branch_accumulator_loop(analysis)
         if summary is not None:
@@ -195,6 +207,781 @@ class StructuralRecurrenceSummarizer:
             f"(lower_bound={lower_bound}, coeff={coeff}, bias={bias}, base={base_value})"
         )
         return summarized_returns, "linear_self_recursion_summary"
+
+    def _try_summarize_readonly_pointer_reduction(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        if analysis is None or not analysis.returns:
+            return None
+        if getattr(getattr(analysis, "effect_summary", None), "effects", None):
+            self._debug("Declined readonly reduction summary: function mutates memory")
+            return None
+
+        pointer_param, count_param = self._infer_readonly_pointer_reduction_parameters(
+            analysis,
+            high_function,
+        )
+        if pointer_param is None or count_param is None:
+            self._debug("Declined readonly reduction summary: pointer/count parameters not identified")
+            return None
+
+        positive_conditions = self._readonly_reduction_positive_conditions(analysis, pointer_param, count_param)
+        if ConditionSimplifier.object_centric_is_contradiction(positive_conditions):
+            self._debug("Declined readonly reduction summary: positive region is contradictory")
+            return None
+
+        loop_shape = self._detect_readonly_sum_loop_shape(
+            high_function,
+            analysis,
+            pointer_param,
+            count_param,
+        )
+        if loop_shape is None:
+            loop_shape = self._infer_readonly_sum_shape_from_positive_returns(
+                analysis,
+                pointer_param,
+                count_param,
+                positive_conditions,
+            )
+        if loop_shape is None:
+            self._debug(
+                f"Declined readonly reduction summary for '{function.getName()}': "
+                "no supported accumulator/load or prefix-sum shape found"
+            )
+            return None
+
+        overlapping_positive_returns = [
+            ret for ret in (analysis.returns or [])
+            if self._return_overlaps_conditions(ret, positive_conditions)
+        ]
+        if not overlapping_positive_returns:
+            self._debug("Declined readonly reduction summary: no positive-region returns to replace")
+            return None
+
+        preserved_returns = [
+            ret for ret in (analysis.returns or [])
+            if ret not in overlapping_positive_returns
+        ]
+        if not preserved_returns and not overlapping_positive_returns:
+            return None
+
+        summary_pointer_expr = self._parameter_expression(pointer_param)
+        summary_count_expr = self._parameter_expression(count_param)
+        result_size = max(1, int(getattr(overlapping_positive_returns[0].value, "size", 0) or 0) or 4)
+        reduction_ref = ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter(
+                pointer_param.get("name", "ptr"),
+                index=pointer_param.get("index"),
+                owner_program_id=pointer_param.get("owner_program_id"),
+                owner_entry_offset=pointer_param.get("owner_entry_offset"),
+            ),
+            count_parameter_name=count_param.get("name", "count"),
+            count_parameter_index=count_param.get("index"),
+            stride=int(loop_shape["stride"]),
+            element_size=int(loop_shape["element_size"]),
+            result_size=result_size,
+            start_offset=0,
+            signed_counter=bool(count_param.get("is_signed", True)),
+        )
+        summary_expr = Expression.intrinsic(
+            "READONLY_SUM",
+            [summary_pointer_expr, summary_count_expr],
+            size=result_size,
+            runtime_ref=reduction_ref,
+            opcode=READONLY_SUM_OPCODE,
+        )
+        positive_anchor = overlapping_positive_returns[0]
+        summarized_returns = list(preserved_returns)
+        summarized_returns.append(
+            ReturnInfo(
+                address=positive_anchor.address,
+                value=summary_expr,
+                conditions=list(positive_conditions),
+                branch_index=10_200,
+                pcode_identity=positive_anchor.pcode_identity,
+                pcode_order=positive_anchor.pcode_order,
+                pcode_time=positive_anchor.pcode_time,
+            )
+        )
+        self._debug(
+            f"Recovered readonly pointer-reduction summary for '{function.getName()}' "
+            f"(pointer={pointer_param.get('name')}, count={count_param.get('name')}, "
+            f"stride={loop_shape['stride']}, element_size={loop_shape['element_size']})"
+        )
+        return summarized_returns, "readonly_pointer_reduction_summary"
+
+    def _infer_readonly_pointer_reduction_parameters(
+        self,
+        analysis,
+        high_function,
+    ) -> Tuple[Optional[dict], Optional[dict]]:
+        parameters = list(analysis.parameters or [])
+        if not parameters:
+            return None, None
+
+        pointer_ranked: List[Tuple[int, int, dict]] = []
+        for param in parameters:
+            score = self._readonly_pointer_candidate_score(
+                analysis,
+                high_function,
+                param,
+            )
+            if score <= 0:
+                continue
+            pointer_ranked.append((score, -int(param.get("index", 0) or 0), param))
+        pointer_ranked.sort(reverse=True)
+        pointer_param = pointer_ranked[0][2] if pointer_ranked else None
+
+        counter_ranked: List[Tuple[int, int, dict]] = []
+        for param in parameters:
+            if pointer_param is not None and int(param.get("index", -1)) == int(pointer_param.get("index", -2)):
+                continue
+            score = self._readonly_counter_candidate_score(analysis, param)
+            if score <= 0:
+                continue
+            counter_ranked.append((score, -int(param.get("index", 0) or 0), param))
+        counter_ranked.sort(reverse=True)
+        counter_param = counter_ranked[0][2] if counter_ranked else None
+
+        if pointer_param is None and counter_param is not None and len(parameters) == 2:
+            pointer_param = next(
+                (param for param in parameters if int(param.get("index", -1)) != int(counter_param.get("index", -1))),
+                None,
+            )
+        if counter_param is None and pointer_param is not None and len(parameters) == 2:
+            counter_param = next(
+                (param for param in parameters if int(param.get("index", -1)) != int(pointer_param.get("index", -1))),
+                None,
+            )
+        return pointer_param, counter_param
+
+    def _readonly_pointer_candidate_score(
+        self,
+        analysis,
+        high_function,
+        param: dict,
+    ) -> int:
+        score = 0
+        if is_pointer_data_type(
+            param.get("data_type_obj"),
+            param.get("data_type"),
+            program=getattr(self.tracer, "program", None),
+        ):
+            score += 8
+        if self._parameter_has_pointer_progression(high_function, param):
+            score += 6
+        if self._parameter_bases_memory_reads(analysis, param):
+            score += 4
+        if self._parameter_has_pointer_guards(analysis, param):
+            score += 1
+        return score
+
+    def _readonly_counter_candidate_score(
+        self,
+        analysis,
+        param: dict,
+    ) -> int:
+        score = 0
+        if self._parameter_can_be_counter(param):
+            score += 4
+        if self._analysis_mentions_parameter_in_conditions(analysis, str(param.get("name", "") or "")):
+            score += 3
+        return score
+
+    def _parameter_has_pointer_progression(
+        self,
+        high_function,
+        param: dict,
+    ) -> bool:
+        if high_function is None:
+            return False
+        for op in self._iter_pcode_ops(high_function):
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            if self._match_pointer_progression_phi(op, param) is not None:
+                return True
+        return False
+
+    def _parameter_bases_memory_reads(
+        self,
+        analysis,
+        param: dict,
+    ) -> bool:
+        for ret in analysis.returns or []:
+            for node in self._iter_expression_nodes(ret.value):
+                if node.expr_type == ExpressionType.MEMORY and node.operands:
+                    location = canonicalize_location(
+                        node.operands[0],
+                        analysis.parameters or [],
+                        size=max(1, int(getattr(node, "size", 0) or 0) or 1),
+                    )
+                    if location is not None and location.base_ref.matches_parameter(param):
+                        return True
+                if node.expr_type == ExpressionType.INTRINSIC and getattr(node, "name", None) == "PTRADD":
+                    base_name = self._parameter_name_from_expr(node.operands[0] if node.operands else None)
+                    if base_name and base_name == param.get("name"):
+                        return True
+        return False
+
+    def _parameter_has_pointer_guards(
+        self,
+        analysis,
+        param: dict,
+    ) -> bool:
+        pointer_name = str(param.get("name", "") or "")
+        if not pointer_name:
+            return False
+        for ret in analysis.returns or []:
+            for condition in ret.conditions or []:
+                if (
+                    self._condition_is_pointer_null(condition, pointer_name)
+                    or self._condition_is_pointer_nonnull(condition, pointer_name)
+                ):
+                    return True
+        return False
+
+    def _iter_expression_nodes(self, expr: Optional[Expression]):
+        if expr is None:
+            return
+        stack = [expr]
+        seen = set()
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            yield current
+            if current.expr_type == ExpressionType.PHI and current.value:
+                for cond, value in current.value:
+                    if cond is not None and getattr(cond, "expression", None) is not None:
+                        stack.append(cond.expression)
+                    if value is not None:
+                        stack.append(value)
+                continue
+            for operand in reversed(list(getattr(current, "operands", None) or [])):
+                stack.append(operand)
+
+    def _readonly_reduction_positive_conditions(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+    ) -> List[Condition]:
+        pointer_expr = self._parameter_expression(pointer_param)
+        count_expr = self._parameter_expression(count_param)
+        return [
+            Condition(
+                Expression.binary_op(
+                    "INT_NOTEQUAL",
+                    pointer_expr,
+                    Expression.constant(0, pointer_expr.size or 8),
+                ),
+                False,
+            ),
+            Condition(
+                Expression.binary_op(
+                    "INT_SLESS",
+                    Expression.constant(0, count_expr.size or 4),
+                    count_expr,
+                ),
+                False,
+            ),
+        ]
+
+    def _return_overlaps_conditions(
+        self,
+        ret: ReturnInfo,
+        conditions: Sequence[Condition],
+    ) -> bool:
+        return not ConditionSimplifier.object_centric_is_contradiction(
+            list(ret.conditions or []) + list(conditions or [])
+        )
+
+    def _detect_readonly_sum_loop_shape(
+        self,
+        high_function,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+    ) -> Optional[Dict[str, int]]:
+        if not self._analysis_mentions_parameter_in_conditions(
+            analysis,
+            count_param.get("name", ""),
+        ):
+            self._debug("Declined readonly reduction summary: counter not observed in guards")
+            return None
+
+        pointer_phis: List[Dict[str, object]] = []
+        index_phis: List[Dict[str, object]] = []
+        all_ops = list(self._iter_pcode_ops(high_function))
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            pointer_match = self._match_pointer_progression_phi(op, pointer_param)
+            if pointer_match is not None:
+                pointer_phis.append(pointer_match)
+            index_match = self._match_index_progression_phi(op)
+            if index_match is not None:
+                index_phis.append(index_match)
+
+        if not pointer_phis and not index_phis:
+            self._debug("Declined readonly reduction summary: no pointer/index progression PHI found")
+            return None
+
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            accumulator_match = self._match_accumulator_phi(
+                op,
+                pointer_param,
+                pointer_phis,
+                index_phis,
+            )
+            if accumulator_match is not None:
+                return accumulator_match
+        return None
+
+    def _analysis_mentions_parameter_in_conditions(
+        self,
+        analysis,
+        param_name: str,
+    ) -> bool:
+        if not param_name:
+            return False
+        for ret in analysis.returns or []:
+            for condition in ret.conditions or []:
+                relation = self._condition_relation(condition, param_name)
+                if relation is not None:
+                    return True
+                relation = self._parameter_comparison_relation(condition)
+                if relation is not None and param_name in relation[:3:2]:
+                    return True
+        return False
+
+    def _infer_readonly_sum_shape_from_positive_returns(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        positive_conditions: Sequence[Condition],
+    ) -> Optional[Dict[str, int]]:
+        stride_votes: Counter[Tuple[int, int]] = Counter()
+        count_name = count_param.get("name", "")
+        for ret in analysis.returns or []:
+            if not self._return_overlaps_conditions(ret, positive_conditions):
+                continue
+            coeffs = self._extract_linear_location_coefficients(
+                ret.value,
+                analysis.parameters or [],
+            )
+            if not coeffs:
+                continue
+            normalized_locations = sorted(coeffs.items(), key=lambda item: item[0].offset)
+            if any(coeff != 1 for _, coeff in normalized_locations):
+                continue
+            locations = [location for location, _coeff in normalized_locations]
+            if not locations:
+                continue
+            if any(
+                not location.base_ref.matches_parameter(pointer_param)
+                or getattr(location, "steps", ())
+                for location in locations
+            ):
+                continue
+            if locations[0].offset != 0:
+                continue
+            exact_count = self._exact_counter_value_from_conditions(ret.conditions, count_name)
+            if exact_count is None or exact_count != len(locations):
+                continue
+            if len(locations) == 1:
+                stride = max(1, int(locations[0].size))
+            else:
+                diffs = [right.offset - left.offset for left, right in zip(locations, locations[1:])]
+                if any(diff <= 0 for diff in diffs):
+                    continue
+                stride = diffs[0]
+                if any(diff != stride for diff in diffs[1:]):
+                    continue
+            stride_votes[(int(stride), int(locations[0].size))] += 1
+
+        if not stride_votes:
+            return None
+        (stride, element_size), _count = stride_votes.most_common(1)[0]
+        return {"stride": int(stride), "element_size": int(element_size)}
+
+    def _match_pointer_progression_phi(
+        self,
+        phi_op,
+        pointer_param: dict,
+    ) -> Optional[Dict[str, object]]:
+        output = getattr(phi_op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+
+        input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
+        for init_index in range(input_count):
+            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            if not self._varnode_matches_parameter(init_varnode, pointer_param.get("name", "")):
+                continue
+            for back_index in range(input_count):
+                if back_index == init_index:
+                    continue
+                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                step = self._extract_pointer_step(back_varnode, output)
+                if step is None or step <= 0:
+                    continue
+                return {
+                    "phi_output": output,
+                    "stride": int(step),
+                }
+        return None
+
+    def _match_index_progression_phi(
+        self,
+        phi_op,
+    ) -> Optional[Dict[str, object]]:
+        output = getattr(phi_op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+
+        input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
+        for init_index in range(input_count):
+            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            if self._varnode_constant_value(init_varnode) != 0:
+                continue
+            for back_index in range(input_count):
+                if back_index == init_index:
+                    continue
+                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                step = self._extract_index_step(back_varnode, output)
+                if step == 1:
+                    return {
+                        "phi_output": output,
+                        "step": 1,
+                    }
+        return None
+
+    def _match_accumulator_phi(
+        self,
+        phi_op,
+        pointer_param: dict,
+        pointer_phis: Sequence[Dict[str, object]],
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[Dict[str, int]]:
+        output = getattr(phi_op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+
+        input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
+        for init_index in range(input_count):
+            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            if self._varnode_constant_value(init_varnode) != 0:
+                continue
+            for back_index in range(input_count):
+                if back_index == init_index:
+                    continue
+                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                back_def = getattr(back_varnode, "getDef", lambda: None)()
+                if back_def is None or getattr(back_def, "getMnemonic", lambda: None)() != "INT_ADD":
+                    continue
+                input0 = self._follow_passthrough_varnode(back_def.getInput(0))
+                input1 = self._follow_passthrough_varnode(back_def.getInput(1))
+                if self._same_varnode_value(input0, output):
+                    addend_varnode = input1
+                elif self._same_varnode_value(input1, output):
+                    addend_varnode = input0
+                else:
+                    continue
+                load_progressions = self._collect_load_progressions_from_varnode(
+                    addend_varnode,
+                    pointer_param,
+                    pointer_phis,
+                    index_phis,
+                )
+                if not load_progressions:
+                    continue
+                first = load_progressions[0]
+                if any(
+                    signature["stride"] != first["stride"]
+                    or signature["element_size"] != first["element_size"]
+                    for signature in load_progressions[1:]
+                ):
+                    continue
+                return {
+                    "stride": int(first["stride"]),
+                    "element_size": int(first["element_size"]),
+                }
+        return None
+
+    def _collect_load_progressions_from_varnode(
+        self,
+        varnode,
+        pointer_param: dict,
+        pointer_phis: Sequence[Dict[str, object]],
+        index_phis: Sequence[Dict[str, object]],
+        depth: int = 0,
+    ) -> List[Dict[str, int]]:
+        if varnode is None or depth > 8:
+            return []
+        varnode = self._follow_passthrough_varnode(varnode)
+        if self._varnode_constant_value(varnode) == 0:
+            return []
+
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is None:
+            return []
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "LOAD":
+            signature = self._match_load_progression(
+                def_op,
+                pointer_param,
+                pointer_phis,
+                index_phis,
+            )
+            return [signature] if signature is not None else []
+        if mnemonic == "INT_ADD":
+            left = self._collect_load_progressions_from_varnode(
+                def_op.getInput(0),
+                pointer_param,
+                pointer_phis,
+                index_phis,
+                depth + 1,
+            )
+            right = self._collect_load_progressions_from_varnode(
+                def_op.getInput(1),
+                pointer_param,
+                pointer_phis,
+                index_phis,
+                depth + 1,
+            )
+            if left or right:
+                return left + right
+        return []
+
+    def _match_load_progression(
+        self,
+        load_op,
+        pointer_param: dict,
+        pointer_phis: Sequence[Dict[str, object]],
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[Dict[str, int]]:
+        output = getattr(load_op, "getOutput", lambda: None)()
+        load_size = max(1, int(getattr(output, "getSize", lambda: 4)() or 4))
+        address_varnode = self._follow_passthrough_varnode(load_op.getInput(1))
+
+        for pointer_info in pointer_phis:
+            if self._same_varnode_value(address_varnode, pointer_info["phi_output"]):
+                return {
+                    "stride": int(pointer_info["stride"]),
+                    "element_size": load_size,
+                }
+
+        address_def = getattr(address_varnode, "getDef", lambda: None)()
+        if address_def is None:
+            return None
+        mnemonic = getattr(address_def, "getMnemonic", lambda: None)()
+        if mnemonic == "PTRADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 3:
+            base_input = self._follow_passthrough_varnode(address_def.getInput(0))
+            index_input = self._follow_passthrough_varnode(address_def.getInput(1))
+            elem_size = self._varnode_constant_value(self._follow_passthrough_varnode(address_def.getInput(2)))
+            if (
+                elem_size is not None
+                and elem_size > 0
+                and self._varnode_matches_parameter(base_input, pointer_param.get("name", ""))
+                and self._matches_index_progression(index_input, index_phis)
+            ):
+                return {
+                    "stride": int(elem_size),
+                    "element_size": load_size,
+                }
+        if mnemonic == "INT_ADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(address_def.getInput(0))
+            right = self._follow_passthrough_varnode(address_def.getInput(1))
+            for pointer_info in pointer_phis:
+                if self._same_varnode_value(left, pointer_info["phi_output"]) and self._varnode_constant_value(right) == 0:
+                    return {
+                        "stride": int(pointer_info["stride"]),
+                        "element_size": load_size,
+                    }
+                if self._same_varnode_value(right, pointer_info["phi_output"]) and self._varnode_constant_value(left) == 0:
+                    return {
+                        "stride": int(pointer_info["stride"]),
+                        "element_size": load_size,
+                    }
+            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
+                scaled = self._scaled_index_stride(right, index_phis)
+                if scaled is not None and scaled > 0:
+                    return {
+                        "stride": int(scaled),
+                        "element_size": load_size,
+                    }
+            if self._varnode_matches_parameter(right, pointer_param.get("name", "")):
+                scaled = self._scaled_index_stride(left, index_phis)
+                if scaled is not None and scaled > 0:
+                    return {
+                        "stride": int(scaled),
+                        "element_size": load_size,
+                    }
+        return None
+
+    def _matches_index_progression(
+        self,
+        varnode,
+        index_phis: Sequence[Dict[str, object]],
+    ) -> bool:
+        varnode = self._follow_passthrough_varnode(varnode)
+        return any(self._same_varnode_value(varnode, info["phi_output"]) for info in index_phis)
+
+    def _scaled_index_stride(
+        self,
+        varnode,
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[int]:
+        varnode = self._follow_passthrough_varnode(varnode)
+        if self._matches_index_progression(varnode, index_phis):
+            return 1
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._matches_index_progression(left, index_phis):
+                return self._varnode_constant_value(right)
+            if self._matches_index_progression(right, index_phis):
+                return self._varnode_constant_value(left)
+        if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            shifted = self._follow_passthrough_varnode(def_op.getInput(0))
+            shift_bits = self._varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+            if self._matches_index_progression(shifted, index_phis) and shift_bits is not None and shift_bits >= 0:
+                return 1 << int(shift_bits)
+        return None
+
+    def _extract_pointer_step(
+        self,
+        varnode,
+        phi_output,
+    ) -> Optional[int]:
+        varnode = self._follow_passthrough_varnode(varnode)
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "PTRADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+            base = self._follow_passthrough_varnode(def_op.getInput(0))
+            index = self._follow_passthrough_varnode(def_op.getInput(1))
+            element_size = self._varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+            index_value = self._varnode_constant_value(index)
+            if (
+                self._same_varnode_value(base, phi_output)
+                and element_size is not None
+                and index_value is not None
+            ):
+                return int(element_size) * int(index_value)
+        if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._same_varnode_value(left, phi_output):
+                return self._varnode_constant_value(right)
+            if self._same_varnode_value(right, phi_output):
+                return self._varnode_constant_value(left)
+        return None
+
+    def _extract_index_step(
+        self,
+        varnode,
+        phi_output,
+    ) -> Optional[int]:
+        varnode = self._follow_passthrough_varnode(varnode)
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_ADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._same_varnode_value(left, phi_output):
+                return self._varnode_constant_value(right)
+            if self._same_varnode_value(right, phi_output):
+                return self._varnode_constant_value(left)
+        return None
+
+    def _follow_passthrough_varnode(self, varnode):
+        current = varnode
+        seen = set()
+        passthrough = {"COPY", "CAST", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            def_op = getattr(current, "getDef", lambda: None)()
+            if def_op is None:
+                break
+            if getattr(def_op, "getMnemonic", lambda: None)() not in passthrough:
+                break
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+            if input_count <= 0:
+                break
+            current = def_op.getInput(0)
+        return current
+
+    def _same_varnode_value(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        try:
+            if left == right:
+                return True
+        except Exception:
+            pass
+        left_high = getattr(left, "getHigh", lambda: None)()
+        right_high = getattr(right, "getHigh", lambda: None)()
+        if left_high is not None and right_high is not None:
+            if left_high is right_high:
+                return True
+            left_rep = getattr(left_high, "getRepresentative", lambda: None)()
+            right_rep = getattr(right_high, "getRepresentative", lambda: None)()
+            if left_rep is not None and left_rep is right_rep:
+                return True
+        return False
+
+    def _varnode_matches_parameter(
+        self,
+        varnode,
+        param_name: str,
+    ) -> bool:
+        expr = self._trace_varnode_expression(varnode)
+        return self._parameter_name_from_expr(expr) == param_name
+
+    def _varnode_constant_value(
+        self,
+        varnode,
+    ) -> Optional[int]:
+        expr = self._trace_varnode_expression(varnode)
+        return self._raw_constant_value(expr)
+
+    def _trace_varnode_expression(
+        self,
+        varnode,
+    ) -> Optional[Expression]:
+        if varnode is None:
+            return None
+        try:
+            return self.tracer.trace_varnode(varnode, 0, use_cache=False)
+        except TypeError:
+            try:
+                return self.tracer.trace_varnode(varnode, use_cache=False)
+            except Exception:
+                return None
+        except Exception:
+            return None
 
     def _try_summarize_branch_accumulator_loop(
         self,
@@ -1215,6 +2002,65 @@ class StructuralRecurrenceSummarizer:
             if relation is None:
                 return None
         return relation, constant
+
+    def _exact_counter_value_from_conditions(
+        self,
+        conditions: Sequence[Condition],
+        param_name: str,
+    ) -> Optional[int]:
+        for condition in conditions or []:
+            expr = getattr(condition, "expression", None)
+            if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+                continue
+            operator = getattr(expr, "operator", None)
+            left, right = expr.operands
+            right_const = self._constant_value(right)
+            left_const = self._constant_value(left)
+            if self._is_condition_counter_view(left, param_name) and right_const is not None:
+                if operator == "INT_EQUAL" and not condition.negated:
+                    return right_const
+                if operator == "INT_NOTEQUAL" and condition.negated:
+                    return right_const
+            if self._is_condition_counter_view(right, param_name) and left_const is not None:
+                if operator == "INT_EQUAL" and not condition.negated:
+                    return left_const
+                if operator == "INT_NOTEQUAL" and condition.negated:
+                    return left_const
+            affine_left = self._solve_counter_affine_equality(left, right_const, operator, condition.negated, param_name)
+            if affine_left is not None:
+                return affine_left
+            affine_right = self._solve_counter_affine_equality(right, left_const, operator, condition.negated, param_name)
+            if affine_right is not None:
+                return affine_right
+        return None
+
+    def _solve_counter_affine_equality(
+        self,
+        expr: Optional[Expression],
+        other_const: Optional[int],
+        operator: Optional[str],
+        negated: bool,
+        param_name: str,
+    ) -> Optional[int]:
+        if (
+            expr is None
+            or other_const is None
+            or operator not in {"INT_EQUAL", "INT_NOTEQUAL"}
+        ):
+            return None
+        if operator == "INT_EQUAL" and negated:
+            return None
+        if operator == "INT_NOTEQUAL" and not negated:
+            return None
+
+        bit_width_hint = self._infer_counter_bit_width(expr, param_name)
+        affine = self._extract_affine_term(expr, param_name, bit_width_hint=bit_width_hint)
+        if affine is None:
+            return None
+        coeff, bias = affine
+        if coeff != 1:
+            return None
+        return other_const - bias
 
     def _parameter_comparison_relation(self, condition: Condition) -> Optional[Tuple[str, str, str]]:
         expr = getattr(condition, "expression", None)

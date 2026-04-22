@@ -4,7 +4,14 @@
 from typing import Any, Dict, List, Optional
 import time
 
-from ...model import Condition, Expression, FunctionReturnAnalysis, ExpressionType
+from ...model import (
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    READONLY_SUM_OPCODE,
+    ReadonlyReductionRef,
+)
 from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...smt import ParallelResult, SolverResult, SolverStatus
@@ -81,7 +88,19 @@ class PairwiseStrategy(CheckStrategy):
     ) -> StrategyResult:
         start_time = time.time()
 
-        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        solver_analysis1 = normalize_analysis_semantic_width(
+            analysis1,
+            infer_parameter_semantics(analysis1),
+        )
+        solver_analysis2 = normalize_analysis_semantic_width(
+            analysis2,
+            infer_parameter_semantics(analysis2),
+        )
+
+        base_ctx = self.formula_builder.build_base_context(
+            solver_analysis1,
+            solver_analysis2,
+        )
         safety_checker = ExpressionSafetyChecker(
             solver_runner=self.solver_runner,
             debug_print=self._debug_print,
@@ -94,8 +113,8 @@ class PairwiseStrategy(CheckStrategy):
             analysis2,
         )
 
-        cases1 = self._extract_return_cases(analysis1)
-        cases2 = self._extract_return_cases(analysis2)
+        cases1 = self._extract_return_cases(solver_analysis1)
+        cases2 = self._extract_return_cases(solver_analysis2)
 
         self._rewrite_cases_with_parameter_fragments(cases1, base_ctx.get("extra_vars1", []))
         self._rewrite_cases_with_parameter_fragments(cases2, base_ctx.get("extra_vars2", []))
@@ -198,6 +217,14 @@ class PairwiseStrategy(CheckStrategy):
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
+                        )
+                    continue
+                if self._cases_have_equivalent_runtime_reductions(case1, case2):
+                    unsat_count += 1
+                    if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
+                        self._debug_print(
+                            f"  Pair {pair_id}: object-centric readonly reduction match -> UNSAT "
+                            f"({unsat_count}/{total_pairs})"
                         )
                     continue
                 if self._case_contains_unresolved_expression(
@@ -366,6 +393,36 @@ class PairwiseStrategy(CheckStrategy):
             param_replace_fn2,
             pair_id,
         )
+
+    def _cases_have_equivalent_runtime_reductions(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> bool:
+        return self._readonly_reduction_values_equivalent(case1.value_expr, case2.value_expr)
+
+    def _readonly_reduction_values_equivalent(
+        self,
+        left: Expression,
+        right: Expression,
+    ) -> bool:
+        left_ref = self._readonly_reduction_ref(left)
+        right_ref = self._readonly_reduction_ref(right)
+        if left_ref is None or right_ref is None:
+            return False
+        return left_ref.comparison_key() == right_ref.comparison_key()
+
+    def _readonly_reduction_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
+        if expr is None or expr.expr_type != ExpressionType.INTRINSIC:
+            return None
+        opcode = getattr(expr, "opcode", None)
+        mnemonic = getattr(expr, "name", None) or ""
+        if opcode != READONLY_SUM_OPCODE and mnemonic != "READONLY_SUM":
+            return None
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(runtime_ref, ReadonlyReductionRef):
+            return runtime_ref
+        return None
 
     def _try_normalization_equivalence(
         self,

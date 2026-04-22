@@ -9,6 +9,7 @@ from typing import Dict, Optional
 
 PTRADD_OPCODE = 65
 PTRSUB_OPCODE = 66
+READONLY_SUM_OPCODE = 4097
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,12 @@ _INTRINSIC_SPECS = (
     PcodeIntrinsicSpec(
         opcode=PTRSUB_OPCODE,
         mnemonic="PTRSUB",
+        arity=2,
+        smt_lowerable=True,
+    ),
+    PcodeIntrinsicSpec(
+        opcode=READONLY_SUM_OPCODE,
+        mnemonic="READONLY_SUM",
         arity=2,
         smt_lowerable=True,
     ),

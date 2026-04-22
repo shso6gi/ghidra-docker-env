@@ -539,6 +539,85 @@ class ObservedMemoryReadRef:
 
 
 @dataclass(frozen=True)
+class ReadonlyReductionRef:
+    """Structured identity for a readonly pointer-reduction summary."""
+
+    reduction_kind: str
+    pointer_base_ref: LocationBaseRef
+    count_parameter_name: str
+    count_parameter_index: Optional[int] = None
+    stride: int = 0
+    element_size: int = 0
+    result_size: int = 0
+    start_offset: int = 0
+    signed_counter: bool = True
+    source: str = "recurrence_summary"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "readonly_reduction",
+            self.reduction_kind,
+            self.pointer_base_ref.stable_key(),
+            self.count_parameter_name,
+            None if self.count_parameter_index is None else int(self.count_parameter_index),
+            int(self.stride),
+            int(self.element_size),
+            int(self.result_size),
+            int(self.start_offset),
+            bool(self.signed_counter),
+            self.source,
+        )
+
+    def comparison_key(self) -> Tuple[Any, ...]:
+        """Semantic identity used when comparing solver-visible readonly reductions.
+
+        The iteration shape (`stride` / `element_size`) is intentionally excluded.
+        Those fields describe one concrete lowered loop shape, while equivalence
+        checking needs the source-level reduction identity over the same input
+        objects and counter domain.
+        """
+
+        counter_id: Any
+        if self.count_parameter_index is not None:
+            counter_id = ("index", int(self.count_parameter_index))
+        else:
+            counter_id = ("name", self.count_parameter_name)
+        return (
+            "readonly_reduction_semantic",
+            self.reduction_kind,
+            self.pointer_base_ref.stable_key(),
+            counter_id,
+            int(self.start_offset),
+            int(self.result_size),
+        )
+
+    def display_name(self) -> str:
+        return (
+            f"{self.reduction_kind}("
+            f"{self.pointer_base_ref.display_name()},"
+            f"{self.count_parameter_name},"
+            f"stride={int(self.stride)},"
+            f"elem={int(self.element_size)})"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "readonly_reduction",
+            "reduction_kind": self.reduction_kind,
+            "pointer_base_ref": self.pointer_base_ref.to_dict(),
+            "count_parameter_name": self.count_parameter_name,
+            "count_parameter_index": self.count_parameter_index,
+            "stride": int(self.stride),
+            "element_size": int(self.element_size),
+            "result_size": int(self.result_size),
+            "start_offset": int(self.start_offset),
+            "signed_counter": bool(self.signed_counter),
+            "source": self.source,
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
 

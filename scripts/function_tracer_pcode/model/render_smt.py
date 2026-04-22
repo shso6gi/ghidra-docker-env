@@ -6,12 +6,19 @@ import re
 from typing import Any, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
+    READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
     is_supported_pcode_intrinsic,
 )
 from .signature import get_declared_type_signedness
-from .runtime_refs import AddressValueRef, CanonicalLocation, PostStateReadRef, PostStateValueRef
+from .runtime_refs import (
+    AddressValueRef,
+    CanonicalLocation,
+    PostStateReadRef,
+    PostStateValueRef,
+    ReadonlyReductionRef,
+)
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -115,10 +122,14 @@ def expression_smt_bit_width(expr) -> int:
 
     if expr_type == expr_kind.INTRINSIC:
         explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        opcode = getattr(expr, "opcode", None)
+        mnemonic = getattr(expr, "name", None) or ""
         operand_bits = max(
             (expression_smt_bit_width(operand) for operand in getattr(expr, "operands", []) or []),
             default=0,
         )
+        if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
+            return explicit_bits or operand_bits
         return max(explicit_bits, operand_bits)
 
     if expr_type == expr_kind.UNARY_OP:
@@ -264,6 +275,24 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
         if decl is None:
             continue
         if decl in seen:
+            continue
+        seen.add(decl)
+        declarations.append(decl)
+    return declarations
+
+
+def collect_intrinsic_smt_declarations(expr) -> List[str]:
+    """Collect deterministic SMT declarations needed for supported intrinsic applications."""
+    declarations: List[str] = []
+    seen = set()
+    for node in _iter_expression_nodes(expr):
+        if node is None or getattr(node, "expr_type", None) is None:
+            continue
+        expr_kind = node.expr_type.__class__
+        if node.expr_type != expr_kind.INTRINSIC:
+            continue
+        decl = _intrinsic_smt_declaration(node)
+        if decl is None or decl in seen:
             continue
         seen.add(decl)
         declarations.append(decl)
@@ -464,6 +493,58 @@ def _unknown_smt_symbol_name(expr) -> str:
 def _unknown_smt_declaration(expr) -> Tuple[str, int]:
     bits = max(1, int(expression_smt_bit_width(expr) or 1))
     return (_unknown_smt_symbol_name(expr), bits)
+
+
+def _readonly_reduction_ref(expr) -> Optional[ReadonlyReductionRef]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, ReadonlyReductionRef):
+        return runtime_ref
+    return None
+
+
+def _readonly_sum_function_name(expr) -> str:
+    operands = getattr(expr, "operands", None) or []
+    base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
+    count_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
+    result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+    reduction_ref = _readonly_reduction_ref(expr)
+    if reduction_ref is None:
+        return f"rt_readonly_sum_{base_bits}_{count_bits}_{result_bits}"
+    reduction_kind = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.reduction_kind or "sum")
+    base_name = re.sub(
+        r"[^A-Za-z0-9_]+",
+        "_",
+        reduction_ref.pointer_base_ref.display_name() or "ptr",
+    )
+    if reduction_ref.count_parameter_index is not None:
+        counter_id = f"c{int(reduction_ref.count_parameter_index)}"
+    else:
+        counter_id = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.count_parameter_name or "count")
+    return (
+        f"rt_{reduction_kind}_{base_name}_"
+        f"{counter_id}_o{int(reduction_ref.start_offset)}_"
+        f"{base_bits}_{count_bits}_{result_bits}"
+    )
+
+
+def _intrinsic_smt_declaration(expr) -> Optional[str]:
+    opcode = getattr(expr, "opcode", None)
+    mnemonic = getattr(expr, "name", None) or ""
+    operands = getattr(expr, "operands", None) or []
+
+    if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
+        if len(operands) != 2:
+            raise ValueError(f"READONLY_SUM expects 2 operands, got {len(operands)}")
+        base_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+        count_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+        result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+        return (
+            f"(declare-fun {_readonly_sum_function_name(expr)} "
+            f"((_ BitVec {base_bits}) (_ BitVec {count_bits})) "
+            f"(_ BitVec {result_bits}))"
+        )
+
+    return None
 
 
 def _to_smt_internal(
@@ -867,6 +948,33 @@ def _lower_intrinsic_to_smt(
         base_smt = _coerce_expr_to_bitvec_width(base, base_smt, target_bits)
         offset_smt = _coerce_expr_to_bitvec_width(offset, offset_smt, target_bits)
         return f"(bvadd {base_smt} {offset_smt})"
+
+    if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
+        if len(operands) != 2:
+            raise ValueError(f"READONLY_SUM expects 2 operands, got {len(operands)}")
+        base, count = operands
+        base_bits = max(1, int(expression_smt_bit_width(base) or 1))
+        count_bits = max(1, int(expression_smt_bit_width(count) or 1))
+        base_smt = _to_smt_internal(
+            base,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            True,
+        )
+        count_smt = _to_smt_internal(
+            count,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
+        count_smt = _coerce_expr_to_bitvec_width(
+            count,
+            count_smt,
+            count_bits,
+            prefer_sign_extension=_expr_prefers_signed_extension(count),
+        )
+        return f"({_readonly_sum_function_name(expr)} {base_smt} {count_smt})"
 
     raise ValueError(
         f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"

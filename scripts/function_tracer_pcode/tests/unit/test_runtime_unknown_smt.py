@@ -15,10 +15,16 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     DeferredCallRef,
     Expression,
+    LocationBaseRef,
+    READONLY_SUM_OPCODE,
+    ReadonlyReductionRef,
     ReturnInfo,
     UnknownValueRef,
 )
-from scripts.function_tracer_pcode.model.render_smt import collect_unknown_smt_declarations
+from scripts.function_tracer_pcode.model.render_smt import (
+    collect_intrinsic_smt_declarations,
+    collect_unknown_smt_declarations,
+)
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -63,6 +69,55 @@ def test_pairwise_query_declares_runtime_unknown_symbols():
     assert f"(declare-const {declared_symbol} (_ BitVec 32))" in "\n".join(base_ctx["header_lines"])
     assert f"(declare-const {declared_symbol} (_ BitVec 32))" in query
     assert " unknown" not in query
+
+
+def test_formula_builder_declares_object_centric_readonly_reduction_functions():
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("param_1", index=0, data_type="int *", size=8),
+            Expression.parameter("param_2", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+            count_parameter_name="param_2",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "int *"},
+            {"name": "param_2", "size": 4, "data_type": "int"},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=reduction_expr, conditions=[], branch_index=0)],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "int *"},
+            {"name": "param_2", "size": 4, "data_type": "int"},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
+    )
+
+    assert collect_intrinsic_smt_declarations(reduction_expr) == [
+        "(declare-fun rt_readonly_sum_param_1_c1_o0_64_32_32 ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
+    ]
+
+    builder = FormulaBuilder()
+    base_ctx = builder.build_base_context(analysis1, analysis2)
+    header_text = "\n".join(base_ctx["header_lines"])
+
+    assert "Intrinsic function declarations" in header_text
+    assert "rt_readonly_sum_param_1_c1_o0_64_32_32" in header_text
 
 
 def test_tracer_promotes_unresolved_direct_call_to_deferred_call_runtime_object():
