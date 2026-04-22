@@ -18,6 +18,14 @@ from .smt_oracle import ConditionSMTOracle
 
 BooleanAtom = Tuple[object, str, object]
 BooleanLiteral = Tuple[BooleanAtom, bool]
+_CONDITION_RECOVERABLE_ERRORS = (
+    AttributeError,
+    IndexError,
+    KeyError,
+    TypeError,
+    ValueError,
+    RecursionError,
+)
 
 
 @dataclass(frozen=True)
@@ -165,11 +173,11 @@ class ConditionSimplifier:
             if condition is None:
                 return 0
             return hash(condition.structural_key(budget=96))
-        except Exception:
+        except _CONDITION_RECOVERABLE_ERRORS:
             try:
                 expr = getattr(condition, "expression", None)
                 return hash((bool(getattr(condition, "negated", False)), id(expr)))
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 return 0
 
     @classmethod
@@ -187,7 +195,7 @@ class ConditionSimplifier:
                 key = condition_key(condition, budget=budget)
                 if key_contains_placeholder(key):
                     key = ("placeholder", cls._safe_condition_id(condition))
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 key = ("unsafe", cls._safe_condition_id(condition))
             keys.append(key)
         keys.sort(key=repr)
@@ -207,7 +215,7 @@ class ConditionSimplifier:
                 continue
             try:
                 signature = condition.structural_key(budget=budget)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 signature = ("unsafe", cls._safe_condition_id(condition))
             signatures.append(signature)
         signatures.sort()
@@ -521,14 +529,14 @@ class ConditionSimplifier:
         if cls._should_use_solver_reasoning(condition_list):
             try:
                 cache_key = ("unsat", cls._safe_condition_cache_key(condition_list))
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 cache_key = ("unsat",)
             try:
                 solver_result = ConditionSMTOracle.conjunction_is_unsat(
                     condition_list,
                     cache_key=cache_key,
                 )
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 solver_result = None
             if solver_result is not None:
                 return solver_result
@@ -553,7 +561,7 @@ class ConditionSimplifier:
                 cls._safe_condition_cache_key(context_list),
                 cls._safe_condition_cache_key([negated_condition]),
             )
-        except Exception:
+        except _CONDITION_RECOVERABLE_ERRORS:
             return None
 
         if cache_key in cls._formula_implies_cache:
@@ -570,7 +578,7 @@ class ConditionSimplifier:
         try:
             try:
                 use_solver = cls._should_use_solver_reasoning(implication_conditions)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 use_solver = False
 
             if use_solver:
@@ -579,14 +587,14 @@ class ConditionSimplifier:
                         implication_conditions,
                         cache_key=cache_key,
                     )
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     solver_result = None
                 if solver_result is not None:
                     result = solver_result
                 else:
                     try:
                         clauses = cls._conditions_to_cnf_clauses(implication_conditions)
-                    except Exception:
+                    except _CONDITION_RECOVERABLE_ERRORS:
                         clauses = None
                     if clauses is None:
                         result = None
@@ -594,12 +602,12 @@ class ConditionSimplifier:
                         try:
                             clause_literals = [clause.literals for clause in clauses]
                             result = not cls._clauses_are_satisfiable(clause_literals)
-                        except Exception:
+                        except _CONDITION_RECOVERABLE_ERRORS:
                             result = None
             else:
                 try:
                     clauses = cls._conditions_to_cnf_clauses(implication_conditions)
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     clauses = None
                 if clauses is None:
                     result = None
@@ -607,7 +615,7 @@ class ConditionSimplifier:
                     try:
                         clause_literals = [clause.literals for clause in clauses]
                         result = not cls._clauses_are_satisfiable(clause_literals)
-                    except Exception:
+                    except _CONDITION_RECOVERABLE_ERRORS:
                         result = None
         finally:
             cls._active_formula_implies_keys.discard(cache_key)
@@ -1003,13 +1011,13 @@ class ConditionSimplifier:
 
             try:
                 normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 continue
             implied.add(normalized)
 
             try:
                 expr = getattr(condition, "expression", None)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 expr = None
             if (
                 not getattr(condition, "negated", False)
@@ -1022,14 +1030,14 @@ class ConditionSimplifier:
                     if operand is not None:
                         try:
                             stack.append(Condition(operand, False))
-                        except Exception:
+                        except _CONDITION_RECOVERABLE_ERRORS:
                             continue
 
         clauses = []
         if not any(cls._condition_contains_solver_opaque_node(condition) for condition in (conditions or [])):
             try:
                 clauses = cls._conditions_to_cnf_clauses(conditions)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 clauses = None
         else:
             clauses = None
@@ -1048,7 +1056,7 @@ class ConditionSimplifier:
                     continue
                 try:
                     implied.add((left, op, right, polarity))
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     pass
 
         return implied
@@ -1116,7 +1124,7 @@ class ConditionSimplifier:
             implied_conditions = implied_conditions or set()
             try:
                 normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 normalized = None
             if normalized is not None and normalized in implied_conditions:
                 return _store_implied_cache(True)
@@ -1128,7 +1136,7 @@ class ConditionSimplifier:
                         scalar_fact,
                         list(context_list or []),
                     )
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     scalar_implied = False
                 if scalar_implied:
                     return _store_implied_cache(True)
@@ -1161,7 +1169,7 @@ class ConditionSimplifier:
                             try:
                                 left = Condition(operands[0], False)
                                 right = Condition(operands[1], False)
-                            except Exception:
+                            except _CONDITION_RECOVERABLE_ERRORS:
                                 return _store_implied_cache(False)
                             stack.append(left)
                             stack.append(right)
@@ -1170,7 +1178,7 @@ class ConditionSimplifier:
                     try:
                         if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
                             return _store_implied_cache(False)
-                    except Exception:
+                    except _CONDITION_RECOVERABLE_ERRORS:
                         return _store_implied_cache(False)
                 return _store_implied_cache(True)
 
@@ -1191,7 +1199,7 @@ class ConditionSimplifier:
 
             try:
                 fact = cls._extract_scalar_constraint(cond)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 continue
 
             if fact is None:
@@ -1418,9 +1426,8 @@ class ConditionSimplifier:
                             0,
                             max(1, expr.get_bit_width()),
                         )
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     pass
-
             if expr.expr_type == ExpressionType.PHI and expr.value:
                 implied = cls._collect_implied_condition_norms(conditions)
 
@@ -1599,7 +1606,7 @@ class ConditionSimplifier:
 
                 try:
                     canonical = ConditionNormalizer.normalize_for_contradiction(cond)
-                except Exception:
+                except _CONDITION_RECOVERABLE_ERRORS:
                     canonical = None
                 if canonical is None:
                     current_index = len(unique_conditions)
@@ -1789,7 +1796,7 @@ class ConditionSimplifier:
         for cond in flattened:
             try:
                 key = cls._safe_condition_cache_key([cond], budget=128)[0]
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 key = ("unsafe", cls._safe_condition_id(cond))
             if key in seen_keys:
                 continue
@@ -1822,7 +1829,7 @@ class ConditionSimplifier:
     ) -> Tuple[object, ...]:
         try:
             keys = list(cls._safe_condition_cache_key((conditions or []), budget=96))
-        except Exception:
+        except _CONDITION_RECOVERABLE_ERRORS:
             keys = [("unsafe",)]
         keys.sort(key=lambda value: repr(value))
         return tuple(keys)
@@ -1846,7 +1853,7 @@ class ConditionSimplifier:
                 continue
             try:
                 key = condition_key(cond, budget=96)
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 key = ("unsafe", cls._safe_condition_id(cond))
             if key_contains_placeholder(key):
                 return True
@@ -2065,7 +2072,7 @@ class ConditionSimplifier:
         for condition in cls.build_object_centric_condition_basis(conditions):
             try:
                 signature.append(condition.structural_key(budget=256))
-            except Exception:
+            except _CONDITION_RECOVERABLE_ERRORS:
                 signature.append(("unsafe", cls._safe_condition_id(condition)))
         signature.sort(key=repr)
         return tuple(signature)
@@ -2081,7 +2088,7 @@ class ConditionSimplifier:
 
         try:
             unsat_cache_key = ("raw-unsat", cls._safe_condition_cache_key(basis))
-        except Exception:
+        except _CONDITION_RECOVERABLE_ERRORS:
             unsat_cache_key = ("raw-unsat",)
         solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
             basis,

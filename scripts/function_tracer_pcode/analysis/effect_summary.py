@@ -89,7 +89,7 @@ def _runtime_expression_signature(expr: Optional[Expression]):
 
 
 def _runtime_conditions_signature(conditions: Sequence[Condition]):
-    return ConditionNormalizer.conditions_signature(conditions)
+    return ConditionSimplifier.object_centric_conditions_signature(conditions)
 
 
 def _encode_signed_token(value: int) -> str:

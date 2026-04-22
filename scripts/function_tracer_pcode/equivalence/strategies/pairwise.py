@@ -410,7 +410,7 @@ class PairwiseStrategy(CheckStrategy):
         right_ref = self._readonly_reduction_ref(right)
         if left_ref is None or right_ref is None:
             return False
-        return left_ref.comparison_key() == right_ref.comparison_key()
+        return left_ref.stable_key() == right_ref.stable_key()
 
     def _readonly_reduction_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
         if expr is None or expr.expr_type != ExpressionType.INTRINSIC:
@@ -676,7 +676,7 @@ class PairwiseStrategy(CheckStrategy):
         combined_conditions = list(case1.conditions) + list(case2.conditions)
         if not combined_conditions:
             return False
-        return ConditionSimplifier.is_contradiction(combined_conditions)
+        return ConditionSimplifier.object_centric_is_contradiction(combined_conditions)
 
     def _case_contains_unresolved_expression(
         self,

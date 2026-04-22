@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 
 from ...model import FunctionReturnAnalysis
 from ...analysis.condition.simplifier import ConditionSimplifier
-from ...analysis.condition.normalizer import ConditionNormalizer
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ..normalize import normalize_expression, NormalizationContext, NormalizationSettings
 from ..formula.returns import (
@@ -62,7 +61,12 @@ def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
     """分岐ケースの統合キーを生成する"""
     cond_key = _build_object_centric_condition_signature(case.conditions)
     key_expr = getattr(case, "normalized_value_expr", None) or case.value_expr
-    value_key = ConditionNormalizer.expression_signature(key_expr)
+    value_key = key_expr.structural_key(
+        budget=256,
+        normalize_commutative=True,
+        include_memory_read_order=True,
+        include_semantic_runtime_refs=True,
+    )
     return cond_key, value_key
 
 
@@ -89,7 +93,7 @@ def _condition_region_is_unsat(conditions) -> bool:
     if solver_unsat is not None:
         return solver_unsat
 
-    return ConditionSimplifier.is_contradiction(condition_list)
+    return ConditionSimplifier.object_centric_is_contradiction(condition_list)
 
 
 def _build_object_centric_condition_signature(conditions) -> Tuple[tuple, ...]:

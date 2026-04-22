@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ...model.structural import condition_key, key_contains_placeholder
 from ...model.render_smt import (
     collect_unknown_smt_declarations,
     normalize_call_symbol_name,
@@ -24,6 +25,14 @@ class ConditionSMTOracle:
     _available = False
     _z3: Any = None
     _unsat_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
+    _RECOVERABLE_KEY_ERRORS = (
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -49,7 +58,7 @@ class ConditionSMTOracle:
         if not usable or script is None:
             return None
 
-        query_key = cache_key or ("unsat", tuple(condition.to_smt() for condition in conditions))
+        query_key = cache_key or cls._build_cache_key(conditions)
         cached = cls._unsat_cache.get(query_key)
         if cached is not None:
             return cached
@@ -81,6 +90,24 @@ class ConditionSMTOracle:
         if len(cls._unsat_cache) >= cls._CACHE_LIMIT:
             cls._unsat_cache.clear()
         cls._unsat_cache[key] = value
+
+    @classmethod
+    def _safe_condition_cache_component(cls, condition) -> Tuple[object, ...]:
+        try:
+            key = condition_key(condition, budget=96)
+            if key_contains_placeholder(key):
+                return ("placeholder", id(condition))
+            return key
+        except cls._RECOVERABLE_KEY_ERRORS:
+            expr = getattr(condition, "expression", None)
+            negated = bool(getattr(condition, "negated", False))
+            return ("unsafe", negated, id(expr) if expr is not None else id(condition))
+
+    @classmethod
+    def _build_cache_key(cls, conditions: Sequence) -> Tuple[object, ...]:
+        keys = [cls._safe_condition_cache_component(condition) for condition in (conditions or ())]
+        keys.sort(key=repr)
+        return ("unsat", tuple(keys))
 
     @classmethod
     def _build_script(
@@ -211,10 +238,15 @@ class ConditionSMTOracle:
     @classmethod
     def _iter_expression_nodes(cls, expr) -> Iterable[Any]:
         pending: List[Any] = [expr]
+        seen: set[int] = set()
         while pending:
             current = pending.pop()
             if current is None:
                 continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
             yield current
 
             expr_type = getattr(current, "expr_type", None)

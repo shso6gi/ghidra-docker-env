@@ -300,7 +300,7 @@ def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
             {"name": "param_1", "data_type": "undefined8 *", "size": 8, "index": 0, "is_signed": True},
             {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": True},
         ],
-        returns=[ReturnInfo(address="0x1002", value=_readonly_sum_value("param_1", stride=16, element_size=8), conditions=[])],
+        returns=[ReturnInfo(address="0x1002", value=_readonly_sum_value("param_1", stride=4, element_size=4), conditions=[])],
         return_type="int",
     )
 
@@ -324,54 +324,9 @@ def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
     strategy.solver_runner.run_sequential.assert_not_called()
 
 
-def test_pairwise_treats_counter_signedness_as_nonsemantic_for_readonly_reductions():
+def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left = _readonly_sum_value("param_1", stride=4, element_size=4, signed_counter=True)
+    right = _readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False)
 
-    analysis1 = FunctionReturnAnalysis(
-        function_name="left",
-        entry_point="0x1000",
-        parameters=[
-            {"name": "param_1", "data_type": "int *", "size": 8, "index": 0, "is_signed": False},
-            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
-        ],
-        returns=[
-            ReturnInfo(
-                address="0x1001",
-                value=_readonly_sum_value("param_1", stride=4, element_size=4, signed_counter=True),
-                conditions=[Condition(_binary("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, size=4)))],
-            )
-        ],
-        return_type="int",
-    )
-    analysis2 = FunctionReturnAnalysis(
-        function_name="right",
-        entry_point="0x1000",
-        parameters=[
-            {"name": "param_1", "data_type": "int *", "size": 8, "index": 0, "is_signed": False},
-            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
-        ],
-        returns=[
-            ReturnInfo(
-                address="0x1001",
-                value=_readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False),
-                conditions=[Condition(_binary("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, size=4)))],
-            )
-        ],
-        return_type="int",
-    )
-
-    strategy.formula_builder.build_base_context.return_value = {
-        "header_lines": [],
-        "params1": [],
-        "params2": [],
-        "extra_vars1": [],
-        "extra_vars2": [],
-    }
-
-    result = strategy.check(analysis1, analysis2)
-
-    assert result.is_equivalent is True
-    assert result.total_pairs == 1
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
+    assert strategy._readonly_reduction_values_equivalent(left, right) is False

@@ -923,6 +923,14 @@ class ReturnAnalyzer:
                 getattr(analysis.effect_summary, "effects", None)
                 and len(getattr(analysis, "returns", []) or []) >= 2
             )
+        if not should_try and getattr(analysis, "effect_summary", None) is not None:
+            has_effects = bool(getattr(analysis.effect_summary, "effects", None))
+            if not has_effects:
+                should_try = any(
+                    getattr(ret, "value", None) is not None
+                    and getattr(ret.value, "contains_memory_access", lambda: False)()
+                    for ret in (analysis.returns or [])
+                )
         if not should_try:
             return None
 
