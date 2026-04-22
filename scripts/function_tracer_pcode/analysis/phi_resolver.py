@@ -5,6 +5,7 @@ from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable
 from ..model import Expression, Condition, ExpressionType
 from ..model.intrinsics import resolve_pcode_intrinsic
+from .debug import summarize_expression
 from .condition import ConditionSimplifier, ConditionNormalizer
 
 
@@ -78,6 +79,9 @@ class PhiHandler:
 
     def _condition_signature(self, conditions: List[Condition]) -> Hashable:
         return ConditionNormalizer.conditions_signature(conditions)
+
+    def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
+        return summarize_expression(expr, max_depth=max_depth)
 
     def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> tuple:
         op_key = self.tracer._get_stable_op_key(multiequal_op)
@@ -288,7 +292,8 @@ class PhiHandler:
                 for ev in expanded_values:
                     if ev.is_valid():
                         self._debug_print(
-                            f"Valid branch: {ev.value.to_string()}", depth + 1
+                            f"Valid branch: {self._debug_expr_summary(ev.value)}",
+                            depth + 1,
                         )
                         all_branches.append(ev)
         

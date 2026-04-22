@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import (
@@ -37,6 +38,52 @@ def _runtime_expression_signature(expr: Optional[Expression]):
 
 def _runtime_conditions_signature(conditions: Sequence[Condition]):
     return ConditionNormalizer.conditions_signature(conditions)
+
+
+@dataclass(frozen=True)
+class CountedLoopInduction:
+    phi_op: object
+    phi_output: object
+    init_expr: Expression
+    backedge_index: int
+    step: int
+    placeholder: Expression
+    signed_guard: bool
+
+
+@dataclass(frozen=True)
+class CountedLoopAccumulator:
+    phi_op: object
+    phi_output: object
+    init_expr: Expression
+    backedge_index: int
+    placeholder: Expression
+
+
+@dataclass(frozen=True)
+class CountedLoopGuard:
+    condition_expr: Expression
+    bound_expr: Expression
+    continue_on_true: bool
+    body_block: object
+    exit_block: object
+    signed_comparison: bool
+    entry_condition_expr: Optional[Expression] = None
+    latch_block: Optional[object] = None
+
+
+@dataclass(frozen=True)
+class CountedLoopUpdateCase:
+    conditions: Tuple[Condition, ...]
+    update_expr: Expression
+    delta_expr: Expression
+
+
+@dataclass(frozen=True)
+class ResidueLoopCase:
+    modulus: int
+    residue: int
+    affine: Tuple[int, int]
 
 
 class StructuralRecurrenceSummarizer:
@@ -76,6 +123,9 @@ class StructuralRecurrenceSummarizer:
         if self._has_readonly_pointer_reduction_candidate(high_function, analysis):
             return True
 
+        if self._has_counted_scalar_loop_candidate(high_function):
+            return True
+
         if self._has_branch_accumulator_candidate(analysis):
             return True
 
@@ -91,6 +141,10 @@ class StructuralRecurrenceSummarizer:
                 return summary
 
         summary = self._try_summarize_readonly_pointer_reduction(function, high_function, analysis)
+        if summary is not None:
+            return summary
+
+        summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
         if summary is not None:
             return summary
 
@@ -146,6 +200,1365 @@ class StructuralRecurrenceSummarizer:
             positive_conditions,
         )
         return loop_shape is not None
+
+    def _has_counted_scalar_loop_candidate(self, high_function) -> bool:
+        if high_function is None:
+            return False
+        for block in self._iter_basic_blocks(high_function):
+            phis = [
+                op for op in self._iter_block_ops(block)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+            ]
+            if len(phis) >= 2 and self._find_cbranch_op(block) is not None:
+                return True
+        return False
+
+    def _try_summarize_counted_scalar_loop(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        if function is None or high_function is None or analysis is None:
+            return None
+
+        model = self._extract_counted_scalar_loop_model(high_function, analysis)
+        if model is None:
+            return None
+
+        induction, accumulator, guard, residue_cases = model
+        start_expr = induction.init_expr
+        limit_expr = guard.bound_expr
+        loop_value = self._build_residue_counted_loop_value(
+            base_expr=accumulator.init_expr,
+            start_expr=start_expr,
+            limit_expr=limit_expr,
+            residue_cases=residue_cases,
+            result_size=accumulator.init_expr.size or accumulator.placeholder.size or 4,
+            signed_loop=induction.signed_guard or guard.signed_comparison,
+        )
+        if loop_value is None:
+            return None
+
+        anchor = next(iter(analysis.returns or []), None)
+        address = getattr(anchor, "address", getattr(function, "getEntryPoint", lambda: "0x0")())
+        pcode_identity = getattr(anchor, "pcode_identity", None)
+        pcode_order = getattr(anchor, "pcode_order", None)
+        pcode_time = getattr(anchor, "pcode_time", None)
+
+        entry_guard_expr = self._substitute_exact_expression(
+            guard.condition_expr,
+            induction.placeholder,
+            start_expr,
+        )
+        derived_continue_condition = Condition(entry_guard_expr or guard.condition_expr, False)
+        derived_base_condition = derived_continue_condition.negate()
+        original_conditions = self._select_counted_loop_return_conditions(
+            analysis,
+            accumulator.init_expr,
+        )
+        if original_conditions is None:
+            continue_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_continue_condition])
+            base_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_base_condition])
+        else:
+            base_conditions, continue_conditions = original_conditions
+            negated_base = self._negate_simple_condition_set(base_conditions)
+            if negated_base is not None:
+                continue_conditions = negated_base
+
+        summarized = [
+            ReturnInfo(
+                address=str(address),
+                value=accumulator.init_expr,
+                conditions=base_conditions,
+                branch_index=20_100,
+                pcode_identity=pcode_identity,
+                pcode_order=pcode_order,
+                pcode_time=pcode_time,
+            ),
+            ReturnInfo(
+                address=str(address),
+                value=loop_value,
+                conditions=continue_conditions,
+                branch_index=20_101,
+                pcode_identity=pcode_identity,
+                pcode_order=pcode_order,
+                pcode_time=pcode_time,
+            ),
+        ]
+        self._debug(
+            "Recovered counted scalar loop summary "
+            f"(start={self._safe_expr_text(start_expr)}, limit={self._safe_expr_text(limit_expr)}, "
+            f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
+        )
+        return summarized, "counted_scalar_loop_summary"
+
+    def _negate_simple_condition_set(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[List[Condition]]:
+        simplified = ConditionSimplifier.simplify_conditions_object_centric(list(conditions or []))
+        if len(simplified) != 1:
+            return None
+        return ConditionSimplifier.simplify_conditions_object_centric([simplified[0].negate()])
+
+    def _extract_counted_scalar_loop_model(
+        self,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[CountedLoopInduction, CountedLoopAccumulator, CountedLoopGuard, Tuple[ResidueLoopCase, ...]]]:
+        blocks = list(self._iter_basic_blocks(high_function))
+        if not blocks:
+            return None
+
+        for header in blocks:
+            cbranch = self._find_cbranch_op(header)
+            if cbranch is None:
+                continue
+            phi_ops = [
+                op for op in self._iter_block_ops(header)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+            ]
+            if len(phi_ops) < 2:
+                continue
+
+            induction_candidates = [
+                info for info in (
+                    self._match_counted_loop_induction(phi_op)
+                    for phi_op in phi_ops
+                )
+                if info is not None
+            ]
+            if not induction_candidates:
+                continue
+
+            for induction in induction_candidates:
+                guard = self._match_counted_loop_guard(header, cbranch, induction)
+                if guard is None:
+                    continue
+                accumulator = self._match_counted_loop_accumulator(
+                    phi_ops,
+                    induction,
+                    guard.body_block,
+                )
+                if accumulator is None:
+                    continue
+                cases = self._extract_counted_loop_update_cases(
+                    accumulator,
+                    induction,
+                    guard,
+                )
+                if not cases:
+                    continue
+                residue_cases = self._extract_residue_loop_cases(
+                    cases,
+                    induction.placeholder.name or "__loop_iv",
+                )
+                if residue_cases is None:
+                    continue
+                return induction, accumulator, guard, residue_cases
+        return None
+
+    def _iter_basic_blocks(self, high_function) -> Iterable:
+        try:
+            for block in high_function.getBasicBlocks():
+                yield block
+        except Exception:
+            return
+
+    def _iter_block_ops(self, block) -> Iterable:
+        iterator = getattr(block, "getIterator", lambda: None)()
+        if iterator is None:
+            return
+        while iterator.hasNext():
+            yield iterator.next()
+
+    def _find_cbranch_op(self, block):
+        for op in self._iter_block_ops(block):
+            if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH":
+                return op
+        return None
+
+    def _collect_block_successors(self, block) -> List[object]:
+        successors = []
+        out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
+        for index in range(out_size):
+            successor = getattr(block, "getOut", lambda _idx: None)(index)
+            if successor is not None:
+                successors.append(successor)
+        return successors
+
+    def _block_key(self, block) -> object:
+        if block is None:
+            return None
+        block_index = getattr(block, "getIndex", lambda: None)()
+        if block_index is not None:
+            return ("index", int(block_index))
+        return ("id", id(block))
+
+    def _can_reach_block(self, start_block, target_block) -> bool:
+        if start_block is None or target_block is None:
+            return False
+        target_key = self._block_key(target_block)
+        stack = [start_block]
+        visited = set()
+        while stack:
+            current = stack.pop()
+            current_key = self._block_key(current)
+            if current_key in visited:
+                continue
+            visited.add(current_key)
+            if current_key == target_key:
+                return True
+            for successor in self._collect_block_successors(current):
+                stack.append(successor)
+        return False
+
+    def _pick_body_and_exit_blocks(self, header_block) -> Optional[Tuple[object, object, bool]]:
+        successors = self._collect_block_successors(header_block)
+        if len(successors) != 2:
+            return None
+
+        reaches = [
+            successor for successor in successors
+            if self._can_reach_block(successor, header_block)
+        ]
+        if len(reaches) != 1:
+            return None
+
+        body_block = reaches[0]
+        exit_block = successors[0] if successors[1] is body_block else successors[1]
+        true_out = getattr(header_block, "getTrueOut", lambda: None)()
+        body_on_true = true_out is not None and self._block_key(true_out) == self._block_key(body_block)
+        return body_block, exit_block, body_on_true
+
+    def _match_counted_loop_induction(
+        self,
+        phi_op,
+    ) -> Optional[CountedLoopInduction]:
+        if int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0) != 2:
+            return None
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
+        if phi_output is None:
+            return None
+
+        placeholder = Expression.parameter("__loop_iv", index=-10_000, size=getattr(phi_output, "getSize", lambda: 4)() or 4)
+        for backedge_index in range(2):
+            step = self._extract_index_step(phi_op.getInput(backedge_index), phi_output)
+            if step != 1:
+                continue
+            init_index = 1 - backedge_index
+            init_expr = self._build_pcode_expression(
+                phi_op.getInput(init_index),
+                placeholders={phi_output: placeholder},
+            )
+            if init_expr is None or self._expression_is_unresolved(init_expr):
+                continue
+            return CountedLoopInduction(
+                phi_op=phi_op,
+                phi_output=phi_output,
+                init_expr=init_expr,
+                backedge_index=backedge_index,
+                step=1,
+                placeholder=placeholder,
+                signed_guard=False,
+            )
+        return None
+
+    def _match_counted_loop_guard(
+        self,
+        header_block,
+        cbranch_op,
+        induction: CountedLoopInduction,
+    ) -> Optional[CountedLoopGuard]:
+        block_info = self._pick_body_and_exit_blocks(header_block)
+        if block_info is None:
+            return self._match_latch_counted_loop_guard(header_block, induction)
+        body_block, exit_block, body_on_true = block_info
+        if int(getattr(cbranch_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return self._match_latch_counted_loop_guard(header_block, induction)
+
+        raw_expr = self._build_pcode_expression(
+            cbranch_op.getInput(1),
+            placeholders={induction.phi_output: induction.placeholder},
+        )
+        if raw_expr is None or self._expression_is_unresolved(raw_expr):
+            return self._match_latch_counted_loop_guard(header_block, induction)
+
+        normalized = self._normalize_loop_continue_guard(raw_expr, induction.placeholder, body_on_true)
+        if normalized is not None:
+            condition_expr, bound_expr, signed_comparison = normalized
+            return CountedLoopGuard(
+                condition_expr=condition_expr,
+                bound_expr=bound_expr,
+                continue_on_true=body_on_true,
+                body_block=body_block,
+                exit_block=exit_block,
+                signed_comparison=signed_comparison,
+                entry_condition_expr=condition_expr,
+            )
+        return self._match_latch_counted_loop_guard(header_block, induction)
+
+    def _match_latch_counted_loop_guard(
+        self,
+        header_block,
+        induction: CountedLoopInduction,
+    ) -> Optional[CountedLoopGuard]:
+        backedge_varnode = induction.phi_op.getInput(induction.backedge_index)
+        backedge_def = getattr(backedge_varnode, "getDef", lambda: None)()
+        if backedge_def is None:
+            return None
+        latch_block = getattr(backedge_def, "getParent", lambda: None)()
+        if latch_block is None:
+            return None
+        cbranch_op = self._find_cbranch_op(latch_block)
+        if cbranch_op is None or int(getattr(cbranch_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return None
+
+        successors = self._collect_block_successors(latch_block)
+        if len(successors) != 2:
+            return None
+        header_key = self._block_key(header_block)
+        backedge_target = next(
+            (successor for successor in successors if self._block_key(successor) == header_key),
+            None,
+        )
+        if backedge_target is None:
+            return None
+        exit_block = successors[0] if successors[1] is backedge_target else successors[1]
+        true_out = getattr(latch_block, "getTrueOut", lambda: None)()
+        continue_on_true = true_out is not None and self._block_key(true_out) == header_key
+
+        raw_expr = self._build_pcode_expression(
+            cbranch_op.getInput(1),
+            placeholders={induction.phi_output: induction.placeholder},
+        )
+        if raw_expr is None or self._expression_is_unresolved(raw_expr):
+            return None
+        normalized = self._normalize_latch_continue_guard(
+            raw_expr,
+            induction.placeholder,
+            continue_on_true,
+        )
+        if normalized is None:
+            return None
+        condition_expr, entry_condition_expr, bound_expr, signed_comparison = normalized
+        return CountedLoopGuard(
+            condition_expr=condition_expr,
+            bound_expr=bound_expr,
+            continue_on_true=continue_on_true,
+            body_block=header_block,
+            exit_block=exit_block,
+            signed_comparison=signed_comparison,
+            entry_condition_expr=entry_condition_expr,
+            latch_block=latch_block,
+        )
+
+    def _match_counted_loop_accumulator(
+        self,
+        phi_ops: Sequence,
+        induction: CountedLoopInduction,
+        body_block,
+    ) -> Optional[CountedLoopAccumulator]:
+        candidate_ops = [
+            phi_op for phi_op in phi_ops
+            if phi_op is not induction.phi_op
+            and int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0) == 2
+            and getattr(phi_op, "getOutput", lambda: None)() is not None
+        ]
+        reaching_ops = [
+            phi_op for phi_op in candidate_ops
+            if self._varnode_reaches_return(getattr(phi_op, "getOutput", lambda: None)())
+        ]
+        if reaching_ops:
+            candidate_ops = reaching_ops
+
+        candidates: List[CountedLoopAccumulator] = []
+        for phi_op in candidate_ops:
+            phi_output = getattr(phi_op, "getOutput", lambda: None)()
+            init_index = 1 - induction.backedge_index
+            try:
+                init_expr = self._trace_varnode_expression(phi_op.getInput(init_index))
+                if init_expr is None or self._expression_is_unresolved(init_expr):
+                    init_expr = self._build_pcode_expression(phi_op.getInput(init_index), placeholders={})
+            except RecursionError:
+                continue
+            if init_expr is None or self._expression_is_unresolved(init_expr):
+                continue
+            placeholder = Expression.variable("__loop_acc", size=getattr(phi_output, "getSize", lambda: 4)() or 4)
+            accumulator = CountedLoopAccumulator(
+                phi_op=phi_op,
+                phi_output=phi_output,
+                init_expr=init_expr,
+                backedge_index=induction.backedge_index,
+                placeholder=placeholder,
+            )
+            backedge_varnode = phi_op.getInput(accumulator.backedge_index)
+            backedge_def = getattr(backedge_varnode, "getDef", lambda: None)()
+            if backedge_def is None:
+                continue
+            parent_block = getattr(backedge_def, "getParent", lambda: None)()
+            if body_block is not None and parent_block is not None:
+                if not self._can_reach_block(body_block, parent_block):
+                    continue
+            if getattr(backedge_def, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+                input_count = int(getattr(backedge_def, "getNumInputs", lambda: 0)() or 0)
+                if input_count == 0:
+                    continue
+                try:
+                    has_resolved_input = any(
+                        self._build_pcode_expression(
+                            backedge_def.getInput(index),
+                            placeholders={
+                                induction.phi_output: induction.placeholder,
+                                accumulator.phi_output: accumulator.placeholder,
+                            },
+                        ) is not None
+                        for index in range(input_count)
+                    )
+                except RecursionError:
+                    continue
+                if not has_resolved_input:
+                    continue
+                candidates.append(accumulator)
+                continue
+            try:
+                resolved_backedge = self._build_pcode_expression(
+                    backedge_varnode,
+                    placeholders={
+                        induction.phi_output: induction.placeholder,
+                        accumulator.phi_output: accumulator.placeholder,
+                    },
+                )
+            except RecursionError:
+                continue
+            if resolved_backedge is not None:
+                candidates.append(accumulator)
+        if not candidates:
+            return None
+        return self._choose_return_reaching_accumulator(candidates)
+
+    def _extract_counted_loop_update_cases(
+        self,
+        accumulator: CountedLoopAccumulator,
+        induction: CountedLoopInduction,
+        guard: CountedLoopGuard,
+    ) -> List[CountedLoopUpdateCase]:
+        header_block = getattr(induction.phi_op, "getParent", lambda: None)()
+        backedge_varnode = accumulator.phi_op.getInput(accumulator.backedge_index)
+        placeholders = {
+            induction.phi_output: induction.placeholder,
+            accumulator.phi_output: accumulator.placeholder,
+        }
+        placeholders.update(
+            self._collect_affine_loop_state_placeholders(
+                header_block=header_block,
+                induction=induction,
+                accumulator=accumulator,
+            )
+        )
+        def_op = getattr(backedge_varnode, "getDef", lambda: None)()
+
+        raw_cases: List[Tuple[List[Condition], Expression]] = []
+        if def_op is not None and getattr(def_op, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+            parent_block = getattr(def_op, "getParent", lambda: None)()
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+            for index in range(input_count):
+                pred_block = None
+                if parent_block is not None and index < int(getattr(parent_block, "getInSize", lambda: 0)() or 0):
+                    pred_block = parent_block.getIn(index)
+                expr = self._build_pcode_expression(def_op.getInput(index), placeholders=placeholders)
+                if expr is None or self._expression_is_unresolved(expr):
+                    continue
+                for conditions in self._enumerate_paths_with_conditions(
+                    start_block=guard.body_block,
+                    target_block=pred_block or parent_block,
+                    header_block=header_block,
+                    placeholders=placeholders,
+                    stop_block=guard.exit_block,
+                ):
+                    raw_cases.append((conditions, expr))
+        else:
+            expr = self._build_pcode_expression(backedge_varnode, placeholders=placeholders)
+            if expr is None or self._expression_is_unresolved(expr):
+                return []
+            target_block = getattr(def_op, "getParent", lambda: None)() if def_op is not None else guard.body_block
+            for conditions in self._enumerate_paths_with_conditions(
+                start_block=guard.body_block,
+                target_block=target_block,
+                header_block=header_block,
+                placeholders=placeholders,
+                stop_block=guard.exit_block,
+            ):
+                raw_cases.append((conditions, expr))
+
+        cases: List[CountedLoopUpdateCase] = []
+        seen = set()
+        for conditions, update_expr in raw_cases:
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(list(conditions or []))
+            if ConditionSimplifier.object_centric_is_contradiction(simplified):
+                continue
+            reduced_update = _reduce_expression_under_conditions(update_expr, simplified) or update_expr
+            delta_expr = self._extract_additive_delta(reduced_update, accumulator.placeholder, list(simplified))
+            if delta_expr is None:
+                continue
+            key = (
+                _runtime_conditions_signature(simplified),
+                _runtime_expression_signature(delta_expr),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            cases.append(
+                CountedLoopUpdateCase(
+                    conditions=tuple(simplified),
+                    update_expr=reduced_update,
+                    delta_expr=delta_expr,
+                )
+            )
+        return cases
+
+    def _collect_affine_loop_state_placeholders(
+        self,
+        *,
+        header_block,
+        induction: CountedLoopInduction,
+        accumulator: CountedLoopAccumulator,
+    ) -> Dict[object, Expression]:
+        placeholders: Dict[object, Expression] = {}
+        if header_block is None:
+            return placeholders
+        for op in self._iter_block_ops(header_block):
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            if op is induction.phi_op or op is accumulator.phi_op:
+                continue
+            expr = self._summarize_affine_loop_state_phi(op, induction)
+            if expr is None:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            placeholders[output] = expr
+        return placeholders
+
+    def _summarize_affine_loop_state_phi(
+        self,
+        phi_op,
+        induction: CountedLoopInduction,
+    ) -> Optional[Expression]:
+        if phi_op is None or induction is None:
+            return None
+        if int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0) != 2:
+            return None
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
+        if phi_output is None:
+            return None
+
+        backedge_index = None
+        delta = None
+        for candidate_index in range(2):
+            candidate_delta = self._extract_index_step(phi_op.getInput(candidate_index), phi_output)
+            if candidate_delta is None:
+                continue
+            backedge_index = candidate_index
+            delta = candidate_delta
+            break
+        if backedge_index is None or delta is None:
+            return None
+
+        init_expr = self._build_pcode_expression(
+            phi_op.getInput(1 - backedge_index),
+            placeholders={
+                induction.phi_output: induction.placeholder,
+                induction.phi_op.getInput(1 - induction.backedge_index): induction.placeholder,
+            },
+        )
+        if init_expr is None or self._expression_is_unresolved(init_expr):
+            return None
+
+        size = getattr(phi_output, "getSize", lambda: 0)() or induction.placeholder.size or init_expr.size or 4
+        counter_name = induction.placeholder.name or "__loop_iv"
+        init_affine = self._extract_affine_term(init_expr, counter_name)
+        if init_affine is not None and init_affine[0] == delta:
+            linear_term = self._scale_term(induction.placeholder, delta, size)
+            if linear_term is None:
+                return None
+            if init_affine[1] == 0:
+                linear_term.size = size
+                return linear_term
+            bias_expr = Expression.constant(init_affine[1], size)
+            expr = Expression.binary_op("INT_ADD", linear_term, bias_expr)
+            expr.size = size
+            return expr
+
+        current_offset = Expression.binary_op("INT_SUB", induction.placeholder, induction.init_expr)
+        current_offset.size = size
+        if delta == 0:
+            expr = init_expr
+        elif delta == 1:
+            expr = Expression.binary_op("INT_ADD", init_expr, current_offset)
+            expr.size = size
+        elif delta == -1:
+            expr = Expression.binary_op("INT_SUB", init_expr, current_offset)
+            expr.size = size
+        else:
+            scale = Expression.constant(abs(delta), size)
+            scaled_offset = Expression.binary_op("INT_MULT", current_offset, scale)
+            scaled_offset.size = size
+            operator = "INT_ADD" if delta > 0 else "INT_SUB"
+            expr = Expression.binary_op(operator, init_expr, scaled_offset)
+            expr.size = size
+        expr.size = size
+        return expr
+
+    def _enumerate_paths_with_conditions(
+        self,
+        *,
+        start_block,
+        target_block,
+        header_block,
+        placeholders: Dict[object, Expression],
+        stop_block=None,
+        limit: int = 8,
+    ) -> List[List[Condition]]:
+        if start_block is None or target_block is None:
+            return [[]]
+        target_key = self._block_key(target_block)
+        header_key = self._block_key(header_block)
+        stop_key = self._block_key(stop_block)
+        paths: List[List[Condition]] = []
+
+        def dfs(current, active_conditions: List[Condition], visited: set) -> None:
+            if len(paths) >= limit:
+                return
+            current_key = self._block_key(current)
+            if current_key == target_key:
+                paths.append(list(active_conditions))
+                return
+            if current_key == stop_key:
+                return
+            visited = set(visited)
+            visited.add(current_key)
+            for successor in self._collect_block_successors(current):
+                successor_key = self._block_key(successor)
+                if successor_key in visited or successor_key == header_key:
+                    continue
+                branch_condition = self._build_block_edge_condition(
+                    current,
+                    successor,
+                    placeholders=placeholders,
+                )
+                next_conditions = list(active_conditions)
+                if branch_condition is not None:
+                    next_conditions.append(branch_condition)
+                dfs(successor, next_conditions, visited)
+
+        dfs(start_block, [], set())
+        return paths or [[]]
+
+    def _build_block_edge_condition(
+        self,
+        block,
+        successor,
+        *,
+        placeholders: Dict[object, Expression],
+    ) -> Optional[Condition]:
+        cbranch = self._find_cbranch_op(block)
+        if cbranch is None or int(getattr(cbranch, "getNumInputs", lambda: 0)() or 0) < 2:
+            return None
+        expr = self._build_pcode_expression(cbranch.getInput(1), placeholders=placeholders)
+        if expr is None or self._expression_is_unresolved(expr):
+            return None
+
+        true_out = getattr(block, "getTrueOut", lambda: None)()
+        false_out = getattr(block, "getFalseOut", lambda: None)()
+        successor_key = self._block_key(successor)
+        if true_out is not None and self._block_key(true_out) == successor_key:
+            return Condition(expr, False)
+        if false_out is not None and self._block_key(false_out) == successor_key:
+            return Condition(expr, True)
+        return None
+
+    def _build_pcode_expression(
+        self,
+        varnode,
+        *,
+        placeholders: Dict[object, Expression],
+        _seen=None,
+        _memo=None,
+    ) -> Optional[Expression]:
+        if varnode is None:
+            return None
+        if _memo is None:
+            _memo = {}
+
+        placeholder_keys = tuple(sorted(id(candidate) for candidate in placeholders))
+        memo_key = (self._varnode_cache_key(varnode), placeholder_keys)
+        cached = _memo.get(memo_key)
+        if cached is not None:
+            if cached is False:
+                return None
+            return cached
+        _memo[memo_key] = False
+
+        for candidate, replacement in placeholders.items():
+            if self._same_placeholder_varnode(varnode, candidate):
+                _memo[memo_key] = replacement
+                return replacement
+
+        current = self._follow_passthrough_varnode(varnode)
+        current_memo_key = memo_key
+        if current is not varnode:
+            current_memo_key = (self._varnode_cache_key(current), placeholder_keys)
+            cached = _memo.get(current_memo_key)
+            if cached is not None:
+                if cached is False:
+                    return None
+                _memo[memo_key] = cached
+                return cached
+            _memo[current_memo_key] = False
+        for candidate, replacement in placeholders.items():
+            if self._same_placeholder_varnode(current, candidate):
+                _memo[memo_key] = replacement
+                _memo[current_memo_key] = replacement
+                return replacement
+
+        if _seen is None:
+            _seen = set()
+        current_id = id(current)
+        if current_id in _seen:
+            return None
+        _seen = set(_seen)
+        _seen.add(current_id)
+
+        def_op = getattr(current, "getDef", lambda: None)()
+        if def_op is None:
+            traced = self._trace_varnode_expression(current)
+            if traced is None or self._expression_is_unresolved(traced):
+                return None
+            _memo[memo_key] = traced
+            _memo[current_memo_key] = traced
+            return traced
+
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        output = getattr(def_op, "getOutput", lambda: None)()
+        output_size = max(1, int(getattr(output, "getSize", lambda: 0)() or getattr(current, "getSize", lambda: 0)() or 1))
+
+        if mnemonic == "MULTIEQUAL":
+            parent_block = getattr(def_op, "getParent", lambda: None)()
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+            branches = []
+            for index in range(input_count):
+                value = self._build_pcode_expression(
+                    def_op.getInput(index),
+                    placeholders=placeholders,
+                    _seen=_seen,
+                    _memo=_memo,
+                )
+                if value is None:
+                    continue
+                condition = None
+                if parent_block is not None and index < int(getattr(parent_block, "getInSize", lambda: 0)() or 0):
+                    predecessor = parent_block.getIn(index)
+                    condition = self._build_block_edge_condition(
+                        predecessor,
+                        parent_block,
+                        placeholders=placeholders,
+                    )
+                branches.append((condition, value))
+            if not branches:
+                return None
+            if len(branches) == 1 and branches[0][0] is None:
+                result = branches[0][1]
+                _memo[memo_key] = result
+                _memo[current_memo_key] = result
+                return result
+            phi = Expression.phi(branches)
+            phi.size = output_size
+            _memo[memo_key] = phi
+            _memo[current_memo_key] = phi
+            return phi
+
+        if mnemonic in {"COPY", "CAST", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}:
+            expr = self._build_pcode_expression(
+                def_op.getInput(0),
+                placeholders=placeholders,
+                _seen=_seen,
+                _memo=_memo,
+            )
+            if expr is None:
+                return None
+            if mnemonic in {"COPY", "CAST"}:
+                expr.size = output_size
+                _memo[memo_key] = expr
+                _memo[current_memo_key] = expr
+                return expr
+            if mnemonic in {"INT_ZEXT", "INT_SEXT"}:
+                widened = Expression.unary_op(mnemonic, expr)
+                widened.size = output_size
+                _memo[memo_key] = widened
+                _memo[current_memo_key] = widened
+                return widened
+            if mnemonic == "SUBPIECE":
+                if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+                    return None
+                offset_expr = self._build_pcode_expression(
+                    def_op.getInput(1),
+                    placeholders=placeholders,
+                    _seen=_seen,
+                    _memo=_memo,
+                )
+                if offset_expr is None:
+                    return None
+                subpiece = Expression.binary_op("SUBPIECE", expr, offset_expr)
+                subpiece.size = output_size
+                _memo[memo_key] = subpiece
+                _memo[current_memo_key] = subpiece
+                return subpiece
+
+        if mnemonic in {"INT_NEGATE", "INT_2COMP", "BOOL_NEGATE"}:
+            if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) != 1:
+                return None
+            operand = self._build_pcode_expression(
+                def_op.getInput(0),
+                placeholders=placeholders,
+                _seen=_seen,
+                _memo=_memo,
+            )
+            if operand is None:
+                return None
+            unary = Expression.unary_op(mnemonic, operand)
+            unary.size = output_size
+            _memo[memo_key] = unary
+            _memo[current_memo_key] = unary
+            return unary
+
+        if mnemonic in {
+            "INT_ADD",
+            "INT_SUB",
+            "INT_MULT",
+            "INT_AND",
+            "INT_OR",
+            "INT_XOR",
+            "INT_LEFT",
+            "INT_RIGHT",
+            "INT_SRIGHT",
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_LESSEQUAL",
+            "INT_SLESS",
+            "INT_SLESSEQUAL",
+            "BOOL_AND",
+            "BOOL_OR",
+            "BOOL_XOR",
+        }:
+            if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) != 2:
+                return None
+            left = self._build_pcode_expression(
+                def_op.getInput(0),
+                placeholders=placeholders,
+                _seen=_seen,
+                _memo=_memo,
+            )
+            right = self._build_pcode_expression(
+                def_op.getInput(1),
+                placeholders=placeholders,
+                _seen=_seen,
+                _memo=_memo,
+            )
+            if left is None or right is None:
+                return None
+            expr = Expression.binary_op(mnemonic, left, right)
+            expr.size = output_size
+            _memo[memo_key] = expr
+            _memo[current_memo_key] = expr
+            return expr
+
+        return None
+
+    def _normalize_loop_continue_guard(
+        self,
+        raw_expr: Expression,
+        counter_placeholder: Expression,
+        body_on_true: bool,
+    ) -> Optional[Tuple[Expression, Expression, bool]]:
+        counter_name = counter_placeholder.name or "__loop_iv"
+        parsed = self._parse_counter_comparison(raw_expr, counter_name)
+        if parsed is None:
+            return None
+        relation, other_expr, signed = parsed
+        if not body_on_true:
+            relation = {
+                "<": ">=",
+                "<=": ">",
+                ">": "<=",
+                ">=": "<",
+            }.get(relation)
+        if relation != "<":
+            return None
+        operator = "INT_SLESS" if signed else "INT_LESS"
+        condition_expr = Expression.binary_op(operator, counter_placeholder, other_expr)
+        condition_expr.size = 1
+        return condition_expr, other_expr, signed
+
+    def _normalize_latch_continue_guard(
+        self,
+        raw_expr: Expression,
+        counter_placeholder: Expression,
+        continue_on_true: bool,
+    ) -> Optional[Tuple[Expression, Expression, Expression, bool]]:
+        counter_name = counter_placeholder.name or "__loop_iv"
+        if raw_expr.expr_type != ExpressionType.BINARY_OP or len(raw_expr.operands) != 2:
+            return None
+        operator = raw_expr.operator
+        left, right = raw_expr.operands
+
+        counter_side = None
+        bound_expr = None
+        signed = operator.startswith("INT_S")
+        affine_left = self._extract_affine_term(left, counter_name)
+        affine_right = self._extract_affine_term(right, counter_name)
+        if affine_left is not None and affine_left[0] == 1 and affine_right is None:
+            counter_side = "left"
+            bound_expr = right
+            bias = affine_left[1]
+        elif affine_right is not None and affine_right[0] == 1 and affine_left is None:
+            counter_side = "right"
+            bound_expr = left
+            bias = affine_right[1]
+        else:
+            return None
+
+        if bias != 1:
+            return None
+
+        continue_when_equal = operator == "INT_EQUAL"
+        if raw_expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return None
+        keep_looping = continue_when_equal if continue_on_true else not continue_when_equal
+        if keep_looping:
+            return None
+
+        compare_op = "INT_SLESS" if signed else "INT_LESS"
+        condition_expr = Expression.binary_op(compare_op, counter_placeholder, bound_expr)
+        condition_expr.size = 1
+        entry_op = "INT_NOTEQUAL" if counter_side == "left" else "INT_NOTEQUAL"
+        entry_condition_expr = Expression.binary_op(entry_op, counter_placeholder, bound_expr)
+        entry_condition_expr.size = 1
+        return condition_expr, entry_condition_expr, bound_expr, signed
+
+    def _parse_counter_comparison(
+        self,
+        expr: Optional[Expression],
+        counter_name: str,
+    ) -> Optional[Tuple[str, Expression, bool]]:
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+        operator = expr.operator
+        if operator not in {"INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL"}:
+            return None
+        signed = operator.startswith("INT_S")
+        left, right = expr.operands
+        left_is_counter = self._expr_matches_counter_placeholder(left, counter_name)
+        right_is_counter = self._expr_matches_counter_placeholder(right, counter_name)
+        if left_is_counter == right_is_counter:
+            return None
+        if left_is_counter:
+            relation = "<" if operator in {"INT_SLESS", "INT_LESS"} else "<="
+            return relation, right, signed
+        relation = ">" if operator in {"INT_SLESS", "INT_LESS"} else ">="
+        return relation, left, signed
+
+    def _expr_matches_counter_placeholder(
+        self,
+        expr: Optional[Expression],
+        counter_name: str,
+    ) -> bool:
+        normalized = self._normalize_counter_view(expr, counter_name)
+        return bool(normalized is not None and getattr(normalized[0], "name", None) == counter_name)
+
+    def _extract_residue_loop_cases(
+        self,
+        cases: Sequence[CountedLoopUpdateCase],
+        counter_name: str,
+    ) -> Optional[Tuple[ResidueLoopCase, ...]]:
+        if not cases:
+            return None
+        if len(cases) == 1 and not cases[0].conditions:
+            affine = self._extract_affine_term(cases[0].delta_expr, counter_name)
+            if affine is None:
+                return None
+            return (ResidueLoopCase(modulus=1, residue=0, affine=affine),)
+
+        residue_cases: List[ResidueLoopCase] = []
+        modulus = None
+        seen_residues = set()
+        for case in cases:
+            affine = self._extract_affine_term(case.delta_expr, counter_name)
+            if affine is None:
+                return None
+            residue_info = self._extract_exact_residue_case(case.conditions, counter_name)
+            if residue_info is None:
+                return None
+            case_modulus, residue = residue_info
+            if modulus is None:
+                modulus = case_modulus
+            if modulus != case_modulus:
+                return None
+            if residue in seen_residues:
+                return None
+            seen_residues.add(residue)
+            residue_cases.append(
+                ResidueLoopCase(
+                    modulus=case_modulus,
+                    residue=residue,
+                    affine=affine,
+                )
+            )
+        if modulus is None or seen_residues != set(range(modulus)):
+            return None
+        return tuple(sorted(residue_cases, key=lambda item: item.residue))
+
+    def _extract_exact_residue_case(
+        self,
+        conditions: Sequence[Condition],
+        counter_name: str,
+    ) -> Optional[Tuple[int, int]]:
+        residue_cases = []
+        for condition in conditions or []:
+            residue = self._condition_to_exact_residue(condition, counter_name)
+            if residue is not None:
+                residue_cases.append(residue)
+                continue
+            if self._condition_mentions_counter(condition, counter_name):
+                return None
+        if not residue_cases:
+            return None
+        first = residue_cases[0]
+        if any(item != first for item in residue_cases[1:]):
+            return None
+        return first
+
+    def _condition_to_exact_residue(
+        self,
+        condition: Condition,
+        counter_name: str,
+    ) -> Optional[Tuple[int, int]]:
+        expr = getattr(condition, "expression", None)
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+        if expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return None
+
+        is_equal = expr.operator == "INT_EQUAL"
+        if condition.negated:
+            is_equal = not is_equal
+
+        bitand = None
+        residue_value = None
+        if self._raw_constant_value(expr.operands[0]) is not None:
+            bitand = expr.operands[1]
+            residue_value = self._raw_constant_value(expr.operands[0])
+        elif self._raw_constant_value(expr.operands[1]) is not None:
+            bitand = expr.operands[0]
+            residue_value = self._raw_constant_value(expr.operands[1])
+        if bitand is None or residue_value is None:
+            return None
+        if bitand.expr_type != ExpressionType.BINARY_OP or bitand.operator != "INT_AND" or len(bitand.operands) != 2:
+            return None
+
+        counter_expr = None
+        mask_value = None
+        if self._raw_constant_value(bitand.operands[0]) is not None and self._expr_matches_counter_placeholder(bitand.operands[1], counter_name):
+            mask_value = self._raw_constant_value(bitand.operands[0])
+            counter_expr = bitand.operands[1]
+        elif self._raw_constant_value(bitand.operands[1]) is not None and self._expr_matches_counter_placeholder(bitand.operands[0], counter_name):
+            mask_value = self._raw_constant_value(bitand.operands[1])
+            counter_expr = bitand.operands[0]
+        if counter_expr is None or mask_value is None:
+            return None
+        if mask_value <= 0 or (mask_value & (mask_value + 1)) != 0:
+            return None
+
+        modulus = int(mask_value) + 1
+        residue = int(residue_value) & int(mask_value)
+        if is_equal:
+            return modulus, residue
+        if modulus == 2:
+            return modulus, residue ^ 1
+        return None
+
+    def _condition_mentions_counter(
+        self,
+        condition: Condition,
+        counter_name: str,
+    ) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return False
+        return any(
+            self._expr_matches_counter_placeholder(node, counter_name)
+            for node in self._iter_expression_nodes(expr)
+        )
+
+    def _build_residue_counted_loop_value(
+        self,
+        *,
+        base_expr: Expression,
+        start_expr: Expression,
+        limit_expr: Expression,
+        residue_cases: Sequence[ResidueLoopCase],
+        result_size: int,
+        signed_loop: bool,
+    ) -> Optional[Expression]:
+        if not residue_cases:
+            return None
+        wide_size = self._summary_working_size(result_size or 4)
+        wide_start = self._extend_summary_expr(start_expr, wide_size, signed=signed_loop)
+        wide_limit = self._extend_summary_expr(limit_expr, wide_size, signed=signed_loop)
+        wide_base = self._extend_summary_expr(base_expr, wide_size, signed=signed_loop)
+        n_expr = Expression.binary_op("INT_SUB", wide_limit, wide_start)
+        n_expr.size = wide_size
+
+        total = wide_base
+        for residue_case in residue_cases:
+            count_expr, offset_expr = self._build_residue_term_count(
+                wide_start,
+                n_expr,
+                residue=residue_case.residue,
+                modulus=residue_case.modulus,
+                wide_size=wide_size,
+            )
+            first_expr = Expression.binary_op("INT_ADD", wide_start, offset_expr)
+            first_expr.size = wide_size
+            progression_sum = self._build_exact_progression_sum(
+                first_expr,
+                count_expr,
+                step=residue_case.modulus,
+                wide_size=wide_size,
+            )
+            coeff_term = self._scale_term(progression_sum, residue_case.affine[0], wide_size)
+            bias_term = self._scale_term(count_expr, residue_case.affine[1], wide_size)
+            for term in (coeff_term, bias_term):
+                if term is None:
+                    continue
+                total = Expression.binary_op("INT_ADD", total, term)
+                total.size = wide_size
+
+        return self._truncate_to_width(total, result_size or base_expr.size or 4)
+
+    def _build_residue_term_count(
+        self,
+        wide_start: Expression,
+        n_expr: Expression,
+        *,
+        residue: int,
+        modulus: int,
+        wide_size: int,
+    ) -> Tuple[Expression, Expression]:
+        if modulus <= 1:
+            zero = Expression.constant(0, wide_size)
+            return n_expr, zero
+
+        mask = modulus - 1
+        mask_expr = Expression.constant(mask, wide_size)
+        residue_expr = Expression.constant(residue, wide_size)
+        start_low = Expression.binary_op("INT_AND", wide_start, mask_expr)
+        start_low.size = wide_size
+        raw_offset = Expression.binary_op("INT_SUB", residue_expr, start_low)
+        raw_offset.size = wide_size
+        offset_expr = Expression.binary_op("INT_AND", raw_offset, mask_expr)
+        offset_expr.size = wide_size
+
+        positive_span = Expression.binary_op("INT_SUB", n_expr, offset_expr)
+        positive_span.size = wide_size
+        zero = Expression.constant(0, wide_size)
+        non_positive = Condition(
+            Expression.binary_op("INT_SLESSEQUAL", positive_span, zero),
+            False,
+        )
+        adjusted = Expression.binary_op("INT_ADD", positive_span, mask_expr)
+        adjusted.size = wide_size
+        shift = Expression.constant(mask.bit_length() - 1, wide_size)
+        shifted = Expression.binary_op("INT_RIGHT", adjusted, shift)
+        shifted.size = wide_size
+        count_expr = Expression.phi([
+            (non_positive, zero),
+            (None, shifted),
+        ])
+        count_expr.size = wide_size
+        return count_expr, offset_expr
+
+    def _build_exact_progression_sum(
+        self,
+        first_expr: Expression,
+        count_expr: Expression,
+        *,
+        step: int,
+        wide_size: int,
+    ) -> Expression:
+        zero = Expression.constant(0, wide_size)
+        count_zero = Condition(
+            Expression.binary_op("INT_EQUAL", count_expr, zero),
+            False,
+        )
+        count_minus_one = Expression.binary_op("INT_SUB", count_expr, Expression.constant(1, wide_size))
+        count_minus_one.size = wide_size
+        shift_amount = Expression.constant(1, wide_size)
+        triangular = self._triangular(count_minus_one, wide_size, shift_amount)
+        stride_term = self._scale_term(triangular, step, wide_size)
+        leading_term = Expression.binary_op("INT_MULT", count_expr, first_expr)
+        leading_term.size = wide_size
+        if stride_term is None:
+            total_nonzero = leading_term
+        else:
+            total_nonzero = Expression.binary_op("INT_ADD", leading_term, stride_term)
+            total_nonzero.size = wide_size
+        total = Expression.phi([
+            (count_zero, zero),
+            (None, total_nonzero),
+        ])
+        total.size = wide_size
+        return total
+
+    def _extend_summary_expr(
+        self,
+        expr: Expression,
+        target_size: int,
+        *,
+        signed: bool,
+    ) -> Expression:
+        source_size = int(getattr(expr, "size", 0) or 0)
+        if source_size <= 0:
+            source_size = target_size
+            expr.size = source_size
+        if source_size >= target_size:
+            if source_size > target_size:
+                return self._truncate_to_width(expr, target_size)
+            expr.size = target_size
+            return expr
+        op = "INT_SEXT" if signed else "INT_ZEXT"
+        widened = Expression.unary_op(op, expr)
+        widened.size = target_size
+        return widened
+
+    def _expression_is_unresolved(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return True
+        if expr.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and self._expression_is_unresolved(cond.expression):
+                    return True
+                if self._expression_is_unresolved(value):
+                    return True
+            return False
+        return any(self._expression_is_unresolved(operand) for operand in getattr(expr, "operands", []) or [])
+
+    def _safe_expr_text(self, expr: Optional[Expression]) -> str:
+        signature = _runtime_expression_signature(expr)
+        return repr(signature)
+
+    def _select_counted_loop_return_conditions(
+        self,
+        analysis,
+        base_expr: Expression,
+    ) -> Optional[Tuple[List[Condition], List[Condition]]]:
+        returns = list(getattr(analysis, "returns", []) or [])
+        if len(returns) != 2:
+            return None
+        unresolved = [ret for ret in returns if self._expression_is_unresolved(ret.value)]
+        resolved = [ret for ret in returns if ret not in unresolved]
+        if len(unresolved) != 1 or len(resolved) != 1:
+            return None
+        return (
+            ConditionSimplifier.simplify_conditions_object_centric(list(resolved[0].conditions or [])),
+            ConditionSimplifier.simplify_conditions_object_centric(list(unresolved[0].conditions or [])),
+        )
+
+    def _substitute_exact_expression(
+        self,
+        expr: Optional[Expression],
+        needle: Expression,
+        replacement: Expression,
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+        if expr.structural_key() == needle.structural_key():
+            return replacement
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left = self._substitute_exact_expression(expr.operands[0], needle, replacement)
+            right = self._substitute_exact_expression(expr.operands[1], needle, replacement)
+            if left is expr.operands[0] and right is expr.operands[1]:
+                return expr
+            rebuilt = Expression.binary_op(expr.operator, left, right)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if expr.expr_type == ExpressionType.UNARY_OP and len(expr.operands) == 1:
+            operand = self._substitute_exact_expression(expr.operands[0], needle, replacement)
+            if operand is expr.operands[0]:
+                return expr
+            rebuilt = Expression.unary_op(expr.operator, operand)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branches = []
+            changed = False
+            for condition, value in expr.value:
+                new_condition = condition
+                if condition is not None:
+                    condition_expr = self._substitute_exact_expression(
+                        condition.expression,
+                        needle,
+                        replacement,
+                    )
+                    if condition_expr is not condition.expression:
+                        new_condition = Condition(condition_expr, condition.negated)
+                        changed = True
+                new_value = self._substitute_exact_expression(value, needle, replacement)
+                if new_value is not value:
+                    changed = True
+                branches.append((new_condition, new_value))
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return rebuilt
+
+        if expr.expr_type in {ExpressionType.CALL, ExpressionType.INTRINSIC, ExpressionType.MEMORY} and expr.operands:
+            new_operands = [
+                self._substitute_exact_expression(operand, needle, replacement)
+                for operand in expr.operands
+            ]
+            if all(new is old for new, old in zip(new_operands, expr.operands)):
+                return expr
+            if expr.expr_type == ExpressionType.CALL:
+                rebuilt = Expression.call(expr.name or "call", new_operands)
+            elif expr.expr_type == ExpressionType.INTRINSIC:
+                rebuilt = Expression.intrinsic(
+                    expr.name or "intrinsic",
+                    new_operands,
+                    size=expr.size,
+                    runtime_ref=expr.runtime_ref,
+                    opcode=expr.opcode,
+                )
+            else:
+                rebuilt = Expression.memory(
+                    new_operands[0],
+                    size=expr.size,
+                    read_order_key=expr.read_order_key,
+                    runtime_ref=expr.runtime_ref,
+                )
+            rebuilt.size = expr.size
+            return rebuilt
+
+        return expr
 
     def _has_branch_accumulator_candidate(
         self,
@@ -1258,21 +2671,32 @@ class StructuralRecurrenceSummarizer:
         if def_op is None:
             return None
         mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
-        if mnemonic == "INT_ADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+        if mnemonic in {"INT_ADD", "INT_SUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(def_op.getInput(0))
             right = self._follow_passthrough_varnode(def_op.getInput(1))
             if self._same_varnode_value(left, phi_output):
-                return self._varnode_constant_value(right)
+                step_value = self._varnode_constant_value(right)
+                if step_value is None:
+                    return None
+                return step_value if mnemonic == "INT_ADD" else -step_value
             if self._same_varnode_value(right, phi_output):
-                return self._varnode_constant_value(left)
+                step_value = self._varnode_constant_value(left)
+                if step_value is None:
+                    return None
+                if mnemonic == "INT_ADD":
+                    return step_value
+                return None
         return None
 
     def _follow_passthrough_varnode(self, varnode):
         current = varnode
         seen = set()
         passthrough = {"COPY", "CAST", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
+        while current is not None:
+            current_key = self._varnode_cache_key(current)
+            if current_key in seen:
+                break
+            seen.add(current_key)
             def_op = getattr(current, "getDef", lambda: None)()
             if def_op is None:
                 break
@@ -1284,7 +2708,79 @@ class StructuralRecurrenceSummarizer:
             current = def_op.getInput(0)
         return current
 
+    def _varnode_cache_key(self, varnode):
+        if varnode is None:
+            return None
+        address_key = None
+        try:
+            address = varnode.getAddress()
+            if address is not None:
+                address_key = (
+                    address.getAddressSpace().getName(),
+                    int(varnode.getOffset()),
+                    int(varnode.getSize()),
+                )
+        except Exception:
+            address_key = None
+
+        def_key = None
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is not None:
+            seq = getattr(def_op, "getSeqnum", lambda: None)()
+            if seq is not None:
+                try:
+                    target = seq.getTarget()
+                    target_key = str(target) if target is not None else None
+                except Exception:
+                    target_key = None
+                try:
+                    order_key = int(seq.getOrder())
+                except Exception:
+                    order_key = None
+                try:
+                    time_key = int(seq.getTime())
+                except Exception:
+                    time_key = None
+                def_key = (target_key, order_key, time_key, getattr(def_op, "getMnemonic", lambda: None)())
+        if address_key is not None or def_key is not None:
+            return ("varnode", address_key, def_key)
+        return ("varnode_id", id(varnode))
+
     def _same_varnode_value(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        try:
+            if left == right:
+                return True
+        except Exception:
+            pass
+        try:
+            left_addr = left.getAddress()
+            right_addr = right.getAddress()
+            if (
+                left_addr is not None
+                and right_addr is not None
+                and left_addr.getAddressSpace().getName() == right_addr.getAddressSpace().getName()
+                and int(left.getOffset()) == int(right.getOffset())
+                and int(left.getSize()) == int(right.getSize())
+            ):
+                return True
+        except Exception:
+            pass
+        left_high = getattr(left, "getHigh", lambda: None)()
+        right_high = getattr(right, "getHigh", lambda: None)()
+        if left_high is not None and right_high is not None:
+            if left_high is right_high:
+                return True
+            left_rep = getattr(left_high, "getRepresentative", lambda: None)()
+            right_rep = getattr(right_high, "getRepresentative", lambda: None)()
+            if left_rep is not None and left_rep is right_rep:
+                return True
+        return False
+
+    def _same_placeholder_varnode(self, left, right) -> bool:
         if left is None or right is None:
             return False
         if left is right:
@@ -1317,8 +2813,68 @@ class StructuralRecurrenceSummarizer:
         self,
         varnode,
     ) -> Optional[int]:
+        try:
+            address = varnode.getAddress()
+            if address is not None and address.getAddressSpace().getName() == "const":
+                return int(varnode.getOffset())
+        except Exception:
+            pass
         expr = self._trace_varnode_expression(varnode)
         return self._raw_constant_value(expr)
+
+    def _choose_return_reaching_accumulator(
+        self,
+        candidates: Sequence[CountedLoopAccumulator],
+    ) -> CountedLoopAccumulator:
+        reaching = [
+            candidate for candidate in candidates
+            if self._varnode_reaches_return(candidate.phi_output)
+        ]
+        if reaching:
+            return reaching[0]
+        return candidates[0]
+
+    def _varnode_reaches_return(
+        self,
+        start_varnode,
+        *,
+        budget: int = 128,
+    ) -> bool:
+        stack = [start_varnode]
+        seen = set()
+        while stack and len(seen) < budget:
+            current = stack.pop()
+            if current is None:
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            descendants = getattr(current, "getDescendants", lambda: None)()
+            if descendants is None:
+                continue
+            try:
+                iterator = iter(descendants)
+            except TypeError:
+                iterator = None
+            if iterator is not None:
+                for op in iterator:
+                    mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                    if mnemonic == "RETURN":
+                        return True
+                    output = getattr(op, "getOutput", lambda: None)()
+                    if output is not None:
+                        stack.append(output)
+                continue
+            while descendants.hasNext():
+                op = descendants.next()
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic == "RETURN":
+                    return True
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is not None:
+                    stack.append(output)
+        return False
 
     def _trace_varnode_expression(
         self,

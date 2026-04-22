@@ -20,6 +20,8 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     UnknownValueRef,
 )
+from scripts.function_tracer_pcode.equivalence.formula.returns import expression_has_unresolved_value
+from scripts.function_tracer_pcode.model.render_smt import expression_to_smt
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -211,6 +213,7 @@ class _FakePcodeOp:
         self._mnemonic = mnemonic
         self._inputs = list(inputs)
         self._output = output
+        self._parent = None
         if output is not None:
             output.setDef(self)
 
@@ -226,6 +229,70 @@ class _FakePcodeOp:
     def getOutput(self):
         return self._output
 
+    def setParent(self, parent):
+        self._parent = parent
+
+    def getParent(self):
+        return self._parent
+
+
+class _FakeBranchOp(_FakePcodeOp):
+    def __init__(self, condition_expr: Expression):
+        super().__init__("CBRANCH", [_FakeVarnode("branch_target"), _FakeArgVarnode(condition_expr)], None)
+
+
+class _FakeCfgBlock:
+    def __init__(self, index: int, ops=None):
+        self._index = index
+        self._ops = list(ops or [])
+        self._ins = []
+        self._outs = []
+        self._true_out = None
+        self._false_out = None
+        for op in self._ops:
+            if hasattr(op, "setParent"):
+                op.setParent(self)
+
+    def getIndex(self):
+        return self._index
+
+    def getIterator(self):
+        return _FakeIterator(self._ops)
+
+    def add_edge(self, target, *, truth: bool | None = None):
+        self._outs.append(target)
+        target._ins.append(self)
+        if truth is True:
+            self._true_out = target
+        elif truth is False:
+            self._false_out = target
+
+    def getOutSize(self):
+        return len(self._outs)
+
+    def getOut(self, index):
+        return self._outs[index]
+
+    def getInSize(self):
+        return len(self._ins)
+
+    def getIn(self, index):
+        return self._ins[index]
+
+    def getTrueOut(self):
+        return self._true_out
+
+    def getFalseOut(self):
+        return self._false_out
+
+
+class _FakeCfgHighFunction:
+    def __init__(self, blocks):
+        self._blocks = list(blocks)
+
+    def getBasicBlocks(self):
+        return list(self._blocks)
+
 
 class _FakeTracer:
     def __init__(self, function_name: str, arg_expr: Expression):
@@ -234,7 +301,11 @@ class _FakeTracer:
         self.debug = False
 
     def trace_varnode(self, varnode, use_cache=True):
-        return getattr(varnode, "expr", self._arg_expr)
+        if hasattr(varnode, "expr"):
+            return varnode.expr
+        if hasattr(varnode, "_expr") and varnode._expr is not None:
+            return varnode._expr
+        return self._arg_expr
 
     def resolve_call_target_ref(self, _addr_varnode, **_kwargs):
         return CallTargetRef.from_name(self._function_name)
@@ -335,6 +406,157 @@ def test_structural_recurrence_summarizer_rejects_non_affine_recursion():
     )
 
     assert summary is None
+
+
+def test_extract_index_step_accepts_subtractive_phi_updates():
+    phi_output = _FakeVarnode("loop_aux")
+    one_vn = _FakeVarnode("one", expr=_const(1))
+    next_vn = _FakeVarnode("loop_aux_next")
+    _FakePcodeOp("INT_SUB", [phi_output, one_vn], next_vn)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._extract_index_step(next_vn, phi_output) == -1
+
+
+def test_affine_loop_state_phi_uses_entry_counter_placeholder():
+    start_expr = Expression.binary_op("INT_AND", _param("param_1"), _const(0xFFFFFFF8))
+    one_vn = _FakeVarnode("one", expr=_const(1))
+    iv_entry_vn = _FakeVarnode("iv_entry", expr=start_expr)
+
+    header = _FakeCfgBlock(0)
+    latch = _FakeCfgBlock(1)
+    header.add_edge(latch)
+    latch.add_edge(header)
+
+    iv_phi_vn = _FakeVarnode("iv_phi")
+    iv_next_vn = _FakeVarnode("iv_next")
+    aux_init_vn = _FakeVarnode("aux_init")
+    aux_phi_vn = _FakeVarnode("aux_phi")
+    aux_next_vn = _FakeVarnode("aux_next")
+
+    iv_phi_op = _FakePcodeOp("MULTIEQUAL", [iv_entry_vn, iv_next_vn], iv_phi_vn)
+    aux_init_op = _FakePcodeOp("INT_2COMP", [iv_entry_vn], aux_init_vn)
+    aux_phi_op = _FakePcodeOp("MULTIEQUAL", [aux_init_vn, aux_next_vn], aux_phi_vn)
+    header._ops[:] = [aux_phi_op, iv_phi_op]
+    for op in header._ops:
+        op.setParent(header)
+
+    iv_next_op = _FakePcodeOp("INT_ADD", [iv_phi_vn, one_vn], iv_next_vn)
+    aux_next_op = _FakePcodeOp("INT_SUB", [aux_phi_vn, one_vn], aux_next_vn)
+    latch._ops[:] = [iv_next_op, aux_next_op]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    induction = summarizer._match_counted_loop_induction(iv_phi_op)
+
+    assert induction is not None
+    aux_expr = summarizer._summarize_affine_loop_state_phi(aux_phi_op, induction)
+
+    assert aux_expr is not None
+    assert summarizer._extract_affine_term(aux_expr, "__loop_iv") == (-1, 0)
+
+
+def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcode_cfg():
+    limit_expr = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1)
+    body = _FakeCfgBlock(2)
+    even_block = _FakeCfgBlock(3)
+    odd_block = _FakeCfgBlock(4)
+    latch = _FakeCfgBlock(5)
+    exit_block = _FakeCfgBlock(6)
+
+    preheader.add_edge(header)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(odd_block, truth=True)
+    body.add_edge(even_block, truth=False)
+    even_block.add_edge(latch)
+    odd_block.add_edge(latch)
+    latch.add_edge(header)
+
+    limit_vn = _FakeVarnode("limit", expr=limit_expr)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+
+    iv_phi_vn = _FakeVarnode("iv_phi")
+    iv_next_vn = _FakeVarnode("iv_next")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_merge_vn = _FakeVarnode("acc_merge")
+    acc_even_vn = _FakeVarnode("acc_even")
+    acc_odd_vn = _FakeVarnode("acc_odd")
+    header_cond_vn = _FakeVarnode("header_cond", size=1)
+    parity_and_vn = _FakeVarnode("parity_and")
+    parity_cond_vn = _FakeVarnode("parity_cond", size=1)
+
+    iv_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, iv_next_vn], iv_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_merge_vn], acc_phi_vn)
+    header_cmp_op = _FakePcodeOp("INT_SLESS", [iv_phi_vn, limit_vn], header_cond_vn)
+    header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("header_target"), header_cond_vn], None)
+    header._ops[:] = [iv_phi_op, acc_phi_op, header_cmp_op, header_branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    parity_and_op = _FakePcodeOp("INT_AND", [iv_phi_vn, one_vn], parity_and_vn)
+    parity_cmp_op = _FakePcodeOp("INT_NOTEQUAL", [parity_and_vn, zero_vn], parity_cond_vn)
+    body_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), parity_cond_vn], None)
+    body._ops[:] = [parity_and_op, parity_cmp_op, body_branch]
+    for op in body._ops:
+        op.setParent(body)
+
+    acc_even_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, iv_phi_vn], acc_even_vn)
+    even_block._ops[:] = [acc_even_op]
+    acc_even_op.setParent(even_block)
+
+    acc_odd_op = _FakePcodeOp("INT_SUB", [acc_phi_vn, iv_phi_vn], acc_odd_vn)
+    odd_block._ops[:] = [acc_odd_op]
+    acc_odd_op.setParent(odd_block)
+
+    acc_merge_op = _FakePcodeOp("MULTIEQUAL", [acc_even_vn, acc_odd_vn], acc_merge_vn)
+    iv_next_op = _FakePcodeOp("INT_ADD", [iv_phi_vn, one_vn], iv_next_vn)
+    latch._ops[:] = [acc_merge_op, iv_next_op]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"), negated=True)],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", Expression.unknown("phi_circular"), _const(0)),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([preheader, header, body, even_block, odd_block, latch, exit_block]),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_scalar_loop_summary"
+    assert len(summarized_returns) == 2
+    assert all(expression_has_unresolved_value(ret.value) is False for ret in summarized_returns)
+    loop_case = next(ret for ret in summarized_returns if ret.conditions and ret.conditions[0].to_string() == "(0 < param_1)")
+    loop_smt = expression_to_smt(loop_case.value)
+    assert "rtunk_" not in loop_smt
+    assert "ite" in loop_smt
 
 
 def test_structural_recurrence_summarizer_accepts_masked_counter_recursion():

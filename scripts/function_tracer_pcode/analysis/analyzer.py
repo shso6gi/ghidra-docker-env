@@ -6570,6 +6570,17 @@ class ReturnAnalyzer:
         
         # MULTIEQUALが含まれるかチェック
         has_multiequal = self._contains_multiequal(return_varnode)
+        if has_multiequal:
+            structural_shortcut = self._try_counted_loop_return_shortcut(
+                return_varnode,
+                address,
+                tracer,
+                path_conditions,
+                return_index,
+                site_metadata=site_metadata,
+            )
+            if structural_shortcut is not None:
+                return structural_shortcut
         
         if has_multiequal:
             self._debug_print("Return value contains MULTIEQUAL - using PHI-based expansion")
@@ -6643,6 +6654,48 @@ class ReturnAnalyzer:
             )]
         
         return results
+
+    def _try_counted_loop_return_shortcut(
+        self,
+        return_varnode,
+        address: str,
+        tracer: PcodeTracer,
+        path_conditions: List[Condition],
+        return_index: int,
+        *,
+        site_metadata: Optional[Dict[str, Optional[object]]] = None,
+    ) -> Optional[List[ReturnInfo]]:
+        high_function = getattr(tracer, "high_function", None)
+        if high_function is None:
+            return None
+
+        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        model = summarizer._extract_counted_scalar_loop_model(high_function, None)
+        if model is None:
+            return None
+
+        self._debug_print(
+            "Bypassing PHI expander for counted scalar loop return; "
+            "using object-centric trace prior to structural summary"
+        )
+        value = tracer.trace_varnode(return_varnode, use_cache=False)
+        simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
+            path_conditions
+        )
+        resolved_value = self._concretize_readonly_loads(
+            value,
+            simplified_conds,
+            self._current_parameters,
+        )
+        return [
+            self._make_return_info(
+                address=address,
+                value=resolved_value,
+                conditions=simplified_conds,
+                branch_index=return_index,
+                site_metadata=site_metadata,
+            )
+        ]
 
     def _build_return_infos_from_expansions(
         self,
