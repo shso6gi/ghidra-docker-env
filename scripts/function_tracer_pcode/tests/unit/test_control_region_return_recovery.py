@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.model import Condition, Expression
+from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
 class _FakeSeq:
@@ -258,3 +259,41 @@ def test_analyze_function_skips_effect_summary_when_control_region_recovery_succ
     assert len(result.returns) == 1
     assert int(result.returns[0].value.value) == 1000
     assert "control_region_return_recovery" in result.analysis_notes
+
+
+def test_apply_structural_recurrence_summary_skips_resolved_plain_memory_return_without_candidate():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    function = Mock()
+    function.getName.return_value = "plain_load"
+    high_function = Mock()
+    high_function.getBasicBlocks.return_value = []
+    tracer = Mock()
+    analysis = create_mock_analysis(
+        "plain_load",
+        return_type="int",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            analyzer._make_return_info(
+                address="0x1000",
+                value=Expression.memory(Expression.parameter("param_1", index=0, size=8), size=4),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+    )
+
+    with patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        side_effect=AssertionError("resolved plain memory returns should not trigger structural summary"),
+    ):
+        result = analyzer._apply_structural_recurrence_summary(
+            function,
+            high_function,
+            analysis,
+            tracer,
+        )
+
+    assert result is None

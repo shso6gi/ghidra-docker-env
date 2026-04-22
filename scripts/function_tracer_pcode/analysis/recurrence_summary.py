@@ -13,11 +13,14 @@ from ..model import (
     ExpressionType,
     LocationBaseRef,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     ReturnInfo,
 )
 from ..model.signature import is_integral_data_type, is_pointer_data_type
 from ..model.runtime_refs import UnknownValueRef
 from .condition import ConditionSimplifier, ConditionNormalizer
+from .condition.bitvector import eval_constant_raw
 from .effect_summary import (
     CanonicalLocation,
     _expressions_equivalent_under_conditions,
@@ -57,6 +60,27 @@ class StructuralRecurrenceSummarizer:
         self.tracer = tracer
         self.debug = debug
 
+    def has_summary_candidate(self, function, high_function, analysis) -> bool:
+        if function is None or high_function is None or analysis is None:
+            return False
+        if not getattr(analysis, "returns", None):
+            return False
+
+        function_name = getattr(function, "getName", lambda: "")()
+        if len(getattr(analysis, "parameters", []) or []) == 1 and any(
+            self._expression_contains_recursive_unknown(ret.value, function_name)
+            for ret in (analysis.returns or [])
+        ):
+            return True
+
+        if self._has_readonly_pointer_reduction_candidate(high_function, analysis):
+            return True
+
+        if self._has_branch_accumulator_candidate(analysis):
+            return True
+
+        return False
+
     def try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
         if function is None or high_function is None or analysis is None:
             return None
@@ -74,6 +98,69 @@ class StructuralRecurrenceSummarizer:
         if summary is not None:
             return summary
         return None
+
+    def _has_readonly_pointer_reduction_candidate(
+        self,
+        high_function,
+        analysis,
+    ) -> bool:
+        if analysis is None or not analysis.returns:
+            return False
+        if getattr(getattr(analysis, "effect_summary", None), "effects", None):
+            return False
+        if len(getattr(analysis, "parameters", []) or []) < 2:
+            return False
+
+        pointer_param, count_param = self._infer_readonly_pointer_reduction_parameters(
+            analysis,
+            high_function,
+        )
+        if pointer_param is None or count_param is None:
+            return False
+
+        positive_conditions = self._readonly_reduction_positive_conditions(
+            analysis,
+            pointer_param,
+            count_param,
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(positive_conditions):
+            return False
+        if not any(
+            self._return_overlaps_conditions(ret, positive_conditions)
+            for ret in (analysis.returns or [])
+        ):
+            return False
+
+        loop_shape = self._detect_readonly_sum_loop_shape(
+            high_function,
+            analysis,
+            pointer_param,
+            count_param,
+        )
+        if loop_shape is not None:
+            return True
+        loop_shape = self._infer_readonly_sum_shape_from_positive_returns(
+            analysis,
+            pointer_param,
+            count_param,
+            positive_conditions,
+        )
+        return loop_shape is not None
+
+    def _has_branch_accumulator_candidate(
+        self,
+        analysis,
+    ) -> bool:
+        if analysis is None or not analysis.returns or len(analysis.parameters or []) < 3:
+            return False
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is None or not getattr(effect_summary, "effects", None):
+            return False
+        if self._infer_loop_parameter_pair(analysis) is None:
+            return False
+        if not self._infer_pointer_parameter_name(analysis):
+            return False
+        return True
 
     def _debug(self, message: str) -> None:
         if self.debug:
@@ -271,6 +358,14 @@ class StructuralRecurrenceSummarizer:
         summary_pointer_expr = self._parameter_expression(pointer_param)
         summary_count_expr = self._parameter_expression(count_param)
         result_size = max(1, int(getattr(overlapping_positive_returns[0].value, "size", 0) or 0) or 4)
+        semantic_witnesses = self._build_readonly_reduction_semantic_witnesses(
+            analysis,
+            pointer_param,
+            count_param,
+            overlapping_positive_returns,
+            loop_shape,
+            result_size=result_size,
+        )
         reduction_ref = ReadonlyReductionRef(
             reduction_kind="readonly_sum",
             pointer_base_ref=LocationBaseRef.parameter(
@@ -286,6 +381,7 @@ class StructuralRecurrenceSummarizer:
             result_size=result_size,
             start_offset=0,
             signed_counter=bool(count_param.get("is_signed", True)),
+            semantic_witnesses=semantic_witnesses,
         )
         summary_expr = Expression.intrinsic(
             "READONLY_SUM",
@@ -615,6 +711,263 @@ class StructuralRecurrenceSummarizer:
             return None
         (stride, element_size), _count = stride_votes.most_common(1)[0]
         return {"stride": int(stride), "element_size": int(element_size)}
+
+    def _build_readonly_reduction_semantic_witnesses(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        positive_returns: Sequence[ReturnInfo],
+        loop_shape: Dict[str, int],
+        *,
+        result_size: int,
+    ) -> Tuple[ReadonlyReductionWitness, ...]:
+        exact_witnesses = self._extract_readonly_reduction_exact_witnesses(
+            analysis,
+            pointer_param,
+            count_param,
+            positive_returns,
+        )
+        synthesized_witnesses = self._synthesize_linear_readonly_reduction_witnesses(
+            pointer_param,
+            loop_shape,
+            result_size=result_size,
+        )
+        if not exact_witnesses:
+            return synthesized_witnesses
+        if not synthesized_witnesses:
+            return exact_witnesses
+
+        exact_by_count = {
+            int(witness.exact_count): witness
+            for witness in exact_witnesses
+        }
+        synthesized_by_count = {
+            int(witness.exact_count): witness
+            for witness in synthesized_witnesses
+        }
+        overlap = set(exact_by_count) & set(synthesized_by_count)
+        for exact_count in sorted(overlap):
+            if exact_by_count[exact_count].stable_key() != synthesized_by_count[exact_count].stable_key():
+                return exact_witnesses
+
+        merged = dict(synthesized_by_count)
+        merged.update(exact_by_count)
+        return tuple(merged[count] for count in sorted(merged))
+
+    def _extract_readonly_reduction_exact_witnesses(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        positive_returns: Sequence[ReturnInfo],
+    ) -> Tuple[ReadonlyReductionWitness, ...]:
+        count_name = str(count_param.get("name") or "")
+        witness_by_count: Dict[int, ReadonlyReductionWitness] = {}
+        for ret in positive_returns or []:
+            exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
+            if exact_count is None or exact_count <= 0:
+                continue
+            reduced_value = _reduce_expression_under_conditions(ret.value, ret.conditions or [])
+            terms = self._extract_readonly_reduction_terms(
+                reduced_value,
+                analysis.parameters or [],
+                pointer_param,
+            )
+            if terms is None and reduced_value is not ret.value:
+                terms = self._extract_readonly_reduction_terms(
+                    ret.value,
+                    analysis.parameters or [],
+                    pointer_param,
+                )
+            if not terms or len(terms) != int(exact_count):
+                continue
+            witness = ReadonlyReductionWitness(
+                exact_count=int(exact_count),
+                terms=tuple(terms),
+            )
+            existing = witness_by_count.get(int(exact_count))
+            if existing is None or existing.stable_key() == witness.stable_key():
+                witness_by_count[int(exact_count)] = witness
+        if not witness_by_count:
+            return ()
+        return tuple(witness_by_count[count] for count in sorted(witness_by_count))
+
+    def _synthesize_linear_readonly_reduction_witnesses(
+        self,
+        pointer_param: dict,
+        loop_shape: Optional[Dict[str, int]],
+        *,
+        result_size: int,
+    ) -> Tuple[ReadonlyReductionWitness, ...]:
+        if not loop_shape:
+            return ()
+        stride = int(loop_shape.get("stride", 0) or 0)
+        element_size = int(loop_shape.get("element_size", 0) or 0)
+        access_size = max(1, int(result_size or 0))
+        if stride <= 0 or element_size <= 0 or element_size != access_size:
+            return ()
+        witnesses: List[ReadonlyReductionWitness] = []
+        for exact_count in range(1, 5):
+            terms = tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=int(index * stride),
+                    access_size=access_size,
+                )
+                for index in range(exact_count)
+            )
+            witnesses.append(
+                ReadonlyReductionWitness(
+                    exact_count=exact_count,
+                    terms=terms,
+                )
+            )
+        return tuple(witnesses)
+
+    def _extract_readonly_reduction_terms(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[dict],
+        pointer_param: dict,
+    ) -> Optional[List[ReadonlyReductionTermRef]]:
+        if expr is None:
+            return None
+        big_endian = self._program_is_big_endian()
+        extracted: List[ReadonlyReductionTermRef] = []
+        for sign, term in self._flatten_add_terms(expr):
+            if term.expr_type == ExpressionType.CONSTANT:
+                continue
+            if sign != 1:
+                return None
+            descriptor = self._extract_readonly_reduction_term_descriptor(
+                term,
+                parameters,
+                pointer_param,
+                big_endian=big_endian,
+            )
+            if descriptor is None:
+                return None
+            extracted.append(descriptor)
+        if not extracted:
+            return None
+        extracted.sort(key=lambda item: (int(item.byte_offset), int(item.access_size)))
+        return extracted
+
+    def _extract_readonly_reduction_term_descriptor(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[dict],
+        pointer_param: dict,
+        *,
+        big_endian: bool,
+        lsb_byte_offset: int = 0,
+        narrowed_size: Optional[int] = None,
+    ) -> Optional[ReadonlyReductionTermRef]:
+        if expr is None:
+            return None
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            if expr.operator in {"INT_ZEXT", "INT_SEXT", "CAST", "COPY"}:
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_param,
+                    big_endian=big_endian,
+                    lsb_byte_offset=lsb_byte_offset,
+                    narrowed_size=narrowed_size,
+                )
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            if expr.operator == "SUBPIECE":
+                byte_offset = self._raw_constant_value(expr.operands[1])
+                if byte_offset is None or byte_offset < 0:
+                    return None
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_param,
+                    big_endian=big_endian,
+                    lsb_byte_offset=lsb_byte_offset + int(byte_offset),
+                    narrowed_size=max(1, int(expr.size or 0)),
+                )
+            if expr.operator == "INT_RIGHT":
+                shift_bits = self._raw_constant_value(expr.operands[1])
+                if shift_bits is None or shift_bits < 0 or (int(shift_bits) % 8) != 0:
+                    return None
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_param,
+                    big_endian=big_endian,
+                    lsb_byte_offset=lsb_byte_offset + (int(shift_bits) // 8),
+                    narrowed_size=narrowed_size or max(1, int(expr.size or 0)),
+                )
+            if expr.operator == "INT_AND":
+                mask_width = self._low_mask_width_bytes(expr.operands[0], expr.operands[1])
+                if mask_width is None:
+                    mask_width = self._low_mask_width_bytes(expr.operands[1], expr.operands[0])
+                if mask_width is not None:
+                    return self._extract_readonly_reduction_term_descriptor(
+                        expr.operands[0] if expr.operands[0].expr_type != ExpressionType.CONSTANT else expr.operands[1],
+                        parameters,
+                        pointer_param,
+                        big_endian=big_endian,
+                        lsb_byte_offset=lsb_byte_offset,
+                        narrowed_size=narrowed_size or mask_width,
+                    )
+
+        if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
+            return None
+
+        load_size = max(1, int(expr.size or 0))
+        access_size = max(1, int(narrowed_size or load_size))
+        if lsb_byte_offset < 0 or access_size > load_size or lsb_byte_offset + access_size > load_size:
+            return None
+        location = canonicalize_location(expr.operands[0], parameters, size=load_size)
+        if location is None or not location.base_ref.matches_parameter(pointer_param):
+            return None
+        if big_endian:
+            byte_offset = int(location.offset) + (load_size - access_size - int(lsb_byte_offset))
+        else:
+            byte_offset = int(location.offset) + int(lsb_byte_offset)
+        return ReadonlyReductionTermRef(
+            byte_offset=byte_offset,
+            access_size=access_size,
+        )
+
+    def _low_mask_width_bytes(
+        self,
+        value_expr: Optional[Expression],
+        mask_expr: Optional[Expression],
+    ) -> Optional[int]:
+        if value_expr is None or mask_expr is None:
+            return None
+        mask_value = self._raw_constant_value(mask_expr)
+        value_size = max(1, int(getattr(value_expr, "size", 0) or 0))
+        if mask_value is None or mask_value < 0:
+            return None
+        full_mask = (1 << (value_size * 8)) - 1
+        mask_value = int(mask_value) & full_mask
+        for width in range(1, value_size + 1):
+            if mask_value == ((1 << (width * 8)) - 1):
+                return width
+        return None
+
+    def _program_is_big_endian(self) -> bool:
+        program = getattr(self.tracer, "program", None)
+        if program is None:
+            return False
+        language_getter = getattr(program, "getLanguage", None)
+        if not callable(language_getter):
+            return False
+        language = language_getter()
+        is_big_endian = getattr(language, "isBigEndian", None)
+        if not callable(is_big_endian):
+            return False
+        try:
+            return bool(is_big_endian())
+        except Exception:
+            return False
 
     def _match_pointer_progression_phi(
         self,
@@ -1792,16 +2145,20 @@ class StructuralRecurrenceSummarizer:
         return expr is not None and expr.expr_type == ExpressionType.CONSTANT
 
     def _constant_value(self, expr: Optional[Expression]) -> Optional[int]:
-        if not self._is_constant_expression(expr):
+        raw = self._raw_constant_value(expr)
+        if raw is None:
             return None
-        assert expr is not None
-        return int(expr.value)
+        return raw
 
     def _raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]:
-        if not self._is_constant_expression(expr):
+        if expr is None:
             return None
-        assert expr is not None
-        return int(expr.value)
+        if expr.expr_type == ExpressionType.CONSTANT:
+            return int(expr.value)
+        evaluated = eval_constant_raw(expr)
+        if evaluated is None:
+            return None
+        return int(evaluated[0])
 
     def _signed_constant_value(
         self,
@@ -2008,30 +2365,55 @@ class StructuralRecurrenceSummarizer:
         conditions: Sequence[Condition],
         param_name: str,
     ) -> Optional[int]:
+        lower_bounds: List[int] = []
+        upper_bounds: List[int] = []
         for condition in conditions or []:
             expr = getattr(condition, "expression", None)
             if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
-                continue
-            operator = getattr(expr, "operator", None)
-            left, right = expr.operands
-            right_const = self._constant_value(right)
-            left_const = self._constant_value(left)
-            if self._is_condition_counter_view(left, param_name) and right_const is not None:
-                if operator == "INT_EQUAL" and not condition.negated:
-                    return right_const
-                if operator == "INT_NOTEQUAL" and condition.negated:
-                    return right_const
-            if self._is_condition_counter_view(right, param_name) and left_const is not None:
-                if operator == "INT_EQUAL" and not condition.negated:
-                    return left_const
-                if operator == "INT_NOTEQUAL" and condition.negated:
-                    return left_const
-            affine_left = self._solve_counter_affine_equality(left, right_const, operator, condition.negated, param_name)
-            if affine_left is not None:
-                return affine_left
-            affine_right = self._solve_counter_affine_equality(right, left_const, operator, condition.negated, param_name)
-            if affine_right is not None:
-                return affine_right
+                relation = self._condition_relation(condition, param_name)
+                if relation is None:
+                    continue
+                relation_name, constant = relation
+            else:
+                operator = getattr(expr, "operator", None)
+                left, right = expr.operands
+                right_const = self._constant_value(right)
+                left_const = self._constant_value(left)
+                if self._is_condition_counter_view(left, param_name) and right_const is not None:
+                    if operator == "INT_EQUAL" and not condition.negated:
+                        return right_const
+                    if operator == "INT_NOTEQUAL" and condition.negated:
+                        return right_const
+                if self._is_condition_counter_view(right, param_name) and left_const is not None:
+                    if operator == "INT_EQUAL" and not condition.negated:
+                        return left_const
+                    if operator == "INT_NOTEQUAL" and condition.negated:
+                        return left_const
+                affine_left = self._solve_counter_affine_equality(left, right_const, operator, condition.negated, param_name)
+                if affine_left is not None:
+                    return affine_left
+                affine_right = self._solve_counter_affine_equality(right, left_const, operator, condition.negated, param_name)
+                if affine_right is not None:
+                    return affine_right
+                relation = self._condition_relation(condition, param_name)
+                if relation is None:
+                    continue
+                relation_name, constant = relation
+
+            if relation_name == ">":
+                lower_bounds.append(constant + 1)
+            elif relation_name == ">=":
+                lower_bounds.append(constant)
+            elif relation_name == "<":
+                upper_bounds.append(constant - 1)
+            elif relation_name == "<=":
+                upper_bounds.append(constant)
+        if not lower_bounds or not upper_bounds:
+            return None
+        exact_lower = max(lower_bounds)
+        exact_upper = min(upper_bounds)
+        if exact_lower == exact_upper:
+            return exact_lower
         return None
 
     def _solve_counter_affine_equality(

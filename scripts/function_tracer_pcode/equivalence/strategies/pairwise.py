@@ -410,7 +410,24 @@ class PairwiseStrategy(CheckStrategy):
         right_ref = self._readonly_reduction_ref(right)
         if left_ref is None or right_ref is None:
             return False
-        return left_ref.stable_key() == right_ref.stable_key()
+        if left_ref.stable_key() == right_ref.stable_key():
+            return True
+        left_semantic_key = left_ref.semantic_key()
+        right_semantic_key = right_ref.semantic_key()
+        if left_semantic_key is None or right_semantic_key is None:
+            return False
+        return left_semantic_key == right_semantic_key
+
+    def _readonly_reduction_refs_share_semantics(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        left_semantic_key = left_ref.semantic_key()
+        right_semantic_key = right_ref.semantic_key()
+        if left_semantic_key is None or right_semantic_key is None:
+            return False
+        return left_semantic_key == right_semantic_key
 
     def _readonly_reduction_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
         if expr is None or expr.expr_type != ExpressionType.INTRINSIC:

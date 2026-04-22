@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
+from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
@@ -12,8 +13,11 @@ from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     Condition,
     Expression,
+    LocationBaseRef,
+    ReadonlyReductionTermRef,
     ReturnInfo,
     ReadonlyReductionRef,
+    ReadonlyReductionWitness,
     UnknownValueRef,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
@@ -1258,6 +1262,122 @@ def test_structural_recurrence_summarizer_recovers_readonly_pointer_reduction_su
     assert positive_case.conditions[1].to_string() == "(0 < param_2)"
 
 
+def test_structural_recurrence_summarizer_candidate_probe_rejects_plain_memory_return():
+    analysis = create_mock_analysis(
+        "plain_load",
+        return_type="int",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.memory(
+                    Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                    size=4,
+                ),
+                conditions=[],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert (
+        summarizer.has_summary_candidate(
+            _FakeFunction("plain_load"),
+            _FakeHighFunction([]),
+            analysis,
+        )
+        is False
+    )
+
+
+def test_structural_recurrence_summarizer_candidate_probe_accepts_readonly_reduction_shape():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_EQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    )
+                ],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESSEQUAL", _param("param_2"), _const(0)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.unknown("phi_circular"),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+
+    ptr_param = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    zero32 = _FakeVarnode("zero32", size=4, expr=Expression.constant(0, 4))
+    one32 = _FakeVarnode("one32", size=4, expr=Expression.constant(1, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    _FakePcodeOp("INT_ADD", [idx_phi, one32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_param, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    assert summarizer.has_summary_candidate(_FakeFunction("ptr_sum_window"), high_function, analysis) is True
+
+
 def test_structural_recurrence_summarizer_recovers_readonly_reduction_from_affine_exact_count_case():
     params = [
         {"name": "param_1", "index": 0, "data_type": "long", "size": 8},
@@ -1529,3 +1649,303 @@ def test_structural_recurrence_summarizer_recovers_readonly_pointer_reduction_fr
     positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ret.value.expr_type.__class__.INTRINSIC)
     assert positive_case.value.opcode == READONLY_SUM_OPCODE
     assert positive_case.value.runtime_ref.stride == 4
+    assert positive_case.value.runtime_ref.semantic_witnesses[:2] == (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        ),
+    )
+    assert [w.exact_count for w in positive_case.value.runtime_ref.semantic_witnesses] == [1, 2, 3, 4]
+
+
+def test_structural_recurrence_summarizer_synthesizes_linear_semantic_witnesses_for_simple_loop():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_EQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    )
+                ],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESSEQUAL", _param("param_2"), _const(0)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 0),
+                    Expression.unknown("phi_circular"),
+                ),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+
+    ptr_param = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    zero32 = _FakeVarnode("zero32", size=4, expr=Expression.constant(0, 4))
+    one32 = _FakeVarnode("one32", size=4, expr=Expression.constant(1, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    idx_add_op = _FakePcodeOp("INT_ADD", [idx_phi, one32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_param, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_add_op, idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("ptr_sum_window"),
+        high_function,
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "readonly_pointer_reduction_summary"
+    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ret.value.expr_type.__class__.INTRINSIC)
+    assert positive_case.value.runtime_ref.semantic_witnesses[:2] == (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        ),
+    )
+
+
+def test_structural_recurrence_summarizer_merges_exact_and_synthesized_semantic_witnesses():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_EQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    )
+                ],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(-300),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESSEQUAL", _param("param_2"), _const(0)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=_mem("param_1", 0),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_EQUAL", _param("param_2"), _const(1)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x100C",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 0),
+                    Expression.unknown("phi_circular"),
+                ),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                ],
+            ),
+        ],
+    )
+
+    ptr_param = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    zero32 = _FakeVarnode("zero32", size=4, expr=Expression.constant(0, 4))
+    one32 = _FakeVarnode("one32", size=4, expr=Expression.constant(1, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    idx_add_op = _FakePcodeOp("INT_ADD", [idx_phi, one32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_param, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_add_op, idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("ptr_sum_window"),
+        high_function,
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "readonly_pointer_reduction_summary"
+    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ret.value.expr_type.__class__.INTRINSIC)
+    assert [w.exact_count for w in positive_case.value.runtime_ref.semantic_witnesses] == [1, 2, 3, 4]
+
+
+def test_return_analyzer_restores_canonical_readonly_summary_guards():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("param_1", index=0, data_type="int *", size=8),
+            Expression.parameter("param_2", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+            count_parameter_name="param_2",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    corrupted = ReturnInfo(
+        address="0x1008",
+        value=reduction_expr,
+        conditions=[
+            _cond(
+                "INT_NOTEQUAL",
+                Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                    Expression.constant(8, size=8),
+                ),
+            ),
+            _cond("INT_SLESS", _const(0), _param("param_2")),
+        ],
+    )
+
+    repaired = analyzer._restore_readonly_reduction_summary_conditions([corrupted], params)
+
+    assert [cond.to_string() for cond in repaired[0].conditions] == ["(param_1 != 0)", "(0 < param_2)"]
+
+
+def test_exact_counter_value_from_interval_conditions_recovers_singleton_count():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    exact = summarizer._exact_counter_value_from_conditions(
+        [
+            _cond("INT_SLESSEQUAL", _const(1), _param("param_2")),
+            _cond("INT_SLESSEQUAL", _param("param_2"), _const(1)),
+        ],
+        "param_2",
+    )
+    exact_two = summarizer._exact_counter_value_from_conditions(
+        [
+            _cond("INT_SLESS", _const(1), _param("param_2")),
+            _cond("INT_SLESSEQUAL", _param("param_2"), _const(2)),
+        ],
+        "param_2",
+    )
+
+    assert exact == 1
+    assert exact_two == 2

@@ -539,6 +539,50 @@ class ObservedMemoryReadRef:
 
 
 @dataclass(frozen=True)
+class ReadonlyReductionTermRef:
+    """Object-centric description of one scalar term in a readonly reduction."""
+
+    byte_offset: int
+    access_size: int
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "readonly_reduction_term",
+            int(self.byte_offset),
+            max(1, int(self.access_size or 0)),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "readonly_reduction_term",
+            "byte_offset": int(self.byte_offset),
+            "access_size": max(1, int(self.access_size or 0)),
+        }
+
+
+@dataclass(frozen=True)
+class ReadonlyReductionWitness:
+    """Exact-count witness for a readonly reduction."""
+
+    exact_count: int
+    terms: Tuple[ReadonlyReductionTermRef, ...]
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "readonly_reduction_witness",
+            int(self.exact_count),
+            tuple(term.stable_key() for term in self.terms),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "readonly_reduction_witness",
+            "exact_count": int(self.exact_count),
+            "terms": [term.to_dict() for term in self.terms],
+        }
+
+
+@dataclass(frozen=True)
 class ReadonlyReductionRef:
     """Structured identity for a readonly pointer-reduction summary."""
 
@@ -552,6 +596,7 @@ class ReadonlyReductionRef:
     start_offset: int = 0
     signed_counter: bool = True
     source: str = "recurrence_summary"
+    semantic_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -568,29 +613,6 @@ class ReadonlyReductionRef:
             self.source,
         )
 
-    def comparison_key(self) -> Tuple[Any, ...]:
-        """Semantic identity used when comparing solver-visible readonly reductions.
-
-        The iteration shape (`stride` / `element_size`) is intentionally excluded.
-        Those fields describe one concrete lowered loop shape, while equivalence
-        checking needs the source-level reduction identity over the same input
-        objects and counter domain.
-        """
-
-        counter_id: Any
-        if self.count_parameter_index is not None:
-            counter_id = ("index", int(self.count_parameter_index))
-        else:
-            counter_id = ("name", self.count_parameter_name)
-        return (
-            "readonly_reduction_semantic",
-            self.reduction_kind,
-            self.pointer_base_ref.stable_key(),
-            counter_id,
-            int(self.start_offset),
-            int(self.result_size),
-        )
-
     def display_name(self) -> str:
         return (
             f"{self.reduction_kind}("
@@ -599,6 +621,54 @@ class ReadonlyReductionRef:
             f"stride={int(self.stride)},"
             f"elem={int(self.element_size)})"
         )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        witness_prefix = self._semantic_witness_prefix(required_prefix=3, cap=3)
+        if witness_prefix is None:
+            return None
+        pointer_identity = (
+            ("parameter", int(self.pointer_base_ref.parameter_index))
+            if self.pointer_base_ref.is_parameter() and self.pointer_base_ref.parameter_index is not None
+            else self.pointer_base_ref.stable_key()
+        )
+        count_identity = (
+            ("parameter", int(self.count_parameter_index))
+            if self.count_parameter_index is not None
+            else ("parameter_name", self.count_parameter_name)
+        )
+        return (
+            "readonly_reduction_semantic",
+            self.reduction_kind,
+            pointer_identity,
+            count_identity,
+            max(1, int(self.result_size or 0)),
+            int(self.start_offset),
+            tuple(witness.stable_key() for witness in witness_prefix),
+        )
+
+    def _semantic_witness_prefix(
+        self,
+        *,
+        required_prefix: int,
+        cap: Optional[int] = None,
+    ) -> Optional[Tuple[ReadonlyReductionWitness, ...]]:
+        if not self.semantic_witnesses:
+            return None
+        witnesses_by_count = {
+            int(witness.exact_count): witness
+            for witness in self.semantic_witnesses
+            if int(getattr(witness, "exact_count", 0) or 0) > 0
+        }
+        prefix = []
+        next_count = 1
+        while next_count in witnesses_by_count:
+            prefix.append(witnesses_by_count[next_count])
+            if cap is not None and len(prefix) >= int(cap):
+                break
+            next_count += 1
+        if len(prefix) < max(1, int(required_prefix or 0)):
+            return None
+        return tuple(prefix)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -613,6 +683,7 @@ class ReadonlyReductionRef:
             "start_offset": int(self.start_offset),
             "signed_counter": bool(self.signed_counter),
             "source": self.source,
+            "semantic_witnesses": [witness.to_dict() for witness in self.semantic_witnesses],
             "display_name": self.display_name(),
         }
 

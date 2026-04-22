@@ -17,7 +17,13 @@ from ..model.analysis import (
     FunctionReturnAnalysis,
     SignednessResult,
 )
-from ..model.runtime_refs import AddressValueRef, DeferredCallRef, PostStateValueRef, UnknownValueRef
+from ..model.runtime_refs import (
+    AddressValueRef,
+    DeferredCallRef,
+    PostStateValueRef,
+    ReadonlyReductionRef,
+    UnknownValueRef,
+)
 from ..model.signature import (
     get_declared_type_signedness,
     is_void_data_type,
@@ -873,6 +879,10 @@ class ReturnAnalyzer:
             if "control_region_return_recovery" not in result.analysis_notes:
                 result.returns = self._exclusivize_return_regions(result.returns)
             result.returns = self._merge_equivalent_return_infos(result.returns)
+            result.returns = self._restore_readonly_reduction_summary_conditions(
+                result.returns,
+                result.parameters,
+            )
             if (
                 result.has_symbolic_post_state_reads()
                 and "symbolic_post_state_reads" not in result.analysis_notes
@@ -914,27 +924,16 @@ class ReturnAnalyzer:
         if analysis is None or not analysis.returns:
             return None
 
+        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
         should_try = analysis.has_unresolved_return_value() or any(
             reason in {"call_out_of_scope", "max_depth_exceeded", "phi_no_valid_branch", "phi_circular"}
             for reason in getattr(analysis, "unknown_event_reasons", [])
         )
-        if not should_try and getattr(analysis, "effect_summary", None) is not None:
-            should_try = bool(
-                getattr(analysis.effect_summary, "effects", None)
-                and len(getattr(analysis, "returns", []) or []) >= 2
-            )
-        if not should_try and getattr(analysis, "effect_summary", None) is not None:
-            has_effects = bool(getattr(analysis.effect_summary, "effects", None))
-            if not has_effects:
-                should_try = any(
-                    getattr(ret, "value", None) is not None
-                    and getattr(ret.value, "contains_memory_access", lambda: False)()
-                    for ret in (analysis.returns or [])
-                )
+        if not should_try:
+            should_try = summarizer.has_summary_candidate(function, high_function, analysis)
         if not should_try:
             return None
 
-        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
         return summarizer.try_summarize_function(function, high_function, analysis)
 
     def _strip_stack_protector_only_conditions(
@@ -990,6 +989,123 @@ class ReturnAnalyzer:
         if not changed:
             return return_infos
         return stripped_infos
+
+    def _restore_readonly_reduction_summary_conditions(
+        self,
+        return_infos: List[ReturnInfo],
+        parameters: Sequence[Dict],
+    ) -> List[ReturnInfo]:
+        if not return_infos:
+            return return_infos
+
+        repaired: List[ReturnInfo] = []
+        changed = False
+        for info in return_infos:
+            runtime_ref = getattr(getattr(info, "value", None), "runtime_ref", None)
+            if not isinstance(runtime_ref, ReadonlyReductionRef):
+                repaired.append(info)
+                continue
+
+            canonical_conditions = self._readonly_reduction_positive_conditions_from_ref(
+                runtime_ref,
+                parameters,
+            )
+            if not canonical_conditions:
+                repaired.append(info)
+                continue
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(canonical_conditions)
+            if (
+                ConditionSimplifier.object_centric_conditions_signature(info.conditions or [])
+                != ConditionSimplifier.object_centric_conditions_signature(simplified)
+            ):
+                changed = True
+                repaired.append(
+                    ReturnInfo(
+                        address=info.address,
+                        value=info.value,
+                        conditions=list(simplified),
+                        branch_index=info.branch_index,
+                        pcode_identity=info.pcode_identity,
+                        pcode_order=info.pcode_order,
+                        pcode_time=info.pcode_time,
+                    )
+                )
+                continue
+            repaired.append(info)
+
+        if changed and self.debug:
+            self._debug_print("Restored canonical positive-region guards for READONLY_SUM summaries")
+        return repaired
+
+    def _readonly_reduction_positive_conditions_from_ref(
+        self,
+        runtime_ref: ReadonlyReductionRef,
+        parameters: Sequence[Dict],
+    ) -> List[Condition]:
+        pointer_expr = self._readonly_reduction_parameter_expression(
+            parameters,
+            index=runtime_ref.pointer_base_ref.parameter_index,
+            name=runtime_ref.pointer_base_ref.parameter_name,
+            default_size=8,
+        )
+        count_expr = self._readonly_reduction_parameter_expression(
+            parameters,
+            index=runtime_ref.count_parameter_index,
+            name=runtime_ref.count_parameter_name,
+            default_size=4,
+        )
+        if pointer_expr is None or count_expr is None:
+            return []
+        return [
+            Condition(
+                Expression.binary_op(
+                    "INT_NOTEQUAL",
+                    pointer_expr,
+                    Expression.constant(0, pointer_expr.size or 8),
+                ),
+                False,
+            ),
+            Condition(
+                Expression.binary_op(
+                    "INT_SLESS",
+                    Expression.constant(0, count_expr.size or 4),
+                    count_expr,
+                ),
+                False,
+            ),
+        ]
+
+    def _readonly_reduction_parameter_expression(
+        self,
+        parameters: Sequence[Dict],
+        *,
+        index: Optional[int],
+        name: Optional[str],
+        default_size: int,
+    ) -> Optional[Expression]:
+        for param in parameters or []:
+            param_index = param.get("index")
+            if index is not None and param_index is not None and int(param_index) == int(index):
+                return Expression.parameter(
+                    str(param.get("name") or name or "param"),
+                    index=int(param_index),
+                    data_type=param.get("data_type"),
+                    data_type_obj=param.get("data_type_obj"),
+                    size=int(param.get("size", default_size) or default_size),
+                    storage_info=param.get("storage_info"),
+                )
+            if name and param.get("name") == name:
+                return Expression.parameter(
+                    name,
+                    index=int(param.get("index", 0) or 0),
+                    data_type=param.get("data_type"),
+                    data_type_obj=param.get("data_type_obj"),
+                    size=int(param.get("size", default_size) or default_size),
+                    storage_info=param.get("storage_info"),
+                )
+        if name is None:
+            return None
+        return Expression.parameter(name, index=int(index or 0), size=default_size)
 
     def _synchronize_parameters_with_referenced_parameter_expressions(
         self,

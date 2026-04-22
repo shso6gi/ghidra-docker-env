@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import re
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
@@ -15,6 +16,8 @@ from scripts.function_tracer_pcode.model import (
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
 )
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_intrinsic_smt_declarations,
@@ -80,12 +83,117 @@ def test_expression_to_smt_lowers_readonly_sum_as_declared_object_centric_functi
 
     smt = expression_to_smt(expr)
     declarations = collect_intrinsic_smt_declarations(expr)
+    declared_name = re.search(r"\(declare-fun ([^ ]+)", declarations[0]).group(1)
 
     assert expression_contains_unsupported_smt_ops(expr) is False
-    assert smt.startswith("(rt_readonly_sum_base_c1_o0_64_32_32 ")
+    assert smt.startswith(f"({declared_name} ")
+    assert declared_name.startswith("rt_readonly_sum_")
     assert declarations == [
-        "(declare-fun rt_readonly_sum_base_c1_o0_64_32_32 ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
+        f"(declare-fun {declared_name} ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
     ]
+
+
+def test_readonly_sum_smt_declarations_distinguish_different_loop_shapes():
+    left = Expression.intrinsic(
+        "READONLY_SUM",
+        [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    right = Expression.intrinsic(
+        "READONLY_SUM",
+        [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=8,
+            element_size=8,
+            result_size=4,
+            signed_counter=True,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+
+    left_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(left)[0]).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
+
+    assert left_name != right_name
+
+
+def test_readonly_sum_smt_declarations_share_semantic_identity_when_witness_prefix_matches():
+    shared_prefix = (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=3,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        ),
+    )
+    left = Expression.intrinsic(
+        "READONLY_SUM",
+        [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            semantic_witnesses=shared_prefix,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    right = Expression.intrinsic(
+        "READONLY_SUM",
+        [_param("base"), Expression.parameter("count", size=4, data_type="uint")],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=16,
+            element_size=8,
+            result_size=4,
+            signed_counter=False,
+            semantic_witnesses=shared_prefix,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+
+    left_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(left)[0]).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
+
+    assert left_name == right_name
 
 
 def test_expander_combines_three_input_ptradd_as_intrinsic(monkeypatch):

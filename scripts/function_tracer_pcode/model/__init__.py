@@ -19,6 +19,8 @@ from .runtime_refs import (
     PostStateValueRef,
     PcodeOpRef,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     UnknownValueRef,
 )
 from .intrinsics import (
@@ -72,6 +74,8 @@ __all__ = [
     "PostStateValueRef",
     "PcodeOpRef",
     "ReadonlyReductionRef",
+    "ReadonlyReductionTermRef",
+    "ReadonlyReductionWitness",
     "UnknownValueRef",
     "READONLY_SUM_OPCODE",
     "PTRADD_OPCODE",

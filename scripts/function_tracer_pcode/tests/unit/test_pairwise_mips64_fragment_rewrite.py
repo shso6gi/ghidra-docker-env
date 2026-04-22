@@ -18,6 +18,8 @@ from scripts.function_tracer_pcode.model import (
     LocationBaseRef,
     READONLY_SUM_OPCODE,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     ReturnInfo,
 )
 
@@ -52,6 +54,7 @@ def _readonly_sum_value(
     stride: int,
     element_size: int,
     signed_counter: bool = True,
+    semantic_witnesses=(),
 ) -> Expression:
     return Expression.intrinsic(
         "READONLY_SUM",
@@ -66,6 +69,7 @@ def _readonly_sum_value(
             element_size=element_size,
             result_size=4,
             signed_counter=signed_counter,
+            semantic_witnesses=tuple(semantic_witnesses),
         ),
         opcode=READONLY_SUM_OPCODE,
     )
@@ -330,3 +334,54 @@ def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
     right = _readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False)
 
     assert strategy._readonly_reduction_values_equivalent(left, right) is False
+
+
+def test_pairwise_short_circuits_semantically_equal_readonly_reductions_via_witnesses():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_witnesses = (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=3,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=4,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+            ),
+        ),
+    )
+    right_witnesses = left_witnesses[:3]
+    left = _readonly_sum_value(
+        "param_1",
+        stride=4,
+        element_size=4,
+        signed_counter=True,
+        semantic_witnesses=left_witnesses,
+    )
+    right = _readonly_sum_value(
+        "param_1",
+        stride=16,
+        element_size=8,
+        signed_counter=False,
+        semantic_witnesses=right_witnesses,
+    )
+
+    assert strategy._readonly_reduction_values_equivalent(left, right) is True

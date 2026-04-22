@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import re
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
@@ -108,8 +109,10 @@ def test_formula_builder_declares_object_centric_readonly_reduction_functions():
         returns=[ReturnInfo(address="0x1000", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    assert collect_intrinsic_smt_declarations(reduction_expr) == [
-        "(declare-fun rt_readonly_sum_param_1_c1_o0_64_32_32 ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
+    declarations = collect_intrinsic_smt_declarations(reduction_expr)
+    declared_name = re.search(r"\(declare-fun ([^ ]+)", declarations[0]).group(1)
+    assert declarations == [
+        f"(declare-fun {declared_name} ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
     ]
 
     builder = FormulaBuilder()
@@ -117,7 +120,7 @@ def test_formula_builder_declares_object_centric_readonly_reduction_functions():
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Intrinsic function declarations" in header_text
-    assert "rt_readonly_sum_param_1_c1_o0_64_32_32" in header_text
+    assert declared_name in header_text
 
 
 def test_tracer_promotes_unresolved_direct_call_to_deferred_call_runtime_object():

@@ -511,20 +511,9 @@ def _readonly_sum_function_name(expr) -> str:
     if reduction_ref is None:
         return f"rt_readonly_sum_{base_bits}_{count_bits}_{result_bits}"
     reduction_kind = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.reduction_kind or "sum")
-    base_name = re.sub(
-        r"[^A-Za-z0-9_]+",
-        "_",
-        reduction_ref.pointer_base_ref.display_name() or "ptr",
-    )
-    if reduction_ref.count_parameter_index is not None:
-        counter_id = f"c{int(reduction_ref.count_parameter_index)}"
-    else:
-        counter_id = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.count_parameter_name or "count")
-    return (
-        f"rt_{reduction_kind}_{base_name}_"
-        f"{counter_id}_o{int(reduction_ref.start_offset)}_"
-        f"{base_bits}_{count_bits}_{result_bits}"
-    )
+    identity = reduction_ref.semantic_key() or reduction_ref.stable_key()
+    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    return f"rt_{reduction_kind}_{digest}_{base_bits}_{count_bits}_{result_bits}"
 
 
 def _intrinsic_smt_declaration(expr) -> Optional[str]:
