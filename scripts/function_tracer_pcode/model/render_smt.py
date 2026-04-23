@@ -6,6 +6,7 @@ import re
 from typing import Any, List, Mapping, Optional, Tuple
 
 from .intrinsics import (
+    COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
@@ -15,6 +16,7 @@ from .signature import get_declared_type_signedness
 from .runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
+    CountedLoopSummaryRef,
     PostStateReadRef,
     PostStateValueRef,
     ReadonlyReductionRef,
@@ -129,6 +131,8 @@ def expression_smt_bit_width(expr) -> int:
             default=0,
         )
         if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
+            return explicit_bits or operand_bits
+        if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
             return explicit_bits or operand_bits
         return max(explicit_bits, operand_bits)
 
@@ -516,6 +520,30 @@ def _readonly_sum_function_name(expr) -> str:
     return f"rt_{reduction_kind}_{digest}_{base_bits}_{count_bits}_{result_bits}"
 
 
+def _counted_loop_sum_ref(expr) -> Optional[CountedLoopSummaryRef]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, CountedLoopSummaryRef):
+        return runtime_ref
+    return None
+
+
+def _counted_loop_sum_function_name(expr) -> str:
+    operands = getattr(expr, "operands", None) or []
+    base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
+    start_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
+    limit_bits = expression_smt_bit_width(operands[2]) if len(operands) >= 3 else 0
+    result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+    summary_ref = _counted_loop_sum_ref(expr)
+    if summary_ref is None:
+        return f"rt_counted_loop_sum_{base_bits}_{start_bits}_{limit_bits}_{result_bits}"
+    identity = summary_ref.semantic_key() or summary_ref.stable_key()
+    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    return (
+        f"rt_counted_loop_sum_{digest}_"
+        f"{base_bits}_{start_bits}_{limit_bits}_{result_bits}"
+    )
+
+
 def _intrinsic_smt_declaration(expr) -> Optional[str]:
     opcode = getattr(expr, "opcode", None)
     mnemonic = getattr(expr, "name", None) or ""
@@ -530,6 +558,19 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         return (
             f"(declare-fun {_readonly_sum_function_name(expr)} "
             f"((_ BitVec {base_bits}) (_ BitVec {count_bits})) "
+            f"(_ BitVec {result_bits}))"
+        )
+
+    if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
+        if len(operands) != 3:
+            raise ValueError(f"COUNTED_LOOP_SUM expects 3 operands, got {len(operands)}")
+        base_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+        start_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+        limit_bits = max(1, int(expression_smt_bit_width(operands[2]) or 1))
+        result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+        return (
+            f"(declare-fun {_counted_loop_sum_function_name(expr)} "
+            f"((_ BitVec {base_bits}) (_ BitVec {start_bits}) (_ BitVec {limit_bits})) "
             f"(_ BitVec {result_bits}))"
         )
 
@@ -964,6 +1005,46 @@ def _lower_intrinsic_to_smt(
             prefer_sign_extension=_expr_prefers_signed_extension(count),
         )
         return f"({_readonly_sum_function_name(expr)} {base_smt} {count_smt})"
+
+    if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
+        if len(operands) != 3:
+            raise ValueError(f"COUNTED_LOOP_SUM expects 3 operands, got {len(operands)}")
+        base, start, limit = operands
+        base_bits = max(1, int(expression_smt_bit_width(base) or 1))
+        start_bits = max(1, int(expression_smt_bit_width(start) or 1))
+        limit_bits = max(1, int(expression_smt_bit_width(limit) or 1))
+        base_smt = _to_smt_internal(
+            base,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        start_smt = _to_smt_internal(
+            start,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        limit_smt = _to_smt_internal(
+            limit,
+            prefer_signed_arithmetic,
+            symbol_name_mapping,
+            address_context,
+        )
+        base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits)
+        start_smt = _coerce_expr_to_bitvec_width(
+            start,
+            start_smt,
+            start_bits,
+            prefer_sign_extension=_expr_prefers_signed_extension(start),
+        )
+        limit_smt = _coerce_expr_to_bitvec_width(
+            limit,
+            limit_smt,
+            limit_bits,
+            prefer_sign_extension=_expr_prefers_signed_extension(limit),
+        )
+        return f"({_counted_loop_sum_function_name(expr)} {base_smt} {start_smt} {limit_smt})"
 
     raise ValueError(
         f"Unsupported intrinsic for SMT lowering: {mnemonic or opcode}"

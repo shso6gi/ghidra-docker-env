@@ -1,7 +1,45 @@
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
-from scripts.function_tracer_pcode.cli._pyghidra_support import start_headless_pyghidra
+from scripts.function_tracer_pcode.cli._pyghidra_support import (
+    _ensure_headless_ghidra_user_dirs,
+    start_headless_pyghidra,
+)
+
+
+def test_ensure_headless_ghidra_user_dirs_uses_per_process_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.cli._pyghidra_support.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+    monkeypatch.setattr("scripts.function_tracer_pcode.cli._pyghidra_support.os.getpid", lambda: 4242)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+
+    _ensure_headless_ghidra_user_dirs()
+
+    expected_base = tmp_path / "codex-ghidra" / "pid-4242"
+    assert Path(os.environ["XDG_CONFIG_HOME"]) == expected_base / "config"
+    assert Path(os.environ["XDG_CACHE_HOME"]) == expected_base / "cache"
+    assert (expected_base / "config").is_dir()
+    assert (expected_base / "cache").is_dir()
+
+
+def test_ensure_headless_ghidra_user_dirs_overrides_shared_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.cli._pyghidra_support.tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+    monkeypatch.setattr("scripts.function_tracer_pcode.cli._pyghidra_support.os.getpid", lambda: 17)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/shared-ghidra-config")
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/shared-ghidra-cache")
+
+    _ensure_headless_ghidra_user_dirs()
+
+    expected_base = tmp_path / "codex-ghidra" / "pid-17"
+    assert Path(os.environ["XDG_CONFIG_HOME"]) == expected_base / "config"
+    assert Path(os.environ["XDG_CACHE_HOME"]) == expected_base / "cache"
 
 
 def test_start_headless_pyghidra_falls_back_to_module_start(monkeypatch):

@@ -63,16 +63,19 @@ def load_pyghidra() -> PyGhidraModule:
 
 
 def _ensure_headless_ghidra_user_dirs() -> None:
-    """Provide writable XDG locations for headless Ghidra sessions."""
-    base_dir = Path(tempfile.gettempdir()) / "codex-ghidra"
+    """Provide writable per-process XDG locations for headless Ghidra sessions."""
+    base_dir = Path(tempfile.gettempdir()) / "codex-ghidra" / f"pid-{os.getpid()}"
     config_dir = base_dir / "config"
     cache_dir = base_dir / "cache"
 
     config_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    os.environ.setdefault("XDG_CONFIG_HOME", str(config_dir))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
+    # Parallel equivalence runs launch multiple isolated Python/JVM processes.
+    # Sharing a single Ghidra XDG/cache root across those processes can race on
+    # filesystem caches such as ``fscache2`` and yield flaky behavior.
+    os.environ["XDG_CONFIG_HOME"] = str(config_dir)
+    os.environ["XDG_CACHE_HOME"] = str(cache_dir)
 
 
 def _install_headless_pre_launch_hook(launcher: Any) -> None:

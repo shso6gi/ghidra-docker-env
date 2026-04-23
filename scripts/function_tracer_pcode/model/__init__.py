@@ -10,6 +10,7 @@ from .call_target import CallTargetRef, coerce_call_target_ref
 from .runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
+    CountedLoopSummaryRef,
     DeferredCallRef,
     LocationBaseRef,
     LocationStep,
@@ -24,6 +25,7 @@ from .runtime_refs import (
     UnknownValueRef,
 )
 from .intrinsics import (
+    COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
@@ -65,6 +67,7 @@ __all__ = [
     "coerce_call_target_ref",
     "AddressValueRef",
     "CanonicalLocation",
+    "CountedLoopSummaryRef",
     "DeferredCallRef",
     "LocationBaseRef",
     "LocationStep",
@@ -77,6 +80,7 @@ __all__ = [
     "ReadonlyReductionTermRef",
     "ReadonlyReductionWitness",
     "UnknownValueRef",
+    "COUNTED_LOOP_SUM_OPCODE",
     "READONLY_SUM_OPCODE",
     "PTRADD_OPCODE",
     "PTRSUB_OPCODE",

@@ -670,6 +670,15 @@ class ReadonlyReductionRef:
             return None
         return tuple(prefix)
 
+    def pairwise_exact_key(self) -> Tuple[Any, ...]:
+        return self.stable_key()
+
+    def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        return self.semantic_key()
+
+    def pairwise_requires_guard_equivalence(self) -> bool:
+        return False
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "kind": "readonly_reduction",
@@ -684,6 +693,86 @@ class ReadonlyReductionRef:
             "signed_counter": bool(self.signed_counter),
             "source": self.source,
             "semantic_witnesses": [witness.to_dict() for witness in self.semantic_witnesses],
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
+class CountedLoopSummaryRef:
+    """Structured identity for a counted scalar loop summary."""
+
+    induction_step: int
+    result_size: int
+    signed_loop: bool
+    residue_cases: Tuple[Tuple[int, int, int, int], ...]
+    source: str = "recurrence_summary"
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "counted_loop_summary",
+            int(self.induction_step),
+            max(1, int(self.result_size or 0)),
+            bool(self.signed_loop),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    int(coeff),
+                    int(bias),
+                )
+                for modulus, residue, coeff, bias in self.residue_cases
+            ),
+            self.source,
+        )
+
+    def semantic_key(self) -> Tuple[Any, ...]:
+        return (
+            "counted_loop_summary_semantic",
+            int(self.induction_step),
+            max(1, int(self.result_size or 0)),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    int(coeff),
+                    int(bias),
+                )
+                for modulus, residue, coeff, bias in self.residue_cases
+            ),
+        )
+
+    def pairwise_exact_key(self) -> Tuple[Any, ...]:
+        return self.stable_key()
+
+    def pairwise_semantic_key(self) -> Tuple[Any, ...]:
+        return self.semantic_key()
+
+    def pairwise_requires_guard_equivalence(self) -> bool:
+        return True
+
+    def display_name(self) -> str:
+        return (
+            f"counted_loop(step={int(self.induction_step)},"
+            f"signed={bool(self.signed_loop)},"
+            f"cases={len(self.residue_cases)})"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "counted_loop_summary",
+            "induction_step": int(self.induction_step),
+            "result_size": max(1, int(self.result_size or 0)),
+            "signed_loop": bool(self.signed_loop),
+            "residue_cases": [
+                {
+                    "modulus": int(modulus),
+                    "residue": int(residue),
+                    "coeff": int(coeff),
+                    "bias": int(bias),
+                }
+                for modulus, residue, coeff, bias in self.residue_cases
+            ],
+            "source": self.source,
             "display_name": self.display_name(),
         }
 

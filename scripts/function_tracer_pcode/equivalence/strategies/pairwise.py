@@ -9,11 +9,10 @@ from ...model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    READONLY_SUM_OPCODE,
-    ReadonlyReductionRef,
 )
 from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...analysis.condition.simplifier import ConditionSimplifier
+from ...analysis.condition.normalizer import ConditionNormalizer
 from ...smt import ParallelResult, SolverResult, SolverStatus
 from .base import CheckStrategy, StrategyResult
 from .pairwise_models import QueryResult, ReturnCase
@@ -399,47 +398,113 @@ class PairwiseStrategy(CheckStrategy):
         case1: ReturnCase,
         case2: ReturnCase,
     ) -> bool:
-        return self._readonly_reduction_values_equivalent(case1.value_expr, case2.value_expr)
+        return self._intrinsic_runtime_values_equivalent(
+            case1.value_expr,
+            case2.value_expr,
+            left_case=case1,
+            right_case=case2,
+        )
+
+    def _intrinsic_runtime_values_equivalent(
+        self,
+        left: Expression,
+        right: Expression,
+        *,
+        left_case: Optional[ReturnCase] = None,
+        right_case: Optional[ReturnCase] = None,
+    ) -> bool:
+        if left is None or right is None:
+            return False
+        if left.expr_type != ExpressionType.INTRINSIC or right.expr_type != ExpressionType.INTRINSIC:
+            return False
+        if getattr(left, "opcode", None) != getattr(right, "opcode", None):
+            return False
+        if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
+            return False
+        refs_equivalent, requires_guard_equivalence = self._runtime_refs_share_shortcut_semantics(
+            getattr(left, "runtime_ref", None),
+            getattr(right, "runtime_ref", None),
+        )
+        if not refs_equivalent:
+            return False
+        if requires_guard_equivalence and (
+            left_case is None
+            or right_case is None
+            or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
+        ):
+            return False
+        if len(left.operands) != len(right.operands):
+            return False
+        return all(
+            self._expressions_share_object_centric_structure(left_operand, right_operand)
+            for left_operand, right_operand in zip(left.operands, right.operands)
+        )
+
+    def _runtime_refs_share_shortcut_semantics(self, left_ref, right_ref) -> tuple[bool, bool]:
+        if left_ref is None or right_ref is None:
+            return False, False
+
+        left_exact_key_fn = getattr(left_ref, "pairwise_exact_key", None)
+        right_exact_key_fn = getattr(right_ref, "pairwise_exact_key", None)
+        if callable(left_exact_key_fn) and callable(right_exact_key_fn):
+            try:
+                if left_exact_key_fn() == right_exact_key_fn():
+                    return True, False
+            except Exception:
+                pass
+
+        left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
+        right_semantic_key_fn = getattr(right_ref, "pairwise_semantic_key", None)
+        if not callable(left_semantic_key_fn) or not callable(right_semantic_key_fn):
+            return False, False
+        try:
+            left_semantic_key = left_semantic_key_fn()
+            right_semantic_key = right_semantic_key_fn()
+        except Exception:
+            return False, False
+        if left_semantic_key is None or right_semantic_key is None:
+            return False, False
+        if left_semantic_key != right_semantic_key:
+            return False, False
+
+        left_guard_fn = getattr(left_ref, "pairwise_requires_guard_equivalence", None)
+        right_guard_fn = getattr(right_ref, "pairwise_requires_guard_equivalence", None)
+        requires_guard_equivalence = bool(callable(left_guard_fn) and left_guard_fn()) or bool(
+            callable(right_guard_fn) and right_guard_fn()
+        )
+        return True, requires_guard_equivalence
+
+    def _cases_have_equivalent_summary_conditions(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+    ) -> bool:
+        left_conditions = left_case.summary_conditions if left_case.summary_conditions is not None else left_case.conditions
+        right_conditions = right_case.summary_conditions if right_case.summary_conditions is not None else right_case.conditions
+        left_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(left_conditions or []))
+        right_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(right_conditions or []))
+        return ConditionNormalizer.conditions_signature(left_normalized) == ConditionNormalizer.conditions_signature(
+            right_normalized
+        )
 
     def _readonly_reduction_values_equivalent(
         self,
         left: Expression,
         right: Expression,
     ) -> bool:
-        left_ref = self._readonly_reduction_ref(left)
-        right_ref = self._readonly_reduction_ref(right)
-        if left_ref is None or right_ref is None:
-            return False
-        if left_ref.stable_key() == right_ref.stable_key():
-            return True
-        left_semantic_key = left_ref.semantic_key()
-        right_semantic_key = right_ref.semantic_key()
-        if left_semantic_key is None or right_semantic_key is None:
-            return False
-        return left_semantic_key == right_semantic_key
+        return self._intrinsic_runtime_values_equivalent(left, right)
 
-    def _readonly_reduction_refs_share_semantics(
+    def _expressions_share_object_centric_structure(
         self,
-        left_ref: ReadonlyReductionRef,
-        right_ref: ReadonlyReductionRef,
+        left: Optional[Expression],
+        right: Optional[Expression],
     ) -> bool:
-        left_semantic_key = left_ref.semantic_key()
-        right_semantic_key = right_ref.semantic_key()
-        if left_semantic_key is None or right_semantic_key is None:
+        if left is None or right is None:
             return False
-        return left_semantic_key == right_semantic_key
-
-    def _readonly_reduction_ref(self, expr: Optional[Expression]) -> Optional[ReadonlyReductionRef]:
-        if expr is None or expr.expr_type != ExpressionType.INTRINSIC:
-            return None
-        opcode = getattr(expr, "opcode", None)
-        mnemonic = getattr(expr, "name", None) or ""
-        if opcode != READONLY_SUM_OPCODE and mnemonic != "READONLY_SUM":
-            return None
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        if isinstance(runtime_ref, ReadonlyReductionRef):
-            return runtime_ref
-        return None
+        if left.expr_type == ExpressionType.INTRINSIC or right.expr_type == ExpressionType.INTRINSIC:
+            return self._intrinsic_runtime_values_equivalent(left, right)
+        equivalent, _reason = are_structurally_equivalent(left, right, debug=self.debug)
+        return equivalent
 
     def _try_normalization_equivalence(
         self,

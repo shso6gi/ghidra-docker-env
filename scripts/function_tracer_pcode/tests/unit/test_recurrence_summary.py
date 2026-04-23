@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.analysis.recurrence_summary import StructuralRecurrenceSummarizer
+from scripts.function_tracer_pcode.analysis.recurrence_summary import (
+    CountedLoopAccumulator,
+    CountedLoopGuard,
+    CountedLoopInduction,
+    CountedLoopUpdateCase,
+    ResidueLoopCase,
+    StructuralRecurrenceSummarizer,
+)
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.analysis.effect_summary import (
@@ -556,7 +563,98 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     loop_case = next(ret for ret in summarized_returns if ret.conditions and ret.conditions[0].to_string() == "(0 < param_1)")
     loop_smt = expression_to_smt(loop_case.value)
     assert "rtunk_" not in loop_smt
-    assert "ite" in loop_smt
+    assert "rt_counted_loop_sum_" in loop_smt
+
+
+def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_cfg():
+    limit_expr = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+
+    entry = _FakeCfgBlock(0)
+    ret_zero = _FakeCfgBlock(1)
+    preheader = _FakeCfgBlock(2)
+    header = _FakeCfgBlock(3)
+    even_block = _FakeCfgBlock(4)
+    even_exit = _FakeCfgBlock(5)
+    odd_block = _FakeCfgBlock(6)
+    odd_exit = _FakeCfgBlock(7)
+
+    entry.add_edge(ret_zero, truth=True)
+    entry.add_edge(preheader, truth=False)
+    odd_block.add_edge(header, truth=True)
+    odd_block.add_edge(odd_exit, truth=False)
+    preheader.add_edge(header)
+    even_block.add_edge(even_exit, truth=True)
+    even_block.add_edge(header, truth=False)
+    header.add_edge(even_block, truth=True)
+    header.add_edge(odd_block, truth=False)
+
+    limit_vn = _FakeVarnode("limit", expr=limit_expr)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+
+    signed_limit_vn = _FakeVarnode("signed_limit")
+    entry_cond_vn = _FakeVarnode("entry_cond", size=1)
+    iv_phi_vn = _FakeVarnode("iv_phi")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    parity_vn = _FakeVarnode("parity")
+    parity_cond_vn = _FakeVarnode("parity_cond", size=1)
+    even_acc_vn = _FakeVarnode("even_acc")
+    even_next_vn = _FakeVarnode("even_next")
+    even_exit_cond_vn = _FakeVarnode("even_exit_cond", size=1)
+    odd_acc_vn = _FakeVarnode("odd_acc")
+    odd_next_vn = _FakeVarnode("odd_next")
+    odd_continue_cond_vn = _FakeVarnode("odd_continue_cond", size=1)
+
+    entry_cast_op = _FakePcodeOp("CAST", [limit_vn], signed_limit_vn)
+    entry_cmp_op = _FakePcodeOp("INT_SLESS", [signed_limit_vn, one_vn], entry_cond_vn)
+    entry_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("entry_target"), entry_cond_vn], None)
+    entry._ops[:] = [entry_cast_op, entry_cmp_op, entry_branch]
+    for op in entry._ops:
+        op.setParent(entry)
+
+    iv_phi_op = _FakePcodeOp("MULTIEQUAL", [odd_next_vn, zero_vn, even_next_vn], iv_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [odd_acc_vn, zero_vn, even_acc_vn], acc_phi_vn)
+    parity_and_op = _FakePcodeOp("INT_AND", [iv_phi_vn, one_vn], parity_vn)
+    parity_cmp_op = _FakePcodeOp("INT_EQUAL", [parity_vn, zero_vn], parity_cond_vn)
+    parity_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("parity_target"), parity_cond_vn], None)
+    header._ops[:] = [iv_phi_op, acc_phi_op, parity_and_op, parity_cmp_op, parity_branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    even_acc_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, iv_phi_vn], even_acc_vn)
+    even_next_op = _FakePcodeOp("INT_ADD", [iv_phi_vn, one_vn], even_next_vn)
+    even_cmp_op = _FakePcodeOp("INT_EQUAL", [limit_vn, even_next_vn], even_exit_cond_vn)
+    even_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("even_target"), even_exit_cond_vn], None)
+    even_block._ops[:] = [even_acc_op, even_next_op, even_cmp_op, even_branch]
+    for op in even_block._ops:
+        op.setParent(even_block)
+
+    odd_acc_op = _FakePcodeOp("INT_SUB", [acc_phi_vn, iv_phi_vn], odd_acc_vn)
+    odd_next_op = _FakePcodeOp("INT_ADD", [iv_phi_vn, one_vn], odd_next_vn)
+    odd_cmp_op = _FakePcodeOp("INT_NOTEQUAL", [limit_vn, odd_next_vn], odd_continue_cond_vn)
+    odd_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("odd_target"), odd_continue_cond_vn], None)
+    odd_block._ops[:] = [odd_acc_op, odd_next_op, odd_cmp_op, odd_branch]
+    for op in odd_block._ops:
+        op.setParent(odd_block)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function_direct(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([entry, ret_zero, preheader, header, even_block, even_exit, odd_block, odd_exit]),
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_scalar_loop_summary"
+    assert len(summarized_returns) == 2
+    assert all(expression_has_unresolved_value(ret.value) is False for ret in summarized_returns)
+    loop_case = next(ret for ret in summarized_returns if ret.value.to_string() != "0")
+    assert any("param_1" in condition.to_string() for condition in loop_case.conditions)
+    loop_smt = expression_to_smt(loop_case.value)
+    assert "rtunk_" not in loop_smt
+    assert "rt_counted_loop_sum_" in loop_smt
 
 
 def test_structural_recurrence_summarizer_accepts_masked_counter_recursion():
@@ -716,6 +814,138 @@ def test_structural_recurrence_summary_uses_widened_closed_form():
     assert "zero_extend" in recursive_smt
     assert "extract 31 0" in recursive_smt
     assert "(bvmul ((_ zero_extend" in recursive_smt
+
+
+def test_general_counted_loop_value_supports_negative_step_single_residue():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    expr = summarizer._build_general_counted_loop_value(
+        base_expr=_const(0),
+        start_expr=_const(16),
+        limit_expr=_const(0),
+        induction_step=-8,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(0, -4)),),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert expr is not None
+    assert expression_has_unresolved_value(expr) is False
+    assert "bvsdiv" in expression_to_smt(expr)
+
+
+def test_affine_loop_state_phi_supports_nonunit_induction_step():
+    tracer = _FakeTracer("unused", _const(0))
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    iv_phi_vn = _FakeVarnode("__loop_iv", size=4, high=_FakeHighVar("__loop_iv"))
+    iv_next_vn = _FakeVarnode("iv_next", size=4)
+    eight_vn = _FakeVarnode("eight", size=4, expr=_const(8))
+    iv_init_vn = _FakeVarnode("iv_init", size=4, expr=_const(16))
+    iv_step_op = _FakePcodeOp("INT_SUB", [iv_phi_vn, eight_vn], iv_next_vn)
+    iv_phi_op = _FakePcodeOp("MULTIEQUAL", [iv_init_vn, iv_next_vn], iv_phi_vn)
+
+    state_phi_vn = _FakeVarnode("lane", size=4, high=_FakeHighVar("lane"))
+    state_next_vn = _FakeVarnode("lane_next", size=4)
+    state_init_vn = _FakeVarnode("lane_init", size=4, expr=_const(0))
+    state_delta_op = _FakePcodeOp("INT_ADD", [state_phi_vn, eight_vn], state_next_vn)
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [state_init_vn, state_next_vn], state_phi_vn)
+
+    induction = CountedLoopInduction(
+        phi_op=iv_phi_op,
+        phi_output=iv_phi_vn,
+        init_expr=_const(16),
+        backedge_index=1,
+        step=-8,
+        placeholder=Expression.parameter("__loop_iv", index=-10000, size=4),
+        signed_guard=False,
+    )
+
+    expr = summarizer._summarize_affine_loop_state_phi(state_phi_op, induction)
+
+    assert expr is not None
+    assert summarizer._extract_affine_term(expr, "__loop_iv") == (-1, 16)
+
+
+def test_extract_counted_scalar_loop_model_evaluates_multiple_accumulator_candidates(monkeypatch):
+    header = _FakeCfgBlock(1)
+    phi_bad = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("bad_acc", size=4))
+    phi_good = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("good_acc", size=4))
+    phi_iv = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("iv", size=4))
+    branch = _FakeBranchOp(_cond("INT_SLESS", _const(0), _param()).expression)
+    header._ops[:] = [phi_iv, phi_bad, phi_good, branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    induction = CountedLoopInduction(
+        phi_op=phi_iv,
+        phi_output=phi_iv.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-10000, size=4),
+        signed_guard=False,
+    )
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+        bound_expr=_param(),
+        continue_on_true=True,
+        body_block=header,
+        exit_block=header,
+        signed_comparison=True,
+        entry_condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+    )
+    bad_acc = CountedLoopAccumulator(
+        phi_op=phi_bad,
+        phi_output=phi_bad.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=Expression.variable("__loop_acc_bad", size=4),
+        member_outputs=(phi_bad.getOutput(),),
+        member_placeholders=(Expression.variable("__loop_acc_bad", size=4),),
+    )
+    good_acc = CountedLoopAccumulator(
+        phi_op=phi_good,
+        phi_output=phi_good.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=Expression.variable("__loop_acc_good", size=4),
+        member_outputs=(phi_good.getOutput(),),
+        member_placeholders=(Expression.variable("__loop_acc_good", size=4),),
+    )
+
+    monkeypatch.setattr(summarizer, "_match_counted_loop_induction", lambda op: induction if op is phi_iv else None)
+    monkeypatch.setattr(summarizer, "_candidate_counted_loop_guards", lambda *_args, **_kwargs: [guard])
+    monkeypatch.setattr(summarizer, "_match_counted_loop_accumulators", lambda *_args, **_kwargs: [bad_acc, good_acc])
+
+    def _fake_cases(accumulator, *_args, **_kwargs):
+        if accumulator is bad_acc:
+            return []
+        return [
+            CountedLoopUpdateCase(
+                conditions=(),
+                update_expr=Expression.binary_op("INT_ADD", accumulator.placeholder, induction.placeholder),
+                delta_expr=induction.placeholder,
+            )
+        ]
+
+    monkeypatch.setattr(summarizer, "_extract_counted_loop_update_cases", _fake_cases)
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_residue_loop_cases",
+        lambda cases, _counter_name: (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),) if cases else None,
+    )
+    monkeypatch.setattr(summarizer, "_match_aggregate_counted_loop_accumulator", lambda **_kwargs: None)
+
+    model = summarizer._extract_counted_scalar_loop_model(
+        _FakeCfgHighFunction([header]),
+        analysis=None,
+    )
+
+    assert model is not None
+    _, accumulator, _, residue_cases = model
+    assert accumulator is good_acc
+    assert residue_cases == (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),)
 
 
 def test_stable_op_key_collapses_distinct_wrappers_for_same_logical_pcode():

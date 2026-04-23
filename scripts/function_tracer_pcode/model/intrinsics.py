@@ -10,6 +10,7 @@ from typing import Dict, Optional
 PTRADD_OPCODE = 65
 PTRSUB_OPCODE = 66
 READONLY_SUM_OPCODE = 4097
+COUNTED_LOOP_SUM_OPCODE = 4098
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,12 @@ _INTRINSIC_SPECS = (
         opcode=READONLY_SUM_OPCODE,
         mnemonic="READONLY_SUM",
         arity=2,
+        smt_lowerable=True,
+    ),
+    PcodeIntrinsicSpec(
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+        mnemonic="COUNTED_LOOP_SUM",
+        arity=3,
         smt_lowerable=True,
     ),
 )

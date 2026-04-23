@@ -732,6 +732,35 @@ class ReturnAnalyzer:
                     self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
                     self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
 
+            direct_summary = self._try_direct_structural_summary(
+                function=function,
+                high_function=high_function,
+                tracer=tracer,
+            )
+            if direct_summary is not None:
+                result = FunctionReturnAnalysis(
+                    function_name=function.getName(),
+                    entry_point=str(function.getEntryPoint()),
+                    parameters=parameters,
+                    returns=direct_summary[0],
+                    function_ref=current_function_ref,
+                    analysis_scope_key=analysis_scope_key,
+                    return_type=return_type,
+                    return_type_obj=return_type_obj,
+                    signedness_result=signedness_result,
+                    deferred_calls=dict(self._current_deferred_calls),
+                    effect_summary=self._make_empty_effect_summary(parameters),
+                )
+                result.analysis_notes.extend([direct_summary[1], "direct_structural_summary"])
+                self._synchronize_parameters_with_referenced_parameter_expressions(result)
+                self._repair_mixed_scalar_signedness(result)
+                result.returns = self._merge_equivalent_return_infos(result.returns)
+                self._call_analysis_cache[analysis_scope_key] = result
+                function_cache_key = self._function_cache_key(function)
+                if function_cache_key is not None and not normalized_bound_parameter_values:
+                    self._call_analysis_cache[function_cache_key] = result
+                return result
+
             return_ops = tracer.find_return_ops()
             self._debug_print(f"Found {len(return_ops)} RETURN operations")
 
@@ -935,6 +964,16 @@ class ReturnAnalyzer:
             return None
 
         return summarizer.try_summarize_function(function, high_function, analysis)
+
+    def _try_direct_structural_summary(
+        self,
+        *,
+        function,
+        high_function,
+        tracer: PcodeTracer,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        return summarizer.try_summarize_function_direct(function, high_function)
 
     def _strip_stack_protector_only_conditions(
         self,

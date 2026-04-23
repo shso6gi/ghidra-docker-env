@@ -7,8 +7,12 @@ from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
+    COUNTED_LOOP_SUM_OPCODE,
+    Condition,
+    CountedLoopSummaryRef,
     Expression,
     ExpressionType,
     LocationBaseRef,
@@ -18,6 +22,7 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
+    ReturnInfo,
 )
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_intrinsic_smt_declarations,
@@ -91,6 +96,147 @@ def test_expression_to_smt_lowers_readonly_sum_as_declared_object_centric_functi
     assert declarations == [
         f"(declare-fun {declared_name} ((_ BitVec 64) (_ BitVec 32)) (_ BitVec 32))"
     ]
+
+
+def test_counted_loop_sum_smt_declarations_share_semantic_identity_across_guard_artifacts():
+    left = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    left_decl = collect_intrinsic_smt_declarations(left)[0]
+    right_decl = collect_intrinsic_smt_declarations(right)[0]
+    left_name = re.search(r"\(declare-fun ([^ ]+)", left_decl).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", right_decl).group(1)
+
+    assert left_name == right_name
+    assert expression_to_smt(left).startswith(f"({left_name} ")
+    assert expression_to_smt(right).startswith(f"({right_name} ")
+
+
+def test_pairwise_shortcuts_counted_loop_runtime_refs_with_shared_semantics():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    left_case = ReturnCase(0, [], left_expr, ReturnInfo("left", left_expr))
+    right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
+
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
+
+
+def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_guards_differ():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    runtime_ref_left = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=True,
+        residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+    )
+    runtime_ref_right = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=False,
+        residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+    )
+    left_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=runtime_ref_left,
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        size=4,
+        runtime_ref=runtime_ref_right,
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    left_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), Expression.parameter("count", size=4)), False)],
+        left_expr,
+        ReturnInfo("left", left_expr),
+    )
+    right_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESSEQUAL", _const(2, size=4), Expression.parameter("count", size=4)), False)],
+        right_expr,
+        ReturnInfo("right", right_expr),
+    )
+
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
+
+
+def test_pairwise_does_not_shortcut_intrinsics_without_explicit_runtime_ref_contract():
+    class _AdHocRuntimeRef:
+        def stable_key(self):
+            return ("adhoc", 1)
+
+        def semantic_key(self):
+            return ("adhoc", 1)
+
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4)],
+        size=4,
+        runtime_ref=_AdHocRuntimeRef(),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4)],
+        size=4,
+        runtime_ref=_AdHocRuntimeRef(),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    left_case = ReturnCase(0, [], left_expr, ReturnInfo("left", left_expr))
+    right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
+
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
 
 
 def test_readonly_sum_smt_declarations_distinguish_different_loop_shapes():
