@@ -544,6 +544,137 @@ def _counted_loop_sum_function_name(expr) -> str:
     )
 
 
+def _smt_bv_const(value: int, bits: int) -> str:
+    mask = (1 << bits) - 1
+    return f"(_ bv{int(value) & mask} {bits})"
+
+
+def _smt_extend_to_width(expr, expr_smt: str, target_bits: int, *, signed: bool) -> str:
+    return _coerce_expr_to_bitvec_width(
+        expr,
+        expr_smt,
+        target_bits,
+        prefer_sign_extension=signed,
+    )
+
+
+def _smt_low_bits(expr_smt: str, current_bits: int, target_bits: int) -> str:
+    if current_bits <= target_bits:
+        return expr_smt
+    return f"((_ extract {target_bits - 1} 0) {expr_smt})"
+
+
+def _smt_scale_term(expr_smt: str, factor: int, bits: int) -> Optional[str]:
+    if factor == 0:
+        return None
+    if factor == 1:
+        return expr_smt
+    if factor == -1:
+        return f"(bvneg {expr_smt})"
+    return f"(bvmul {_smt_bv_const(factor, bits)} {expr_smt})"
+
+
+def _counted_loop_sum_exact_smt(
+    expr,
+    *,
+    base_smt: str,
+    start_smt: str,
+    limit_smt: str,
+    base_bits: int,
+    start_bits: int,
+    limit_bits: int,
+    result_bits: int,
+) -> Optional[str]:
+    summary_ref = _counted_loop_sum_ref(expr)
+    if summary_ref is None:
+        return None
+
+    induction_step = int(getattr(summary_ref, "induction_step", 0) or 0)
+    residue_cases = tuple(getattr(summary_ref, "residue_cases", ()) or ())
+    if induction_step == 0 or not residue_cases:
+        return None
+
+    signed_loop = bool(getattr(summary_ref, "signed_loop", False))
+    wide_bits = max(64, result_bits * 2, base_bits, start_bits, limit_bits)
+    wide_base = _smt_extend_to_width(expr.operands[0], base_smt, wide_bits, signed=signed_loop)
+    wide_start = _smt_extend_to_width(expr.operands[1], start_smt, wide_bits, signed=signed_loop)
+    wide_limit = _smt_extend_to_width(expr.operands[2], limit_smt, wide_bits, signed=signed_loop)
+    zero = _smt_bv_const(0, wide_bits)
+    one = _smt_bv_const(1, wide_bits)
+
+    def _triangular(value_smt: str) -> str:
+        incremented = f"(bvadd {value_smt} {one})"
+        product = f"(bvmul {value_smt} {incremented})"
+        return f"(bvlshr {product} {one})"
+
+    def _exact_progression_sum(first_smt: str, count_smt: str, *, step: int) -> str:
+        count_minus_one = f"(bvsub {count_smt} {one})"
+        triangular = _triangular(count_minus_one)
+        stride_term = _smt_scale_term(triangular, step, wide_bits)
+        leading_term = f"(bvmul {count_smt} {first_smt})"
+        total_nonzero = leading_term
+        if stride_term is not None:
+            total_nonzero = f"(bvadd {leading_term} {stride_term})"
+        return f"(ite (= {count_smt} {zero}) {zero} {total_nonzero})"
+
+    if induction_step == 1:
+        n_expr = f"(bvsub {wide_limit} {wide_start})"
+        total = wide_base
+        for modulus, residue, coeff, bias in residue_cases:
+            modulus = int(modulus)
+            residue = int(residue)
+            coeff = int(coeff)
+            bias = int(bias)
+            if modulus <= 1:
+                count_expr = n_expr
+                offset_expr = zero
+            else:
+                mask = modulus - 1
+                if mask <= 0 or (mask & (mask + 1)) != 0:
+                    return None
+                mask_smt = _smt_bv_const(mask, wide_bits)
+                residue_smt = _smt_bv_const(residue, wide_bits)
+                start_low = f"(bvand {wide_start} {mask_smt})"
+                raw_offset = f"(bvsub {residue_smt} {start_low})"
+                offset_expr = f"(bvand {raw_offset} {mask_smt})"
+                positive_span = f"(bvsub {n_expr} {offset_expr})"
+                adjusted = f"(bvadd {positive_span} {mask_smt})"
+                shift_amount = _smt_bv_const(mask.bit_length() - 1, wide_bits)
+                shifted = f"(bvlshr {adjusted} {shift_amount})"
+                count_expr = f"(ite (bvsle {positive_span} {zero}) {zero} {shifted})"
+            first_expr = f"(bvadd {wide_start} {offset_expr})"
+            progression_sum = _exact_progression_sum(first_expr, count_expr, step=modulus)
+            coeff_term = _smt_scale_term(progression_sum, coeff, wide_bits)
+            bias_term = _smt_scale_term(count_expr, bias, wide_bits)
+            for term in (coeff_term, bias_term):
+                if term is not None:
+                    total = f"(bvadd {total} {term})"
+        return _smt_low_bits(total, wide_bits, result_bits)
+
+    if any(int(modulus) != 1 for modulus, _residue, _coeff, _bias in residue_cases):
+        return None
+
+    if induction_step > 0:
+        span_expr = f"(bvsub {wide_limit} {wide_start})"
+    else:
+        span_expr = f"(bvsub {wide_start} {wide_limit})"
+    count_nonzero = span_expr
+    step_magnitude = abs(induction_step)
+    if step_magnitude != 1:
+        adjusted = f"(bvadd {span_expr} {_smt_bv_const(step_magnitude - 1, wide_bits)})"
+        count_nonzero = f"(bvsdiv {adjusted} {_smt_bv_const(step_magnitude, wide_bits)})"
+    count_expr = f"(ite (bvsle {span_expr} {zero}) {zero} {count_nonzero})"
+    progression_sum = _exact_progression_sum(wide_start, count_expr, step=induction_step)
+    total = wide_base
+    for _modulus, _residue, coeff, bias in residue_cases:
+        coeff_term = _smt_scale_term(progression_sum, int(coeff), wide_bits)
+        bias_term = _smt_scale_term(count_expr, int(bias), wide_bits)
+        for term in (coeff_term, bias_term):
+            if term is not None:
+                total = f"(bvadd {total} {term})"
+    return _smt_low_bits(total, wide_bits, result_bits)
+
+
 def _intrinsic_smt_declaration(expr) -> Optional[str]:
     opcode = getattr(expr, "opcode", None)
     mnemonic = getattr(expr, "name", None) or ""
@@ -562,17 +693,7 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         )
 
     if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
-        if len(operands) != 3:
-            raise ValueError(f"COUNTED_LOOP_SUM expects 3 operands, got {len(operands)}")
-        base_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
-        start_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
-        limit_bits = max(1, int(expression_smt_bit_width(operands[2]) or 1))
-        result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
-        return (
-            f"(declare-fun {_counted_loop_sum_function_name(expr)} "
-            f"((_ BitVec {base_bits}) (_ BitVec {start_bits}) (_ BitVec {limit_bits})) "
-            f"(_ BitVec {result_bits}))"
-        )
+        return None
 
     return None
 
@@ -1044,6 +1165,18 @@ def _lower_intrinsic_to_smt(
             limit_bits,
             prefer_sign_extension=_expr_prefers_signed_extension(limit),
         )
+        exact_smt = _counted_loop_sum_exact_smt(
+            expr,
+            base_smt=base_smt,
+            start_smt=start_smt,
+            limit_smt=limit_smt,
+            base_bits=base_bits,
+            start_bits=start_bits,
+            limit_bits=limit_bits,
+            result_bits=max(1, int(expression_smt_bit_width(expr) or 1)),
+        )
+        if exact_smt is not None:
+            return exact_smt
         return f"({_counted_loop_sum_function_name(expr)} {base_smt} {start_smt} {limit_smt})"
 
     raise ValueError(

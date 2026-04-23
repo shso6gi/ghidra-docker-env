@@ -300,6 +300,52 @@ def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
     tracer.clear_cache.assert_called_once()
 
 
+def test_return_analyzer_multiequal_return_does_not_bypass_phi_expansion_for_loop_candidates():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analyzer.program.getImageBase.return_value.getOffset.return_value = 0
+
+    tracer = Mock()
+    tracer.clear_cache = Mock()
+
+    class FakeExpander:
+        calls = 0
+
+        def __init__(self, tracer_obj, tracker_obj, debug=False, call_resolver=None, **kwargs):
+            self.tracer = tracer_obj
+            self.tracker = tracker_obj
+            self.debug = debug
+            self.call_resolver = call_resolver
+
+        def expand_from_varnode(self, return_varnode, base_conditions, depth=0):
+            FakeExpander.calls += 1
+            return [
+                ExpandedValue(
+                    Expression(ExpressionType.CONSTANT, value=7, size=4),
+                    list(base_conditions),
+                )
+            ]
+
+    with patch.object(ReturnAnalyzer, "_contains_multiequal", return_value=True):
+        with patch("scripts.function_tracer_pcode.transform.ExpressionExpander", FakeExpander):
+            with patch(
+                "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer._extract_counted_scalar_loop_model",
+                side_effect=AssertionError("MULTIEQUAL returns must be expanded directly"),
+            ):
+                results = analyzer._analyze_return_value(
+                    return_varnode=Mock(),
+                    address="0x1000",
+                    tracer=tracer,
+                    condition_tracker=Mock(),
+                    path_conditions=[],
+                    return_index=3,
+                )
+
+    assert len(results) == 1
+    assert results[0].value.value == 7
+    assert FakeExpander.calls == 1
+    tracer.clear_cache.assert_called_once()
+
+
 def test_expression_expander_prunes_multiequal_paths_that_become_contradictory_after_merge():
     selector_eq_zero = _cond("INT_EQUAL", _param("param_1"), Expression.constant(0, 4))
     selector_nonzero = _cond("INT_NOTEQUAL", _param("param_1"), Expression.constant(0, 4))

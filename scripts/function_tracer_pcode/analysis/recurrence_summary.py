@@ -20,8 +20,11 @@ from ..model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
+from ..model.render_smt import collect_intrinsic_smt_declarations
 from ..model.signature import is_integral_data_type, is_pointer_data_type
 from ..model.runtime_refs import UnknownValueRef
+from ..smt.interface import SolverStatus
+from ..smt.solvers.z3 import Z3Solver
 from .condition import ConditionSimplifier, ConditionNormalizer
 from .condition.bitvector import eval_constant_raw
 from .effect_summary import (
@@ -172,6 +175,31 @@ class StructuralRecurrenceSummarizer:
             return None
         return self._build_counted_scalar_loop_summary(function, high_function, analysis=None)
 
+    def can_try_direct_counted_scalar_summary(
+        self,
+        high_function,
+        return_ops: Optional[Sequence] = None,
+    ) -> bool:
+        if high_function is None:
+            return False
+        if return_ops is not None and not list(return_ops):
+            return False
+        if not self._has_counted_scalar_loop_candidate(high_function):
+            return False
+
+        forbidden = {"CALL", "CALLIND", "BRANCHIND", "STORE"}
+        for op in self._iter_pcode_ops(high_function):
+            mnemonic = getattr(op, "getMnemonic", lambda: None)()
+            if mnemonic in forbidden:
+                return False
+        if return_ops is None:
+            return True
+        for op in return_ops:
+            num_inputs = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+            if num_inputs < 2:
+                return False
+        return True
+
     def _has_readonly_pointer_reduction_candidate(
         self,
         high_function,
@@ -240,7 +268,25 @@ class StructuralRecurrenceSummarizer:
     ) -> Optional[Tuple[List[ReturnInfo], str]]:
         if function is None or high_function is None or analysis is None:
             return None
+        if not self._analysis_is_safe_for_counted_scalar_summary(analysis):
+            return None
         return self._build_counted_scalar_loop_summary(function, high_function, analysis)
+
+    def _analysis_is_safe_for_counted_scalar_summary(self, analysis) -> bool:
+        if analysis is None:
+            return False
+        effect_summary = getattr(analysis, "effect_summary", None)
+        if effect_summary is not None:
+            if getattr(effect_summary, "effects", None):
+                self._debug("Declined counted scalar loop summary: function mutates memory")
+                return False
+            if getattr(effect_summary, "has_unsupported_call", False):
+                self._debug("Declined counted scalar loop summary: effect summary contains unsupported call")
+                return False
+        if getattr(analysis, "incomplete_control_flow", False):
+            self._debug("Declined counted scalar loop summary: control flow is incomplete")
+            return False
+        return True
 
     def _build_counted_scalar_loop_summary(
         self,
@@ -283,22 +329,16 @@ class StructuralRecurrenceSummarizer:
         )
         derived_continue_condition = Condition(entry_guard_expr or guard.condition_expr, False)
         derived_base_condition = derived_continue_condition.negate()
-        original_conditions = (
-            self._select_counted_loop_return_conditions(
-                analysis,
-                accumulator.init_expr,
-            )
-            if analysis is not None
-            else self._derive_direct_counted_loop_conditions(high_function, induction, guard)
-        )
+        original_conditions = self._derive_direct_counted_loop_conditions(high_function, induction, guard)
         if original_conditions is None:
             continue_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_continue_condition])
             base_conditions = ConditionSimplifier.simplify_conditions_object_centric([derived_base_condition])
         else:
             base_conditions, continue_conditions = original_conditions
-            negated_base = self._negate_simple_condition_set(base_conditions)
-            if negated_base is not None:
-                continue_conditions = negated_base
+            base_conditions, continue_conditions = self._repair_two_way_partition_conditions(
+                base_conditions,
+                continue_conditions,
+            )
 
         summarized = [
             ReturnInfo(
@@ -320,9 +360,54 @@ class StructuralRecurrenceSummarizer:
                 pcode_time=pcode_time,
             ),
         ]
+        loop_case = summarized[1]
+        canonical_value = self._canonicalize_peeled_counted_loop_value(
+            loop_case.value,
+            continue_conditions=continue_conditions,
+            parameters=self._collect_summary_parameter_specs(
+                loop_case.value,
+                accumulator.init_expr,
+                start_expr,
+                limit_expr,
+                *(cond.expression for cond in continue_conditions or [] if cond is not None),
+            ),
+            base_expr=accumulator.init_expr,
+            limit_expr=limit_expr,
+            induction_step=induction.step,
+            residue_cases=residue_cases,
+            result_size=accumulator.init_expr.size or accumulator.placeholder.size or 4,
+            signed_loop=induction.signed_guard or guard.signed_comparison,
+        )
+        canonical_value = self._canonicalize_zero_prefix_counted_loop_value(
+            canonical_value,
+            base_expr=accumulator.init_expr,
+            limit_expr=limit_expr,
+            induction_step=induction.step,
+            residue_cases=residue_cases,
+            result_size=accumulator.init_expr.size or accumulator.placeholder.size or 4,
+            signed_loop=induction.signed_guard or guard.signed_comparison,
+        )
+        if canonical_value is not None and not canonical_value.equals(loop_case.value):
+            summarized[1] = ReturnInfo(
+                address=loop_case.address,
+                value=canonical_value,
+                conditions=list(loop_case.conditions or []),
+                branch_index=loop_case.branch_index,
+                pcode_identity=loop_case.pcode_identity,
+                pcode_order=loop_case.pcode_order,
+                pcode_time=loop_case.pcode_time,
+            )
+        effective_loop_value = summarized[1].value
+        effective_start_expr = start_expr
+        if (
+            effective_loop_value is not None
+            and getattr(effective_loop_value, "expr_type", None) == ExpressionType.INTRINSIC
+            and len(getattr(effective_loop_value, "operands", None) or []) == 3
+        ):
+            effective_start_expr = effective_loop_value.operands[1]
         self._debug(
             "Recovered counted scalar loop summary "
-            f"(start={self._safe_expr_text(start_expr)}, limit={self._safe_expr_text(limit_expr)}, "
+            f"(start={self._safe_expr_text(effective_start_expr)}, limit={self._safe_expr_text(limit_expr)}, "
             f"step={induction.step}, "
             f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
         )
@@ -339,6 +424,11 @@ class StructuralRecurrenceSummarizer:
         result_size: int,
         signed_loop: bool,
     ) -> Optional[Expression]:
+        if any(
+            self._expression_is_unresolved(expr)
+            for expr in (base_expr, start_expr, limit_expr)
+        ):
+            return None
         intrinsic = self._build_counted_loop_summary_intrinsic(
             base_expr=base_expr,
             start_expr=start_expr,
@@ -406,6 +496,279 @@ class StructuralRecurrenceSummarizer:
         intrinsic.size = max(1, int(result_size or 0))
         return intrinsic
 
+    def _canonicalize_zero_prefix_counted_loop_value(
+        self,
+        value: Optional[Expression],
+        *,
+        base_expr: Expression,
+        limit_expr: Expression,
+        induction_step: int,
+        residue_cases: Sequence[ResidueLoopCase],
+        result_size: int,
+        signed_loop: bool,
+    ) -> Optional[Expression]:
+        if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
+            return value
+        if getattr(value, "opcode", None) != COUNTED_LOOP_SUM_OPCODE and getattr(value, "name", None) != "COUNTED_LOOP_SUM":
+            return value
+        operands = list(getattr(value, "operands", None) or [])
+        if len(operands) != 3:
+            return value
+        start_raw = self._raw_constant_value(operands[1])
+        if start_raw is None:
+            return value
+        start = int(start_raw)
+        if start <= 0 or start > 16 or int(induction_step) != 1:
+            return value
+        if not self._counted_loop_prefix_contributes_zero(start, residue_cases):
+            return value
+        zero_start = Expression.constant(
+            0,
+            size=max(1, int(getattr(operands[1], "size", 0) or getattr(limit_expr, "size", 0) or 4)),
+        )
+        canonical = self._build_counted_loop_summary_intrinsic(
+            base_expr=base_expr,
+            start_expr=zero_start,
+            limit_expr=limit_expr,
+            induction_step=induction_step,
+            residue_cases=residue_cases,
+            result_size=result_size,
+            signed_loop=signed_loop,
+        )
+        if canonical is None:
+            return value
+        self._debug(
+            "Canonicalized counted loop zero-contribution prefix to zero-start summary "
+            f"(original start={start})"
+        )
+        return canonical
+
+    def _counted_loop_prefix_contributes_zero(
+        self,
+        stop: int,
+        residue_cases: Sequence[ResidueLoopCase],
+    ) -> bool:
+        if stop <= 0 or not residue_cases:
+            return False
+        for index in range(stop):
+            matched = [
+                case
+                for case in residue_cases
+                if int(case.modulus) > 0 and index % int(case.modulus) == int(case.residue)
+            ]
+            if len(matched) != 1:
+                return False
+            coeff, bias = matched[0].affine
+            if int(coeff) * index + int(bias) != 0:
+                return False
+        return True
+
+    def _canonicalize_peeled_counted_loop_value(
+        self,
+        value: Expression,
+        *,
+        continue_conditions: Sequence[Condition],
+        parameters: Sequence[dict],
+        base_expr: Expression,
+        limit_expr: Expression,
+        induction_step: int,
+        residue_cases: Sequence[ResidueLoopCase],
+        result_size: int,
+        signed_loop: bool,
+    ) -> Optional[Expression]:
+        if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
+            return value
+        if getattr(value, "opcode", None) != COUNTED_LOOP_SUM_OPCODE and getattr(value, "name", None) != "COUNTED_LOOP_SUM":
+            return value
+        operands = list(getattr(value, "operands", None) or [])
+        if len(operands) != 3:
+            return value
+        start_expr = operands[1]
+        if not self._looks_like_peeled_counted_loop_start(start_expr, limit_expr):
+            return value
+
+        zero_start = Expression.constant(
+            0,
+            size=max(1, int(getattr(start_expr, "size", 0) or getattr(limit_expr, "size", 0) or 4)),
+        )
+        canonical = self._build_counted_loop_summary_intrinsic(
+            base_expr=base_expr,
+            start_expr=zero_start,
+            limit_expr=limit_expr,
+            induction_step=induction_step,
+            residue_cases=residue_cases,
+            result_size=result_size,
+            signed_loop=signed_loop,
+        )
+        if canonical is None:
+            return value
+        if not self._prove_expression_equivalence_under_conditions(
+            value,
+            canonical,
+            continue_conditions,
+            parameters,
+        ):
+            return value
+        self._debug(
+            "Canonicalized peeled counted loop start to zero-start counted summary "
+            f"(original start={self._safe_expr_text(start_expr)})"
+        )
+        return canonical
+
+    def _looks_like_peeled_counted_loop_start(
+        self,
+        start_expr: Optional[Expression],
+        limit_expr: Optional[Expression],
+    ) -> bool:
+        if start_expr is None or limit_expr is None:
+            return False
+        if getattr(start_expr, "expr_type", None) != ExpressionType.PHI:
+            return False
+        branches = list(getattr(start_expr, "value", None) or [])
+        if len(branches) < 2:
+            return False
+
+        limit_signature = _runtime_expression_signature(limit_expr)
+        saw_zero = False
+        saw_limit_dependent = False
+        for _cond, branch_value in branches:
+            if branch_value is None:
+                continue
+            if self._raw_constant_value(branch_value) == 0:
+                saw_zero = True
+                continue
+            if self._expression_depends_on_signature(branch_value, limit_signature):
+                saw_limit_dependent = True
+        return saw_zero and saw_limit_dependent
+
+    def _expression_depends_on_signature(
+        self,
+        expr: Optional[Expression],
+        target_signature,
+    ) -> bool:
+        if expr is None:
+            return False
+        if _runtime_expression_signature(expr) == target_signature:
+            return True
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type == ExpressionType.PHI:
+            for cond, branch_value in getattr(expr, "value", None) or []:
+                if cond is not None and self._expression_depends_on_signature(getattr(cond, "expression", None), target_signature):
+                    return True
+                if self._expression_depends_on_signature(branch_value, target_signature):
+                    return True
+            return False
+        for operand in getattr(expr, "operands", None) or []:
+            if self._expression_depends_on_signature(operand, target_signature):
+                return True
+        return False
+
+    def _collect_summary_parameter_specs(
+        self,
+        *exprs: Optional[Expression],
+    ) -> List[dict]:
+        specs: Dict[str, dict] = {}
+
+        def visit(expr: Optional[Expression]) -> None:
+            if expr is None:
+                return
+            expr_type = getattr(expr, "expr_type", None)
+            if expr_type == ExpressionType.PARAMETER:
+                name = getattr(expr, "name", None)
+                if not name:
+                    return
+                size = max(1, int(getattr(expr, "size", 0) or 4))
+                index = int(getattr(expr, "value", -1) or -1)
+                candidate = {
+                    "name": name,
+                    "index": index,
+                    "size": size,
+                    "data_type": getattr(expr, "data_type", None),
+                }
+                existing = specs.get(name)
+                if existing is None or int(existing.get("size", 0) or 0) < size:
+                    specs[name] = candidate
+                return
+            if expr_type == ExpressionType.PHI:
+                for cond, branch_value in getattr(expr, "value", None) or []:
+                    if cond is not None:
+                        visit(getattr(cond, "expression", None))
+                    visit(branch_value)
+                return
+            for operand in getattr(expr, "operands", None) or []:
+                visit(operand)
+
+        for expr in exprs:
+            visit(expr)
+
+        ordered = sorted(
+            specs.values(),
+            key=lambda item: (
+                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
+                item.get("name") or "",
+            ),
+        )
+        for fallback_index, spec in enumerate(ordered):
+            if int(spec.get("index", -1)) < 0:
+                spec["index"] = fallback_index
+        return ordered
+
+    def _prove_expression_equivalence_under_conditions(
+        self,
+        left: Expression,
+        right: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[dict],
+    ) -> bool:
+        if left.equals(right):
+            return True
+        query = self._build_expression_equivalence_query(left, right, conditions, parameters)
+        if not query:
+            return False
+        solver = Z3Solver(timeout=2, debug=self.debug)
+        result = solver.check_equivalence_direct(query)
+        return result.status == SolverStatus.UNSAT
+
+    def _build_expression_equivalence_query(
+        self,
+        left: Expression,
+        right: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[dict],
+    ) -> Optional[str]:
+        if left is None or right is None:
+            return None
+        declarations = ["(set-logic QF_BV)"]
+        seen_params = set()
+        for parameter in parameters or []:
+            name = str(parameter.get("name") or "")
+            if not name or name in seen_params:
+                continue
+            width_bits = max(1, int(parameter.get("size", 0) or 4)) * 8
+            declarations.append(f"(declare-const {name} (_ BitVec {width_bits}))")
+            seen_params.add(name)
+
+        intrinsic_declarations: List[str] = []
+        for expr in (left, right):
+            for declaration in collect_intrinsic_smt_declarations(expr):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            for declaration in collect_intrinsic_smt_declarations(condition.expression):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+        declarations.extend(intrinsic_declarations)
+
+        assertions = []
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            assertions.append(f"(assert {condition.to_smt()})")
+        assertions.append(f"(assert (not (= {left.to_smt()} {right.to_smt()})))")
+        return "\n".join(declarations + assertions + ["(check-sat)"])
+
     def _negate_simple_condition_set(
         self,
         conditions: Sequence[Condition],
@@ -414,6 +777,25 @@ class StructuralRecurrenceSummarizer:
         if len(simplified) != 1:
             return None
         return ConditionSimplifier.simplify_conditions_object_centric([simplified[0].negate()])
+
+    def _repair_two_way_partition_conditions(
+        self,
+        base_conditions: Sequence[Condition],
+        continue_conditions: Sequence[Condition],
+    ) -> Tuple[List[Condition], List[Condition]]:
+        base_simplified = ConditionSimplifier.simplify_conditions_object_centric(list(base_conditions or []))
+        continue_simplified = ConditionSimplifier.simplify_conditions_object_centric(list(continue_conditions or []))
+
+        if not base_simplified and continue_simplified:
+            negated_continue = self._negate_simple_condition_set(continue_simplified)
+            if negated_continue is not None:
+                base_simplified = negated_continue
+        elif not continue_simplified and base_simplified:
+            negated_base = self._negate_simple_condition_set(base_simplified)
+            if negated_base is not None:
+                continue_simplified = negated_base
+
+        return base_simplified, continue_simplified
 
     def _derive_direct_counted_loop_conditions(
         self,
@@ -960,9 +1342,9 @@ class StructuralRecurrenceSummarizer:
         target_varnode = accumulator.phi_output or accumulator.update_varnode
         member_count = len(accumulator.member_outputs) or (1 if target_varnode is not None else 0)
         return (
+            1 if self._varnode_reaches_return(target_varnode) else 0,
             1 if max_coeff != 0 else 0,
             max_coeff,
-            1 if self._varnode_reaches_return(target_varnode) else 0,
             member_count,
             max_bias,
         )
@@ -2049,23 +2431,6 @@ class StructuralRecurrenceSummarizer:
     def _safe_expr_text(self, expr: Optional[Expression]) -> str:
         signature = _runtime_expression_signature(expr)
         return repr(signature)
-
-    def _select_counted_loop_return_conditions(
-        self,
-        analysis,
-        base_expr: Expression,
-    ) -> Optional[Tuple[List[Condition], List[Condition]]]:
-        returns = list(getattr(analysis, "returns", []) or [])
-        if len(returns) != 2:
-            return None
-        unresolved = [ret for ret in returns if self._expression_is_unresolved(ret.value)]
-        resolved = [ret for ret in returns if ret not in unresolved]
-        if len(unresolved) != 1 or len(resolved) != 1:
-            return None
-        return (
-            ConditionSimplifier.simplify_conditions_object_centric(list(resolved[0].conditions or [])),
-            ConditionSimplifier.simplify_conditions_object_centric(list(unresolved[0].conditions or [])),
-        )
 
     def _substitute_exact_expression(
         self,

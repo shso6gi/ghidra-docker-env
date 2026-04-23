@@ -297,3 +297,205 @@ def test_apply_structural_recurrence_summary_skips_resolved_plain_memory_return_
         )
 
     assert result is None
+
+
+def test_apply_structural_recurrence_summary_uses_structural_summarizer():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    function = Mock()
+    function.getName.return_value = "branch_for_accumulate"
+    high_function = Mock()
+    tracer = Mock()
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            analyzer._make_return_info(
+                address="0x1000",
+                value=Expression.constant(0, 4),
+                conditions=[],
+                branch_index=0,
+            ),
+            analyzer._make_return_info(
+                address="0x1004",
+                value=Expression.unknown("phi_circular"),
+                conditions=[],
+                branch_index=1,
+            ),
+        ],
+    )
+
+    summary_returns = [
+        analyzer._make_return_info(
+            address="0x2000",
+            value=Expression.constant(0, 4),
+            conditions=[],
+            branch_index=10,
+        ),
+        analyzer._make_return_info(
+            address="0x2004",
+            value=Expression.intrinsic(
+                "COUNTED_LOOP_SUM",
+                [
+                    Expression.constant(0, 4),
+                    Expression.constant(0, 4),
+                    Expression.parameter("param_1", 0, size=4),
+                ],
+                size=4,
+            ),
+            conditions=[],
+            branch_index=11,
+        ),
+    ]
+
+    with patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
+        return_value=(summary_returns, "counted_scalar_loop_summary"),
+    ) as summary_mock:
+        result = analyzer._apply_structural_recurrence_summary(
+            function,
+            high_function,
+            analysis,
+            tracer,
+        )
+
+    assert result == (summary_returns, "counted_scalar_loop_summary")
+    summary_mock.assert_called_once()
+
+
+def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_expansion():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    function = Mock()
+    function.getName.return_value = "branch_for_accumulate"
+    function.getEntryPoint.return_value = "0x401000"
+    high_function = Mock()
+    fake_results = Mock()
+    fake_results.decompileCompleted.return_value = True
+    fake_results.getHighFunction.return_value = high_function
+
+    summary_returns = [
+        analyzer._make_return_info(
+            address="0x401000",
+            value=Expression.constant(0, 4),
+            conditions=[
+                Condition(
+                    Expression.binary_op(
+                        "INT_SLESSEQUAL",
+                        Expression.parameter("param_1", 0, size=4),
+                        Expression.constant(0, 4),
+                    ),
+                    False,
+                )
+            ],
+            branch_index=201000,
+        ),
+        analyzer._make_return_info(
+            address="0x401000",
+            value=Expression.intrinsic(
+                "COUNTED_LOOP_SUM",
+                [
+                    Expression.constant(0, 4),
+                    Expression.constant(0, 4),
+                    Expression.parameter("param_1", 0, size=4),
+                ],
+                size=4,
+            ),
+            conditions=[
+                Condition(
+                    Expression.binary_op(
+                        "INT_SLESS",
+                        Expression.constant(0, 4),
+                        Expression.parameter("param_1", 0, size=4),
+                    ),
+                    False,
+                )
+            ],
+            branch_index=201010,
+        ),
+    ]
+
+    with patch.object(
+        analyzer,
+        "_get_decompiler",
+        return_value=Mock(decompileFunction=Mock(return_value=fake_results)),
+    ), patch.object(
+        analyzer,
+        "_make_tracer",
+        return_value=_FakeTracer(),
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",
+        _FakeConditionTracker,
+    ), patch.object(
+        analyzer,
+        "_collect_parameters",
+        return_value=[{"name": "param_1", "index": 0, "size": 4}],
+    ), patch.object(
+        analyzer,
+        "_augment_parameters_with_implicit_passthrough",
+        side_effect=lambda params, *_args, **_kwargs: params,
+    ), patch.object(
+        analyzer,
+        "_get_return_type_info",
+        return_value=(None, "int"),
+    ), patch.object(
+        analyzer,
+        "_detect_signedness",
+        return_value=None,
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.can_try_direct_counted_scalar_summary",
+        return_value=True,
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function_direct",
+        return_value=(summary_returns, "counted_scalar_loop_summary"),
+    ), patch.object(
+        analyzer,
+        "_recover_control_region_returns_early",
+        side_effect=AssertionError("control-region recovery should be skipped after direct structural summary"),
+    ), patch.object(
+        analyzer,
+        "_invoke_build_effect_summary",
+        side_effect=AssertionError("effect_summary should not be built after direct structural summary"),
+    ), patch.object(
+        analyzer,
+        "_analyze_return_op",
+        side_effect=AssertionError("generic return analysis should not run after direct structural summary"),
+    ):
+        result = analyzer.analyze_function(function, timeout=1)
+
+    assert result is not None
+    assert len(result.returns) == 2
+    assert "counted_scalar_loop_summary" in result.analysis_notes
+
+
+def test_mark_incomplete_control_flow_recomputes_reasons_after_summary_rewrite():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            analyzer._make_return_info(
+                address="0x1000",
+                value=Expression.unknown("phi_circular"),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+    )
+
+    analyzer._mark_incomplete_control_flow(analysis)
+    assert analysis.incomplete_control_flow is True
+    assert "unknown_return" in analysis.analysis_notes
+
+    analysis.returns = [
+        analyzer._make_return_info(
+            address="0x1004",
+            value=Expression.constant(0, 4),
+            conditions=[],
+            branch_index=1,
+        )
+    ]
+    analyzer._mark_incomplete_control_flow(analysis)
+
+    assert analysis.incomplete_control_flow is False
+    assert "unknown_return" not in analysis.analysis_notes

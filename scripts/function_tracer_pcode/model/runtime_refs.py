@@ -730,6 +730,7 @@ class CountedLoopSummaryRef:
             "counted_loop_summary_semantic",
             int(self.induction_step),
             max(1, int(self.result_size or 0)),
+            bool(self.signed_loop),
             tuple(
                 (
                     int(modulus),

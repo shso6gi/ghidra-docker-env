@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     StructuralRecurrenceSummarizer,
 )
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
+from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
@@ -16,10 +17,13 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     StoreEffect,
 )
 from scripts.function_tracer_pcode.model import (
+    COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
     CallTargetRef,
     Condition,
+    CountedLoopSummaryRef,
     Expression,
+    ExpressionType,
     LocationBaseRef,
     ReadonlyReductionTermRef,
     ReturnInfo,
@@ -42,6 +46,63 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _cond(operator: str, left: Expression, right: Expression, negated: bool = False) -> Condition:
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
+
+
+def test_counted_loop_summary_canonicalizes_zero_contribution_prefix():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    residue_cases = (
+        ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),
+        ResidueLoopCase(modulus=2, residue=1, affine=(-1, 0)),
+    )
+    value = summarizer._build_counted_loop_summary_intrinsic(
+        base_expr=_const(0),
+        start_expr=_const(1),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=residue_cases,
+        result_size=4,
+        signed_loop=True,
+    )
+
+    canonical = summarizer._canonicalize_zero_prefix_counted_loop_value(
+        value,
+        base_expr=_const(0),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=residue_cases,
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert canonical is not None
+    assert canonical.expr_type == ExpressionType.INTRINSIC
+    assert canonical.operands[1].equals(_const(0))
+
+
+def test_counted_loop_summary_keeps_nonzero_prefix_start():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    residue_cases = (ResidueLoopCase(modulus=1, residue=0, affine=(1, 1)),)
+    value = summarizer._build_counted_loop_summary_intrinsic(
+        base_expr=_const(0),
+        start_expr=_const(1),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=residue_cases,
+        result_size=4,
+        signed_loop=True,
+    )
+
+    canonical = summarizer._canonicalize_zero_prefix_counted_loop_value(
+        value,
+        base_expr=_const(0),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=residue_cases,
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert canonical is value
 
 
 def test_recurrence_terms_equivalent_does_not_require_to_string(monkeypatch):
@@ -563,7 +624,8 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     loop_case = next(ret for ret in summarized_returns if ret.conditions and ret.conditions[0].to_string() == "(0 < param_1)")
     loop_smt = expression_to_smt(loop_case.value)
     assert "rtunk_" not in loop_smt
-    assert "rt_counted_loop_sum_" in loop_smt
+    assert "rt_counted_loop_sum_" not in loop_smt
+    assert "(ite " in loop_smt
 
 
 def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_cfg():
@@ -654,7 +716,8 @@ def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_c
     assert any("param_1" in condition.to_string() for condition in loop_case.conditions)
     loop_smt = expression_to_smt(loop_case.value)
     assert "rtunk_" not in loop_smt
-    assert "rt_counted_loop_sum_" in loop_smt
+    assert "rt_counted_loop_sum_" not in loop_smt
+    assert "(ite " in loop_smt
 
 
 def test_structural_recurrence_summarizer_accepts_masked_counter_recursion():
@@ -946,6 +1009,371 @@ def test_extract_counted_scalar_loop_model_evaluates_multiple_accumulator_candid
     _, accumulator, _, residue_cases = model
     assert accumulator is good_acc
     assert residue_cases == (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),)
+
+
+def test_counted_loop_model_prefers_return_reaching_accumulator_over_larger_coeff(monkeypatch):
+    header = _FakeCfgBlock(1)
+    phi_bad = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("bad_acc", size=4))
+    phi_good = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("good_acc", size=4))
+    phi_iv = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("iv", size=4))
+    branch = _FakeBranchOp(_cond("INT_SLESS", _const(0), _param()).expression)
+    header._ops[:] = [phi_iv, phi_bad, phi_good, branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    induction = CountedLoopInduction(
+        phi_op=phi_iv,
+        phi_output=phi_iv.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-10000, size=4),
+        signed_guard=False,
+    )
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+        bound_expr=_param(),
+        continue_on_true=True,
+        body_block=header,
+        exit_block=header,
+        signed_comparison=True,
+        entry_condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+    )
+    bad_acc = CountedLoopAccumulator(
+        phi_op=phi_bad,
+        phi_output=phi_bad.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=Expression.variable("__loop_acc_bad", size=4),
+        member_outputs=(phi_bad.getOutput(),),
+        member_placeholders=(Expression.variable("__loop_acc_bad", size=4),),
+    )
+    good_acc = CountedLoopAccumulator(
+        phi_op=phi_good,
+        phi_output=phi_good.getOutput(),
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=Expression.variable("__loop_acc_good", size=4),
+        member_outputs=(phi_good.getOutput(),),
+        member_placeholders=(Expression.variable("__loop_acc_good", size=4),),
+    )
+
+    monkeypatch.setattr(summarizer, "_match_counted_loop_induction", lambda op: induction if op is phi_iv else None)
+    monkeypatch.setattr(summarizer, "_candidate_counted_loop_guards", lambda *_args, **_kwargs: [guard])
+    monkeypatch.setattr(summarizer, "_match_counted_loop_accumulators", lambda *_args, **_kwargs: [bad_acc, good_acc])
+    monkeypatch.setattr(summarizer, "_match_aggregate_counted_loop_accumulator", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        summarizer,
+        "_varnode_reaches_return",
+        lambda varnode, **_kwargs: varnode is good_acc.phi_output,
+    )
+
+    def _fake_cases(accumulator, *_args, **_kwargs):
+        coeff = 8 if accumulator is bad_acc else 1
+        return [
+            CountedLoopUpdateCase(
+                conditions=(),
+                update_expr=Expression.binary_op("INT_ADD", accumulator.placeholder, induction.placeholder),
+                delta_expr=Expression.binary_op("INT_MULT", induction.placeholder, _const(coeff)),
+            )
+        ]
+
+    monkeypatch.setattr(summarizer, "_extract_counted_loop_update_cases", _fake_cases)
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_residue_loop_cases",
+        lambda cases, _counter_name: (
+            ResidueLoopCase(
+                modulus=1,
+                residue=0,
+                affine=(int(cases[0].delta_expr.operands[1].value), 0),
+            ),
+        ) if cases else None,
+    )
+
+    model = summarizer._extract_counted_scalar_loop_model(
+        _FakeCfgHighFunction([header]),
+        analysis=None,
+    )
+
+    assert model is not None
+    _, accumulator, _, residue_cases = model
+    assert accumulator is good_acc
+    assert residue_cases == (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),)
+
+
+def test_counted_scalar_loop_summary_declines_effectful_analysis(monkeypatch):
+    analysis = create_mock_analysis(
+        "counted_loop_effectful",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"), negated=True)],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.unknown("phi_circular"),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("param_1", index=0),
+                    offset=0,
+                    size=4,
+                ),
+                value=_const(1),
+                conditions=[],
+                order_key=0,
+            )
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    monkeypatch.setattr(
+        summarizer,
+        "_build_counted_scalar_loop_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("effectful analysis must not build a counted-loop summary")
+        ),
+    )
+
+    summary = summarizer._try_summarize_counted_scalar_loop(
+        _FakeFunction("counted_loop_effectful"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    )
+
+    assert summary is None
+
+
+def test_counted_scalar_loop_summary_rejects_unresolved_operands():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary_value = summarizer._build_counted_loop_summary_value(
+        base_expr=_const(0),
+        start_expr=Expression.unknown("phi_circular"),
+        limit_expr=_param("param_1"),
+        induction_step=1,
+        residue_cases=(
+            ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),
+            ResidueLoopCase(modulus=2, residue=1, affine=(-1, 0)),
+        ),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert summary_value is None
+
+
+def test_canonicalize_peeled_counted_loop_value_rewrites_proven_phi_start(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    start_expr = Expression.phi(
+        [
+            (None, _const(0)),
+            (
+                _cond("INT_NOTEQUAL", Expression.binary_op("INT_AND", _param(), _const(0xFFFFFFF8)), _param()),
+                Expression.binary_op("INT_AND", _param(), _const(0xFFFFFFF8)),
+            ),
+        ]
+    )
+    original = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0), start_expr, _param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_prove_expression_equivalence_under_conditions",
+        lambda *_args, **_kwargs: True,
+    )
+
+    rewritten = summarizer._canonicalize_peeled_counted_loop_value(
+        original,
+        continue_conditions=[_cond("INT_SLESS", _const(0), _param())],
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        base_expr=_const(0),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=(
+            ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),
+            ResidueLoopCase(modulus=2, residue=1, affine=(-1, 0)),
+        ),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert rewritten is not None
+    assert rewritten.expr_type == ExpressionType.INTRINSIC
+    assert rewritten.operands[1].expr_type == ExpressionType.CONSTANT
+    assert rewritten.operands[1].value == 0
+
+
+def test_canonicalize_peeled_counted_loop_value_keeps_original_when_unproved(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    start_expr = Expression.phi(
+        [
+            (None, _const(0)),
+            (_cond("INT_SLESS", _const(0), _param()), Expression.binary_op("INT_AND", _param(), _const(0xFFFFFFF8))),
+        ]
+    )
+    original = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0), start_expr, _param()],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_prove_expression_equivalence_under_conditions",
+        lambda *_args, **_kwargs: False,
+    )
+
+    rewritten = summarizer._canonicalize_peeled_counted_loop_value(
+        original,
+        continue_conditions=[_cond("INT_SLESS", _const(0), _param())],
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        base_expr=_const(0),
+        limit_expr=_param(),
+        induction_step=1,
+        residue_cases=(
+            ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),
+            ResidueLoopCase(modulus=2, residue=1, affine=(-1, 0)),
+        ),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert rewritten is original
+
+
+def test_counted_scalar_loop_summary_recovers_when_analysis_erases_loop_effect(monkeypatch):
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(0),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+    analysis.effect_summary = EffectSummary(parameter_names=["param_1"], effects=[])
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    induction = CountedLoopInduction(
+        phi_op=_FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("iv_phi")),
+        phi_output=_FakeVarnode("iv_phi"),
+        init_expr=_const(0),
+        backedge_index=0,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-1, size=4),
+        signed_guard=True,
+        init_index=1,
+        backedge_indices=(0,),
+    )
+    accumulator = CountedLoopAccumulator(
+        phi_op=_FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("acc_phi")),
+        phi_output=_FakeVarnode("acc_phi"),
+        init_expr=_const(0),
+        backedge_index=0,
+        placeholder=Expression.variable("__loop_acc", size=4),
+        init_index=1,
+        backedge_indices=(0,),
+    )
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param("param_1")),
+        bound_expr=_param("param_1"),
+        continue_on_true=True,
+        body_block=object(),
+        exit_block=object(),
+        signed_comparison=True,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_counted_scalar_loop_model",
+        lambda *_args, **_kwargs: (
+            induction,
+            accumulator,
+            guard,
+            (
+                ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),
+                ResidueLoopCase(modulus=2, residue=1, affine=(-1, 0)),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_derive_direct_counted_loop_conditions",
+        lambda *_args, **_kwargs: (
+            [_cond("INT_SLESS", _const(0), _param("param_1"), negated=True)],
+            [_cond("INT_SLESS", _const(0), _param("param_1"))],
+        ),
+    )
+
+    summary = summarizer._build_counted_scalar_loop_summary(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([]),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "counted_scalar_loop_summary"
+    assert any(ret.value.expr_type == ExpressionType.INTRINSIC for ret in summarized_returns)
+    base_case = next(ret for ret in summarized_returns if ret.value.expr_type != ExpressionType.INTRINSIC)
+    loop_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert ConditionSimplifier.get_simplified_condition_string(base_case.conditions[0]) == "(param_1 <= 0)"
+    assert ConditionSimplifier.get_simplified_condition_string(loop_case.conditions[0]) == "(0 < param_1)"
+
+
+def test_repair_two_way_partition_conditions_preserves_existing_continue_conditions():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    base_conditions = [_cond("INT_SLESS", _const(0), _param("param_1"), negated=True)]
+    continue_conditions = [
+        _cond("INT_SLESS", _const(0), _param("param_1")),
+        _cond("INT_NOTEQUAL", Expression.binary_op("INT_AND", _param("param_1"), _const(1)), _const(0)),
+    ]
+
+    repaired_base, repaired_continue = summarizer._repair_two_way_partition_conditions(
+        base_conditions,
+        continue_conditions,
+    )
+
+    assert [cond.to_string() for cond in repaired_base] == ["(not (0 < param_1))"]
+    assert [cond.to_string() for cond in repaired_continue] == [
+        "(0 < param_1)",
+        "((param_1 & 1) != 0)",
+    ]
 
 
 def test_stable_op_key_collapses_distinct_wrappers_for_same_logical_pcode():

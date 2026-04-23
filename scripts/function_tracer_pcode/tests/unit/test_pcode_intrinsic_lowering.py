@@ -2,6 +2,7 @@
 
 import re
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
@@ -15,6 +16,7 @@ from scripts.function_tracer_pcode.model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
     LocationBaseRef,
     READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
@@ -38,6 +40,21 @@ def _param(name: str, size: int = 8) -> Expression:
 
 def _const(value: int, size: int = 8) -> Expression:
     return Expression.constant(value, size=size)
+
+
+def _counted_loop_sum_value(*, signed_loop: bool, data_type: str = "int") -> Expression:
+    return Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("param_1", size=4, data_type=data_type)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=signed_loop,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
 
 
 def test_expression_to_smt_lowers_ptradd_intrinsic_without_uninterpreted_symbol():
@@ -98,7 +115,7 @@ def test_expression_to_smt_lowers_readonly_sum_as_declared_object_centric_functi
     ]
 
 
-def test_counted_loop_sum_smt_declarations_share_semantic_identity_across_guard_artifacts():
+def test_counted_loop_sum_lowers_to_exact_smt_without_uninterpreted_symbol():
     left = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
         [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
@@ -111,30 +128,48 @@ def test_counted_loop_sum_smt_declarations_share_semantic_identity_across_guard_
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
-    right = Expression.intrinsic(
+
+    smt = expression_to_smt(left)
+
+    assert collect_intrinsic_smt_declarations(left) == []
+    assert "rt_counted_loop_sum_" not in smt
+    assert "(ite " in smt
+    assert "bvlshr" in smt
+
+
+def test_pairwise_shortcuts_counted_loop_runtime_refs_with_matching_signedness():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
             result_size=4,
-            signed_loop=False,
+            signed_loop=True,
             residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
+    right_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    left_case = ReturnCase(0, [], left_expr, ReturnInfo("left", left_expr))
+    right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
 
-    left_decl = collect_intrinsic_smt_declarations(left)[0]
-    right_decl = collect_intrinsic_smt_declarations(right)[0]
-    left_name = re.search(r"\(declare-fun ([^ ]+)", left_decl).group(1)
-    right_name = re.search(r"\(declare-fun ([^ ]+)", right_decl).group(1)
-
-    assert left_name == right_name
-    assert expression_to_smt(left).startswith(f"({left_name} ")
-    assert expression_to_smt(right).startswith(f"({right_name} ")
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
 
 
-def test_pairwise_shortcuts_counted_loop_runtime_refs_with_shared_semantics():
+def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_signedness_differs():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
@@ -162,6 +197,50 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_with_shared_semantics():
     )
     left_case = ReturnCase(0, [], left_expr, ReturnInfo("left", left_expr))
     right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
+
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
+
+
+def test_pairwise_shortcuts_counted_loop_runtime_refs_when_signedness_differs_but_pair_guards_prove_equivalent():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    right_expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((2, 0, 1, 0), (2, 1, -1, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    left_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("count", size=4)), False)],
+        left_expr,
+        ReturnInfo("left", left_expr),
+        parameters=[{"name": "count", "size": 4, "index": 0, "data_type": "int"}],
+    )
+    right_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESS", _param("count", size=4), _const(1, size=4)), True)],
+        right_expr,
+        ReturnInfo("right", right_expr),
+        parameters=[{"name": "count", "size": 4, "index": 0, "data_type": "uint"}],
+    )
 
     assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
 
@@ -196,13 +275,13 @@ def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_guards_differ
     )
     left_case = ReturnCase(
         0,
-        [Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), Expression.parameter("count", size=4)), False)],
+        [Condition(Expression.binary_op("INT_NOTEQUAL", Expression.parameter("count", size=4), _const(0, size=4)), False)],
         left_expr,
         ReturnInfo("left", left_expr),
     )
     right_case = ReturnCase(
         0,
-        [Condition(Expression.binary_op("INT_SLESSEQUAL", _const(2, size=4), Expression.parameter("count", size=4)), False)],
+        [Condition(Expression.binary_op("INT_NOTEQUAL", Expression.parameter("count", size=4), _const(0, size=4)), False)],
         right_expr,
         ReturnInfo("right", right_expr),
     )
@@ -237,6 +316,89 @@ def test_pairwise_does_not_shortcut_intrinsics_without_explicit_runtime_ref_cont
     right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
 
     assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
+
+
+def test_pairwise_shortcuts_equivalent_counted_loop_partition_without_solver():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x1001",
+                value=_const(0, size=4),
+                conditions=[Condition(Expression.binary_op("INT_SLESSEQUAL", _param("param_1", size=4), _const(0, size=4)), False)],
+            ),
+            ReturnInfo(
+                address="0x1002",
+                value=_counted_loop_sum_value(signed_loop=True, data_type="int"),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), False)],
+            ),
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x2000",
+        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
+        returns=[
+            ReturnInfo(
+                address="0x2001",
+                value=_counted_loop_sum_value(signed_loop=True, data_type="int"),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), False)],
+            ),
+            ReturnInfo(
+                address="0x2002",
+                value=_const(0, size=4),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), True)],
+            ),
+        ],
+        return_type="int",
+    )
+
+    with patch.object(strategy, "_collect_return_coverage_unsafety_reasons", return_value=[]):
+        result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 4
+    assert result.unsat_pairs == 4
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+    strategy.solver_runner.run_parallel.assert_not_called()
+
+
+def test_partition_shortcut_rejects_unsafe_analysis_inputs():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    base_ctx = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+    }
+    left_case = ReturnCase(0, [], _counted_loop_sum_value(signed_loop=True), ReturnInfo("left", _counted_loop_sum_value(signed_loop=True)))
+    right_case = ReturnCase(0, [], _counted_loop_sum_value(signed_loop=False, data_type="uint"), ReturnInfo("right", _counted_loop_sum_value(signed_loop=False, data_type="uint")))
+
+    assert strategy._cases_form_equivalent_partition(
+        [left_case],
+        [right_case],
+        base_ctx=base_ctx,
+        render_fn1=None,
+        render_fn2=None,
+        sat_unsafety_reasons=["function1:return_coverage_gap"],
+    ) is False
 
 
 def test_readonly_sum_smt_declarations_distinguish_different_loop_shapes():

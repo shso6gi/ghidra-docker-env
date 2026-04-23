@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """Pairwise戦略（分岐ペア分割方式・二段階チェック対応）"""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 import time
 
 from ...model import (
+    COUNTED_LOOP_SUM_OPCODE,
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
 )
-from ...model.render_smt import expression_contains_unsupported_smt_ops
+from ...model.render_smt import (
+    collect_intrinsic_smt_declarations,
+    expression_contains_unsupported_smt_ops,
+)
 from ...analysis.condition.simplifier import ConditionSimplifier
-from ...analysis.condition.normalizer import ConditionNormalizer
+from ...analysis.condition.smt_oracle import ConditionSMTOracle
 from ...smt import ParallelResult, SolverResult, SolverStatus
+from ...smt.solvers.z3 import Z3Solver
 from .base import CheckStrategy, StrategyResult
 from .pairwise_models import QueryResult, ReturnCase
 from .pairwise_normalization import try_normalization_equivalence
@@ -159,6 +164,56 @@ class PairwiseStrategy(CheckStrategy):
             if "return_case_coverage_gap" not in analysis2.analysis_notes:
                 analysis2.analysis_notes.append("return_case_coverage_gap")
         total_pairs = len(cases1) * len(cases2)
+
+        if self._cases_form_equivalent_partition(
+            cases1,
+            cases2,
+            base_ctx=base_ctx,
+            render_fn1=symbol_replace_fn1,
+            render_fn2=symbol_replace_fn2,
+            sat_unsafety_reasons=sat_unsafety_reasons,
+        ):
+            elapsed_time = time.time() - start_time
+            self._debug_print("=" * 60)
+            self._debug_print("Result: EQUIVALENT (object-centric return partition match)")
+            self._debug_print(f"  Total pairs: {total_pairs}")
+            self._debug_print("=" * 60)
+            aggregate_result = self._create_aggregate_result(
+                True,
+                elapsed_time,
+                None,
+            )
+            try:
+                return StrategyResult(
+                    is_equivalent=True,
+                    solver_results=aggregate_result,
+                    smt_formula=None,
+                    counterexample_raw=None,
+                    return_var1="return_1",
+                    return_var2="return_2",
+                    constrained_fragments=base_ctx.get("constrained_fragments", []),
+                    total_pairs=total_pairs,
+                    unsat_pairs=total_pairs,
+                    sat_pairs=0,
+                    unknown_pairs=0,
+                    error_pairs=0,
+                    sat_pair_info=None,
+                    normalization_rules=[],
+                    pairwise_debug_stats={
+                        "solver_proven_rewrite_attempts": 0,
+                        "solver_proven_rewrite_successes": 0,
+                        "solver_proven_rewrite_failures": 0,
+                        "timeout_fallback_attempts": 0,
+                        "changed_pairs": 0,
+                        "no_change_pairs": 0,
+                        "unsat_results": total_pairs,
+                        "sat_results": 0,
+                        "unknown_results": 0,
+                    },
+                )
+            finally:
+                self._active_safety_checker = None
+                self._active_normalization_stats = None
 
         self._debug_print("=" * 60)
         self._debug_print("Pairwise strategy (two-stage check):")
@@ -405,6 +460,116 @@ class PairwiseStrategy(CheckStrategy):
             right_case=case2,
         )
 
+    def _cases_form_equivalent_partition(
+        self,
+        left_cases: Sequence[ReturnCase],
+        right_cases: Sequence[ReturnCase],
+        *,
+        base_ctx: Dict[str, Any],
+        render_fn1,
+        render_fn2,
+        sat_unsafety_reasons: Sequence[str],
+    ) -> bool:
+        if sat_unsafety_reasons:
+            return False
+        if not left_cases or not right_cases:
+            return False
+        if len(left_cases) != len(right_cases):
+            return False
+
+        left_unmatched = list(left_cases)
+        right_unmatched = list(right_cases)
+        if any(
+            self._case_partition_contains_unresolved(
+                case,
+                render_fn=render_fn1,
+                base_ctx=base_ctx,
+                label=f"partition:left[{case.index}]",
+            )
+            for case in left_unmatched
+        ):
+            return False
+        if any(
+            self._case_partition_contains_unresolved(
+                case,
+                render_fn=render_fn2,
+                base_ctx=base_ctx,
+                label=f"partition:right[{case.index}]",
+            )
+            for case in right_unmatched
+        ):
+            return False
+
+        matched_right: set[int] = set()
+        for left_case in left_unmatched:
+            candidate_index: Optional[int] = None
+            for idx, right_case in enumerate(right_unmatched):
+                if idx in matched_right:
+                    continue
+                if not self._cases_have_equivalent_summary_conditions(left_case, right_case):
+                    continue
+                if not self._case_values_share_partition_semantics(left_case, right_case):
+                    continue
+                if candidate_index is not None:
+                    return False
+                candidate_index = idx
+            if candidate_index is None:
+                return False
+            matched_right.add(candidate_index)
+
+        return len(matched_right) == len(right_unmatched)
+
+    def _case_partition_contains_unresolved(
+        self,
+        case: ReturnCase,
+        *,
+        render_fn,
+        base_ctx: Dict[str, Any],
+        label: str,
+    ) -> bool:
+        if self._case_contains_unresolved_expression(
+            case,
+            own_render_fn=render_fn,
+            base_ctx=base_ctx,
+            query_label=label,
+        ):
+            return True
+        summary_conditions = case.summary_conditions if case.summary_conditions is not None else case.conditions
+        if summary_conditions is case.conditions:
+            return False
+        summary_case = ReturnCase(
+            index=case.index,
+            conditions=list(summary_conditions or []),
+            value_expr=case.value_expr,
+            return_info=case.return_info,
+            normalized_value_expr=case.normalized_value_expr,
+            return_type=case.return_type,
+            return_type_obj=case.return_type_obj,
+            source_indices=list(case.source_indices),
+            parameters=list(case.parameters or []),
+            effect_summary=case.effect_summary,
+            comparison_surface=case.comparison_surface,
+            summary_conditions=list(summary_conditions or []),
+        )
+        return self._case_contains_unresolved_expression(
+            summary_case,
+            own_render_fn=render_fn,
+            base_ctx=base_ctx,
+            query_label=f"{label}:summary",
+        )
+
+    def _case_values_share_partition_semantics(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+    ) -> bool:
+        if self._cases_have_equivalent_runtime_reductions(left_case, right_case):
+            return True
+        left_value = getattr(left_case, "normalized_value_expr", None) or left_case.value_expr
+        right_value = getattr(right_case, "normalized_value_expr", None) or right_case.value_expr
+        equivalent, _reason = are_structurally_equivalent(left_value, right_value, debug=False)
+        return equivalent
+
     def _intrinsic_runtime_values_equivalent(
         self,
         left: Expression,
@@ -426,12 +591,26 @@ class PairwiseStrategy(CheckStrategy):
             getattr(right, "runtime_ref", None),
         )
         if not refs_equivalent:
+            if self._counted_loop_values_are_provably_equivalent(
+                left,
+                right,
+                left_case=left_case,
+                right_case=right_case,
+            ):
+                return True
             return False
         if requires_guard_equivalence and (
             left_case is None
             or right_case is None
             or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
         ):
+            if self._counted_loop_values_are_provably_equivalent(
+                left,
+                right,
+                left_case=left_case,
+                right_case=right_case,
+            ):
+                return True
             return False
         if len(left.operands) != len(right.operands):
             return False
@@ -474,6 +653,272 @@ class PairwiseStrategy(CheckStrategy):
         )
         return True, requires_guard_equivalence
 
+    def _counted_loop_values_are_provably_equivalent(
+        self,
+        left: Expression,
+        right: Expression,
+        *,
+        left_case: Optional[ReturnCase],
+        right_case: Optional[ReturnCase],
+    ) -> bool:
+        if left_case is None or right_case is None:
+            return False
+        if getattr(left, "opcode", None) != COUNTED_LOOP_SUM_OPCODE:
+            return False
+        if getattr(right, "opcode", None) != COUNTED_LOOP_SUM_OPCODE:
+            return False
+        if len(getattr(left, "operands", None) or []) != 3 or len(getattr(right, "operands", None) or []) != 3:
+            return False
+
+        left_ref = getattr(left, "runtime_ref", None)
+        right_ref = getattr(right, "runtime_ref", None)
+        if not self._counted_loop_refs_match_ignoring_signedness(left_ref, right_ref):
+            return False
+        if not all(
+            self._expressions_share_object_centric_structure(left_operand, right_operand)
+            for left_operand, right_operand in zip(left.operands, right.operands)
+        ):
+            return False
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        parameters = self._collect_intrinsic_parameter_specs(left_case, right_case, left, right)
+        if bool(getattr(left_ref, "signed_loop", False)) == bool(getattr(right_ref, "signed_loop", False)):
+            return True
+        if self._counted_loop_signedness_difference_is_guarded(
+            left,
+            right,
+            conditions,
+            parameters,
+        ):
+            return True
+        return self._prove_intrinsic_equivalence_under_conditions(
+            left,
+            right,
+            conditions,
+            parameters,
+        )
+
+    def _counted_loop_refs_match_ignoring_signedness(self, left_ref, right_ref) -> bool:
+        if left_ref is None or right_ref is None:
+            return False
+        left_kind = type(left_ref).__name__
+        right_kind = type(right_ref).__name__
+        if left_kind != "CountedLoopSummaryRef" or right_kind != "CountedLoopSummaryRef":
+            return False
+        try:
+            return (
+                int(getattr(left_ref, "induction_step", 0) or 0)
+                == int(getattr(right_ref, "induction_step", 0) or 0)
+                and max(1, int(getattr(left_ref, "result_size", 0) or 0))
+                == max(1, int(getattr(right_ref, "result_size", 0) or 0))
+                and tuple(getattr(left_ref, "residue_cases", ()) or ())
+                == tuple(getattr(right_ref, "residue_cases", ()) or ())
+                and getattr(left_ref, "source", None) == getattr(right_ref, "source", None)
+            )
+        except Exception:
+            return False
+
+    def _counted_loop_signedness_difference_is_guarded(
+        self,
+        left: Expression,
+        right: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        left_ref = getattr(left, "runtime_ref", None)
+        right_ref = getattr(right, "runtime_ref", None)
+        if bool(getattr(left_ref, "signed_loop", False)) == bool(getattr(right_ref, "signed_loop", False)):
+            return True
+        operands = list(getattr(left, "operands", None) or [])
+        if len(operands) != 3:
+            return False
+        # Signed and unsigned COUNTED_LOOP_SUM lowerings differ in how start/limit
+        # are extended to the wide arithmetic domain. If both are non-negative
+        # under the current pair guard, the two interpretations coincide.
+        return all(
+            self._expression_is_provably_nonnegative_under_conditions(expr, conditions, parameters)
+            for expr in operands[1:3]
+        )
+
+    def _expression_is_provably_nonnegative_under_conditions(
+        self,
+        expr: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        width_bits = max(1, int(getattr(expr, "size", 0) or 4) * 8)
+        if width_bits <= 1:
+            return True
+        if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+            try:
+                raw = int(getattr(expr, "value", 0) or 0) % (1 << width_bits)
+                return raw < (1 << (width_bits - 1))
+            except Exception:
+                return False
+        query = self._build_nonnegative_query(expr, conditions, parameters, width_bits)
+        if not query:
+            return False
+        result = Z3Solver(timeout=1, debug=False).check_equivalence_direct(query)
+        return result.status == SolverStatus.UNSAT
+
+    def _build_nonnegative_query(
+        self,
+        expr: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+        width_bits: int,
+    ) -> Optional[str]:
+        declarations = ["(set-logic QF_BV)"]
+        seen_params = set()
+        for parameter in parameters or []:
+            name = str(parameter.get("name") or "")
+            if not name or name in seen_params:
+                continue
+            param_width = max(1, int(parameter.get("size", 0) or 4)) * 8
+            declarations.append(f"(declare-const {name} (_ BitVec {param_width}))")
+            seen_params.add(name)
+
+        intrinsic_declarations: List[str] = []
+        for item in [expr, *(condition.expression for condition in conditions or [] if condition is not None)]:
+            for declaration in collect_intrinsic_smt_declarations(item):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+        declarations.extend(intrinsic_declarations)
+
+        assertions = [
+            f"(assert {condition.to_smt()})"
+            for condition in conditions or []
+            if condition is not None
+        ]
+        expr_smt = expr.to_smt()
+        assertions.append(f"(assert (= ((_ extract {width_bits - 1} {width_bits - 1}) {expr_smt}) #b1))")
+        return "\n".join(declarations + assertions + ["(check-sat)"])
+
+    def _combined_summary_conditions(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+    ) -> List[Condition]:
+        left_conditions = left_case.summary_conditions if left_case.summary_conditions is not None else left_case.conditions
+        right_conditions = right_case.summary_conditions if right_case.summary_conditions is not None else right_case.conditions
+        return ConditionSimplifier.simplify_conditions_object_centric(
+            list(left_conditions or []) + list(right_conditions or [])
+        )
+
+    def _collect_intrinsic_parameter_specs(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        *exprs: Expression,
+    ) -> List[Dict[str, Any]]:
+        specs: Dict[str, Dict[str, Any]] = {}
+        for case in (left_case, right_case):
+            for parameter in list(getattr(case, "parameters", None) or []):
+                name = str(parameter.get("name") or "")
+                if not name:
+                    continue
+                size = max(1, int(parameter.get("size", 0) or 4))
+                candidate = dict(parameter)
+                candidate["name"] = name
+                candidate["size"] = size
+                existing = specs.get(name)
+                if existing is None or int(existing.get("size", 0) or 0) < size:
+                    specs[name] = candidate
+
+        def visit(expr: Optional[Expression]) -> None:
+            if expr is None:
+                return
+            if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+                name = str(getattr(expr, "name", None) or "")
+                if not name:
+                    return
+                size = max(1, int(getattr(expr, "size", 0) or 4))
+                candidate = {
+                    "name": name,
+                    "index": int(getattr(expr, "value", -1) or -1),
+                    "size": size,
+                    "data_type": getattr(expr, "data_type", None),
+                }
+                existing = specs.get(name)
+                if existing is None or int(existing.get("size", 0) or 0) < size:
+                    specs[name] = candidate
+                return
+            if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+                for cond, branch_value in getattr(expr, "value", None) or []:
+                    if cond is not None:
+                        visit(getattr(cond, "expression", None))
+                    visit(branch_value)
+                return
+            for operand in getattr(expr, "operands", None) or []:
+                visit(operand)
+
+        for expr in exprs:
+            visit(expr)
+
+        ordered = sorted(
+            specs.values(),
+            key=lambda item: (
+                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
+                item.get("name") or "",
+            ),
+        )
+        for fallback_index, spec in enumerate(ordered):
+            if int(spec.get("index", -1)) < 0:
+                spec["index"] = fallback_index
+        return ordered
+
+    def _prove_intrinsic_equivalence_under_conditions(
+        self,
+        left: Expression,
+        right: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        query = self._build_intrinsic_equivalence_query(left, right, conditions, parameters)
+        if not query:
+            return False
+        result = Z3Solver(timeout=2, debug=self.debug).check_equivalence_direct(query)
+        return result.status == SolverStatus.UNSAT
+
+    def _build_intrinsic_equivalence_query(
+        self,
+        left: Expression,
+        right: Expression,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[str]:
+        if left is None or right is None:
+            return None
+        declarations = ["(set-logic QF_BV)"]
+        seen_params = set()
+        for parameter in parameters or []:
+            name = str(parameter.get("name") or "")
+            if not name or name in seen_params:
+                continue
+            width_bits = max(1, int(parameter.get("size", 0) or 4)) * 8
+            declarations.append(f"(declare-const {name} (_ BitVec {width_bits}))")
+            seen_params.add(name)
+
+        intrinsic_declarations: List[str] = []
+        for expr in (left, right):
+            for declaration in collect_intrinsic_smt_declarations(expr):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            for declaration in collect_intrinsic_smt_declarations(condition.expression):
+                if declaration not in intrinsic_declarations:
+                    intrinsic_declarations.append(declaration)
+        declarations.extend(intrinsic_declarations)
+
+        assertions = []
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            assertions.append(f"(assert {condition.to_smt()})")
+        assertions.append(f"(assert (not (= {left.to_smt()} {right.to_smt()})))")
+        return "\n".join(declarations + assertions + ["(check-sat)"])
+
     def _cases_have_equivalent_summary_conditions(
         self,
         left_case: ReturnCase,
@@ -483,9 +928,49 @@ class PairwiseStrategy(CheckStrategy):
         right_conditions = right_case.summary_conditions if right_case.summary_conditions is not None else right_case.conditions
         left_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(left_conditions or []))
         right_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(right_conditions or []))
-        return ConditionNormalizer.conditions_signature(left_normalized) == ConditionNormalizer.conditions_signature(
-            right_normalized
+        if len(left_normalized) != len(right_normalized):
+            return False
+        if not left_normalized and not right_normalized:
+            return True
+
+        matched_right: set[int] = set()
+        for left_condition in left_normalized:
+            candidate_index: Optional[int] = None
+            for idx, right_condition in enumerate(right_normalized):
+                if idx in matched_right:
+                    continue
+                if not self._conditions_are_semantically_equivalent(left_condition, right_condition):
+                    continue
+                if candidate_index is not None:
+                    return False
+                candidate_index = idx
+            if candidate_index is None:
+                return False
+            matched_right.add(candidate_index)
+        return len(matched_right) == len(right_normalized)
+
+    def _conditions_are_semantically_equivalent(
+        self,
+        left_condition: Condition,
+        right_condition: Condition,
+    ) -> bool:
+        if left_condition.equals(right_condition):
+            return True
+        return self._condition_implies(left_condition, right_condition) and self._condition_implies(
+            right_condition,
+            left_condition,
         )
+
+    def _condition_implies(
+        self,
+        premise: Condition,
+        conclusion: Condition,
+    ) -> bool:
+        implication_conditions = [premise, conclusion.negate()]
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(implication_conditions)
+        if solver_result is not None:
+            return solver_result
+        return ConditionSimplifier.object_centric_is_contradiction(implication_conditions)
 
     def _readonly_reduction_values_equivalent(
         self,

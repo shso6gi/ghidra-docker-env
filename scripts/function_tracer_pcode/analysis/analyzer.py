@@ -732,39 +732,30 @@ class ReturnAnalyzer:
                     self._debug_print(f"Evidence summary: {signedness_result.evidence_summary}")
                     self._debug_print(f"Opcode counts: {signedness_result.opcode_counts}")
 
-            direct_summary = self._try_direct_structural_summary(
-                function=function,
-                high_function=high_function,
-                tracer=tracer,
-            )
-            if direct_summary is not None:
-                result = FunctionReturnAnalysis(
-                    function_name=function.getName(),
-                    entry_point=str(function.getEntryPoint()),
-                    parameters=parameters,
-                    returns=direct_summary[0],
-                    function_ref=current_function_ref,
-                    analysis_scope_key=analysis_scope_key,
-                    return_type=return_type,
-                    return_type_obj=return_type_obj,
-                    signedness_result=signedness_result,
-                    deferred_calls=dict(self._current_deferred_calls),
-                    effect_summary=self._make_empty_effect_summary(parameters),
-                )
-                result.analysis_notes.extend([direct_summary[1], "direct_structural_summary"])
-                self._synchronize_parameters_with_referenced_parameter_expressions(result)
-                self._repair_mixed_scalar_signedness(result)
-                result.returns = self._merge_equivalent_return_infos(result.returns)
-                self._call_analysis_cache[analysis_scope_key] = result
-                function_cache_key = self._function_cache_key(function)
-                if function_cache_key is not None and not normalized_bound_parameter_values:
-                    self._call_analysis_cache[function_cache_key] = result
-                return result
-
             return_ops = tracer.find_return_ops()
             self._debug_print(f"Found {len(return_ops)} RETURN operations")
 
             empty_effect_summary = self._make_empty_effect_summary(parameters)
+            direct_structural_result = self._try_early_direct_counted_loop_summary(
+                function=function,
+                high_function=high_function,
+                tracer=tracer,
+                parameters=parameters,
+                return_ops=return_ops,
+                current_function_ref=current_function_ref,
+                analysis_scope_key=analysis_scope_key,
+                return_type=return_type,
+                return_type_obj=return_type_obj,
+                signedness_result=signedness_result,
+                empty_effect_summary=empty_effect_summary,
+            )
+            if direct_structural_result is not None:
+                self._call_analysis_cache[analysis_scope_key] = direct_structural_result
+                function_cache_key = self._function_cache_key(function)
+                if function_cache_key is not None and not normalized_bound_parameter_values:
+                    self._call_analysis_cache[function_cache_key] = direct_structural_result
+                return direct_structural_result
+
             recovered_control_returns, control_region_notes = self._recover_control_region_returns_early(
                 function,
                 tracer,
@@ -878,16 +869,6 @@ class ReturnAnalyzer:
                     if "switch_return_recovery" not in result.analysis_notes:
                         result.analysis_notes.append("switch_return_recovery")
 
-            summary = self._apply_structural_recurrence_summary(
-                function,
-                high_function,
-                result,
-                tracer,
-            )
-            if summary is not None:
-                result.returns = summary[0]
-                result.analysis_notes.append(summary[1])
-
             result.deferred_calls = dict(self._current_deferred_calls)
 
             if current_active_key is not None:
@@ -904,20 +885,26 @@ class ReturnAnalyzer:
 
             self._synchronize_parameters_with_referenced_parameter_expressions(result)
             self._repair_mixed_scalar_signedness(result)
-            result.returns = self._strip_stack_protector_only_conditions(result.returns)
-            if "control_region_return_recovery" not in result.analysis_notes:
-                result.returns = self._exclusivize_return_regions(result.returns)
-            result.returns = self._merge_equivalent_return_infos(result.returns)
-            result.returns = self._restore_readonly_reduction_summary_conditions(
-                result.returns,
-                result.parameters,
+            self._normalize_return_partition(result)
+            self._mark_incomplete_control_flow(result)
+
+            summary = self._apply_structural_recurrence_summary(
+                function,
+                high_function,
+                result,
+                tracer,
             )
+            if summary is not None:
+                result.returns = summary[0]
+                if summary[1] not in result.analysis_notes:
+                    result.analysis_notes.append(summary[1])
+                self._normalize_return_partition(result)
+                self._mark_incomplete_control_flow(result)
             if (
                 result.has_symbolic_post_state_reads()
                 and "symbolic_post_state_reads" not in result.analysis_notes
             ):
                 result.analysis_notes.append("symbolic_post_state_reads")
-            self._mark_incomplete_control_flow(result)
 
             # デバッグダンプ（解析結果の可視化）
             self._dump_return_infos(result)
@@ -965,15 +952,70 @@ class ReturnAnalyzer:
 
         return summarizer.try_summarize_function(function, high_function, analysis)
 
-    def _try_direct_structural_summary(
+    def _try_early_direct_counted_loop_summary(
         self,
         *,
         function,
         high_function,
         tracer: PcodeTracer,
-    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        parameters: Sequence[Dict],
+        return_ops: Sequence,
+        current_function_ref: CallTargetRef,
+        analysis_scope_key,
+        return_type: Optional[str],
+        return_type_obj,
+        signedness_result: Optional[SignednessResult],
+        empty_effect_summary: EffectSummary,
+    ) -> Optional[FunctionReturnAnalysis]:
         summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
-        return summarizer.try_summarize_function_direct(function, high_function)
+        if not summarizer.can_try_direct_counted_scalar_summary(high_function, return_ops):
+            return None
+
+        summary = summarizer.try_summarize_function_direct(function, high_function)
+        if summary is None:
+            return None
+
+        summary_returns, summary_note = summary
+        result = FunctionReturnAnalysis(
+            function_name=function.getName(),
+            entry_point=str(function.getEntryPoint()),
+            parameters=list(parameters or []),
+            returns=list(summary_returns),
+            function_ref=current_function_ref,
+            analysis_scope_key=analysis_scope_key,
+            return_type=return_type,
+            return_type_obj=return_type_obj,
+            signedness_result=signedness_result,
+            deferred_calls=dict(self._current_deferred_calls),
+            effect_summary=empty_effect_summary,
+        )
+        if summary_note not in result.analysis_notes:
+            result.analysis_notes.append(summary_note)
+        result.unknown_event_count = len(tracer.unknown_tracker.events)
+        result.unknown_event_reasons = sorted(
+            {
+                getattr(event, "reason_str", None) or getattr(event.reason, "value", "unknown")
+                for event in tracer.unknown_tracker.events
+            }
+        )
+        self._synchronize_parameters_with_referenced_parameter_expressions(result)
+        self._repair_mixed_scalar_signedness(result)
+        self._normalize_return_partition(result)
+        self._mark_incomplete_control_flow(result)
+        self._dump_return_infos(result)
+        return result
+
+    def _normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
+        if analysis is None:
+            return
+        analysis.returns = self._strip_stack_protector_only_conditions(analysis.returns)
+        if "control_region_return_recovery" not in analysis.analysis_notes:
+            analysis.returns = self._exclusivize_return_regions(analysis.returns)
+        analysis.returns = self._merge_equivalent_return_infos(analysis.returns)
+        analysis.returns = self._restore_readonly_reduction_summary_conditions(
+            analysis.returns,
+            analysis.parameters,
+        )
 
     def _strip_stack_protector_only_conditions(
         self,
@@ -1627,6 +1669,15 @@ class ReturnAnalyzer:
 
     def _mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
         """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
+        auto_notes = {
+            "unknown_return",
+            "overlapping_unconditional_returns",
+            "indirect_control_flow_unresolved",
+        }
+        analysis.analysis_notes = [
+            note for note in analysis.analysis_notes
+            if note not in auto_notes
+        ]
         reasons = []
 
         if analysis.has_unknown_return():
@@ -6610,18 +6661,6 @@ class ReturnAnalyzer:
         # MULTIEQUALが含まれるかチェック
         has_multiequal = self._contains_multiequal(return_varnode)
         if has_multiequal:
-            structural_shortcut = self._try_counted_loop_return_shortcut(
-                return_varnode,
-                address,
-                tracer,
-                path_conditions,
-                return_index,
-                site_metadata=site_metadata,
-            )
-            if structural_shortcut is not None:
-                return structural_shortcut
-        
-        if has_multiequal:
             self._debug_print("Return value contains MULTIEQUAL - using PHI-based expansion")
             expander = ExpressionExpander(
                 tracer,
@@ -6693,48 +6732,6 @@ class ReturnAnalyzer:
             )]
         
         return results
-
-    def _try_counted_loop_return_shortcut(
-        self,
-        return_varnode,
-        address: str,
-        tracer: PcodeTracer,
-        path_conditions: List[Condition],
-        return_index: int,
-        *,
-        site_metadata: Optional[Dict[str, Optional[object]]] = None,
-    ) -> Optional[List[ReturnInfo]]:
-        high_function = getattr(tracer, "high_function", None)
-        if high_function is None:
-            return None
-
-        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
-        model = summarizer._extract_counted_scalar_loop_model(high_function, None)
-        if model is None:
-            return None
-
-        self._debug_print(
-            "Bypassing PHI expander for counted scalar loop return; "
-            "using object-centric trace prior to structural summary"
-        )
-        value = tracer.trace_varnode(return_varnode, use_cache=False)
-        simplified_conds = ConditionSimplifier.simplify_conditions_object_centric(
-            path_conditions
-        )
-        resolved_value = self._concretize_readonly_loads(
-            value,
-            simplified_conds,
-            self._current_parameters,
-        )
-        return [
-            self._make_return_info(
-                address=address,
-                value=resolved_value,
-                conditions=simplified_conds,
-                branch_index=return_index,
-                site_metadata=site_metadata,
-            )
-        ]
 
     def _build_return_infos_from_expansions(
         self,
