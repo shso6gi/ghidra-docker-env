@@ -736,26 +736,6 @@ class ReturnAnalyzer:
             self._debug_print(f"Found {len(return_ops)} RETURN operations")
 
             empty_effect_summary = self._make_empty_effect_summary(parameters)
-            direct_structural_result = self._try_early_direct_counted_loop_summary(
-                function=function,
-                high_function=high_function,
-                tracer=tracer,
-                parameters=parameters,
-                return_ops=return_ops,
-                current_function_ref=current_function_ref,
-                analysis_scope_key=analysis_scope_key,
-                return_type=return_type,
-                return_type_obj=return_type_obj,
-                signedness_result=signedness_result,
-                empty_effect_summary=empty_effect_summary,
-            )
-            if direct_structural_result is not None:
-                self._call_analysis_cache[analysis_scope_key] = direct_structural_result
-                function_cache_key = self._function_cache_key(function)
-                if function_cache_key is not None and not normalized_bound_parameter_values:
-                    self._call_analysis_cache[function_cache_key] = direct_structural_result
-                return direct_structural_result
-
             recovered_control_returns, control_region_notes = self._recover_control_region_returns_early(
                 function,
                 tracer,
@@ -779,6 +759,26 @@ class ReturnAnalyzer:
                     bound_parameter_values=normalized_bound_parameter_values,
                 )
                 self._current_effect_summary = effect_summary
+
+                direct_structural_result = self._try_early_direct_counted_loop_summary(
+                    function=function,
+                    high_function=high_function,
+                    tracer=tracer,
+                    parameters=parameters,
+                    return_ops=return_ops,
+                    current_function_ref=current_function_ref,
+                    analysis_scope_key=analysis_scope_key,
+                    return_type=return_type,
+                    return_type_obj=return_type_obj,
+                    signedness_result=signedness_result,
+                    effect_summary=effect_summary,
+                )
+                if direct_structural_result is not None:
+                    self._call_analysis_cache[analysis_scope_key] = direct_structural_result
+                    function_cache_key = self._function_cache_key(function)
+                    if function_cache_key is not None and not normalized_bound_parameter_values:
+                        self._call_analysis_cache[function_cache_key] = direct_structural_result
+                    return direct_structural_result
 
                 return_infos = []
                 for i, return_op in enumerate(return_ops):
@@ -965,10 +965,12 @@ class ReturnAnalyzer:
         return_type: Optional[str],
         return_type_obj,
         signedness_result: Optional[SignednessResult],
-        empty_effect_summary: EffectSummary,
+        effect_summary: EffectSummary,
     ) -> Optional[FunctionReturnAnalysis]:
         summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
         if not summarizer.can_try_direct_counted_scalar_summary(high_function, return_ops):
+            return None
+        if not self._effect_summary_allows_direct_structural_summary(effect_summary):
             return None
 
         summary = summarizer.try_summarize_function_direct(function, high_function)
@@ -987,7 +989,7 @@ class ReturnAnalyzer:
             return_type_obj=return_type_obj,
             signedness_result=signedness_result,
             deferred_calls=dict(self._current_deferred_calls),
-            effect_summary=empty_effect_summary,
+            effect_summary=effect_summary,
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -1004,6 +1006,20 @@ class ReturnAnalyzer:
         self._mark_incomplete_control_flow(result)
         self._dump_return_infos(result)
         return result
+
+    def _effect_summary_allows_direct_structural_summary(
+        self,
+        effect_summary: Optional[EffectSummary],
+    ) -> bool:
+        if effect_summary is None:
+            return False
+        if getattr(effect_summary, "effects", None):
+            self._debug_print("Declined direct counted loop summary: effect summary contains memory writes")
+            return False
+        if getattr(effect_summary, "has_unsupported_call", False):
+            self._debug_print("Declined direct counted loop summary: effect summary contains unsupported call")
+            return False
+        return True
 
     def _normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
         if analysis is None:

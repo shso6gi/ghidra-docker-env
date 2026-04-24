@@ -450,11 +450,11 @@ def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_exp
     ), patch.object(
         analyzer,
         "_recover_control_region_returns_early",
-        side_effect=AssertionError("control-region recovery should be skipped after direct structural summary"),
+        return_value=(None, []),
     ), patch.object(
         analyzer,
         "_invoke_build_effect_summary",
-        side_effect=AssertionError("effect_summary should not be built after direct structural summary"),
+        return_value=analyzer._make_empty_effect_summary([{"name": "param_1", "index": 0, "size": 4}]),
     ), patch.object(
         analyzer,
         "_analyze_return_op",

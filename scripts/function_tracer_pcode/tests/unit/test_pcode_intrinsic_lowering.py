@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, 
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
     COUNTED_LOOP_SUM_OPCODE,
@@ -26,6 +27,7 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
@@ -55,6 +57,56 @@ def _counted_loop_sum_value(*, signed_loop: bool, data_type: str = "int") -> Exp
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
+
+
+class _UnsatProofRunner:
+    def __init__(self):
+        self.queries = []
+
+    def run_sequential(self, query, timeout=None):
+        self.queries.append(query)
+        return ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="proof",
+                    status=SolverStatus.UNSAT,
+                    elapsed_time=0.0,
+                )
+            ],
+            first_definitive=SolverResult(
+                solver_name="proof",
+                status=SolverStatus.UNSAT,
+                elapsed_time=0.0,
+            ),
+            is_equivalent=True,
+        )
+
+    def run_parallel(self, query):
+        raise AssertionError("partition proof should not need normal pairwise solving")
+
+
+class _FirstSatProofRunner(_UnsatProofRunner):
+    def run_sequential(self, query, timeout=None):
+        self.queries.append(query)
+        if len(self.queries) == 1:
+            return ParallelResult(
+                results=[
+                    SolverResult(
+                        solver_name="proof",
+                        status=SolverStatus.SAT,
+                        elapsed_time=0.0,
+                        model={},
+                    )
+                ],
+                first_definitive=SolverResult(
+                    solver_name="proof",
+                    status=SolverStatus.SAT,
+                    elapsed_time=0.0,
+                    model={},
+                ),
+                is_equivalent=False,
+            )
+        return super().run_sequential(query, timeout=timeout)
 
 
 def test_expression_to_smt_lowers_ptradd_intrinsic_without_uninterpreted_symbol():
@@ -319,11 +371,16 @@ def test_pairwise_does_not_shortcut_intrinsics_without_explicit_runtime_ref_cont
 
 
 def test_pairwise_shortcuts_equivalent_counted_loop_partition_without_solver():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    proof_runner = _UnsatProofRunner()
+    strategy = PairwiseStrategy(Mock(), proof_runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
-        "header_lines": [],
-        "params1": [],
-        "params2": [],
+        "header_lines": [
+            "(declare-const param_1_1 (_ BitVec 32))",
+            "(declare-const param_1_2 (_ BitVec 32))",
+            "(assert (= param_1_1 param_1_2))",
+        ],
+        "params1": [ParameterInfo("param_1", "param_1_1", 32, 0)],
+        "params2": [ParameterInfo("param_1", "param_1_2", 32, 0)],
         "extra_vars1": [],
         "extra_vars2": [],
         "constrained_fragments": [],
@@ -375,8 +432,7 @@ def test_pairwise_shortcuts_equivalent_counted_loop_partition_without_solver():
     assert result.total_pairs == 4
     assert result.unsat_pairs == 4
     assert result.unknown_pairs == 0
-    strategy.solver_runner.run_sequential.assert_not_called()
-    strategy.solver_runner.run_parallel.assert_not_called()
+    assert proof_runner.queries
 
 
 def test_partition_shortcut_rejects_unsafe_analysis_inputs():
@@ -398,6 +454,41 @@ def test_partition_shortcut_rejects_unsafe_analysis_inputs():
         render_fn1=None,
         render_fn2=None,
         sat_unsafety_reasons=["function1:return_coverage_gap"],
+    ) is False
+
+
+def test_partition_shortcut_requires_smt_proven_case_disjointness():
+    strategy = PairwiseStrategy(Mock(), _FirstSatProofRunner(), debug=False)
+    base_ctx = {
+        "header_lines": ["(declare-const param_1 (_ BitVec 32))"],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+    param = _param("param_1", size=4)
+    zero = _const(0, size=4)
+    ten = _const(10, size=4)
+    lower_region = Condition(Expression.binary_op("INT_SLESSEQUAL", zero, param), False)
+    upper_region = Condition(Expression.binary_op("INT_SLESSEQUAL", param, ten), False)
+    left_cases = [
+        ReturnCase(0, [lower_region], _const(1, size=4), ReturnInfo("left0", _const(1, size=4))),
+        ReturnCase(1, [upper_region], _const(2, size=4), ReturnInfo("left1", _const(2, size=4))),
+    ]
+    right_cases = [
+        ReturnCase(0, [lower_region], _const(1, size=4), ReturnInfo("right0", _const(1, size=4))),
+        ReturnCase(1, [upper_region], _const(2, size=4), ReturnInfo("right1", _const(2, size=4))),
+    ]
+
+    assert strategy._cases_form_equivalent_partition(
+        left_cases,
+        right_cases,
+        base_ctx=base_ctx,
+        render_fn1=None,
+        render_fn2=None,
+        sat_unsafety_reasons=[],
     ) is False
 
 

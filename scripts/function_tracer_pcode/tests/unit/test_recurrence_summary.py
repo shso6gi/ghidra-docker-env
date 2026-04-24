@@ -628,6 +628,24 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert "(ite " in loop_smt
 
 
+def test_direct_counted_scalar_summary_requires_all_return_ops_to_have_values(monkeypatch):
+    class _ReturnOp:
+        def __init__(self, inputs):
+            self._inputs = inputs
+
+        def getNumInputs(self):
+            return self._inputs
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    monkeypatch.setattr(summarizer, "_has_counted_scalar_loop_candidate", lambda _high_function: True)
+    monkeypatch.setattr(summarizer, "_iter_pcode_ops", lambda _high_function: iter(()))
+
+    assert summarizer.can_try_direct_counted_scalar_summary(
+        object(),
+        return_ops=[_ReturnOp(2), _ReturnOp(1)],
+    ) is False
+
+
 def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_cfg():
     limit_expr = _param("param_1")
     zero_expr = _const(0)

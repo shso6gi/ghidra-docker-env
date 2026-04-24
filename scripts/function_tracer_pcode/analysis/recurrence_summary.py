@@ -182,8 +182,10 @@ class StructuralRecurrenceSummarizer:
     ) -> bool:
         if high_function is None:
             return False
-        if return_ops is not None and not list(return_ops):
-            return False
+        if return_ops is not None:
+            return_ops = list(return_ops)
+            if not return_ops:
+                return False
         if not self._has_counted_scalar_loop_candidate(high_function):
             return False
 

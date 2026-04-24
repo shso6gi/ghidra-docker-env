@@ -7,6 +7,7 @@ import time
 from ...model import (
     COUNTED_LOOP_SUM_OPCODE,
     Condition,
+    CountedLoopSummaryRef,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
@@ -501,7 +502,8 @@ class PairwiseStrategy(CheckStrategy):
             return False
 
         matched_right: set[int] = set()
-        for left_case in left_unmatched:
+        matches: List[tuple[int, int]] = []
+        for left_idx, left_case in enumerate(left_unmatched):
             candidate_index: Optional[int] = None
             for idx, right_case in enumerate(right_unmatched):
                 if idx in matched_right:
@@ -516,8 +518,110 @@ class PairwiseStrategy(CheckStrategy):
             if candidate_index is None:
                 return False
             matched_right.add(candidate_index)
+            matches.append((left_idx, candidate_index))
 
-        return len(matched_right) == len(right_unmatched)
+        if len(matched_right) != len(right_unmatched):
+            return False
+        return self._prove_partition_shortcut_sound(
+            left_unmatched,
+            right_unmatched,
+            matches,
+            base_ctx=base_ctx,
+            render_fn1=render_fn1,
+            render_fn2=render_fn2,
+        )
+
+    def _prove_partition_shortcut_sound(
+        self,
+        left_cases: Sequence[ReturnCase],
+        right_cases: Sequence[ReturnCase],
+        matches: Sequence[tuple[int, int]],
+        *,
+        base_ctx: Dict[str, Any],
+        render_fn1,
+        render_fn2,
+    ) -> bool:
+        if not base_ctx.get("header_lines"):
+            return False
+        if not self._prove_cases_mutually_exclusive(
+            left_cases,
+            base_ctx=base_ctx,
+            render_fn=render_fn1,
+            label="partition:left",
+        ):
+            return False
+        if not self._prove_cases_mutually_exclusive(
+            right_cases,
+            base_ctx=base_ctx,
+            render_fn=render_fn2,
+            label="partition:right",
+        ):
+            return False
+
+        matched_pairs = set(matches)
+        for left_index, right_index in matches:
+            query = build_pair_query(
+                base_ctx,
+                left_cases[left_index],
+                right_cases[right_index],
+                render_fn1,
+                render_fn2,
+                f"partition-match-{left_index}-{right_index}",
+            )
+            if not self._solver_proves_unsat(query, label=f"partition match {left_index},{right_index}"):
+                return False
+
+        for left_index, left_case in enumerate(left_cases):
+            for right_index, right_case in enumerate(right_cases):
+                if (left_index, right_index) in matched_pairs:
+                    continue
+                query = build_condition_only_query(
+                    base_ctx,
+                    left_case,
+                    right_case,
+                    render_fn1,
+                    render_fn2,
+                    f"partition-cross-{left_index}-{right_index}",
+                )
+                if not self._solver_proves_unsat(query, label=f"partition cross {left_index},{right_index}"):
+                    return False
+        return True
+
+    def _prove_cases_mutually_exclusive(
+        self,
+        cases: Sequence[ReturnCase],
+        *,
+        base_ctx: Dict[str, Any],
+        render_fn,
+        label: str,
+    ) -> bool:
+        for left_index, left_case in enumerate(cases):
+            for right_index in range(left_index + 1, len(cases)):
+                right_case = cases[right_index]
+                query = build_condition_only_query(
+                    base_ctx,
+                    left_case,
+                    right_case,
+                    render_fn,
+                    render_fn,
+                    f"{label}-{left_index}-{right_index}",
+                )
+                if not self._solver_proves_unsat(query, label=f"{label} {left_index},{right_index}"):
+                    return False
+        return True
+
+    def _solver_proves_unsat(self, query: str, *, label: str) -> bool:
+        try:
+            result = self.solver_runner.run_sequential(query, timeout=self.per_query_timeout)
+        except TypeError:
+            result = self.solver_runner.run_sequential(query)
+        except Exception as exc:
+            self._debug_print(f"  Partition proof {label}: solver error {exc}")
+            return False
+        if getattr(result, "is_equivalent", None) is True:
+            return True
+        self._debug_print(f"  Partition proof {label}: not proven UNSAT")
+        return False
 
     def _case_partition_contains_unresolved(
         self,
@@ -700,9 +804,7 @@ class PairwiseStrategy(CheckStrategy):
     def _counted_loop_refs_match_ignoring_signedness(self, left_ref, right_ref) -> bool:
         if left_ref is None or right_ref is None:
             return False
-        left_kind = type(left_ref).__name__
-        right_kind = type(right_ref).__name__
-        if left_kind != "CountedLoopSummaryRef" or right_kind != "CountedLoopSummaryRef":
+        if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
             return False
         try:
             return (
