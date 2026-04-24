@@ -2,6 +2,7 @@
 """条件の正規化モジュール（Expression構造ベース改善版）"""
 
 from typing import Dict, Optional, Tuple
+from weakref import WeakKeyDictionary
 from ...model import (
     Expression,
     Condition,
@@ -24,7 +25,11 @@ class ConditionNormalizer:
     _EXPR_KEY_MAX_NODES = 48
     _EXPR_KEY_CACHE_LIMIT = 4096
     _CONTRADICTION_CACHE_LIMIT = 8192
-    _expr_key_cache: Dict[Tuple[object, bool], StructuralKey] = {}
+    # Keep the cache tied to the actual Expression object lifetime.  A plain
+    # id(expr)-keyed dict can return stale structural keys after Python reuses
+    # an object id for a new expression, which corrupts later condition
+    # normalization and display.
+    _expr_key_cache: WeakKeyDictionary = WeakKeyDictionary()
     _contradiction_cache: Dict[Tuple[Expression, bool], Tuple[StructuralKey, str, StructuralKey, bool]] = {}
 
     @classmethod
@@ -413,10 +418,10 @@ class ConditionNormalizer:
         if expr is None:
             return ("none",)
 
-        cache_key = (id(expr), bool(include_memory_read_order))
-        cached = cls._expr_key_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        cache_mode = bool(include_memory_read_order)
+        cached_by_mode = cls._expr_key_cache.get(expr)
+        if cached_by_mode is not None and cache_mode in cached_by_mode:
+            return cached_by_mode[cache_mode]
 
         rendered = expression_key(
             expr,
@@ -426,7 +431,10 @@ class ConditionNormalizer:
         )
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
-        cls._expr_key_cache[cache_key] = rendered
+        if cached_by_mode is None:
+            cached_by_mode = {}
+            cls._expr_key_cache[expr] = cached_by_mode
+        cached_by_mode[cache_mode] = rendered
         return rendered
 
     @staticmethod

@@ -7,17 +7,66 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     DeferredCallInfo,
+    CountedLoopSummaryRef,
     LocationBaseRef,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
     PostStateReadRef,
     PostStateSnapshotRef,
+    ReadonlyReductionRef,
     StorageInfo,
     coerce_call_target_ref,
+    compare_loop_summaries,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
 def test_coerce_call_target_ref_rejects_raw_strings():
     assert coerce_call_target_ref("callee") is None
+
+
+def test_loop_summary_comparator_interface_is_explicitly_unknown():
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="memory_load", stride=4, element_size=4),
+    )
+
+    result = compare_loop_summaries(summary, summary)
+
+    assert result.status == "unknown"
+    assert result.is_equivalent() is None
+
+
+def test_loop_summary_unkeyable_refs_disable_pairwise_exact_shortcut():
+    unkeyable_summary = LoopSummaryRef(
+        start_expr=object(),
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="memory_load", stride=4, element_size=4),
+    )
+    readonly_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("ptr", index=0),
+        count_parameter_name="n",
+        count_parameter_index=1,
+        stride=4,
+        element_size=4,
+        result_size=4,
+        loop_summary=unkeyable_summary,
+    )
+    counted_ref = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=True,
+        residue_cases=((1, 0, 1, 0),),
+        loop_summary=unkeyable_summary,
+    )
+
+    assert unkeyable_summary.stable_key() is None
+    assert readonly_ref.pairwise_exact_key() is None
+    assert counted_ref.pairwise_exact_key() is None
 
 
 def test_function_analysis_normalizes_deferred_calls_to_deferred_call_refs():

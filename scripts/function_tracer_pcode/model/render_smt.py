@@ -538,6 +538,36 @@ def _readonly_reduction_ref(expr) -> Optional[ReadonlyReductionRef]:
     return None
 
 
+def _runtime_ref_smt_identity(expr, runtime_ref):
+    loop_summary = getattr(runtime_ref, "loop_summary", None)
+    if loop_summary is not None:
+        loop_key = loop_summary.stable_key()
+        if loop_key is None:
+            return (
+                "unkeyable_loop_summary",
+                type(runtime_ref).__module__,
+                type(runtime_ref).__qualname__,
+                id(runtime_ref),
+                id(loop_summary),
+                id(expr),
+            )
+    semantic_key = getattr(runtime_ref, "semantic_key", None)
+    if callable(semantic_key):
+        identity = semantic_key()
+        if identity is not None:
+            return identity
+    stable_key = getattr(runtime_ref, "stable_key", None)
+    if callable(stable_key):
+        return stable_key()
+    return (
+        "opaque_runtime_ref",
+        type(runtime_ref).__module__,
+        type(runtime_ref).__qualname__,
+        id(runtime_ref),
+        id(expr),
+    )
+
+
 def _readonly_sum_function_name(expr) -> str:
     operands = getattr(expr, "operands", None) or []
     base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
@@ -547,7 +577,7 @@ def _readonly_sum_function_name(expr) -> str:
     if reduction_ref is None:
         return f"rt_readonly_sum_{base_bits}_{count_bits}_{result_bits}"
     reduction_kind = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.reduction_kind or "sum")
-    identity = reduction_ref.semantic_key() or reduction_ref.stable_key()
+    identity = _runtime_ref_smt_identity(expr, reduction_ref)
     digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
     return f"rt_{reduction_kind}_{digest}_{base_bits}_{count_bits}_{result_bits}"
 
@@ -568,7 +598,7 @@ def _counted_loop_sum_function_name(expr) -> str:
     summary_ref = _counted_loop_sum_ref(expr)
     if summary_ref is None:
         return f"rt_counted_loop_sum_{base_bits}_{start_bits}_{limit_bits}_{result_bits}"
-    identity = summary_ref.semantic_key() or summary_ref.stable_key()
+    identity = _runtime_ref_smt_identity(expr, summary_ref)
     digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
     return (
         f"rt_counted_loop_sum_{digest}_"

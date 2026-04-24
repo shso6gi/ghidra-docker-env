@@ -11,6 +11,7 @@ from ...model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    compare_loop_summaries,
 )
 from ...model.render_smt import (
     collect_intrinsic_smt_declarations,
@@ -465,11 +466,21 @@ class PairwiseStrategy(CheckStrategy):
         if left_ref is None or right_ref is None:
             return False, False
 
+        left_loop_summary = getattr(left_ref, "loop_summary", None)
+        right_loop_summary = getattr(right_ref, "loop_summary", None)
+        if left_loop_summary is not None or right_loop_summary is not None:
+            loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
+            decisive = loop_result.is_equivalent()
+            if decisive is not None:
+                return bool(decisive), True
+
         left_exact_key_fn = getattr(left_ref, "pairwise_exact_key", None)
         right_exact_key_fn = getattr(right_ref, "pairwise_exact_key", None)
         if callable(left_exact_key_fn) and callable(right_exact_key_fn):
             try:
-                if left_exact_key_fn() == right_exact_key_fn():
+                left_exact_key = left_exact_key_fn()
+                right_exact_key = right_exact_key_fn()
+                if left_exact_key is not None and right_exact_key is not None and left_exact_key == right_exact_key:
                     return True, False
             except Exception:
                 pass

@@ -382,6 +382,24 @@ def test_simplify_conditions_keeps_only_strongest_interval_bounds():
     ]
 
 
+def test_condition_normalizer_ignores_stale_id_shaped_expr_key_cache_entry():
+    stale_key = ConditionNormalizer._condition_expr_key(_or(_const(2), _param("y")))
+    ConditionNormalizer._expr_key_cache.clear()
+    param = _param("param_2")
+    zero = _const(0)
+
+    try:
+        ConditionNormalizer._expr_key_cache[(id(zero), True)] = stale_key
+    except TypeError:
+        pass
+
+    try:
+        condition = Condition(Expression.binary_op("INT_SLESS", zero, param), False)
+        assert ConditionSimplifier.get_simplified_condition_string(condition) == "(0 < param_2)"
+    finally:
+        ConditionNormalizer._expr_key_cache.clear()
+
+
 def test_normalize_for_contradiction_skips_full_render_for_large_expression(monkeypatch):
     huge = _param("param_1")
     for _ in range(64):

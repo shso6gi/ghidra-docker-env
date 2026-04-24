@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    LoopSummaryRef,
     LocationBaseRef,
     ReadonlyReductionTermRef,
     ReturnInfo,
@@ -63,6 +64,10 @@ def test_counted_loop_summary_canonicalizes_zero_contribution_prefix():
         result_size=4,
         signed_loop=True,
     )
+
+    assert value is not None
+    assert isinstance(value.runtime_ref.loop_summary, LoopSummaryRef)
+    assert value.runtime_ref.semantic_key() is None
 
     canonical = summarizer._canonicalize_zero_prefix_counted_loop_value(
         value,
@@ -2507,7 +2512,7 @@ def test_structural_recurrence_summarizer_candidate_probe_accepts_readonly_reduc
     assert summarizer.has_summary_candidate(_FakeFunction("ptr_sum_window"), high_function, analysis) is True
 
 
-def test_structural_recurrence_summarizer_recovers_readonly_reduction_from_affine_exact_count_case():
+def test_structural_recurrence_summarizer_declines_readonly_reduction_from_exact_count_only():
     params = [
         {"name": "param_1", "index": 0, "data_type": "long", "size": 8},
         {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False},
@@ -2572,16 +2577,111 @@ def test_structural_recurrence_summarizer_recovers_readonly_reduction_from_affin
         analysis,
     )
 
+    assert summary is None
+
+
+def test_readonly_reduction_summary_preserves_nonzero_start_offset_object_centrically():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    ptr_param = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count_param = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_EQUAL", ptr_param, Expression.constant(0, size=8))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(0),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESSEQUAL", count_param, _const(1)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.unknown("phi_circular"),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESS", _const(1), count_param),
+                ],
+            ),
+        ],
+    )
+
+    ptr_varnode = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    one32 = _FakeVarnode("one32", size=4, expr=Expression.constant(1, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    idx_add_op = _FakePcodeOp("INT_ADD", [idx_phi, one32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [one32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_varnode, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    zero32 = _FakeVarnode("zero32", size=4, expr=Expression.constant(0, 4))
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero32, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_add_op, idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("ptr_sum_window"),
+        high_function,
+        analysis,
+    )
+
     assert summary is not None
     summarized_returns, note = summary
     assert note == "readonly_pointer_reduction_summary"
-    assert len(summarized_returns) == 3
-    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ret.value.expr_type.__class__.INTRINSIC)
-    assert positive_case.value.opcode == READONLY_SUM_OPCODE
-    assert isinstance(positive_case.value.runtime_ref, ReadonlyReductionRef)
-    assert positive_case.value.runtime_ref.stride == 4
-    assert positive_case.value.runtime_ref.element_size == 4
-    assert [cond.to_string() for cond in positive_case.conditions] == ["(param_1 != 0)", "(0 < param_2)"]
+    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    runtime_ref = positive_case.value.runtime_ref
+    assert isinstance(runtime_ref, ReadonlyReductionRef)
+    assert runtime_ref.reduction_kind == "memory_sum"
+    assert runtime_ref.start_offset == 4
+    assert runtime_ref.stride == 4
+    assert isinstance(runtime_ref.loop_summary, LoopSummaryRef)
+    assert runtime_ref.loop_summary.loop_var_unit == "element_index"
+    assert runtime_ref.loop_summary.start_expr.equals(Expression.constant(1, size=4))
+    assert runtime_ref.loop_summary.step_expr.equals(Expression.constant(1, size=4))
+    assert runtime_ref.loop_summary.term_descriptor.start_offset == 0
+    assert runtime_ref.loop_summary.term_descriptor.stride == 4
+    assert runtime_ref.loop_summary.seed_terms == ()
+    assert runtime_ref.loop_summary.witnesses == runtime_ref.semantic_witnesses
+    assert runtime_ref.semantic_key() is None
+    assert runtime_ref.semantic_witnesses[:2] == (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(ReadonlyReductionTermRef(byte_offset=4, access_size=4),),
+        ),
+    )
+    assert [cond.to_string() for cond in positive_case.conditions] == ["(param_1 != 0)", "(1 < param_2)"]
 
 
 def test_structural_recurrence_summarizer_infers_pointer_parameter_object_centrically():
@@ -2688,7 +2788,7 @@ def test_structural_recurrence_summarizer_infers_pointer_parameter_object_centri
     assert [cond.to_string() for cond in positive_case.conditions] == ["(param_1 != 0)", "(0 < param_2)"]
 
 
-def test_structural_recurrence_summarizer_recovers_readonly_pointer_reduction_from_prefix_returns():
+def test_structural_recurrence_summarizer_declines_readonly_reduction_from_prefix_returns_only():
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
         {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
@@ -2772,26 +2872,7 @@ def test_structural_recurrence_summarizer_recovers_readonly_pointer_reduction_fr
         analysis,
     )
 
-    assert summary is not None
-    summarized_returns, note = summary
-    assert note == "readonly_pointer_reduction_summary"
-    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ret.value.expr_type.__class__.INTRINSIC)
-    assert positive_case.value.opcode == READONLY_SUM_OPCODE
-    assert positive_case.value.runtime_ref.stride == 4
-    assert positive_case.value.runtime_ref.semantic_witnesses[:2] == (
-        ReadonlyReductionWitness(
-            exact_count=1,
-            terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
-        ),
-        ReadonlyReductionWitness(
-            exact_count=2,
-            terms=(
-                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
-                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
-            ),
-        ),
-    )
-    assert [w.exact_count for w in positive_case.value.runtime_ref.semantic_witnesses] == [1, 2, 3, 4]
+    assert summary is None
 
 
 def test_structural_recurrence_summarizer_synthesizes_linear_semantic_witnesses_for_simple_loop():

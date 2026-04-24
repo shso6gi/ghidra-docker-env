@@ -16,6 +16,8 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     LocationBaseRef,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
     READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
@@ -584,6 +586,79 @@ def test_readonly_sum_smt_declarations_share_semantic_identity_when_witness_pref
     right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
 
     assert left_name == right_name
+
+
+def test_readonly_sum_smt_identity_does_not_fallback_to_coarse_stable_key_for_unkeyable_loop_summary():
+    def _expr_with_unkeyable_summary():
+        loop_summary = LoopSummaryRef(
+            start_expr=object(),
+            limit_expr=Expression.parameter("count", size=4, data_type="int"),
+            step_expr=1,
+            term_descriptor=LoopTermDescriptorRef(kind="memory_load", stride=4, element_size=4),
+        )
+        return Expression.intrinsic(
+            "READONLY_SUM",
+            [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+            size=4,
+            runtime_ref=ReadonlyReductionRef(
+                reduction_kind="memory_sum",
+                pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+                count_parameter_name="count",
+                count_parameter_index=1,
+                stride=4,
+                element_size=4,
+                result_size=4,
+                signed_counter=True,
+                loop_summary=loop_summary,
+            ),
+            opcode=READONLY_SUM_OPCODE,
+        )
+
+    left = _expr_with_unkeyable_summary()
+    right = _expr_with_unkeyable_summary()
+
+    assert left.runtime_ref.stable_key() == right.runtime_ref.stable_key()
+    assert left.runtime_ref.pairwise_exact_key() is None
+    left_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(left)[0]).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
+
+    assert left_name != right_name
+
+
+def test_counted_loop_smt_identity_does_not_fallback_to_coarse_stable_key_for_unkeyable_loop_summary():
+    def _expr_with_unkeyable_summary():
+        loop_summary = LoopSummaryRef(
+            start_expr=object(),
+            limit_expr=Expression.parameter("limit", size=4, data_type="int"),
+            step_expr=1,
+            term_descriptor=LoopTermDescriptorRef(
+                kind="affine_residue",
+                residue_cases=((3, 0, 1, 0),),
+            ),
+        )
+        return Expression.intrinsic(
+            "COUNTED_LOOP_SUM",
+            [_const(0, size=4), _const(0, size=4), Expression.parameter("limit", size=4, data_type="int")],
+            size=4,
+            runtime_ref=CountedLoopSummaryRef(
+                induction_step=1,
+                result_size=4,
+                signed_loop=True,
+                residue_cases=((3, 0, 1, 0),),
+                loop_summary=loop_summary,
+            ),
+            opcode=COUNTED_LOOP_SUM_OPCODE,
+        )
+
+    left = _expr_with_unkeyable_summary()
+    right = _expr_with_unkeyable_summary()
+
+    assert left.runtime_ref.stable_key() == right.runtime_ref.stable_key()
+    assert left.runtime_ref.pairwise_exact_key() is None
+    left_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(left)[0]).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
+
+    assert left_name != right_name
 
 
 def test_expander_combines_three_input_ptradd_as_intrinsic(monkeypatch):

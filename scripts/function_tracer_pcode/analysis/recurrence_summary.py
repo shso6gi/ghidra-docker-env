@@ -14,6 +14,9 @@ from ..model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    LoopSideEffectProfileRef,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
     LocationBaseRef,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
@@ -271,14 +274,6 @@ class StructuralRecurrenceSummarizer:
             pointer_param,
             count_param,
         )
-        if loop_shape is not None:
-            return True
-        loop_shape = self._infer_readonly_sum_shape_from_positive_returns(
-            analysis,
-            pointer_param,
-            count_param,
-            positive_conditions,
-        )
         return loop_shape is not None
 
     def _has_counted_scalar_loop_candidate(self, high_function) -> bool:
@@ -511,10 +506,14 @@ class StructuralRecurrenceSummarizer:
     ) -> Optional[Expression]:
         if induction_step == 0 or not residue_cases:
             return None
-        runtime_ref = CountedLoopSummaryRef(
-            induction_step=int(induction_step),
+        step_expr = Expression.constant(
+            int(induction_step),
+            size=max(1, int(getattr(start_expr, "size", 0) or getattr(limit_expr, "size", 0) or 4)),
+        )
+        term_descriptor = LoopTermDescriptorRef(
+            kind="affine_residue",
+            reduction_kind="sum",
             result_size=max(1, int(result_size or 0)),
-            signed_loop=bool(signed_loop),
             residue_cases=tuple(
                 (
                     int(case.modulus),
@@ -524,6 +523,24 @@ class StructuralRecurrenceSummarizer:
                 )
                 for case in residue_cases
             ),
+        )
+        loop_summary = LoopSummaryRef(
+            start_expr=start_expr,
+            limit_expr=limit_expr,
+            step_expr=step_expr,
+            term_descriptor=term_descriptor,
+            seed_terms=(),
+            witnesses=(),
+            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+            guard_constraints=(),
+            loop_var_unit="induction_value",
+        )
+        runtime_ref = CountedLoopSummaryRef(
+            induction_step=int(induction_step),
+            result_size=max(1, int(result_size or 0)),
+            signed_loop=bool(signed_loop),
+            residue_cases=term_descriptor.residue_cases,
+            loop_summary=loop_summary,
         )
         intrinsic = Expression.intrinsic(
             "COUNTED_LOOP_SUM",
@@ -2711,17 +2728,19 @@ class StructuralRecurrenceSummarizer:
             pointer_param,
             count_param,
         )
-        if loop_shape is None:
-            loop_shape = self._infer_readonly_sum_shape_from_positive_returns(
-                analysis,
-                pointer_param,
-                count_param,
-                positive_conditions,
-            )
+        positive_conditions = self._readonly_reduction_positive_conditions(
+            analysis,
+            pointer_param,
+            count_param,
+            loop_start_index=int(loop_shape.get("start_index", 0) or 0) if loop_shape is not None else 0,
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(positive_conditions):
+            self._debug("Declined readonly reduction summary: positive loop region is contradictory")
+            return None
         if loop_shape is None:
             self._debug(
                 f"Declined readonly reduction summary for '{function.getName()}': "
-                "no supported accumulator/load or prefix-sum shape found"
+                "no supported accumulator/load loop shape found"
             )
             return None
 
@@ -2751,22 +2770,35 @@ class StructuralRecurrenceSummarizer:
             loop_shape,
             result_size=result_size,
         )
+        pointer_base_ref = LocationBaseRef.parameter(
+            pointer_param.get("name", "ptr"),
+            index=pointer_param.get("index"),
+            owner_program_id=pointer_param.get("owner_program_id"),
+            owner_entry_offset=pointer_param.get("owner_entry_offset"),
+        )
+        start_offset = int(loop_shape.get("start_offset", 0) or 0)
+        stride = int(loop_shape["stride"])
+        element_size = int(loop_shape["element_size"])
+        loop_summary = self._build_readonly_loop_summary_ref(
+            summary_count_expr=summary_count_expr,
+            pointer_base_ref=pointer_base_ref,
+            loop_shape=loop_shape,
+            result_size=result_size,
+            semantic_witnesses=semantic_witnesses,
+            guard_constraints=positive_conditions,
+        )
         reduction_ref = ReadonlyReductionRef(
-            reduction_kind="readonly_sum",
-            pointer_base_ref=LocationBaseRef.parameter(
-                pointer_param.get("name", "ptr"),
-                index=pointer_param.get("index"),
-                owner_program_id=pointer_param.get("owner_program_id"),
-                owner_entry_offset=pointer_param.get("owner_entry_offset"),
-            ),
+            reduction_kind="memory_sum",
+            pointer_base_ref=pointer_base_ref,
             count_parameter_name=count_param.get("name", "count"),
             count_parameter_index=count_param.get("index"),
-            stride=int(loop_shape["stride"]),
-            element_size=int(loop_shape["element_size"]),
+            stride=stride,
+            element_size=element_size,
             result_size=result_size,
-            start_offset=0,
+            start_offset=start_offset,
             signed_counter=bool(count_param.get("is_signed", True)),
             semantic_witnesses=semantic_witnesses,
+            loop_summary=loop_summary,
         )
         summary_expr = Expression.intrinsic(
             "READONLY_SUM",
@@ -2794,6 +2826,58 @@ class StructuralRecurrenceSummarizer:
             f"stride={loop_shape['stride']}, element_size={loop_shape['element_size']})"
         )
         return summarized_returns, "readonly_pointer_reduction_summary"
+
+    def _build_readonly_loop_summary_ref(
+        self,
+        *,
+        summary_count_expr: Expression,
+        pointer_base_ref: LocationBaseRef,
+        loop_shape: Dict[str, int],
+        result_size: int,
+        semantic_witnesses: Sequence[ReadonlyReductionWitness],
+        guard_constraints: Sequence[Condition],
+    ) -> Optional[LoopSummaryRef]:
+        stride = int(loop_shape.get("stride", 0) or 0)
+        start_offset = int(loop_shape.get("start_offset", 0) or 0)
+        element_size = int(loop_shape.get("element_size", 0) or 0)
+        if stride <= 0 or element_size <= 0:
+            return None
+
+        start_index = loop_shape.get("start_index")
+        index_step = int(loop_shape.get("index_step", 1) or 1)
+        index_scale = int(loop_shape.get("index_scale", stride) or stride)
+        if start_index is None:
+            if start_offset % stride != 0:
+                return None
+            start_index = start_offset // stride
+            index_step = 1
+            index_scale = stride
+        if index_step == 0 or index_scale <= 0:
+            return None
+
+        counter_size = max(1, int(getattr(summary_count_expr, "size", 0) or 4))
+        return LoopSummaryRef(
+            start_expr=Expression.constant(int(start_index), size=counter_size),
+            limit_expr=summary_count_expr,
+            step_expr=Expression.constant(index_step, size=counter_size),
+            term_descriptor=LoopTermDescriptorRef(
+                kind="memory_load",
+                reduction_kind="sum",
+                location_base_ref=pointer_base_ref,
+                start_offset=0,
+                stride=index_scale,
+                element_size=element_size,
+                result_size=result_size,
+            ),
+            seed_terms=(),
+            witnesses=tuple(semantic_witnesses or ()),
+            side_effect_profile=LoopSideEffectProfileRef(
+                profile="pure_memory_read",
+                memory_reads=True,
+            ),
+            guard_constraints=tuple(guard_constraints or ()),
+            loop_var_unit="element_index",
+        )
 
     def _infer_readonly_pointer_reduction_parameters(
         self,
@@ -2954,9 +3038,12 @@ class StructuralRecurrenceSummarizer:
         analysis,
         pointer_param: dict,
         count_param: dict,
+        *,
+        loop_start_index: int = 0,
     ) -> List[Condition]:
         pointer_expr = self._parameter_expression(pointer_param)
         count_expr = self._parameter_expression(count_param)
+        lower_bound = max(0, int(loop_start_index or 0))
         return [
             Condition(
                 Expression.binary_op(
@@ -2969,7 +3056,7 @@ class StructuralRecurrenceSummarizer:
             Condition(
                 Expression.binary_op(
                     "INT_SLESS",
-                    Expression.constant(0, count_expr.size or 4),
+                    Expression.constant(lower_bound, count_expr.size or 4),
                     count_expr,
                 ),
                 False,
@@ -3046,57 +3133,6 @@ class StructuralRecurrenceSummarizer:
                     return True
         return False
 
-    def _infer_readonly_sum_shape_from_positive_returns(
-        self,
-        analysis,
-        pointer_param: dict,
-        count_param: dict,
-        positive_conditions: Sequence[Condition],
-    ) -> Optional[Dict[str, int]]:
-        stride_votes: Counter[Tuple[int, int]] = Counter()
-        count_name = count_param.get("name", "")
-        for ret in analysis.returns or []:
-            if not self._return_overlaps_conditions(ret, positive_conditions):
-                continue
-            coeffs = self._extract_linear_location_coefficients(
-                ret.value,
-                analysis.parameters or [],
-            )
-            if not coeffs:
-                continue
-            normalized_locations = sorted(coeffs.items(), key=lambda item: item[0].offset)
-            if any(coeff != 1 for _, coeff in normalized_locations):
-                continue
-            locations = [location for location, _coeff in normalized_locations]
-            if not locations:
-                continue
-            if any(
-                not location.base_ref.matches_parameter(pointer_param)
-                or getattr(location, "steps", ())
-                for location in locations
-            ):
-                continue
-            if locations[0].offset != 0:
-                continue
-            exact_count = self._exact_counter_value_from_conditions(ret.conditions, count_name)
-            if exact_count is None or exact_count != len(locations):
-                continue
-            if len(locations) == 1:
-                stride = max(1, int(locations[0].size))
-            else:
-                diffs = [right.offset - left.offset for left, right in zip(locations, locations[1:])]
-                if any(diff <= 0 for diff in diffs):
-                    continue
-                stride = diffs[0]
-                if any(diff != stride for diff in diffs[1:]):
-                    continue
-            stride_votes[(int(stride), int(locations[0].size))] += 1
-
-        if not stride_votes:
-            return None
-        (stride, element_size), _count = stride_votes.most_common(1)[0]
-        return {"stride": int(stride), "element_size": int(element_size)}
-
     def _build_readonly_reduction_semantic_witnesses(
         self,
         analysis,
@@ -3112,6 +3148,7 @@ class StructuralRecurrenceSummarizer:
             pointer_param,
             count_param,
             positive_returns,
+            loop_shape,
         )
         synthesized_witnesses = self._synthesize_linear_readonly_reduction_witnesses(
             pointer_param,
@@ -3146,12 +3183,16 @@ class StructuralRecurrenceSummarizer:
         pointer_param: dict,
         count_param: dict,
         positive_returns: Sequence[ReturnInfo],
+        loop_shape: Optional[Dict[str, int]] = None,
     ) -> Tuple[ReadonlyReductionWitness, ...]:
         count_name = str(count_param.get("name") or "")
         witness_by_count: Dict[int, ReadonlyReductionWitness] = {}
         for ret in positive_returns or []:
             exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
             if exact_count is None or exact_count <= 0:
+                continue
+            expected_trip_count = self._readonly_loop_trip_count_for_count_value(loop_shape, int(exact_count))
+            if expected_trip_count is None:
                 continue
             reduced_value = _reduce_expression_under_conditions(ret.value, ret.conditions or [])
             terms = self._extract_readonly_reduction_terms(
@@ -3165,7 +3206,7 @@ class StructuralRecurrenceSummarizer:
                     analysis.parameters or [],
                     pointer_param,
                 )
-            if not terms or len(terms) != int(exact_count):
+            if terms is None or len(terms) != int(expected_trip_count):
                 continue
             witness = ReadonlyReductionWitness(
                 exact_count=int(exact_count),
@@ -3178,6 +3219,24 @@ class StructuralRecurrenceSummarizer:
             return ()
         return tuple(witness_by_count[count] for count in sorted(witness_by_count))
 
+    def _readonly_loop_trip_count_for_count_value(
+        self,
+        loop_shape: Optional[Dict[str, int]],
+        count_value: int,
+    ) -> Optional[int]:
+        if count_value <= 0:
+            return None
+        if not loop_shape:
+            return int(count_value)
+        start_index = int(loop_shape.get("start_index", 0) or 0)
+        index_step = int(loop_shape.get("index_step", 1) or 1)
+        if index_step <= 0:
+            return None
+        if count_value <= start_index:
+            return 0
+        distance = int(count_value) - start_index
+        return (distance + index_step - 1) // index_step
+
     def _synthesize_linear_readonly_reduction_witnesses(
         self,
         pointer_param: dict,
@@ -3189,17 +3248,23 @@ class StructuralRecurrenceSummarizer:
             return ()
         stride = int(loop_shape.get("stride", 0) or 0)
         element_size = int(loop_shape.get("element_size", 0) or 0)
+        start_offset = int(loop_shape.get("start_offset", 0) or 0)
+        start_index = int(loop_shape.get("start_index", 0) or 0)
+        index_step = int(loop_shape.get("index_step", 1) or 1)
         access_size = max(1, int(result_size or 0))
-        if stride <= 0 or element_size <= 0 or element_size != access_size:
+        if stride <= 0 or element_size <= 0 or element_size != access_size or index_step <= 0:
             return ()
         witnesses: List[ReadonlyReductionWitness] = []
-        for exact_count in range(1, 5):
+        for exact_count in range(1, max(4, start_index + index_step + 1) + 1):
+            trip_count = self._readonly_loop_trip_count_for_count_value(loop_shape, exact_count)
+            if trip_count is None:
+                continue
             terms = tuple(
                 ReadonlyReductionTermRef(
-                    byte_offset=int(index * stride),
+                    byte_offset=int(start_offset + index * stride),
                     access_size=access_size,
                 )
-                for index in range(exact_count)
+                for index in range(trip_count)
             )
             witnesses.append(
                 ReadonlyReductionWitness(
@@ -3378,6 +3443,10 @@ class StructuralRecurrenceSummarizer:
                 return {
                     "phi_output": output,
                     "stride": int(step),
+                    "start_offset": 0,
+                    "start_index": 0,
+                    "index_step": 1,
+                    "index_scale": int(step),
                 }
         return None
 
@@ -3392,7 +3461,8 @@ class StructuralRecurrenceSummarizer:
         input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
         for init_index in range(input_count):
             init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
-            if self._varnode_constant_value(init_varnode) != 0:
+            init_value = self._varnode_constant_value(init_varnode)
+            if init_value is None:
                 continue
             for back_index in range(input_count):
                 if back_index == init_index:
@@ -3402,7 +3472,8 @@ class StructuralRecurrenceSummarizer:
                 if step == 1:
                     return {
                         "phi_output": output,
-                        "step": 1,
+                        "start": int(init_value),
+                        "step": int(step),
                     }
         return None
 
@@ -3449,12 +3520,20 @@ class StructuralRecurrenceSummarizer:
                 if any(
                     signature["stride"] != first["stride"]
                     or signature["element_size"] != first["element_size"]
+                    or signature.get("start_offset", 0) != first.get("start_offset", 0)
+                    or signature.get("start_index", 0) != first.get("start_index", 0)
+                    or signature.get("index_step", 1) != first.get("index_step", 1)
+                    or signature.get("index_scale", signature["stride"]) != first.get("index_scale", first["stride"])
                     for signature in load_progressions[1:]
                 ):
                     continue
                 return {
                     "stride": int(first["stride"]),
                     "element_size": int(first["element_size"]),
+                    "start_offset": int(first.get("start_offset", 0) or 0),
+                    "start_index": int(first.get("start_index", 0) or 0),
+                    "index_step": int(first.get("index_step", 1) or 1),
+                    "index_scale": int(first.get("index_scale", first["stride"]) or first["stride"]),
                 }
         return None
 
@@ -3519,6 +3598,10 @@ class StructuralRecurrenceSummarizer:
                 return {
                     "stride": int(pointer_info["stride"]),
                     "element_size": load_size,
+                    "start_offset": int(pointer_info.get("start_offset", 0) or 0),
+                    "start_index": int(pointer_info.get("start_index", 0) or 0),
+                    "index_step": int(pointer_info.get("index_step", 1) or 1),
+                    "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
                 }
 
         address_def = getattr(address_varnode, "getDef", lambda: None)()
@@ -3529,15 +3612,20 @@ class StructuralRecurrenceSummarizer:
             base_input = self._follow_passthrough_varnode(address_def.getInput(0))
             index_input = self._follow_passthrough_varnode(address_def.getInput(1))
             elem_size = self._varnode_constant_value(self._follow_passthrough_varnode(address_def.getInput(2)))
+            index_info = self._matched_index_progression(index_input, index_phis)
             if (
                 elem_size is not None
                 and elem_size > 0
                 and self._varnode_matches_parameter(base_input, pointer_param.get("name", ""))
-                and self._matches_index_progression(index_input, index_phis)
+                and index_info is not None
             ):
                 return {
-                    "stride": int(elem_size),
+                    "stride": int(elem_size) * int(index_info.get("step", 1) or 1),
                     "element_size": load_size,
+                    "start_offset": int(elem_size) * int(index_info.get("start", 0) or 0),
+                    "start_index": int(index_info.get("start", 0) or 0),
+                    "index_step": int(index_info.get("step", 1) or 1),
+                    "index_scale": int(elem_size),
                 }
         if mnemonic == "INT_ADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(address_def.getInput(0))
@@ -3547,26 +3635,53 @@ class StructuralRecurrenceSummarizer:
                     return {
                         "stride": int(pointer_info["stride"]),
                         "element_size": load_size,
+                        "start_offset": int(pointer_info.get("start_offset", 0) or 0),
+                        "start_index": int(pointer_info.get("start_index", 0) or 0),
+                        "index_step": int(pointer_info.get("index_step", 1) or 1),
+                        "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
                     }
                 if self._same_varnode_value(right, pointer_info["phi_output"]) and self._varnode_constant_value(left) == 0:
                     return {
                         "stride": int(pointer_info["stride"]),
                         "element_size": load_size,
+                        "start_offset": int(pointer_info.get("start_offset", 0) or 0),
+                        "start_index": int(pointer_info.get("start_index", 0) or 0),
+                        "index_step": int(pointer_info.get("index_step", 1) or 1),
+                        "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
                     }
             if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
-                scaled = self._scaled_index_stride(right, index_phis)
-                if scaled is not None and scaled > 0:
+                scaled = self._scaled_index_stride_and_start(right, index_phis)
+                if scaled is not None and scaled[0] > 0:
                     return {
-                        "stride": int(scaled),
+                        "stride": int(scaled[0]),
                         "element_size": load_size,
+                        "start_offset": int(scaled[1]),
+                        "start_index": int(scaled[2]),
+                        "index_step": int(scaled[3]),
+                        "index_scale": int(scaled[4]),
                     }
             if self._varnode_matches_parameter(right, pointer_param.get("name", "")):
-                scaled = self._scaled_index_stride(left, index_phis)
-                if scaled is not None and scaled > 0:
+                scaled = self._scaled_index_stride_and_start(left, index_phis)
+                if scaled is not None and scaled[0] > 0:
                     return {
-                        "stride": int(scaled),
+                        "stride": int(scaled[0]),
                         "element_size": load_size,
+                        "start_offset": int(scaled[1]),
+                        "start_index": int(scaled[2]),
+                        "index_step": int(scaled[3]),
+                        "index_scale": int(scaled[4]),
                     }
+        return None
+
+    def _matched_index_progression(
+        self,
+        varnode,
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[Dict[str, object]]:
+        varnode = self._follow_passthrough_varnode(varnode)
+        for info in index_phis:
+            if self._same_varnode_value(varnode, info["phi_output"]):
+                return info
         return None
 
     def _matches_index_progression(
@@ -3574,17 +3689,29 @@ class StructuralRecurrenceSummarizer:
         varnode,
         index_phis: Sequence[Dict[str, object]],
     ) -> bool:
-        varnode = self._follow_passthrough_varnode(varnode)
-        return any(self._same_varnode_value(varnode, info["phi_output"]) for info in index_phis)
+        return self._matched_index_progression(varnode, index_phis) is not None
 
     def _scaled_index_stride(
         self,
         varnode,
         index_phis: Sequence[Dict[str, object]],
     ) -> Optional[int]:
+        scaled = self._scaled_index_stride_and_start(varnode, index_phis)
+        if scaled is None:
+            return None
+        return int(scaled[0])
+
+    def _scaled_index_stride_and_start(
+        self,
+        varnode,
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[Tuple[int, int, int, int, int]]:
         varnode = self._follow_passthrough_varnode(varnode)
-        if self._matches_index_progression(varnode, index_phis):
-            return 1
+        index_info = self._matched_index_progression(varnode, index_phis)
+        if index_info is not None:
+            start = int(index_info.get("start", 0) or 0)
+            step = int(index_info.get("step", 1) or 1)
+            return step, start, start, step, 1
         def_op = getattr(varnode, "getDef", lambda: None)()
         if def_op is None:
             return None
@@ -3592,15 +3719,43 @@ class StructuralRecurrenceSummarizer:
         if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(def_op.getInput(0))
             right = self._follow_passthrough_varnode(def_op.getInput(1))
-            if self._matches_index_progression(left, index_phis):
-                return self._varnode_constant_value(right)
-            if self._matches_index_progression(right, index_phis):
-                return self._varnode_constant_value(left)
+            left_info = self._matched_index_progression(left, index_phis)
+            if left_info is not None:
+                scale = self._varnode_constant_value(right)
+                if scale is None:
+                    return None
+                return (
+                    int(scale) * int(left_info.get("step", 1) or 1),
+                    int(scale) * int(left_info.get("start", 0) or 0),
+                    int(left_info.get("start", 0) or 0),
+                    int(left_info.get("step", 1) or 1),
+                    int(scale),
+                )
+            right_info = self._matched_index_progression(right, index_phis)
+            if right_info is not None:
+                scale = self._varnode_constant_value(left)
+                if scale is None:
+                    return None
+                return (
+                    int(scale) * int(right_info.get("step", 1) or 1),
+                    int(scale) * int(right_info.get("start", 0) or 0),
+                    int(right_info.get("start", 0) or 0),
+                    int(right_info.get("step", 1) or 1),
+                    int(scale),
+                )
         if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             shifted = self._follow_passthrough_varnode(def_op.getInput(0))
             shift_bits = self._varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
-            if self._matches_index_progression(shifted, index_phis) and shift_bits is not None and shift_bits >= 0:
-                return 1 << int(shift_bits)
+            shifted_info = self._matched_index_progression(shifted, index_phis)
+            if shifted_info is not None and shift_bits is not None and shift_bits >= 0:
+                scale = 1 << int(shift_bits)
+                return (
+                    scale * int(shifted_info.get("step", 1) or 1),
+                    scale * int(shifted_info.get("start", 0) or 0),
+                    int(shifted_info.get("start", 0) or 0),
+                    int(shifted_info.get("step", 1) or 1),
+                    int(scale),
+                )
         return None
 
     def _extract_pointer_step(

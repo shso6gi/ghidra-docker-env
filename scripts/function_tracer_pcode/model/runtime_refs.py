@@ -538,9 +538,290 @@ class ObservedMemoryReadRef:
         }
 
 
+def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    if value is None:
+        return ("none",)
+    if isinstance(value, bool):
+        return ("bool", bool(value))
+    if isinstance(value, int):
+        return ("int", int(value))
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, tuple):
+        item_keys = tuple(_loop_object_key(item) for item in value)
+        if any(item_key is None for item_key in item_keys):
+            return None
+        return ("tuple", item_keys)
+    if isinstance(value, list):
+        item_keys = tuple(_loop_object_key(item) for item in value)
+        if any(item_key is None for item_key in item_keys):
+            return None
+        return ("list", item_keys)
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            key_key = _loop_object_key(key)
+            item_key = _loop_object_key(item)
+            if key_key is None or item_key is None:
+                return None
+            items.append((key_key, item_key))
+        items.sort()
+        return ("dict", tuple(items))
+    structural_key = getattr(value, "structural_key", None)
+    if callable(structural_key):
+        try:
+            return ("structural", structural_key())
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            key = stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+        if key is None:
+            return None
+        return ("stable", key)
+    return None
+
+
+def _loop_object_to_dict(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, tuple):
+        return [_loop_object_to_dict(item) for item in value]
+    if isinstance(value, list):
+        return [_loop_object_to_dict(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _loop_object_to_dict(item) for key, item in value.items()}
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return to_dict()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return {
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "unserializable": True,
+            }
+    return {
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "unkeyable": True,
+    }
+
+
+@dataclass(frozen=True)
+class LoopSideEffectProfileRef:
+    """Object-centric side-effect profile for a loop summary."""
+
+    profile: str = "pure"
+    memory_reads: bool = False
+    memory_writes: bool = False
+    calls: bool = False
+    escapes: bool = False
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "loop_side_effect_profile",
+            self.profile,
+            bool(self.memory_reads),
+            bool(self.memory_writes),
+            bool(self.calls),
+            bool(self.escapes),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_side_effect_profile",
+            "profile": self.profile,
+            "memory_reads": bool(self.memory_reads),
+            "memory_writes": bool(self.memory_writes),
+            "calls": bool(self.calls),
+            "escapes": bool(self.escapes),
+        }
+
+
+@dataclass(frozen=True)
+class LoopTermDescriptorRef:
+    """Object-centric descriptor for the per-iteration term of a loop summary."""
+
+    kind: str
+    reduction_kind: str = "sum"
+    location_base_ref: Optional[LocationBaseRef] = None
+    start_offset: int = 0
+    stride: int = 0
+    element_size: int = 0
+    result_size: int = 0
+    residue_cases: Tuple[Tuple[int, int, int, int], ...] = ()
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "loop_term_descriptor",
+            self.kind,
+            self.reduction_kind,
+            self.location_base_ref.stable_key() if self.location_base_ref is not None else None,
+            int(self.start_offset),
+            int(self.stride),
+            int(self.element_size),
+            max(1, int(self.result_size or 0)),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    int(coeff),
+                    int(bias),
+                )
+                for modulus, residue, coeff, bias in self.residue_cases
+            ),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "kind": "loop_term_descriptor",
+            "term_kind": self.kind,
+            "reduction_kind": self.reduction_kind,
+            "start_offset": int(self.start_offset),
+            "stride": int(self.stride),
+            "element_size": int(self.element_size),
+            "result_size": max(1, int(self.result_size or 0)),
+            "residue_cases": [
+                {
+                    "modulus": int(modulus),
+                    "residue": int(residue),
+                    "coeff": int(coeff),
+                    "bias": int(bias),
+                }
+                for modulus, residue, coeff, bias in self.residue_cases
+            ],
+        }
+        if self.location_base_ref is not None:
+            result["location_base_ref"] = self.location_base_ref.to_dict()
+        return result
+
+
+@dataclass(frozen=True)
+class LoopSummaryRef:
+    """Unified semantic loop summary shared by all recurrence summaries.
+
+    ``witnesses`` are evidence keyed by the original count/limit surface, not
+    proof obligations by themselves. A witness may describe a count value outside
+    ``guard_constraints``; consumers must check guard reachability before using
+    witnesses to prove equivalence.
+    """
+
+    start_expr: Any
+    limit_expr: Any
+    step_expr: Any
+    term_descriptor: LoopTermDescriptorRef
+    seed_terms: Tuple[Any, ...] = ()
+    witnesses: Tuple[Any, ...] = ()
+    side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
+    guard_constraints: Tuple[Any, ...] = ()
+    loop_var_unit: str = "element_index"
+    source: str = "recurrence_summary"
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        start_key = _loop_object_key(self.start_expr)
+        limit_key = _loop_object_key(self.limit_expr)
+        step_key = _loop_object_key(self.step_expr)
+        seed_keys = tuple(_loop_object_key(term) for term in self.seed_terms)
+        witness_keys = tuple(_loop_object_key(witness) for witness in self.witnesses)
+        guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        if (
+            start_key is None
+            or limit_key is None
+            or step_key is None
+            or any(seed_key is None for seed_key in seed_keys)
+            or any(witness_key is None for witness_key in witness_keys)
+            or any(guard_key is None for guard_key in guard_keys)
+        ):
+            return None
+        return (
+            "loop_summary",
+            self.loop_var_unit,
+            start_key,
+            limit_key,
+            step_key,
+            self.term_descriptor.stable_key(),
+            seed_keys,
+            witness_keys,
+            self.side_effect_profile.stable_key(),
+            guard_keys,
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        return None
+
+    def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
+        return self.stable_key()
+
+    def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_summary",
+            "loop_var_unit": self.loop_var_unit,
+            "start_expr": _loop_object_to_dict(self.start_expr),
+            "limit_expr": _loop_object_to_dict(self.limit_expr),
+            "step_expr": _loop_object_to_dict(self.step_expr),
+            "term_descriptor": self.term_descriptor.to_dict(),
+            "seed_terms": [_loop_object_to_dict(term) for term in self.seed_terms],
+            "witnesses": [_loop_object_to_dict(witness) for witness in self.witnesses],
+            "side_effect_profile": self.side_effect_profile.to_dict(),
+            "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class LoopSummaryComparisonResult:
+    """Tri-state result for the future Method-B loop-summary comparator."""
+
+    status: str
+    reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"equivalent", "different", "unknown"}:
+            raise ValueError(f"Unsupported loop summary comparison status: {self.status}")
+
+    def is_equivalent(self) -> Optional[bool]:
+        if self.status == "equivalent":
+            return True
+        if self.status == "different":
+            return False
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_summary_comparison_result",
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+
+def compare_loop_summaries(
+    left: Optional[LoopSummaryRef],
+    right: Optional[LoopSummaryRef],
+) -> LoopSummaryComparisonResult:
+    """Compare Method-B loop summaries.
+
+    This is intentionally a non-decisive interface for Task A. The concrete
+    seed/tail, guard-aware, and SMT-backed comparison belongs to the follow-up
+    integration work; callers can route through this API without re-enabling
+    runtime-ref-specific semantic shortcuts.
+    """
+
+    if left is None or right is None:
+        return LoopSummaryComparisonResult("unknown", "missing loop summary")
+    return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
+
+
 @dataclass(frozen=True)
 class ReadonlyReductionTermRef:
-    """Object-centric description of one scalar term in a readonly reduction."""
+    """Object-centric description of one scalar term in a memory reduction."""
 
     byte_offset: int
     access_size: int
@@ -562,14 +843,16 @@ class ReadonlyReductionTermRef:
 
 @dataclass(frozen=True)
 class ReadonlyReductionWitness:
-    """Exact-count witness for a readonly reduction."""
+    """Concrete count-parameter witness for a readonly reduction."""
 
     exact_count: int
     terms: Tuple[ReadonlyReductionTermRef, ...]
+    count_semantics: str = "count_parameter"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "readonly_reduction_witness",
+            self.count_semantics,
             int(self.exact_count),
             tuple(term.stable_key() for term in self.terms),
         )
@@ -577,6 +860,7 @@ class ReadonlyReductionWitness:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "kind": "readonly_reduction_witness",
+            "count_semantics": self.count_semantics,
             "exact_count": int(self.exact_count),
             "terms": [term.to_dict() for term in self.terms],
         }
@@ -597,8 +881,10 @@ class ReadonlyReductionRef:
     signed_counter: bool = True
     source: str = "recurrence_summary"
     semantic_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
+    loop_summary: Optional[LoopSummaryRef] = None
 
     def stable_key(self) -> Tuple[Any, ...]:
+        loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
         return (
             "readonly_reduction",
             self.reduction_kind,
@@ -611,6 +897,7 @@ class ReadonlyReductionRef:
             int(self.start_offset),
             bool(self.signed_counter),
             self.source,
+            loop_summary_key,
         )
 
     def display_name(self) -> str:
@@ -623,6 +910,8 @@ class ReadonlyReductionRef:
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.loop_summary is not None:
+            return None
         witness_prefix = self._semantic_witness_prefix(required_prefix=3, cap=3)
         if witness_prefix is None:
             return None
@@ -670,7 +959,9 @@ class ReadonlyReductionRef:
             return None
         return tuple(prefix)
 
-    def pairwise_exact_key(self) -> Tuple[Any, ...]:
+    def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.loop_summary is not None and self.loop_summary.stable_key() is None:
+            return None
         return self.stable_key()
 
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
@@ -693,6 +984,7 @@ class ReadonlyReductionRef:
             "signed_counter": bool(self.signed_counter),
             "source": self.source,
             "semantic_witnesses": [witness.to_dict() for witness in self.semantic_witnesses],
+            "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
             "display_name": self.display_name(),
         }
 
@@ -706,8 +998,10 @@ class CountedLoopSummaryRef:
     signed_loop: bool
     residue_cases: Tuple[Tuple[int, int, int, int], ...]
     source: str = "recurrence_summary"
+    loop_summary: Optional[LoopSummaryRef] = None
 
     def stable_key(self) -> Tuple[Any, ...]:
+        loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
         return (
             "counted_loop_summary",
             int(self.induction_step),
@@ -723,9 +1017,12 @@ class CountedLoopSummaryRef:
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
             self.source,
+            loop_summary_key,
         )
 
-    def semantic_key(self) -> Tuple[Any, ...]:
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.loop_summary is not None:
+            return None
         return (
             "counted_loop_summary_semantic",
             int(self.induction_step),
@@ -742,10 +1039,12 @@ class CountedLoopSummaryRef:
             ),
         )
 
-    def pairwise_exact_key(self) -> Tuple[Any, ...]:
+    def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.loop_summary is not None and self.loop_summary.stable_key() is None:
+            return None
         return self.stable_key()
 
-    def pairwise_semantic_key(self) -> Tuple[Any, ...]:
+    def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
     def pairwise_requires_guard_equivalence(self) -> bool:
@@ -774,6 +1073,7 @@ class CountedLoopSummaryRef:
                 for modulus, residue, coeff, bias in self.residue_cases
             ],
             "source": self.source,
+            "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
             "display_name": self.display_name(),
         }
 
