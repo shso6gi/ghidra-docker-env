@@ -760,7 +760,7 @@ class ReturnAnalyzer:
                 )
                 self._current_effect_summary = effect_summary
 
-                direct_structural_result = self._try_early_direct_counted_loop_summary(
+                pre_return_structural_result = self._try_pre_return_counted_loop_summary(
                     function=function,
                     high_function=high_function,
                     tracer=tracer,
@@ -773,12 +773,12 @@ class ReturnAnalyzer:
                     signedness_result=signedness_result,
                     effect_summary=effect_summary,
                 )
-                if direct_structural_result is not None:
-                    self._call_analysis_cache[analysis_scope_key] = direct_structural_result
+                if pre_return_structural_result is not None:
+                    self._call_analysis_cache[analysis_scope_key] = pre_return_structural_result
                     function_cache_key = self._function_cache_key(function)
                     if function_cache_key is not None and not normalized_bound_parameter_values:
-                        self._call_analysis_cache[function_cache_key] = direct_structural_result
-                    return direct_structural_result
+                        self._call_analysis_cache[function_cache_key] = pre_return_structural_result
+                    return pre_return_structural_result
 
                 return_infos = []
                 for i, return_op in enumerate(return_ops):
@@ -952,7 +952,7 @@ class ReturnAnalyzer:
 
         return summarizer.try_summarize_function(function, high_function, analysis)
 
-    def _try_early_direct_counted_loop_summary(
+    def _try_pre_return_counted_loop_summary(
         self,
         *,
         function,
@@ -967,13 +967,30 @@ class ReturnAnalyzer:
         signedness_result: Optional[SignednessResult],
         effect_summary: EffectSummary,
     ) -> Optional[FunctionReturnAnalysis]:
-        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
-        if not summarizer.can_try_direct_counted_scalar_summary(high_function, return_ops):
-            return None
-        if not self._effect_summary_allows_direct_structural_summary(effect_summary):
+        if not self._effect_summary_allows_pre_return_structural_summary(effect_summary):
             return None
 
-        summary = summarizer.try_summarize_function_direct(function, high_function)
+        anchor = self._make_pre_return_summary_anchor(function, return_ops)
+        skeleton = FunctionReturnAnalysis(
+            function_name=function.getName(),
+            entry_point=str(function.getEntryPoint()),
+            parameters=list(parameters or []),
+            returns=[anchor],
+            function_ref=current_function_ref,
+            analysis_scope_key=analysis_scope_key,
+            return_type=return_type,
+            return_type_obj=return_type_obj,
+            signedness_result=signedness_result,
+            deferred_calls=dict(self._current_deferred_calls),
+            effect_summary=effect_summary,
+        )
+        summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
+        summary = summarizer.try_summarize_pre_return_counted_scalar_loop(
+            function,
+            high_function,
+            skeleton,
+            return_ops,
+        )
         if summary is None:
             return None
 
@@ -993,6 +1010,8 @@ class ReturnAnalyzer:
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
+        if "pre_return_counted_loop_summary" not in result.analysis_notes:
+            result.analysis_notes.append("pre_return_counted_loop_summary")
         result.unknown_event_count = len(tracer.unknown_tracker.events)
         result.unknown_event_reasons = sorted(
             {
@@ -1007,17 +1026,43 @@ class ReturnAnalyzer:
         self._dump_return_infos(result)
         return result
 
-    def _effect_summary_allows_direct_structural_summary(
+    def _make_pre_return_summary_anchor(
+        self,
+        function,
+        return_ops: Sequence,
+    ) -> ReturnInfo:
+        return_op = next(iter(return_ops or []), None)
+        seqnum = getattr(return_op, "getSeqnum", lambda: None)() if return_op is not None else None
+        address = str(getattr(seqnum, "getTarget", lambda: function.getEntryPoint())())
+        pcode_time = getattr(seqnum, "getTime", lambda: None)()
+        pcode_order = getattr(seqnum, "getOrder", lambda: None)()
+        return self._make_return_info(
+            address=address,
+            value=Expression.unknown("pre_return_counted_loop_candidate"),
+            conditions=[],
+            branch_index=20_000,
+            site_metadata={
+                "pcode_identity": (
+                    f"{address}:t{pcode_time}:o{pcode_order}"
+                    if pcode_time is not None and pcode_order is not None
+                    else None
+                ),
+                "pcode_time": pcode_time,
+                "pcode_order": pcode_order,
+            },
+        )
+
+    def _effect_summary_allows_pre_return_structural_summary(
         self,
         effect_summary: Optional[EffectSummary],
     ) -> bool:
         if effect_summary is None:
             return False
         if getattr(effect_summary, "effects", None):
-            self._debug_print("Declined direct counted loop summary: effect summary contains memory writes")
+            self._debug_print("Declined pre-return counted loop summary: effect summary contains memory writes")
             return False
         if getattr(effect_summary, "has_unsupported_call", False):
-            self._debug_print("Declined direct counted loop summary: effect summary contains unsupported call")
+            self._debug_print("Declined pre-return counted loop summary: effect summary contains unsupported call")
             return False
         return True
 

@@ -67,13 +67,14 @@ def test_solver_proven_rewrite_equivalence_proves_and_retries(monkeypatch):
     half_b = Expression.binary_op("INT_SDIV", param2, _const(2))
     canonical = Expression.binary_op("INT_ADD", param1, half_b)
     commuted = Expression.binary_op("INT_ADD", half_b, param1)
+    nontrivial_rewrite = Expression.binary_op("INT_SUB", canonical, _const(0))
 
     case1 = _case(0, canonical)
     case2 = _case(1, commuted)
 
     def fake_candidate(expr, settings):
         if expr is commuted:
-            return canonical
+            return nontrivial_rewrite
         return expr
 
     monkeypatch.setattr(rewrite_module, "_build_rewrite_candidate", fake_candidate)
@@ -106,6 +107,52 @@ def test_solver_proven_rewrite_equivalence_proves_and_retries(monkeypatch):
     assert result.is_equivalent is True
     assert result.pair_stage == "rewrite-ineq"
     assert [stage for stage, _, _ in strategy.stages] == ["rewrite-proof-2", "rewrite-ineq"]
+
+
+def test_solver_proven_rewrite_returns_after_structural_match(monkeypatch):
+    param1 = _param("param_1")
+    param2 = _param("param_2")
+    half_b = Expression.binary_op("INT_SDIV", param2, _const(2))
+    canonical = Expression.binary_op("INT_ADD", param1, half_b)
+    commuted = Expression.binary_op("INT_ADD", half_b, param1)
+
+    case1 = _case(0, canonical)
+    case2 = _case(1, commuted)
+
+    def fake_candidate(expr, settings):
+        if expr is commuted:
+            return canonical
+        return expr
+
+    monkeypatch.setattr(rewrite_module, "_build_rewrite_candidate", fake_candidate)
+
+    class FakeStrategy:
+        debug = False
+
+        def __init__(self):
+            self.stages = []
+
+        def _solve_query_internal(self, query, pair_id, stage="full", use_hard_timeout=False):
+            self.stages.append(stage)
+            if stage == "rewrite-proof-2":
+                assert "(assert (not (= " in query
+                return QueryResult(is_equivalent=True)
+            raise AssertionError(f"unexpected stage: {stage}")
+
+    strategy = FakeStrategy()
+    result = try_solver_proven_rewrite_equivalence(
+        strategy,
+        _base_ctx(),
+        case1,
+        case2,
+        lambda obj: obj.to_smt(),
+        lambda obj: obj.to_smt(),
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is True
+    assert result.pair_stage == "rewrite-structural"
+    assert strategy.stages == ["rewrite-proof-2"]
 
 
 def test_solve_query_twostage_uses_solver_proven_rewrite_after_timeout():

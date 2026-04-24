@@ -126,6 +126,131 @@ def test_recurrence_terms_equivalent_does_not_require_to_string(monkeypatch):
     assert summarizer._terms_equivalent(left, right, []) is True
 
 
+def test_counted_loop_update_validation_rejects_non_affine_update_semantics():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    loop_iv = Expression.parameter("__loop_iv", index=-10000, size=4)
+    loop_acc = Expression.variable("__loop_acc", size=4)
+    induction = CountedLoopInduction(
+        phi_op=object(),
+        phi_output=object(),
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=loop_iv,
+        signed_guard=False,
+    )
+    accumulator = CountedLoopAccumulator(
+        phi_op=None,
+        phi_output=None,
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=loop_acc,
+    )
+    actual_update = Expression.binary_op("INT_ADD", loop_acc, loop_iv)
+    actual_update.size = 4
+    wrong_delta = Expression.constant(-1, 4)
+    case = CountedLoopUpdateCase(
+        conditions=(),
+        update_expr=actual_update,
+        delta_expr=wrong_delta,
+    )
+
+    assert not summarizer._validate_counted_loop_update_cases(
+        cases=(case,),
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(0, -1)),),
+        induction=induction,
+        accumulator=accumulator,
+    )
+
+
+def test_counted_loop_update_validation_accepts_solver_proven_affine_update():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    loop_iv = Expression.parameter("__loop_iv", index=-10000, size=4)
+    loop_acc = Expression.variable("__loop_acc", size=4)
+    even_condition = _cond(
+        "INT_EQUAL",
+        Expression.binary_op("INT_AND", loop_iv, _const(1)),
+        _const(0),
+    )
+    update_expr = Expression.binary_op("INT_ADD", loop_acc, loop_iv)
+    update_expr.size = 4
+    case = CountedLoopUpdateCase(
+        conditions=(even_condition,),
+        update_expr=update_expr,
+        delta_expr=loop_iv,
+    )
+    induction = CountedLoopInduction(
+        phi_op=object(),
+        phi_output=object(),
+        init_expr=_const(0),
+        backedge_index=1,
+        step=1,
+        placeholder=loop_iv,
+        signed_guard=False,
+    )
+    accumulator = CountedLoopAccumulator(
+        phi_op=None,
+        phi_output=None,
+        init_expr=_const(0),
+        backedge_index=1,
+        placeholder=loop_acc,
+    )
+
+    assert summarizer._validate_counted_loop_update_cases(
+        cases=(case,),
+        residue_cases=(ResidueLoopCase(modulus=2, residue=0, affine=(1, 0)),),
+        induction=induction,
+        accumulator=accumulator,
+    )
+
+
+def test_counted_loop_update_validation_query_uses_symbol_replacer_names():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    loop_iv = Expression.parameter("__loop_iv", index=-10000, size=4)
+    loop_acc = Expression.variable("__loop_acc", size=4)
+    condition = _cond("INT_EQUAL", Expression.binary_op("INT_AND", loop_iv, _const(1)), _const(0))
+    query = summarizer._build_expression_equivalence_query(
+        Expression.binary_op("INT_ADD", loop_acc, loop_iv),
+        Expression.binary_op("INT_ADD", loop_acc, loop_iv),
+        [condition],
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+    )
+
+    assert query is not None
+    assert "(declare-const __loop_iv_aux (_ BitVec 32))" in query
+    assert "(declare-const __loop_acc_aux (_ BitVec 32))" in query
+    assert "__loop_iv_aux" in query
+    assert "__loop_acc_aux" in query
+    assert " __loop_iv)" not in query
+    assert " __loop_acc)" not in query
+
+
+def test_expression_equivalence_query_coerces_mixed_width_values():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    wide_zero = Expression.unary_op("INT_ZEXT", _const(0))
+    wide_zero.size = 16
+    query = summarizer._build_expression_equivalence_query(
+        wide_zero,
+        _const(0),
+        [],
+        [],
+    )
+
+    assert query is not None
+    assert "(assert (not (= ((_ zero_extend 96) (_ bv0 32)) ((_ zero_extend 96) (_ bv0 32)))))" in query
+
+
+def test_zero_base_canonicalization_handles_wide_zero_expression():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    wide_zero = Expression.unary_op("INT_ZEXT", _const(0))
+    wide_zero.size = 16
+    canonical = summarizer._canonicalize_zero_value_under_conditions(wide_zero, [])
+
+    assert canonical.expr_type == ExpressionType.CONSTANT
+    assert canonical.value == 0
+    assert canonical.size == 16
+
+
 class _FakeIterator:
     def __init__(self, items):
         self._items = list(items)
@@ -628,22 +753,94 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert "(ite " in loop_smt
 
 
-def test_direct_counted_scalar_summary_requires_all_return_ops_to_have_values(monkeypatch):
-    class _ReturnOp:
-        def __init__(self, inputs):
-            self._inputs = inputs
+def test_path_enumeration_no_path_is_not_unconditional_success():
+    start = _FakeCfgBlock(0)
+    target = _FakeCfgBlock(1)
+    header = _FakeCfgBlock(2)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
 
-        def getNumInputs(self):
-            return self._inputs
+    assert summarizer._enumerate_paths_with_conditions(
+        start_block=start,
+        target_block=target,
+        header_block=header,
+        placeholders={},
+    ) == []
+
+
+def test_pre_return_counted_loop_summary_requires_single_covered_return(monkeypatch):
+    header = _FakeCfgBlock(0)
+    ret_block = _FakeCfgBlock(1)
+    header.add_edge(ret_block)
+    iv_phi = _FakePcodeOp("MULTIEQUAL", [], _FakeVarnode("iv_phi"))
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_phi = _FakePcodeOp("MULTIEQUAL", [], acc_phi_vn)
+    branch = _FakeBranchOp(_cond("INT_SLESS", _const(0), _param()).expression)
+    header._ops[:] = [iv_phi, acc_phi, branch]
+    for op in header._ops:
+        op.setParent(header)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("target"), acc_phi_vn], None)
+    ret_block._ops[:] = [return_op]
+    return_op.setParent(ret_block)
 
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
-    monkeypatch.setattr(summarizer, "_has_counted_scalar_loop_candidate", lambda _high_function: True)
-    monkeypatch.setattr(summarizer, "_iter_pcode_ops", lambda _high_function: iter(()))
+    induction = CountedLoopInduction(
+        phi_op=iv_phi,
+        phi_output=iv_phi.getOutput(),
+        init_expr=_const(0),
+        backedge_index=0,
+        step=1,
+        placeholder=Expression.parameter("__loop_iv", index=-1, size=4),
+        signed_guard=True,
+    )
+    accumulator = CountedLoopAccumulator(
+        phi_op=acc_phi,
+        phi_output=acc_phi_vn,
+        init_expr=_const(0),
+        backedge_index=0,
+        placeholder=Expression.variable("__loop_acc", size=4),
+        member_outputs=(acc_phi_vn,),
+    )
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", induction.placeholder, _param()),
+        bound_expr=_param(),
+        continue_on_true=True,
+        body_block=header,
+        exit_block=ret_block,
+        signed_comparison=True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_counted_scalar_loop_model",
+        lambda *_args, **_kwargs: (
+            induction,
+            accumulator,
+            guard,
+            (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        ),
+    )
+    monkeypatch.setattr(summarizer, "_derive_direct_counted_loop_conditions", lambda *_args, **_kwargs: None)
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("pre_return"), conditions=[])],
+    )
 
-    assert summarizer.can_try_direct_counted_scalar_summary(
-        object(),
-        return_ops=[_ReturnOp(2), _ReturnOp(1)],
-    ) is False
+    summary = summarizer.try_summarize_pre_return_counted_scalar_loop(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([header, ret_block]),
+        analysis,
+        [return_op],
+    )
+
+    assert summary is not None
+    extra_ret_block = _FakeCfgBlock(2)
+    assert summarizer.try_summarize_pre_return_counted_scalar_loop(
+        _FakeFunction("branch_for_accumulate"),
+        _FakeCfgHighFunction([header, ret_block, extra_ret_block]),
+        analysis,
+        [return_op],
+    ) is None
 
 
 def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_cfg():
@@ -720,9 +917,22 @@ def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_c
         op.setParent(odd_block)
 
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
-    summary = summarizer.try_summarize_function_direct(
+    analysis = create_mock_analysis(
+        "branch_for_accumulate",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x401000",
+                value=Expression.unknown("phi_circular"),
+                conditions=[],
+            )
+        ],
+    )
+    summary = summarizer.try_summarize_function(
         _FakeFunction("branch_for_accumulate"),
         _FakeCfgHighFunction([entry, ret_zero, preheader, header, even_block, even_exit, odd_block, odd_exit]),
+        analysis,
     )
 
     assert summary is not None
@@ -897,9 +1107,9 @@ def test_structural_recurrence_summary_uses_widened_closed_form():
     assert "(bvmul ((_ zero_extend" in recursive_smt
 
 
-def test_general_counted_loop_value_supports_negative_step_single_residue():
+def test_counted_loop_summary_value_uses_intrinsic_for_negative_step_single_residue():
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
-    expr = summarizer._build_general_counted_loop_value(
+    expr = summarizer._build_counted_loop_summary_value(
         base_expr=_const(0),
         start_expr=_const(16),
         limit_expr=_const(0),
@@ -910,8 +1120,32 @@ def test_general_counted_loop_value_supports_negative_step_single_residue():
     )
 
     assert expr is not None
+    assert expr.expr_type == ExpressionType.INTRINSIC
+    assert expr.opcode == COUNTED_LOOP_SUM_OPCODE
     assert expression_has_unresolved_value(expr) is False
-    assert "bvsdiv" in expression_to_smt(expr)
+    assert "rt_counted_loop_sum_" not in expression_to_smt(expr)
+
+
+def test_counted_loop_latch_guard_rejects_boolean_bound_expression():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    counter = Expression.parameter("__loop_iv", index=-10000, size=4)
+    bool_bound = Expression.binary_op(
+        "INT_EQUAL",
+        Expression.binary_op("INT_AND", _const(0), _const(1)),
+        _const(0),
+    )
+    bool_bound.size = 1
+    counter_next = Expression.binary_op("INT_ADD", counter, _const(1))
+    counter_next.size = 4
+    raw_guard = Expression.binary_op("INT_NOTEQUAL", bool_bound, counter_next)
+    raw_guard.size = 1
+
+    assert summarizer._normalize_latch_continue_guard(
+        raw_guard,
+        counter,
+        continue_on_true=True,
+        step=1,
+    ) is None
 
 
 def test_affine_loop_state_phi_supports_nonunit_induction_step():
@@ -1016,8 +1250,6 @@ def test_extract_counted_scalar_loop_model_evaluates_multiple_accumulator_candid
         "_extract_residue_loop_cases",
         lambda cases, _counter_name: (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),) if cases else None,
     )
-    monkeypatch.setattr(summarizer, "_match_aggregate_counted_loop_accumulator", lambda **_kwargs: None)
-
     model = summarizer._extract_counted_scalar_loop_model(
         _FakeCfgHighFunction([header]),
         analysis=None,
@@ -1080,7 +1312,6 @@ def test_counted_loop_model_prefers_return_reaching_accumulator_over_larger_coef
     monkeypatch.setattr(summarizer, "_match_counted_loop_induction", lambda op: induction if op is phi_iv else None)
     monkeypatch.setattr(summarizer, "_candidate_counted_loop_guards", lambda *_args, **_kwargs: [guard])
     monkeypatch.setattr(summarizer, "_match_counted_loop_accumulators", lambda *_args, **_kwargs: [bad_acc, good_acc])
-    monkeypatch.setattr(summarizer, "_match_aggregate_counted_loop_accumulator", lambda **_kwargs: None)
     monkeypatch.setattr(
         summarizer,
         "_varnode_reaches_return",

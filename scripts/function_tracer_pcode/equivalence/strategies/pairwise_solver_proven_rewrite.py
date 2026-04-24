@@ -7,7 +7,12 @@ from typing import Any, Dict, Optional
 
 from ...model import Expression, ExpressionType
 from ..formula.returns import coerce_value_to_bitvec_width
-from ..normalize import NormalizationContext, NormalizationSettings, normalize_expression
+from ..normalize import (
+    NormalizationContext,
+    NormalizationSettings,
+    are_structurally_equivalent,
+    normalize_expression,
+)
 from .pairwise_models import QueryResult, ReturnCase
 from .pairwise_query_builder import build_pair_query
 
@@ -63,6 +68,16 @@ def try_solver_proven_rewrite_equivalence(
 
     rewritten_case1 = _clone_case_with_value_expr(case1, rewritten_expr1)
     rewritten_case2 = _clone_case_with_value_expr(case2, rewritten_expr2)
+    if _rewritten_values_are_trivially_equal(
+        strategy,
+        base_ctx,
+        rewritten_case1,
+        rewritten_case2,
+    ):
+        result = QueryResult(is_equivalent=True)
+        result.pair_stage = "rewrite-structural"
+        return result
+
     rewritten_query = build_pair_query(
         base_ctx,
         rewritten_case1,
@@ -80,6 +95,87 @@ def try_solver_proven_rewrite_equivalence(
     result.last_query = rewritten_query
     result.pair_stage = "rewrite-ineq"
     return result
+
+
+def _rewritten_values_are_trivially_equal(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+) -> bool:
+    if base_ctx.get("return_size1", 32) != base_ctx.get("return_size2", 32):
+        return False
+    if case1.should_sign_extend_value() != case2.should_sign_extend_value() and not _sign_extension_irrelevant(
+        base_ctx,
+        case1.value_expr,
+        case2.value_expr,
+    ):
+        return False
+
+    left = case1.value_expr
+    right = case2.value_expr
+    if _intrinsic_values_match(strategy, case1, case2):
+        return True
+
+    equivalent, _reason = are_structurally_equivalent(
+        left,
+        right,
+        debug=bool(getattr(strategy, "debug", False)),
+    )
+    if not equivalent:
+        return False
+    return _expression_sizes_compatible(left, right)
+
+
+def _sign_extension_irrelevant(
+    base_ctx: Dict[str, Any],
+    left: Expression,
+    right: Expression,
+) -> bool:
+    target_bits = int(base_ctx.get("return_size1", 32) or 32)
+    left_bits = _expr_known_bits(left)
+    right_bits = _expr_known_bits(right)
+    return left_bits is not None and right_bits is not None and left_bits >= target_bits and right_bits >= target_bits
+
+
+def _expr_known_bits(expr: Expression) -> Optional[int]:
+    size = int(getattr(expr, "size", 0) or 0)
+    if size <= 0:
+        return None
+    return size * 8
+
+
+def _intrinsic_values_match(strategy, case1: ReturnCase, case2: ReturnCase) -> bool:
+    intrinsic_equivalent = getattr(strategy, "_intrinsic_runtime_values_equivalent", None)
+    if not callable(intrinsic_equivalent):
+        return False
+    try:
+        return bool(
+            intrinsic_equivalent(
+                case1.value_expr,
+                case2.value_expr,
+                left_case=case1,
+                right_case=case2,
+            )
+        )
+    except TypeError:
+        return bool(intrinsic_equivalent(case1.value_expr, case2.value_expr))
+
+
+def _expression_sizes_compatible(left: Expression, right: Expression) -> bool:
+    left_size = int(getattr(left, "size", 0) or 0)
+    right_size = int(getattr(right, "size", 0) or 0)
+    if left_size > 0 and right_size > 0 and left_size != right_size:
+        return False
+
+    left_operands = list(getattr(left, "operands", []) or [])
+    right_operands = list(getattr(right, "operands", []) or [])
+    if len(left_operands) != len(right_operands):
+        return False
+    return all(
+        _expression_sizes_compatible(left_operand, right_operand)
+        for left_operand, right_operand in zip(left_operands, right_operands)
+    )
 
 
 def _clone_case_with_value_expr(case: ReturnCase, value_expr: Expression) -> ReturnCase:

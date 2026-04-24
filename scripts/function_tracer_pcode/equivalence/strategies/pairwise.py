@@ -39,6 +39,7 @@ from .pairwise_query_executor import (
 )
 from .expression_safety import ExpressionSafetyChecker
 from ..formula.symbol_replace import build_symbol_replacer
+from ..formula.types import ParameterInfo
 from ..normalize import (
     SignFacts,
     normalize_expression,
@@ -165,56 +166,6 @@ class PairwiseStrategy(CheckStrategy):
             if "return_case_coverage_gap" not in analysis2.analysis_notes:
                 analysis2.analysis_notes.append("return_case_coverage_gap")
         total_pairs = len(cases1) * len(cases2)
-
-        if self._cases_form_equivalent_partition(
-            cases1,
-            cases2,
-            base_ctx=base_ctx,
-            render_fn1=symbol_replace_fn1,
-            render_fn2=symbol_replace_fn2,
-            sat_unsafety_reasons=sat_unsafety_reasons,
-        ):
-            elapsed_time = time.time() - start_time
-            self._debug_print("=" * 60)
-            self._debug_print("Result: EQUIVALENT (object-centric return partition match)")
-            self._debug_print(f"  Total pairs: {total_pairs}")
-            self._debug_print("=" * 60)
-            aggregate_result = self._create_aggregate_result(
-                True,
-                elapsed_time,
-                None,
-            )
-            try:
-                return StrategyResult(
-                    is_equivalent=True,
-                    solver_results=aggregate_result,
-                    smt_formula=None,
-                    counterexample_raw=None,
-                    return_var1="return_1",
-                    return_var2="return_2",
-                    constrained_fragments=base_ctx.get("constrained_fragments", []),
-                    total_pairs=total_pairs,
-                    unsat_pairs=total_pairs,
-                    sat_pairs=0,
-                    unknown_pairs=0,
-                    error_pairs=0,
-                    sat_pair_info=None,
-                    normalization_rules=[],
-                    pairwise_debug_stats={
-                        "solver_proven_rewrite_attempts": 0,
-                        "solver_proven_rewrite_successes": 0,
-                        "solver_proven_rewrite_failures": 0,
-                        "timeout_fallback_attempts": 0,
-                        "changed_pairs": 0,
-                        "no_change_pairs": 0,
-                        "unsat_results": total_pairs,
-                        "sat_results": 0,
-                        "unknown_results": 0,
-                    },
-                )
-            finally:
-                self._active_safety_checker = None
-                self._active_normalization_stats = None
 
         self._debug_print("=" * 60)
         self._debug_print("Pairwise strategy (two-stage check):")
@@ -461,219 +412,6 @@ class PairwiseStrategy(CheckStrategy):
             right_case=case2,
         )
 
-    def _cases_form_equivalent_partition(
-        self,
-        left_cases: Sequence[ReturnCase],
-        right_cases: Sequence[ReturnCase],
-        *,
-        base_ctx: Dict[str, Any],
-        render_fn1,
-        render_fn2,
-        sat_unsafety_reasons: Sequence[str],
-    ) -> bool:
-        if sat_unsafety_reasons:
-            return False
-        if not left_cases or not right_cases:
-            return False
-        if len(left_cases) != len(right_cases):
-            return False
-
-        left_unmatched = list(left_cases)
-        right_unmatched = list(right_cases)
-        if any(
-            self._case_partition_contains_unresolved(
-                case,
-                render_fn=render_fn1,
-                base_ctx=base_ctx,
-                label=f"partition:left[{case.index}]",
-            )
-            for case in left_unmatched
-        ):
-            return False
-        if any(
-            self._case_partition_contains_unresolved(
-                case,
-                render_fn=render_fn2,
-                base_ctx=base_ctx,
-                label=f"partition:right[{case.index}]",
-            )
-            for case in right_unmatched
-        ):
-            return False
-
-        matched_right: set[int] = set()
-        matches: List[tuple[int, int]] = []
-        for left_idx, left_case in enumerate(left_unmatched):
-            candidate_index: Optional[int] = None
-            for idx, right_case in enumerate(right_unmatched):
-                if idx in matched_right:
-                    continue
-                if not self._cases_have_equivalent_summary_conditions(left_case, right_case):
-                    continue
-                if not self._case_values_share_partition_semantics(left_case, right_case):
-                    continue
-                if candidate_index is not None:
-                    return False
-                candidate_index = idx
-            if candidate_index is None:
-                return False
-            matched_right.add(candidate_index)
-            matches.append((left_idx, candidate_index))
-
-        if len(matched_right) != len(right_unmatched):
-            return False
-        return self._prove_partition_shortcut_sound(
-            left_unmatched,
-            right_unmatched,
-            matches,
-            base_ctx=base_ctx,
-            render_fn1=render_fn1,
-            render_fn2=render_fn2,
-        )
-
-    def _prove_partition_shortcut_sound(
-        self,
-        left_cases: Sequence[ReturnCase],
-        right_cases: Sequence[ReturnCase],
-        matches: Sequence[tuple[int, int]],
-        *,
-        base_ctx: Dict[str, Any],
-        render_fn1,
-        render_fn2,
-    ) -> bool:
-        if not base_ctx.get("header_lines"):
-            return False
-        if not self._prove_cases_mutually_exclusive(
-            left_cases,
-            base_ctx=base_ctx,
-            render_fn=render_fn1,
-            label="partition:left",
-        ):
-            return False
-        if not self._prove_cases_mutually_exclusive(
-            right_cases,
-            base_ctx=base_ctx,
-            render_fn=render_fn2,
-            label="partition:right",
-        ):
-            return False
-
-        matched_pairs = set(matches)
-        for left_index, right_index in matches:
-            query = build_pair_query(
-                base_ctx,
-                left_cases[left_index],
-                right_cases[right_index],
-                render_fn1,
-                render_fn2,
-                f"partition-match-{left_index}-{right_index}",
-            )
-            if not self._solver_proves_unsat(query, label=f"partition match {left_index},{right_index}"):
-                return False
-
-        for left_index, left_case in enumerate(left_cases):
-            for right_index, right_case in enumerate(right_cases):
-                if (left_index, right_index) in matched_pairs:
-                    continue
-                query = build_condition_only_query(
-                    base_ctx,
-                    left_case,
-                    right_case,
-                    render_fn1,
-                    render_fn2,
-                    f"partition-cross-{left_index}-{right_index}",
-                )
-                if not self._solver_proves_unsat(query, label=f"partition cross {left_index},{right_index}"):
-                    return False
-        return True
-
-    def _prove_cases_mutually_exclusive(
-        self,
-        cases: Sequence[ReturnCase],
-        *,
-        base_ctx: Dict[str, Any],
-        render_fn,
-        label: str,
-    ) -> bool:
-        for left_index, left_case in enumerate(cases):
-            for right_index in range(left_index + 1, len(cases)):
-                right_case = cases[right_index]
-                query = build_condition_only_query(
-                    base_ctx,
-                    left_case,
-                    right_case,
-                    render_fn,
-                    render_fn,
-                    f"{label}-{left_index}-{right_index}",
-                )
-                if not self._solver_proves_unsat(query, label=f"{label} {left_index},{right_index}"):
-                    return False
-        return True
-
-    def _solver_proves_unsat(self, query: str, *, label: str) -> bool:
-        try:
-            result = self.solver_runner.run_sequential(query, timeout=self.per_query_timeout)
-        except TypeError:
-            result = self.solver_runner.run_sequential(query)
-        except Exception as exc:
-            self._debug_print(f"  Partition proof {label}: solver error {exc}")
-            return False
-        if getattr(result, "is_equivalent", None) is True:
-            return True
-        self._debug_print(f"  Partition proof {label}: not proven UNSAT")
-        return False
-
-    def _case_partition_contains_unresolved(
-        self,
-        case: ReturnCase,
-        *,
-        render_fn,
-        base_ctx: Dict[str, Any],
-        label: str,
-    ) -> bool:
-        if self._case_contains_unresolved_expression(
-            case,
-            own_render_fn=render_fn,
-            base_ctx=base_ctx,
-            query_label=label,
-        ):
-            return True
-        summary_conditions = case.summary_conditions if case.summary_conditions is not None else case.conditions
-        if summary_conditions is case.conditions:
-            return False
-        summary_case = ReturnCase(
-            index=case.index,
-            conditions=list(summary_conditions or []),
-            value_expr=case.value_expr,
-            return_info=case.return_info,
-            normalized_value_expr=case.normalized_value_expr,
-            return_type=case.return_type,
-            return_type_obj=case.return_type_obj,
-            source_indices=list(case.source_indices),
-            parameters=list(case.parameters or []),
-            effect_summary=case.effect_summary,
-            comparison_surface=case.comparison_surface,
-            summary_conditions=list(summary_conditions or []),
-        )
-        return self._case_contains_unresolved_expression(
-            summary_case,
-            own_render_fn=render_fn,
-            base_ctx=base_ctx,
-            query_label=f"{label}:summary",
-        )
-
-    def _case_values_share_partition_semantics(
-        self,
-        left_case: ReturnCase,
-        right_case: ReturnCase,
-    ) -> bool:
-        if self._cases_have_equivalent_runtime_reductions(left_case, right_case):
-            return True
-        left_value = getattr(left_case, "normalized_value_expr", None) or left_case.value_expr
-        right_value = getattr(right_case, "normalized_value_expr", None) or right_case.value_expr
-        equivalent, _reason = are_structurally_equivalent(left_value, right_value, debug=False)
-        return equivalent
-
     def _intrinsic_runtime_values_equivalent(
         self,
         left: Expression,
@@ -870,14 +608,10 @@ class PairwiseStrategy(CheckStrategy):
         width_bits: int,
     ) -> Optional[str]:
         declarations = ["(set-logic QF_BV)"]
-        seen_params = set()
-        for parameter in parameters or []:
-            name = str(parameter.get("name") or "")
-            if not name or name in seen_params:
-                continue
-            param_width = max(1, int(parameter.get("size", 0) or 4)) * 8
-            declarations.append(f"(declare-const {name} (_ BitVec {param_width}))")
-            seen_params.add(name)
+        symbol_infos = self._build_auxiliary_parameter_infos(parameters)
+        for symbol in symbol_infos:
+            declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
+        render = build_symbol_replacer(symbol_infos, [])
 
         intrinsic_declarations: List[str] = []
         for item in [expr, *(condition.expression for condition in conditions or [] if condition is not None)]:
@@ -887,11 +621,11 @@ class PairwiseStrategy(CheckStrategy):
         declarations.extend(intrinsic_declarations)
 
         assertions = [
-            f"(assert {condition.to_smt()})"
+            f"(assert {render(condition)})"
             for condition in conditions or []
             if condition is not None
         ]
-        expr_smt = expr.to_smt()
+        expr_smt = render(expr)
         assertions.append(f"(assert (= ((_ extract {width_bits - 1} {width_bits - 1}) {expr_smt}) #b1))")
         return "\n".join(declarations + assertions + ["(check-sat)"])
 
@@ -937,6 +671,21 @@ class PairwiseStrategy(CheckStrategy):
                 candidate = {
                     "name": name,
                     "index": int(getattr(expr, "value", -1) or -1),
+                    "size": size,
+                    "data_type": getattr(expr, "data_type", None),
+                }
+                existing = specs.get(name)
+                if existing is None or int(existing.get("size", 0) or 0) < size:
+                    specs[name] = candidate
+                return
+            if getattr(expr, "expr_type", None) == ExpressionType.VARIABLE:
+                name = str(getattr(expr, "name", None) or "")
+                if not name:
+                    return
+                size = max(1, int(getattr(expr, "size", 0) or 4))
+                candidate = {
+                    "name": name,
+                    "index": -1,
                     "size": size,
                     "data_type": getattr(expr, "data_type", None),
                 }
@@ -991,14 +740,10 @@ class PairwiseStrategy(CheckStrategy):
         if left is None or right is None:
             return None
         declarations = ["(set-logic QF_BV)"]
-        seen_params = set()
-        for parameter in parameters or []:
-            name = str(parameter.get("name") or "")
-            if not name or name in seen_params:
-                continue
-            width_bits = max(1, int(parameter.get("size", 0) or 4)) * 8
-            declarations.append(f"(declare-const {name} (_ BitVec {width_bits}))")
-            seen_params.add(name)
+        symbol_infos = self._build_auxiliary_parameter_infos(parameters)
+        for symbol in symbol_infos:
+            declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
+        render = build_symbol_replacer(symbol_infos, [])
 
         intrinsic_declarations: List[str] = []
         for expr in (left, right):
@@ -1017,9 +762,37 @@ class PairwiseStrategy(CheckStrategy):
         for condition in conditions or []:
             if condition is None:
                 continue
-            assertions.append(f"(assert {condition.to_smt()})")
-        assertions.append(f"(assert (not (= {left.to_smt()} {right.to_smt()})))")
+            assertions.append(f"(assert {render(condition)})")
+        assertions.append(f"(assert (not (= {render(left)} {render(right)})))")
         return "\n".join(declarations + assertions + ["(check-sat)"])
+
+    def _build_auxiliary_parameter_infos(
+        self,
+        symbol_specs: Sequence[Dict[str, Any]],
+    ) -> List[ParameterInfo]:
+        infos: List[ParameterInfo] = []
+        seen: set[str] = set()
+        for spec in sorted(
+            symbol_specs or [],
+            key=lambda item: (
+                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
+                item.get("name") or "",
+            ),
+        ):
+            name = str(spec.get("name") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            infos.append(
+                ParameterInfo(
+                    original_name=name,
+                    smt_name=f"{name}_aux",
+                    bit_width=max(1, int(spec.get("size", 0) or 4)) * 8,
+                    index=int(spec.get("index", -1) or -1),
+                    is_signed=bool(spec.get("is_signed", True)),
+                )
+            )
+        return infos
 
     def _cases_have_equivalent_summary_conditions(
         self,

@@ -363,7 +363,7 @@ def test_apply_structural_recurrence_summary_uses_structural_summarizer():
     summary_mock.assert_called_once()
 
 
-def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_expansion():
+def test_analyze_function_applies_counted_loop_summary_after_return_analysis():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     function = Mock()
     function.getName.return_value = "branch_for_accumulate"
@@ -414,6 +414,13 @@ def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_exp
         ),
     ]
 
+    generic_return = analyzer._make_return_info(
+        address="0x401000",
+        value=Expression.unknown("phi_circular"),
+        conditions=[],
+        branch_index=0,
+    )
+
     with patch.object(
         analyzer,
         "_get_decompiler",
@@ -442,12 +449,9 @@ def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_exp
         "_detect_signedness",
         return_value=None,
     ), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.can_try_direct_counted_scalar_summary",
-        return_value=True,
-    ), patch(
-        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function_direct",
+        "scripts.function_tracer_pcode.analysis.analyzer.StructuralRecurrenceSummarizer.try_summarize_function",
         return_value=(summary_returns, "counted_scalar_loop_summary"),
-    ), patch.object(
+    ) as summary_mock, patch.object(
         analyzer,
         "_recover_control_region_returns_early",
         return_value=(None, []),
@@ -457,14 +461,24 @@ def test_analyze_function_uses_early_direct_counted_loop_summary_before_path_exp
         return_value=analyzer._make_empty_effect_summary([{"name": "param_1", "index": 0, "size": 4}]),
     ), patch.object(
         analyzer,
+        "_recover_call_wrapper_returns",
+        return_value=None,
+    ), patch.object(
+        analyzer,
+        "_recover_switch_like_returns_from_pcode",
+        return_value=None,
+    ), patch.object(
+        analyzer,
         "_analyze_return_op",
-        side_effect=AssertionError("generic return analysis should not run after direct structural summary"),
-    ):
+        return_value=[generic_return],
+    ) as analyze_return_mock:
         result = analyzer.analyze_function(function, timeout=1)
 
     assert result is not None
     assert len(result.returns) == 2
     assert "counted_scalar_loop_summary" in result.analysis_notes
+    analyze_return_mock.assert_called_once()
+    summary_mock.assert_called_once()
 
 
 def test_mark_incomplete_control_flow_recomputes_reasons_after_summary_rewrite():

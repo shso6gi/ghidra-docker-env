@@ -35,6 +35,33 @@ def test_expression_to_smt_coerces_bool_vs_bitvector_equality_without_sort_error
     assert smt == "(= (ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32)) (_ bv0 32))"
 
 
+def test_expression_to_smt_coerces_bool_before_integer_twos_complement():
+    bool_expr = _binary("INT_EQUAL", _binary("INT_AND", _param("param_1", size=1), _const(1, size=1)), _const(0, size=1))
+    expr = Expression.unary_op("INT_2COMP", bool_expr)
+
+    smt = expression_to_smt(expr)
+
+    assert "(bvneg (=" not in smt
+    assert smt == (
+        "(bvneg (ite (= (bvand param_1 (_ bv1 8)) (_ bv0 8)) "
+        "(_ bv1 8) (_ bv0 8)))"
+    )
+
+
+def test_expression_to_smt_respects_explicit_shift_width_inside_piece():
+    shifted = _binary("INT_RIGHT", _const(0x100e68, size=8), _const(56, size=4))
+    shifted.size = 1
+    piece = _binary("PIECE", shifted, _const(0x12, size=1))
+    piece.size = 2
+
+    smt = expression_to_smt(piece)
+
+    assert smt == (
+        "(concat ((_ extract 7 0) "
+        "(bvlshr (_ bv1052264 64) ((_ zero_extend 32) (_ bv56 32)))) (_ bv18 8))"
+    )
+
+
 def test_expression_to_smt_handles_bool_phi_compared_against_zero():
     selector = _binary("INT_SLESS", _param("param_2"), _param("param_1"))
     selector_is_zero = _binary("INT_EQUAL", selector, _const(0, 4))
@@ -71,6 +98,23 @@ def test_expression_to_smt_handles_bool_phi_compared_against_zero():
     assert smt.startswith("(ite ")
     assert "((_ zero_extend 31) (bvslt" not in smt
     assert "(= (ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32)) (_ bv0 32))" in smt
+
+
+def test_expression_to_smt_collapses_unconditional_phi_branch():
+    expr = Expression.phi(
+        [
+            (None, _const(0, 4)),
+            (
+                Condition(_binary("INT_EQUAL", _param("param_1"), _const(0, 4))),
+                _binary("INT_AND", _param("param_1"), _const(0xFFFFFFF8, 4)),
+            ),
+        ]
+    )
+    expr.size = 4
+
+    smt = expression_to_smt(expr)
+
+    assert smt == "(_ bv0 32)"
 
 
 def test_expression_to_smt_sign_extends_narrow_operand_for_signed_width_mismatch_compare():

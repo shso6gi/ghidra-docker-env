@@ -2,14 +2,12 @@
 
 import re
 from unittest.mock import Mock
-from unittest.mock import patch
 
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
     COUNTED_LOOP_SUM_OPCODE,
@@ -17,7 +15,6 @@ from scripts.function_tracer_pcode.model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
-    FunctionReturnAnalysis,
     LocationBaseRef,
     READONLY_SUM_OPCODE,
     PTRADD_OPCODE,
@@ -27,12 +24,13 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
-from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.model.render_smt import (
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
     expression_to_smt,
 )
+from scripts.function_tracer_pcode.smt.interface import SolverStatus
+from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.transform.expander import ExpandedValue, ExpressionExpander
 
 
@@ -57,56 +55,6 @@ def _counted_loop_sum_value(*, signed_loop: bool, data_type: str = "int") -> Exp
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
-
-
-class _UnsatProofRunner:
-    def __init__(self):
-        self.queries = []
-
-    def run_sequential(self, query, timeout=None):
-        self.queries.append(query)
-        return ParallelResult(
-            results=[
-                SolverResult(
-                    solver_name="proof",
-                    status=SolverStatus.UNSAT,
-                    elapsed_time=0.0,
-                )
-            ],
-            first_definitive=SolverResult(
-                solver_name="proof",
-                status=SolverStatus.UNSAT,
-                elapsed_time=0.0,
-            ),
-            is_equivalent=True,
-        )
-
-    def run_parallel(self, query):
-        raise AssertionError("partition proof should not need normal pairwise solving")
-
-
-class _FirstSatProofRunner(_UnsatProofRunner):
-    def run_sequential(self, query, timeout=None):
-        self.queries.append(query)
-        if len(self.queries) == 1:
-            return ParallelResult(
-                results=[
-                    SolverResult(
-                        solver_name="proof",
-                        status=SolverStatus.SAT,
-                        elapsed_time=0.0,
-                        model={},
-                    )
-                ],
-                first_definitive=SolverResult(
-                    solver_name="proof",
-                    status=SolverStatus.SAT,
-                    elapsed_time=0.0,
-                    model={},
-                ),
-                is_equivalent=False,
-            )
-        return super().run_sequential(query, timeout=timeout)
 
 
 def test_expression_to_smt_lowers_ptradd_intrinsic_without_uninterpreted_symbol():
@@ -189,6 +137,144 @@ def test_counted_loop_sum_lowers_to_exact_smt_without_uninterpreted_symbol():
     assert "bvlshr" in smt
 
 
+def test_counted_loop_sum_exact_smt_clamps_no_iteration_span_to_base():
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(7, size=4), _const(5, size=4), _const(3, size=4)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 1, 0),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    smt = expression_to_smt(expr)
+    query = "\n".join(
+        [
+            "(set-logic QF_BV)",
+            f"(assert (not (= {smt} (_ bv7 32))))",
+            "(check-sat)",
+        ]
+    )
+
+    assert "rt_counted_loop_sum_" not in smt
+    assert "(ite (bvsle " in smt
+    assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
+
+
+def test_counted_loop_sum_exact_smt_uses_unsigned_clamp_for_unsigned_loop():
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=8), _const((1 << 63) + 1, size=8)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((1, 0, 0, 1),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    smt = expression_to_smt(expr)
+    query = "\n".join(
+        [
+            "(set-logic QF_BV)",
+            f"(assert (not (= {smt} (_ bv1 32))))",
+            "(check-sat)",
+        ]
+    )
+
+    assert "rt_counted_loop_sum_" not in smt
+    assert "bvule" in smt
+    assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
+
+
+def test_counted_loop_sum_exact_smt_avoids_unsigned_ceil_div_overflow():
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=8), _const((1 << 64) - 2, size=8)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=3,
+            result_size=4,
+            signed_loop=False,
+            residue_cases=((1, 0, 0, 1),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+    expected = ((1 << 64) // 3) & 0xFFFFFFFF
+
+    smt = expression_to_smt(expr)
+    query = "\n".join(
+        [
+            "(set-logic QF_BV)",
+            f"(assert (not (= {smt} (_ bv{expected} 32))))",
+            "(check-sat)",
+        ]
+    )
+
+    assert expected == 0x55555555
+    assert "bvudiv (bvsub" in smt
+    assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
+
+
+def test_counted_loop_sum_exact_smt_uses_unsigned_distance_for_signed_residue_reachability():
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(1 << 63, size=8), _const(1, size=8)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((2, 0, 0, 1),),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    smt = expression_to_smt(expr)
+    query = "\n".join(
+        [
+            "(set-logic QF_BV)",
+            f"(assert (not (= {smt} (_ bv1 32))))",
+            "(check-sat)",
+        ]
+    )
+
+    assert "rt_counted_loop_sum_" not in smt
+    assert "bvsle" in smt
+    assert "bvule (bvsub" in smt
+    assert Z3Solver(timeout=2).check_equivalence_direct(query).status == SolverStatus.UNSAT
+
+
+def test_counted_loop_sum_fallback_declares_uninterpreted_function():
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((3, 0, 1, 0), (3, 1, -1, 0), (3, 2, 2, 0)),
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+    smt = expression_to_smt(expr)
+    declarations = collect_intrinsic_smt_declarations(expr)
+    declared_name = re.search(r"\(declare-fun ([^ ]+)", declarations[0]).group(1)
+
+    assert smt.startswith(f"({declared_name} ")
+    assert declarations == [
+        f"(declare-fun {declared_name} ((_ BitVec 32) (_ BitVec 32) (_ BitVec 32)) (_ BitVec 32))"
+    ]
+
+
 def test_pairwise_shortcuts_counted_loop_runtime_refs_with_matching_signedness():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_expr = Expression.intrinsic(
@@ -219,6 +305,33 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_with_matching_signedness()
     right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
 
     assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
+
+
+def test_pairwise_intrinsic_auxiliary_query_uses_symbol_replacer_names():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    count = Expression.parameter("count", index=0, size=4, data_type="int")
+    aux_var = Expression.variable("__loop_acc", size=4)
+    condition = Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), count), False)
+    left = Expression.binary_op("INT_ADD", aux_var, count)
+    right = Expression.binary_op("INT_ADD", aux_var, count)
+
+    query = strategy._build_intrinsic_equivalence_query(
+        left,
+        right,
+        [condition],
+        [
+            {"name": "count", "index": 0, "size": 4, "data_type": "int"},
+            {"name": "__loop_acc", "index": -1, "size": 4},
+        ],
+    )
+
+    assert query is not None
+    assert "(declare-const count_aux (_ BitVec 32))" in query
+    assert "(declare-const __loop_acc_aux (_ BitVec 32))" in query
+    assert "count_aux" in query
+    assert "__loop_acc_aux" in query
+    assert " count)" not in query
+    assert " __loop_acc)" not in query
 
 
 def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_signedness_differs():
@@ -368,128 +481,6 @@ def test_pairwise_does_not_shortcut_intrinsics_without_explicit_runtime_ref_cont
     right_case = ReturnCase(0, [], right_expr, ReturnInfo("right", right_expr))
 
     assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
-
-
-def test_pairwise_shortcuts_equivalent_counted_loop_partition_without_solver():
-    proof_runner = _UnsatProofRunner()
-    strategy = PairwiseStrategy(Mock(), proof_runner, debug=False)
-    strategy.formula_builder.build_base_context.return_value = {
-        "header_lines": [
-            "(declare-const param_1_1 (_ BitVec 32))",
-            "(declare-const param_1_2 (_ BitVec 32))",
-            "(assert (= param_1_1 param_1_2))",
-        ],
-        "params1": [ParameterInfo("param_1", "param_1_1", 32, 0)],
-        "params2": [ParameterInfo("param_1", "param_1_2", 32, 0)],
-        "extra_vars1": [],
-        "extra_vars2": [],
-        "constrained_fragments": [],
-        "return_size1": 32,
-        "return_size2": 32,
-    }
-
-    analysis1 = FunctionReturnAnalysis(
-        function_name="left",
-        entry_point="0x1000",
-        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
-        returns=[
-            ReturnInfo(
-                address="0x1001",
-                value=_const(0, size=4),
-                conditions=[Condition(Expression.binary_op("INT_SLESSEQUAL", _param("param_1", size=4), _const(0, size=4)), False)],
-            ),
-            ReturnInfo(
-                address="0x1002",
-                value=_counted_loop_sum_value(signed_loop=True, data_type="int"),
-                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), False)],
-            ),
-        ],
-        return_type="int",
-    )
-    analysis2 = FunctionReturnAnalysis(
-        function_name="right",
-        entry_point="0x2000",
-        parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
-        returns=[
-            ReturnInfo(
-                address="0x2001",
-                value=_counted_loop_sum_value(signed_loop=True, data_type="int"),
-                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), False)],
-            ),
-            ReturnInfo(
-                address="0x2002",
-                value=_const(0, size=4),
-                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("param_1", size=4)), True)],
-            ),
-        ],
-        return_type="int",
-    )
-
-    with patch.object(strategy, "_collect_return_coverage_unsafety_reasons", return_value=[]):
-        result = strategy.check(analysis1, analysis2)
-
-    assert result.is_equivalent is True
-    assert result.total_pairs == 4
-    assert result.unsat_pairs == 4
-    assert result.unknown_pairs == 0
-    assert proof_runner.queries
-
-
-def test_partition_shortcut_rejects_unsafe_analysis_inputs():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
-    base_ctx = {
-        "header_lines": [],
-        "params1": [],
-        "params2": [],
-        "extra_vars1": [],
-        "extra_vars2": [],
-    }
-    left_case = ReturnCase(0, [], _counted_loop_sum_value(signed_loop=True), ReturnInfo("left", _counted_loop_sum_value(signed_loop=True)))
-    right_case = ReturnCase(0, [], _counted_loop_sum_value(signed_loop=False, data_type="uint"), ReturnInfo("right", _counted_loop_sum_value(signed_loop=False, data_type="uint")))
-
-    assert strategy._cases_form_equivalent_partition(
-        [left_case],
-        [right_case],
-        base_ctx=base_ctx,
-        render_fn1=None,
-        render_fn2=None,
-        sat_unsafety_reasons=["function1:return_coverage_gap"],
-    ) is False
-
-
-def test_partition_shortcut_requires_smt_proven_case_disjointness():
-    strategy = PairwiseStrategy(Mock(), _FirstSatProofRunner(), debug=False)
-    base_ctx = {
-        "header_lines": ["(declare-const param_1 (_ BitVec 32))"],
-        "params1": [],
-        "params2": [],
-        "extra_vars1": [],
-        "extra_vars2": [],
-        "return_size1": 32,
-        "return_size2": 32,
-    }
-    param = _param("param_1", size=4)
-    zero = _const(0, size=4)
-    ten = _const(10, size=4)
-    lower_region = Condition(Expression.binary_op("INT_SLESSEQUAL", zero, param), False)
-    upper_region = Condition(Expression.binary_op("INT_SLESSEQUAL", param, ten), False)
-    left_cases = [
-        ReturnCase(0, [lower_region], _const(1, size=4), ReturnInfo("left0", _const(1, size=4))),
-        ReturnCase(1, [upper_region], _const(2, size=4), ReturnInfo("left1", _const(2, size=4))),
-    ]
-    right_cases = [
-        ReturnCase(0, [lower_region], _const(1, size=4), ReturnInfo("right0", _const(1, size=4))),
-        ReturnCase(1, [upper_region], _const(2, size=4), ReturnInfo("right1", _const(2, size=4))),
-    ]
-
-    assert strategy._cases_form_equivalent_partition(
-        left_cases,
-        right_cases,
-        base_ctx=base_ctx,
-        render_fn1=None,
-        render_fn2=None,
-        sat_unsafety_reasons=[],
-    ) is False
 
 
 def test_readonly_sum_smt_declarations_distinguish_different_loop_shapes():

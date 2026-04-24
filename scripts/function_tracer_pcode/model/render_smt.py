@@ -58,6 +58,7 @@ _ARITHMETIC_BINARY_OPERATORS = {
     "INT_REM",
     "INT_SREM",
 }
+_BITWISE_BINARY_OPERATORS = {"INT_AND", "INT_OR", "INT_XOR"}
 
 _SUPPORTED_BINARY_OPERATORS = (
     _ARITHMETIC_BINARY_OPERATORS
@@ -144,7 +145,8 @@ def expression_smt_bit_width(expr) -> int:
             return explicit_bits or operand_bits
         if expr.operator == "BOOL_NEGATE":
             return 1
-        return operand_bits
+        explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+        return explicit_bits or operand_bits
 
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0] if len(getattr(expr, "operands", [])) >= 1 else None
@@ -153,15 +155,21 @@ def expression_smt_bit_width(expr) -> int:
         right_bits = expression_smt_bit_width(right)
 
         if expr.operator == "PIECE":
-            return left_bits + right_bits
+            explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+            return explicit_bits or (left_bits + right_bits)
         if expr.operator == "SUBPIECE":
             explicit_bits = (expr.size or 0) * 8
             return explicit_bits or max(left_bits, right_bits)
         if expr.operator in {"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}:
-            return left_bits
+            explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+            return explicit_bits or left_bits
         if expr.operator in _BOOLEAN_BINARY_OPERATORS:
             return 1
         if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
+            if expr.operator in _BITWISE_BINARY_OPERATORS:
+                explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
+                if explicit_bits > 0:
+                    return explicit_bits
             return _preferred_arithmetic_width(left, right, left_bits, right_bits)
         return max(left_bits, right_bits)
 
@@ -310,6 +318,21 @@ def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     return f"(ite {expr_smt} (_ bv1 {bits}) (_ bv0 {bits}))"
 
 
+def _coerce_smt_bitvec_width(
+    expr_smt: str,
+    source_bits: int,
+    target_bits: int,
+    *,
+    prefer_sign_extension: bool = False,
+) -> str:
+    if source_bits <= 0 or target_bits <= 0 or source_bits == target_bits:
+        return expr_smt
+    if source_bits < target_bits:
+        op = "sign_extend" if prefer_sign_extension else "zero_extend"
+        return f"((_ {op} {target_bits - source_bits}) {expr_smt})"
+    return f"((_ extract {target_bits - 1} 0) {expr_smt})"
+
+
 def _rewrite_ambiguous_negative_constant(expr, expr_smt: str, target_bits: int, prefer_sign_extension: bool) -> str:
     """32bit 由来の負定数が 64bit で zero-extended された形なら sign-extended に補正する。"""
     if not prefer_sign_extension:
@@ -352,14 +375,23 @@ def _coerce_expr_to_bitvec_width(
     if expr_bits == target_bits:
         return expr_smt
     if expr_bits < target_bits:
-        op = "sign_extend" if prefer_sign_extension else "zero_extend"
-        return f"((_ {op} {target_bits - expr_bits}) {expr_smt})"
+        return _coerce_smt_bitvec_width(
+            expr_smt,
+            expr_bits,
+            target_bits,
+            prefer_sign_extension=prefer_sign_extension,
+        )
     if expr is not None and getattr(expr, "expr_type", None) == expr.expr_type.__class__.CONSTANT:
         value = getattr(expr, "value", 0)
         if isinstance(value, int) and target_bits > 0:
             value = value & ((1 << target_bits) - 1)
             return f"(_ bv{value} {target_bits})"
-    return f"((_ extract {target_bits - 1} 0) {expr_smt})"
+    return _coerce_smt_bitvec_width(
+        expr_smt,
+        expr_bits,
+        target_bits,
+        prefer_sign_extension=prefer_sign_extension,
+    )
 
 
 def _constant_fits_width(expr, target_bits: int) -> bool:
@@ -544,6 +576,29 @@ def _counted_loop_sum_function_name(expr) -> str:
     )
 
 
+def _counted_loop_sum_has_exact_lowering(expr) -> bool:
+    operands = getattr(expr, "operands", None) or []
+    if len(operands) != 3:
+        return False
+    summary_ref = _counted_loop_sum_ref(expr)
+    if summary_ref is None:
+        return False
+    induction_step = int(getattr(summary_ref, "induction_step", 0) or 0)
+    residue_cases = tuple(getattr(summary_ref, "residue_cases", ()) or ())
+    if induction_step == 0 or not residue_cases:
+        return False
+    if induction_step != 1:
+        return all(int(modulus) == 1 for modulus, _residue, _coeff, _bias in residue_cases)
+    for modulus, _residue, _coeff, _bias in residue_cases:
+        modulus = int(modulus)
+        if modulus <= 1:
+            continue
+        mask = modulus - 1
+        if mask <= 0 or (mask & (mask + 1)) != 0:
+            return False
+    return True
+
+
 def _smt_bv_const(value: int, bits: int) -> str:
     mask = (1 << bits) - 1
     return f"(_ bv{int(value) & mask} {bits})"
@@ -617,8 +672,29 @@ def _counted_loop_sum_exact_smt(
             total_nonzero = f"(bvadd {leading_term} {stride_term})"
         return f"(ite (= {count_smt} {zero}) {zero} {total_nonzero})"
 
+    def _loop_le(left_smt: str, right_smt: str) -> str:
+        operator = "bvsle" if signed_loop else "bvule"
+        return f"({operator} {left_smt} {right_smt})"
+
+    def _distance_le(left_smt: str, right_smt: str) -> str:
+        return f"(bvule {left_smt} {right_smt})"
+
+    def _ceil_div_positive(value_smt: str, divisor: int) -> str:
+        divisor = int(divisor)
+        if divisor <= 1:
+            return value_smt
+        decremented = f"(bvsub {value_smt} {one})"
+        if divisor & (divisor - 1) == 0:
+            shift_amount = _smt_bv_const(divisor.bit_length() - 1, wide_bits)
+            quotient = f"(bvlshr {decremented} {shift_amount})"
+        else:
+            quotient = f"(bvudiv {decremented} {_smt_bv_const(divisor, wide_bits)})"
+        return f"(bvadd {quotient} {one})"
+
     if induction_step == 1:
         n_expr = f"(bvsub {wide_limit} {wide_start})"
+        no_iteration = _loop_le(wide_limit, wide_start)
+        count_all_expr = f"(ite {no_iteration} {zero} {n_expr})"
         total = wide_base
         for modulus, residue, coeff, bias in residue_cases:
             modulus = int(modulus)
@@ -626,7 +702,7 @@ def _counted_loop_sum_exact_smt(
             coeff = int(coeff)
             bias = int(bias)
             if modulus <= 1:
-                count_expr = n_expr
+                count_expr = count_all_expr
                 offset_expr = zero
             else:
                 mask = modulus - 1
@@ -638,10 +714,9 @@ def _counted_loop_sum_exact_smt(
                 raw_offset = f"(bvsub {residue_smt} {start_low})"
                 offset_expr = f"(bvand {raw_offset} {mask_smt})"
                 positive_span = f"(bvsub {n_expr} {offset_expr})"
-                adjusted = f"(bvadd {positive_span} {mask_smt})"
-                shift_amount = _smt_bv_const(mask.bit_length() - 1, wide_bits)
-                shifted = f"(bvlshr {adjusted} {shift_amount})"
-                count_expr = f"(ite (bvsle {positive_span} {zero}) {zero} {shifted})"
+                no_matching_residue = f"(or {no_iteration} {_distance_le(n_expr, offset_expr)})"
+                count_nonzero = _ceil_div_positive(positive_span, modulus)
+                count_expr = f"(ite {no_matching_residue} {zero} {count_nonzero})"
             first_expr = f"(bvadd {wide_start} {offset_expr})"
             progression_sum = _exact_progression_sum(first_expr, count_expr, step=modulus)
             coeff_term = _smt_scale_term(progression_sum, coeff, wide_bits)
@@ -656,14 +731,15 @@ def _counted_loop_sum_exact_smt(
 
     if induction_step > 0:
         span_expr = f"(bvsub {wide_limit} {wide_start})"
+        no_iteration = _loop_le(wide_limit, wide_start)
     else:
         span_expr = f"(bvsub {wide_start} {wide_limit})"
+        no_iteration = _loop_le(wide_start, wide_limit)
     count_nonzero = span_expr
     step_magnitude = abs(induction_step)
     if step_magnitude != 1:
-        adjusted = f"(bvadd {span_expr} {_smt_bv_const(step_magnitude - 1, wide_bits)})"
-        count_nonzero = f"(bvsdiv {adjusted} {_smt_bv_const(step_magnitude, wide_bits)})"
-    count_expr = f"(ite (bvsle {span_expr} {zero}) {zero} {count_nonzero})"
+        count_nonzero = _ceil_div_positive(span_expr, step_magnitude)
+    count_expr = f"(ite {no_iteration} {zero} {count_nonzero})"
     progression_sum = _exact_progression_sum(wide_start, count_expr, step=induction_step)
     total = wide_base
     for _modulus, _residue, coeff, bias in residue_cases:
@@ -693,7 +769,19 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         )
 
     if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
-        return None
+        if _counted_loop_sum_has_exact_lowering(expr):
+            return None
+        if len(operands) != 3:
+            raise ValueError(f"COUNTED_LOOP_SUM expects 3 operands, got {len(operands)}")
+        base_bits = max(1, int(expression_smt_bit_width(operands[0]) or 1))
+        start_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
+        limit_bits = max(1, int(expression_smt_bit_width(operands[2]) or 1))
+        result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
+        return (
+            f"(declare-fun {_counted_loop_sum_function_name(expr)} "
+            f"((_ BitVec {base_bits}) (_ BitVec {start_bits}) (_ BitVec {limit_bits})) "
+            f"(_ BitVec {result_bits}))"
+        )
 
     return None
 
@@ -747,10 +835,17 @@ def _to_smt_internal(
         right = expr.operands[1]
 
         if expr.operator == "PIECE":
-            return (
+            left_bits = expression_smt_bit_width(left)
+            right_bits = expression_smt_bit_width(right)
+            concat_smt = (
                 f"(concat "
                 f"{_to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context)} "
                 f"{_to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context)})"
+            )
+            return _coerce_smt_bitvec_width(
+                concat_smt,
+                left_bits + right_bits,
+                expression_smt_bit_width(expr) or (left_bits + right_bits),
             )
 
         if expr.operator == "SUBPIECE":
@@ -780,20 +875,26 @@ def _to_smt_internal(
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
-            result_bits = left_bits
-            if right_bits != result_bits:
-                if right_bits > result_bits:
-                    right_smt = f"((_ extract {result_bits - 1} 0) {right_smt})"
-                else:
-                    right_smt = f"((_ zero_extend {result_bits - right_bits}) {right_smt})"
+            shift_bits = left_bits
+            if right_bits != shift_bits:
+                right_smt = _coerce_smt_bitvec_width(right_smt, right_bits, shift_bits)
             op = expr._get_smt_operator(expr.operator)
-            return f"({op} {left_smt} {right_smt})"
+            shifted_smt = f"({op} {left_smt} {right_smt})"
+            return _coerce_smt_bitvec_width(
+                shifted_smt,
+                shift_bits,
+                expression_smt_bit_width(expr) or shift_bits,
+            )
 
         if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
-            if left_bits != right_bits:
-                target_bits = _preferred_arithmetic_width(left, right, left_bits, right_bits)
+            target_bits = (
+                expression_smt_bit_width(expr)
+                if expr.operator in _BITWISE_BINARY_OPERATORS
+                else _preferred_arithmetic_width(left, right, left_bits, right_bits)
+            )
+            if left_bits != target_bits or right_bits != target_bits:
                 if left_bits < target_bits:
                     left_extend = (
                         "sign_extend"
@@ -909,9 +1010,13 @@ def _to_smt_internal(
             return f"((_ extract {output_bits - 1} 0) {operand_smt})"
 
         if expr.operator == "INT_NEGATE":
+            target_bits = expression_smt_bit_width(expr) or operand_bits
+            operand_smt = _coerce_bool_to_bitvec(operand, operand_smt, target_bits)
             return f"(bvnot {operand_smt})"
 
         if expr.operator == "INT_2COMP":
+            target_bits = expression_smt_bit_width(expr) or operand_bits
+            operand_smt = _coerce_bool_to_bitvec(operand, operand_smt, target_bits)
             return f"(bvneg {operand_smt})"
 
         if expr.operator == "BOOL_NEGATE":
@@ -1011,7 +1116,10 @@ def _to_smt_internal(
 
             val_str = render_branch_value(val)
 
-            result = f"(ite {cond_str} {val_str} {result})"
+            if cond_str == "true":
+                result = val_str
+            elif cond_str != "false":
+                result = f"(ite {cond_str} {val_str} {result})"
 
         return result
 
