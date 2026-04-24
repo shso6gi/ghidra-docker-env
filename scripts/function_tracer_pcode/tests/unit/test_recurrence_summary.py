@@ -24,6 +24,8 @@ from scripts.function_tracer_pcode.model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    LoopBodyEffectRef,
+    LoopSideEffectProfileRef,
     LoopSummaryRef,
     LocationBaseRef,
     ReadonlyReductionTermRef,
@@ -108,6 +110,46 @@ def test_counted_loop_summary_keeps_nonzero_prefix_start():
     )
 
     assert canonical is value
+
+
+def test_counted_loop_summary_intrinsic_preserves_effect_aware_profile():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    effect_profile = LoopSideEffectProfileRef(
+        profile="effect_aware",
+        memory_writes=True,
+        effect_count=1,
+        effect_descriptors=(
+            LoopBodyEffectRef(
+                kind="memory_write",
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("out", index=0),
+                    offset=0,
+                    size=4,
+                ),
+                value_expr=_param("param_1"),
+                guard_constraints=(_cond("INT_SLESS", _const(0), _param("param_1")),),
+                order_key=7,
+            ),
+        ),
+    )
+    value = summarizer._build_counted_loop_summary_intrinsic(
+        base_expr=_const(0),
+        start_expr=_const(0),
+        limit_expr=_param("param_1"),
+        induction_step=1,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        result_size=4,
+        signed_loop=True,
+        side_effect_profile=effect_profile,
+        guard_constraints=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+    )
+
+    assert value is not None
+    loop_summary = value.runtime_ref.loop_summary
+    assert loop_summary.side_effect_profile.profile == "effect_aware"
+    assert loop_summary.side_effect_profile.memory_writes is True
+    assert loop_summary.guard_constraints
+    assert loop_summary.stable_key() is not None
 
 
 def test_recurrence_terms_equivalent_does_not_require_to_string(monkeypatch):
@@ -307,16 +349,55 @@ class _FakeSeqNum:
 
 
 class _FakeAddressSpace:
-    def __init__(self, name: str):
+    def __init__(
+        self,
+        name: str,
+        *,
+        space_id: int | None = None,
+        space_type: int | None = None,
+        is_memory: bool | None = None,
+        is_register: bool | None = None,
+        is_stack: bool | None = None,
+    ):
         self._name = name
+        self._space_id = space_id
+        self._space_type = space_type
+        self._is_memory = is_memory
+        self._is_register = is_register
+        self._is_stack = is_stack
 
     def getName(self):
         return self._name
 
+    def getSpaceID(self):
+        if self._space_id is None:
+            raise AttributeError("space id unavailable")
+        return self._space_id
+
+    def getType(self):
+        if self._space_type is None:
+            raise AttributeError("space type unavailable")
+        return self._space_type
+
+    def isMemorySpace(self):
+        if self._is_memory is None:
+            raise AttributeError("memory flag unavailable")
+        return self._is_memory
+
+    def isRegisterSpace(self):
+        if self._is_register is None:
+            raise AttributeError("register flag unavailable")
+        return self._is_register
+
+    def isStackSpace(self):
+        if self._is_stack is None:
+            raise AttributeError("stack flag unavailable")
+        return self._is_stack
+
 
 class _FakeAddress:
-    def __init__(self, space_name: str):
-        self._space = _FakeAddressSpace(space_name)
+    def __init__(self, space_name: str | _FakeAddressSpace):
+        self._space = space_name if isinstance(space_name, _FakeAddressSpace) else _FakeAddressSpace(space_name)
 
     def getAddressSpace(self):
         return self._space
@@ -404,6 +485,44 @@ class _FakeVarnode:
 
     def getSize(self):
         return self._size
+
+
+class _FakeStoreSpaceVarnode:
+    def __init__(
+        self,
+        *,
+        target_space_id: int,
+        size: int = 8,
+        pcode_space: _FakeAddressSpace | None = None,
+    ):
+        self._target_space_id = target_space_id
+        self._size = size
+        self._address = _FakeAddress(pcode_space or _FakeAddressSpace("const", space_id=0))
+
+    def getAddress(self):
+        return self._address
+
+    def getOffset(self):
+        return self._target_space_id
+
+    def getSize(self):
+        return self._size
+
+
+class _FakeAddressFactory:
+    def __init__(self, spaces):
+        self._spaces = dict(spaces)
+
+    def getAddressSpace(self, space_id):
+        return self._spaces[int(space_id)]
+
+
+class _FakeProgram:
+    def __init__(self, address_factory):
+        self._address_factory = address_factory
+
+    def getAddressFactory(self):
+        return self._address_factory
 
 
 class _FakePcodeOp:
@@ -1357,7 +1476,7 @@ def test_counted_loop_model_prefers_return_reaching_accumulator_over_larger_coef
     assert residue_cases == (ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),)
 
 
-def test_counted_scalar_loop_summary_declines_effectful_analysis(monkeypatch):
+def test_counted_scalar_loop_summary_keeps_function_memory_writes_as_context():
     analysis = create_mock_analysis(
         "counted_loop_effectful",
         return_type="int",
@@ -1392,21 +1511,348 @@ def test_counted_scalar_loop_summary_declines_effectful_analysis(monkeypatch):
     )
 
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
-    monkeypatch.setattr(
-        summarizer,
-        "_build_counted_scalar_loop_summary",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("effectful analysis must not build a counted-loop summary")
-        ),
+    profile = summarizer._build_loop_side_effect_profile(analysis=analysis)
+
+    assert summarizer._analysis_is_safe_for_counted_scalar_summary(analysis) is True
+    assert profile.profile == "pure"
+    assert profile.memory_writes is False
+    assert profile.context_memory_writes is True
+    assert profile.calls is False
+    assert profile.escapes is False
+    assert profile.effect_descriptors == ()
+    assert len(profile.context_descriptors) == 1
+    assert profile.context_descriptors[0].kind == "memory_write"
+    assert profile.context_descriptors[0].source == "function_effect_summary"
+    assert profile.context_descriptors[0].scope == "function"
+
+
+def test_loop_side_effect_profile_records_pcode_store_address_and_value():
+    address = Expression.parameter("out", index=0, data_type="int *", size=8)
+    value = Expression.binary_op("INT_ADD", _param("param_1"), _const(1))
+    body = _FakeCfgBlock(
+        1,
+        ops=[
+            _FakePcodeOp(
+                "STORE",
+                [_FakeVarnode("ram"), _FakeArgVarnode(address), _FakeArgVarnode(value)],
+                None,
+            ),
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    profile = summarizer._build_loop_side_effect_profile(loop_blocks=[body])
+
+    assert profile.profile == "effect_aware"
+    assert profile.memory_writes is True
+    assert len(profile.effect_descriptors) == 1
+    effect = profile.effect_descriptors[0]
+    assert effect.kind == "memory_write"
+    assert effect.keyable is True
+    assert effect.address_space["space_name"] == "ram"
+    assert effect.location.equals(address)
+    assert effect.value_expr.equals(value)
+    assert effect.stable_key() is not None
+
+
+def test_loop_store_address_space_uses_program_address_factory_target_space():
+    address = Expression.parameter("out", index=0, data_type="int *", size=8)
+    value = _const(7)
+    store_space = _FakeStoreSpaceVarnode(target_space_id=1)
+    body = _FakeCfgBlock(
+        1,
+        ops=[
+            _FakePcodeOp(
+                "STORE",
+                [store_space, _FakeArgVarnode(address), _FakeArgVarnode(value)],
+                None,
+            ),
+        ],
+    )
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.program = _FakeProgram(
+        _FakeAddressFactory({
+            1: _FakeAddressSpace(
+                "ram",
+                space_id=1,
+                space_type=17,
+                is_memory=True,
+                is_register=False,
+                is_stack=False,
+            ),
+        })
+    )
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    profile = summarizer._build_loop_side_effect_profile(loop_blocks=[body])
+
+    effect = profile.effect_descriptors[0]
+    assert effect.address_space["encoding"] == "ghidra_store_space_id"
+    assert effect.address_space["space_name"] == "ram"
+    assert effect.address_space["space_id"] == 1
+    assert effect.address_space["is_memory_space"] is True
+    assert effect.address_space["pcode_space_id_constant"] == 1
+    assert effect.address_space["pcode_input_space"]["space_name"] == "const"
+    assert effect.stable_key() is not None
+
+
+def test_counted_scalar_loop_summary_declines_unsupported_call_effect():
+    analysis = create_mock_analysis(
+        "counted_loop_call",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4}],
+        returns=[],
+    )
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        has_unsupported_call=True,
     )
 
-    summary = summarizer._try_summarize_counted_scalar_loop(
-        _FakeFunction("counted_loop_effectful"),
-        _FakeCfgHighFunction([]),
-        analysis,
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._analysis_is_safe_for_counted_scalar_summary(analysis) is False
+
+
+def test_loop_side_effect_profile_classifies_body_guards_calls_and_escapes():
+    guard_expr = Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
+    body = _FakeCfgBlock(
+        1,
+        ops=[
+            _FakePcodeOp("CBRANCH", [_FakeVarnode("target"), _FakeArgVarnode(guard_expr)], None),
+            _FakePcodeOp("STORE", [], None),
+            _FakePcodeOp("CALL", [_FakeVarnode("direct_target")], None),
+            _FakePcodeOp("CALLIND", [_FakeVarnode("indirect_target")], None),
+            _FakePcodeOp("BRANCHIND", [_FakeVarnode("escape_target")], None),
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("callee", _const(0)), debug=False)
+
+    profile = summarizer._build_loop_side_effect_profile(loop_blocks=[body])
+
+    assert profile.profile == "effect_unknown"
+    assert profile.memory_writes is True
+    assert profile.calls is True
+    assert profile.escapes is True
+    assert profile.conditional_guards is True
+    assert any(effect.kind == "conditional_guard" for effect in profile.effect_descriptors)
+    assert any(effect.kind == "memory_write" for effect in profile.effect_descriptors)
+    assert any(effect.kind == "call" for effect in profile.effect_descriptors)
+    assert any(effect.kind == "escape" for effect in profile.effect_descriptors)
+    assert any(
+        effect.kind == "memory_write" and effect.keyable is False
+        for effect in profile.effect_descriptors
+    )
+    assert all(
+        effect.source == "pcode_scan" and effect.scope == "loop"
+        for effect in profile.effect_descriptors
     )
 
-    assert summary is None
+
+def test_loop_effect_profile_keeps_function_and_loop_effect_origins_separate():
+    analysis = create_mock_analysis(
+        "loop_effect_origins",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int *", "size": 8}],
+        returns=[],
+    )
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[
+            StoreEffect(
+                location=CanonicalLocation(
+                    base_ref=LocationBaseRef.parameter("param_1", index=0),
+                    offset=4,
+                    size=4,
+                ),
+                value=_const(11),
+                conditions=[],
+                order_key=3,
+            ),
+        ],
+    )
+    body = _FakeCfgBlock(1, ops=[_FakePcodeOp("STORE", [], None)])
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    profile = summarizer._build_loop_side_effect_profile(analysis=analysis, loop_blocks=[body])
+
+    loop_sources = [(effect.source, effect.scope) for effect in profile.effect_descriptors]
+    context_sources = [(effect.source, effect.scope) for effect in profile.context_descriptors]
+    assert ("function_effect_summary", "function") in context_sources
+    assert ("pcode_scan", "loop") in loop_sources
+
+
+def test_loop_body_block_collection_includes_header_and_latch_effects():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    guard_expr = Expression.binary_op("INT_SLESS", _param("param_1"), _const(8))
+    header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("header_target"), _FakeArgVarnode(guard_expr)], None)
+    header = _FakeCfgBlock(0, ops=[header_branch, _FakePcodeOp("STORE", [], None)])
+    body = _FakeCfgBlock(1)
+    latch = _FakeCfgBlock(2, ops=[_FakePcodeOp("STORE", [], None)])
+    exit_block = _FakeCfgBlock(3)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(latch)
+    latch.add_edge(header)
+    guard = CountedLoopGuard(
+        condition_expr=guard_expr,
+        bound_expr=_const(8),
+        continue_on_true=True,
+        body_block=body,
+        exit_block=exit_block,
+        signed_comparison=True,
+        latch_block=latch,
+    )
+
+    loop_blocks = summarizer._collect_loop_body_blocks(header_block=header, guard=guard)
+    profile = summarizer._build_loop_side_effect_profile(
+        loop_blocks=loop_blocks,
+        ignored_branch_ops=[header_branch],
+    )
+
+    assert {block.getIndex() for block in loop_blocks} == {0, 1, 2}
+    assert profile.memory_writes is True
+    assert profile.conditional_guards is False
+    assert sum(1 for effect in profile.effect_descriptors if effect.kind == "memory_write") == 2
+
+
+def test_loop_body_block_collection_uses_natural_loop_boundary():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    guard_expr = Expression.binary_op("INT_SLESS", _param("param_1"), _const(8))
+    header = _FakeCfgBlock(0)
+    body = _FakeCfgBlock(1)
+    latch = _FakeCfgBlock(2)
+    cleanup = _FakeCfgBlock(3, ops=[_FakePcodeOp("STORE", [], None)])
+    exit_block = _FakeCfgBlock(4)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(latch)
+    body.add_edge(cleanup)
+    latch.add_edge(header)
+    cleanup.add_edge(exit_block)
+    guard = CountedLoopGuard(
+        condition_expr=guard_expr,
+        bound_expr=_const(8),
+        continue_on_true=True,
+        body_block=body,
+        exit_block=exit_block,
+        signed_comparison=True,
+        latch_block=latch,
+    )
+
+    loop_blocks = summarizer._collect_loop_body_blocks(header_block=header, guard=guard)
+
+    assert {block.getIndex() for block in loop_blocks} == {0, 1, 2}
+
+
+def test_loop_store_effect_carries_block_control_guard():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    guard_expr = Expression.binary_op("INT_EQUAL", Expression.binary_op("INT_AND", _param("param_1"), _const(1)), _const(0))
+    header = _FakeCfgBlock(0)
+    body_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), _FakeArgVarnode(guard_expr)], None)
+    body = _FakeCfgBlock(1, ops=[body_branch])
+    store_block = _FakeCfgBlock(
+        2,
+        ops=[
+            _FakePcodeOp(
+                "STORE",
+                [
+                    _FakeVarnode("ram"),
+                    _FakeArgVarnode(Expression.parameter("out", index=0, data_type="int *", size=8)),
+                    _FakeArgVarnode(_param("param_1")),
+                ],
+                None,
+            )
+        ],
+    )
+    latch = _FakeCfgBlock(3)
+    exit_block = _FakeCfgBlock(4)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(store_block, truth=True)
+    body.add_edge(latch, truth=False)
+    store_block.add_edge(latch)
+    latch.add_edge(header)
+    guard = CountedLoopGuard(
+        condition_expr=Expression.binary_op("INT_SLESS", _param("param_1"), _const(8)),
+        bound_expr=_const(8),
+        continue_on_true=True,
+        body_block=body,
+        exit_block=exit_block,
+        signed_comparison=True,
+        latch_block=latch,
+    )
+    loop_blocks = summarizer._collect_loop_body_blocks(header_block=header, guard=guard)
+    block_guard_info = summarizer._loop_block_guard_effect_info(
+        header_block=header,
+        guard=guard,
+        loop_blocks=loop_blocks,
+    )
+
+    profile = summarizer._build_loop_side_effect_profile(
+        loop_blocks=loop_blocks,
+        ignored_branch_ops=[],
+        block_guard_info=block_guard_info,
+    )
+
+    store_effect = next(effect for effect in profile.effect_descriptors if effect.kind == "memory_write")
+    assert len(store_effect.guard_constraints) == 1
+    assert store_effect.guard_constraints[0].expression.equals(guard_expr)
+    assert len(store_effect.path_condition_sets) == 1
+    assert len(store_effect.path_condition_sets[0]) == 1
+    assert store_effect.path_condition_sets[0][0].expression.equals(guard_expr)
+    assert store_effect.guard_paths_incomplete is False
+
+
+def test_store_effect_with_incomplete_guard_paths_is_unkeyable():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    store_op = _FakePcodeOp(
+        "STORE",
+        [
+            _FakeVarnode("ram"),
+            _FakeArgVarnode(Expression.parameter("out", index=0, data_type="int *", size=8)),
+            _FakeArgVarnode(_param("param_1")),
+        ],
+        None,
+    )
+
+    effect = summarizer._store_effect_ref_for_op(
+        store_op,
+        scope="loop",
+        guard_paths_incomplete=True,
+    )
+
+    assert effect.keyable is False
+    assert effect.guard_paths_incomplete is True
+    assert "store_guard_paths_incomplete" in effect.unkeyable_reason
+    assert effect.stable_key() is None
+
+
+def test_path_enumeration_reports_incomplete_when_limit_is_reached():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    header = _FakeCfgBlock(0)
+    body = _FakeCfgBlock(1)
+    left = _FakeCfgBlock(2)
+    right = _FakeCfgBlock(3)
+    target = _FakeCfgBlock(4)
+    exit_block = _FakeCfgBlock(5)
+    body.add_edge(left)
+    body.add_edge(right)
+    left.add_edge(target)
+    right.add_edge(target)
+    target.add_edge(header)
+
+    paths, incomplete = summarizer._enumerate_paths_with_conditions_result(
+        start_block=body,
+        target_block=target,
+        header_block=header,
+        placeholders={},
+        stop_block=exit_block,
+        limit=1,
+    )
+
+    assert len(paths) == 1
+    assert incomplete is True
 
 
 def test_counted_scalar_loop_summary_rejects_unresolved_operands():

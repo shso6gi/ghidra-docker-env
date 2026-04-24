@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..model import (
     COUNTED_LOOP_SUM_OPCODE,
@@ -14,6 +14,7 @@ from ..model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    LoopBodyEffectRef,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
@@ -303,18 +304,411 @@ class StructuralRecurrenceSummarizer:
     def _analysis_is_safe_for_counted_scalar_summary(self, analysis) -> bool:
         if analysis is None:
             return False
-        effect_summary = getattr(analysis, "effect_summary", None)
-        if effect_summary is not None:
-            if getattr(effect_summary, "effects", None):
-                self._debug("Declined counted scalar loop summary: function mutates memory")
-                return False
-            if getattr(effect_summary, "has_unsupported_call", False):
-                self._debug("Declined counted scalar loop summary: effect summary contains unsupported call")
-                return False
+        effect_profile = self._build_loop_side_effect_profile(
+            analysis=analysis,
+        )
+        if (
+            effect_profile.calls
+            or effect_profile.escapes
+            or effect_profile.context_calls
+            or effect_profile.context_escapes
+        ):
+            self._debug("Declined counted scalar loop summary: loop contains calls or escaping control flow")
+            return False
         if getattr(analysis, "incomplete_control_flow", False):
             self._debug("Declined counted scalar loop summary: control flow is incomplete")
             return False
         return True
+
+    def _loop_effect_profile_name(
+        self,
+        *,
+        memory_reads: bool,
+        memory_writes: bool,
+        calls: bool,
+        escapes: bool,
+        conditional_guards: bool,
+    ) -> str:
+        if calls or escapes:
+            return "effect_unknown"
+        if memory_writes:
+            return "effect_aware"
+        if conditional_guards:
+            return "pure_conditional"
+        if memory_reads:
+            return "pure_memory_read"
+        return "pure"
+
+    def _build_loop_side_effect_profile(
+        self,
+        *,
+        analysis=None,
+        high_function=None,
+        loop_blocks: Optional[Sequence[object]] = None,
+        ignored_branch_ops: Optional[Sequence[object]] = None,
+        block_guard_conditions: Optional[Dict[object, Sequence[Condition]]] = None,
+        block_guard_info: Optional[Dict[object, Dict[str, Any]]] = None,
+        memory_reads: bool = False,
+    ) -> LoopSideEffectProfileRef:
+        descriptors: List[LoopBodyEffectRef] = []
+        context_descriptors: List[LoopBodyEffectRef] = []
+        has_memory_reads = bool(memory_reads)
+        has_memory_writes = False
+        has_calls = False
+        has_escapes = False
+        has_conditional_guards = False
+        has_context_memory_writes = False
+        has_context_calls = False
+        has_context_escapes = False
+        has_context_conditional_guards = False
+
+        effect_summary = getattr(analysis, "effect_summary", None) if analysis is not None else None
+        for effect in getattr(effect_summary, "effects", None) or []:
+            has_context_memory_writes = True
+            effect_conditions = tuple(getattr(effect, "conditions", None) or ())
+            if effect_conditions:
+                has_context_conditional_guards = True
+            context_descriptors.append(
+                LoopBodyEffectRef(
+                    kind="memory_write",
+                    source="function_effect_summary",
+                    scope="function",
+                    location=getattr(effect, "location", None),
+                    value_expr=getattr(effect, "value", None),
+                    guard_constraints=effect_conditions,
+                    order_key=getattr(effect, "order_key", None),
+                )
+            )
+        if getattr(effect_summary, "has_unsupported_call", False):
+            has_context_calls = True
+            has_context_escapes = True
+            context_descriptors.append(
+                LoopBodyEffectRef(
+                    kind="unsupported_call",
+                    source="function_effect_summary",
+                    scope="function",
+                )
+            )
+        if getattr(analysis, "incomplete_control_flow", False):
+            has_context_escapes = True
+            context_descriptors.append(
+                LoopBodyEffectRef(
+                    kind="incomplete_control_flow",
+                    source="function_analysis",
+                    scope="function",
+                )
+            )
+
+        ignored_ids = {id(op) for op in (ignored_branch_ops or ()) if op is not None}
+        pcode_scope = "loop" if loop_blocks is not None else "function"
+        if loop_blocks is None and high_function is not None:
+            loop_blocks = list(self._iter_basic_blocks(high_function))
+        for block in loop_blocks or ():
+            for op in self._iter_block_ops(block):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic == "LOAD":
+                    if pcode_scope == "loop":
+                        has_memory_reads = True
+                    continue
+                if mnemonic == "STORE":
+                    block_key = self._block_key(block)
+                    guard_info = (block_guard_info or {}).get(block_key, {})
+                    guard_conditions = tuple(
+                        guard_info.get(
+                            "common",
+                            (block_guard_conditions or {}).get(block_key, ()),
+                        )
+                    )
+                    path_condition_sets = tuple(
+                        tuple(path_conditions or ())
+                        for path_conditions in guard_info.get("paths", ())
+                    )
+                    store_effect = self._store_effect_ref_for_op(
+                        op,
+                        scope=pcode_scope,
+                        guard_constraints=guard_conditions,
+                        path_condition_sets=path_condition_sets,
+                        guard_paths_incomplete=bool(guard_info.get("incomplete", False)),
+                    )
+                    if pcode_scope == "loop":
+                        has_memory_writes = True
+                        descriptors.append(store_effect)
+                    else:
+                        has_context_memory_writes = True
+                        context_descriptors.append(store_effect)
+                    continue
+                if mnemonic in {"CALL", "CALLIND"}:
+                    call_effect = LoopBodyEffectRef(
+                        kind="call",
+                        source="pcode_scan",
+                        scope=pcode_scope,
+                        target_ref=self._call_target_ref_for_op(op),
+                        order_key=self._pcode_op_order_key(op),
+                    )
+                    if pcode_scope == "loop":
+                        has_calls = True
+                        has_escapes = True
+                        descriptors.append(call_effect)
+                    else:
+                        has_context_calls = True
+                        has_context_escapes = True
+                        context_descriptors.append(call_effect)
+                    continue
+                if mnemonic == "BRANCHIND":
+                    escape_effect = LoopBodyEffectRef(
+                        kind="escape",
+                        source="pcode_scan",
+                        scope=pcode_scope,
+                        order_key=self._pcode_op_order_key(op),
+                    )
+                    if pcode_scope == "loop":
+                        has_escapes = True
+                        descriptors.append(escape_effect)
+                    else:
+                        has_context_escapes = True
+                        context_descriptors.append(escape_effect)
+                    continue
+                if mnemonic == "CBRANCH" and id(op) not in ignored_ids:
+                    condition = self._condition_for_cbranch_op(op)
+                    guard_effect = LoopBodyEffectRef(
+                        kind="conditional_guard",
+                        source="pcode_scan",
+                        scope=pcode_scope,
+                        guard_constraints=(condition,) if condition is not None else (),
+                        order_key=self._pcode_op_order_key(op),
+                    )
+                    if pcode_scope == "loop":
+                        has_conditional_guards = True
+                        descriptors.append(guard_effect)
+                    else:
+                        has_context_conditional_guards = True
+                        context_descriptors.append(guard_effect)
+
+        guard_count = sum(1 for effect in descriptors if effect.kind == "conditional_guard")
+        profile = self._loop_effect_profile_name(
+            memory_reads=has_memory_reads,
+            memory_writes=has_memory_writes,
+            calls=has_calls,
+            escapes=has_escapes,
+            conditional_guards=has_conditional_guards,
+        )
+        return LoopSideEffectProfileRef(
+            profile=profile,
+            memory_reads=has_memory_reads,
+            memory_writes=has_memory_writes,
+            calls=has_calls,
+            escapes=has_escapes,
+            conditional_guards=has_conditional_guards,
+            context_memory_writes=has_context_memory_writes,
+            context_calls=has_context_calls,
+            context_escapes=has_context_escapes,
+            context_conditional_guards=has_context_conditional_guards,
+            effect_count=len(descriptors),
+            guard_count=guard_count,
+            effect_descriptors=tuple(descriptors),
+            context_descriptors=tuple(context_descriptors),
+        )
+
+    def _store_effect_ref_for_op(
+        self,
+        op,
+        *,
+        scope: str,
+        guard_constraints: Sequence[Condition] = (),
+        path_condition_sets: Sequence[Sequence[Condition]] = (),
+        guard_paths_incomplete: bool = False,
+    ) -> LoopBodyEffectRef:
+        address_space = None
+        address_expr = None
+        value_expr = None
+        unkeyable_reasons: List[str] = []
+        input_count = self._safe_pcode_input_count(op)
+        if input_count >= 3:
+            address_space = self._store_address_space_ref_for_op(op)
+            try:
+                address_expr = self._build_pcode_expression(op.getInput(1), placeholders={})
+            except RecursionError:
+                address_expr = None
+            try:
+                value_expr = self._build_pcode_expression(op.getInput(2), placeholders={})
+            except RecursionError:
+                value_expr = None
+        if address_space is None:
+            unkeyable_reasons.append("store_address_space_unresolved")
+        if address_expr is None or self._expression_is_unresolved(address_expr):
+            address_expr = None
+            unkeyable_reasons.append("store_address_unresolved")
+        if value_expr is None or self._expression_is_unresolved(value_expr):
+            value_expr = None
+            unkeyable_reasons.append("store_value_unresolved")
+        if guard_paths_incomplete:
+            unkeyable_reasons.append("store_guard_paths_incomplete")
+        return LoopBodyEffectRef(
+            kind="memory_write",
+            source="pcode_scan",
+            scope=scope,
+            address_space=address_space,
+            location=address_expr,
+            value_expr=value_expr,
+            guard_constraints=tuple(guard_constraints or ()),
+            path_condition_sets=tuple(
+                tuple(path_conditions or ())
+                for path_conditions in (path_condition_sets or ())
+            ),
+            guard_paths_incomplete=bool(guard_paths_incomplete),
+            order_key=self._pcode_op_order_key(op),
+            keyable=not unkeyable_reasons,
+            unkeyable_reason=";".join(unkeyable_reasons) if unkeyable_reasons else None,
+        )
+
+    def _store_address_space_ref_for_op(self, op):
+        if op is None or self._safe_pcode_input_count(op) < 1:
+            return None
+        space_varnode = op.getInput(0)
+
+        address = getattr(space_varnode, "getAddress", lambda: None)()
+        address_space = getattr(address, "getAddressSpace", lambda: None)() if address is not None else None
+        input_space_ref = self._address_space_ref(address_space)
+        offset = getattr(space_varnode, "getOffset", lambda: None)()
+        size = getattr(space_varnode, "getSize", lambda: None)()
+        offset_int = self._safe_int(offset)
+        size_int = self._safe_int(size)
+        target_space_ref = self._resolve_store_target_address_space_ref(offset_int)
+        space_name = (input_space_ref or {}).get("space_name")
+        space_id = (input_space_ref or {}).get("space_id")
+        if space_name is None:
+            name = getattr(space_varnode, "_name", None)
+            if name:
+                space_name = str(name)
+        if target_space_ref is not None:
+            return {
+                "encoding": "ghidra_store_space_id",
+                "space_name": target_space_ref.get("space_name"),
+                "space_id": target_space_ref.get("space_id"),
+                "space_type": target_space_ref.get("space_type"),
+                "is_memory_space": target_space_ref.get("is_memory_space"),
+                "is_register_space": target_space_ref.get("is_register_space"),
+                "is_stack_space": target_space_ref.get("is_stack_space"),
+                "pcode_input_space": input_space_ref,
+                "pcode_space_id_constant": offset_int,
+                "size": size_int,
+            }
+        if space_name is None and space_id is None and offset_int is None and size_int is None:
+            name = getattr(space_varnode, "_name", None)
+            if name:
+                return {"space_name": str(name)}
+            try:
+                expr = self._build_pcode_expression(space_varnode, placeholders={})
+            except RecursionError:
+                expr = None
+            if expr is not None and not self._expression_is_unresolved(expr):
+                return expr
+            return None
+        return {
+            "encoding": "pcode_input_space_metadata",
+            "space_name": space_name,
+            "space_id": space_id,
+            "offset": offset_int,
+            "size": size_int,
+        }
+
+    def _resolve_store_target_address_space_ref(self, space_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if space_id is None:
+            return None
+        program = getattr(self.tracer, "program", None)
+        address_factory_getter = getattr(program, "getAddressFactory", None)
+        if not callable(address_factory_getter):
+            return None
+        try:
+            address_factory = address_factory_getter()
+        except (AttributeError, TypeError, ValueError, RuntimeError, LookupError):
+            return None
+        get_address_space = getattr(address_factory, "getAddressSpace", None)
+        if not callable(get_address_space):
+            return None
+        try:
+            address_space = get_address_space(int(space_id))
+        except (AttributeError, TypeError, ValueError, RuntimeError, LookupError):
+            return None
+        return self._address_space_ref(address_space)
+
+    def _address_space_ref(self, address_space) -> Optional[Dict[str, Any]]:
+        if address_space is None:
+            return None
+        space_name = self._safe_call(address_space, "getName")
+        space_id = self._safe_int(self._safe_call(address_space, "getSpaceID"))
+        if space_name is None and space_id is None:
+            return None
+        return {
+            "space_name": None if space_name is None else str(space_name),
+            "space_id": space_id,
+            "space_type": self._safe_int(self._safe_call(address_space, "getType")),
+            "is_memory_space": self._safe_bool_call(address_space, "isMemorySpace"),
+            "is_register_space": self._safe_bool_call(address_space, "isRegisterSpace"),
+            "is_stack_space": self._safe_bool_call(address_space, "isStackSpace"),
+        }
+
+    def _safe_call(self, obj, method_name: str):
+        method = getattr(obj, method_name, None)
+        if not callable(method):
+            return None
+        try:
+            return method()
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None
+
+    def _safe_bool_call(self, obj, method_name: str) -> Optional[bool]:
+        value = self._safe_call(obj, method_name)
+        if value is None:
+            return None
+        return bool(value)
+
+    def _safe_int(self, value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _pcode_op_order_key(self, op) -> Optional[int]:
+        sequence = getattr(op, "getSeqnum", lambda: None)()
+        if sequence is not None:
+            order = getattr(sequence, "getOrder", lambda: None)()
+            if order is not None:
+                try:
+                    return int(order)
+                except (TypeError, ValueError):
+                    pass
+        order = getattr(op, "getOrder", lambda: None)()
+        if order is not None:
+            try:
+                return int(order)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _call_target_ref_for_op(self, op):
+        if op is None or self._safe_pcode_input_count(op) < 1:
+            return None
+        resolver = getattr(self.tracer, "resolve_call_target_ref", None)
+        if not callable(resolver):
+            return None
+        try:
+            return resolver(op.getInput(0))
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+
+    def _condition_for_cbranch_op(self, op) -> Optional[Condition]:
+        if op is None or self._safe_pcode_input_count(op) < 2:
+            return None
+        try:
+            expr = self._build_pcode_expression(op.getInput(1), placeholders={})
+        except RecursionError:
+            return None
+        if expr is None or self._expression_is_unresolved(expr):
+            return None
+        return Condition(expr, False)
 
     def _build_counted_scalar_loop_summary(
         self,
@@ -336,6 +730,30 @@ class StructuralRecurrenceSummarizer:
         induction, accumulator, guard, residue_cases = model
         start_expr = induction.init_expr
         limit_expr = guard.bound_expr
+        header_block = getattr(induction.phi_op, "getParent", lambda: None)()
+        loop_body_blocks = self._collect_loop_body_blocks(
+            header_block=header_block,
+            guard=guard,
+        )
+        loop_block_guard_info = self._loop_block_guard_effect_info(
+            header_block=header_block,
+            guard=guard,
+            loop_blocks=loop_body_blocks,
+        )
+        ignored_branch_ops = [
+            self._find_cbranch_op(block)
+            for block in (header_block, guard.latch_block)
+            if block is not None
+        ]
+        side_effect_profile = self._build_loop_side_effect_profile(
+            analysis=analysis,
+            loop_blocks=loop_body_blocks,
+            ignored_branch_ops=ignored_branch_ops,
+            block_guard_info=loop_block_guard_info,
+        )
+        if side_effect_profile.calls or side_effect_profile.escapes:
+            self._debug("Declined counted scalar loop summary: loop body contains calls or escaping control flow")
+            return None
         entry_guard_expr = self._substitute_exact_expression(
             guard.condition_expr,
             induction.placeholder,
@@ -370,6 +788,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
             signed_loop=induction.signed_guard or guard.signed_comparison,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=continue_conditions,
         )
         if loop_value is None:
             return None
@@ -419,6 +839,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
             signed_loop=induction.signed_guard or guard.signed_comparison,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=continue_conditions,
         )
         canonical_value = self._canonicalize_zero_prefix_counted_loop_value(
             canonical_value,
@@ -428,6 +850,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=loop_base_expr.size or accumulator.placeholder.size or 4,
             signed_loop=induction.signed_guard or guard.signed_comparison,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=continue_conditions,
         )
         if canonical_value is not None and not canonical_value.equals(loop_case.value):
             summarized[-1] = ReturnInfo(
@@ -474,6 +898,8 @@ class StructuralRecurrenceSummarizer:
         residue_cases: Sequence[ResidueLoopCase],
         result_size: int,
         signed_loop: bool,
+        side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
+        guard_constraints: Sequence[Condition] = (),
     ) -> Optional[Expression]:
         if any(
             self._expression_is_unresolved(expr)
@@ -488,6 +914,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=result_size,
             signed_loop=signed_loop,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=guard_constraints,
         )
         if intrinsic is not None:
             return intrinsic
@@ -503,6 +931,8 @@ class StructuralRecurrenceSummarizer:
         residue_cases: Sequence[ResidueLoopCase],
         result_size: int,
         signed_loop: bool,
+        side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
+        guard_constraints: Sequence[Condition] = (),
     ) -> Optional[Expression]:
         if induction_step == 0 or not residue_cases:
             return None
@@ -531,8 +961,8 @@ class StructuralRecurrenceSummarizer:
             term_descriptor=term_descriptor,
             seed_terms=(),
             witnesses=(),
-            side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
-            guard_constraints=(),
+            side_effect_profile=side_effect_profile or LoopSideEffectProfileRef(profile="pure"),
+            guard_constraints=tuple(guard_constraints or ()),
             loop_var_unit="induction_value",
         )
         runtime_ref = CountedLoopSummaryRef(
@@ -589,6 +1019,8 @@ class StructuralRecurrenceSummarizer:
         residue_cases: Sequence[ResidueLoopCase],
         result_size: int,
         signed_loop: bool,
+        side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
+        guard_constraints: Sequence[Condition] = (),
     ) -> Optional[Expression]:
         if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
             return value
@@ -617,6 +1049,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=result_size,
             signed_loop=signed_loop,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=guard_constraints,
         )
         if canonical is None:
             return value
@@ -658,6 +1092,8 @@ class StructuralRecurrenceSummarizer:
         residue_cases: Sequence[ResidueLoopCase],
         result_size: int,
         signed_loop: bool,
+        side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
+        guard_constraints: Sequence[Condition] = (),
     ) -> Optional[Expression]:
         if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
             return value
@@ -682,6 +1118,8 @@ class StructuralRecurrenceSummarizer:
             residue_cases=residue_cases,
             result_size=result_size,
             signed_loop=signed_loop,
+            side_effect_profile=side_effect_profile,
+            guard_constraints=guard_constraints,
         )
         if canonical is None:
             return value
@@ -1212,6 +1650,172 @@ class StructuralRecurrenceSummarizer:
             if successor is not None:
                 successors.append(successor)
         return successors
+
+    def _collect_block_predecessors(self, block) -> List[object]:
+        predecessors = []
+        in_size = int(getattr(block, "getInSize", lambda: 0)() or 0)
+        for index in range(in_size):
+            predecessor = getattr(block, "getIn", lambda _idx: None)(index)
+            if predecessor is not None:
+                predecessors.append(predecessor)
+        return predecessors
+
+    def _collect_loop_body_blocks(
+        self,
+        *,
+        header_block,
+        guard: CountedLoopGuard,
+    ) -> Tuple[object, ...]:
+        if guard is None or guard.body_block is None:
+            return ()
+        natural_loop_blocks = self._collect_natural_loop_blocks(
+            header_block=header_block,
+            guard=guard,
+        )
+        if natural_loop_blocks:
+            return natural_loop_blocks
+        self._debug("Falling back to reachability-based loop body collection")
+        return self._collect_reachable_loop_body_blocks(
+            header_block=header_block,
+            guard=guard,
+        )
+
+    def _collect_natural_loop_blocks(
+        self,
+        *,
+        header_block,
+        guard: CountedLoopGuard,
+    ) -> Tuple[object, ...]:
+        if header_block is None or guard is None or guard.body_block is None or guard.latch_block is None:
+            return ()
+        header_key = self._block_key(header_block)
+        latch_key = self._block_key(guard.latch_block)
+        body_key = self._block_key(guard.body_block)
+        exit_key = self._block_key(guard.exit_block)
+        if header_key is None or latch_key is None or body_key is None:
+            return ()
+        if not any(self._block_key(successor) == header_key for successor in self._collect_block_successors(guard.latch_block)):
+            return ()
+
+        blocks_by_key: Dict[object, object] = {
+            header_key: header_block,
+            latch_key: guard.latch_block,
+        }
+        stack = [guard.latch_block]
+        while stack:
+            current = stack.pop()
+            for predecessor in self._collect_block_predecessors(current):
+                predecessor_key = self._block_key(predecessor)
+                if predecessor_key is None or predecessor_key == exit_key:
+                    continue
+                if predecessor_key in blocks_by_key:
+                    continue
+                blocks_by_key[predecessor_key] = predecessor
+                if predecessor_key != header_key:
+                    stack.append(predecessor)
+
+        if body_key not in blocks_by_key:
+            return ()
+        return tuple(blocks_by_key.values())
+
+    def _collect_reachable_loop_body_blocks(
+        self,
+        *,
+        header_block,
+        guard: CountedLoopGuard,
+    ) -> Tuple[object, ...]:
+        if guard is None or guard.body_block is None:
+            return ()
+        header_key = self._block_key(header_block)
+        exit_key = self._block_key(guard.exit_block)
+        blocks_by_key: Dict[object, object] = {}
+
+        def add_block(block) -> None:
+            key = self._block_key(block)
+            if key is not None and key != exit_key and key not in blocks_by_key:
+                blocks_by_key[key] = block
+
+        add_block(header_block)
+        add_block(guard.body_block)
+        add_block(guard.latch_block)
+        stack = [guard.body_block]
+        visited = set()
+        while stack:
+            current = stack.pop()
+            current_key = self._block_key(current)
+            if current_key in visited or current_key == exit_key:
+                continue
+            visited.add(current_key)
+            add_block(current)
+            for successor in self._collect_block_successors(current):
+                successor_key = self._block_key(successor)
+                if successor_key == exit_key:
+                    continue
+                if successor_key == header_key:
+                    add_block(successor)
+                    continue
+                if successor_key not in visited:
+                    stack.append(successor)
+        return tuple(blocks_by_key.values())
+
+    def _loop_block_guard_conditions(
+        self,
+        *,
+        header_block,
+        guard: CountedLoopGuard,
+        loop_blocks: Sequence[object],
+    ) -> Dict[object, Tuple[Condition, ...]]:
+        return {
+            block_key: tuple(info.get("common", ()))
+            for block_key, info in self._loop_block_guard_effect_info(
+                header_block=header_block,
+                guard=guard,
+                loop_blocks=loop_blocks,
+            ).items()
+        }
+
+    def _loop_block_guard_effect_info(
+        self,
+        *,
+        header_block,
+        guard: CountedLoopGuard,
+        loop_blocks: Sequence[object],
+    ) -> Dict[object, Dict[str, Any]]:
+        if guard is None or guard.body_block is None:
+            return {}
+        result: Dict[object, Dict[str, Any]] = {}
+        header_key = self._block_key(header_block)
+        body_key = self._block_key(guard.body_block)
+        for block in loop_blocks or ():
+            block_key = self._block_key(block)
+            if block_key in {header_key, body_key}:
+                result[block_key] = {
+                    "common": (),
+                    "paths": ((),),
+                    "incomplete": False,
+                }
+                continue
+            paths, incomplete = self._enumerate_paths_with_conditions_result(
+                start_block=guard.body_block,
+                target_block=block,
+                header_block=header_block,
+                placeholders={},
+                stop_block=guard.exit_block,
+                limit=16,
+            )
+            if not paths:
+                result[block_key] = {
+                    "common": (),
+                    "paths": (),
+                    "incomplete": incomplete,
+                }
+                continue
+            result[block_key] = {
+                "common": tuple(self._common_conditions_across_paths(paths)),
+                "paths": tuple(tuple(path) for path in paths),
+                "incomplete": incomplete,
+            }
+        return result
 
     def _block_key(self, block) -> object:
         if block is None:
@@ -1774,15 +2378,38 @@ class StructuralRecurrenceSummarizer:
         stop_block=None,
         limit: int = 8,
     ) -> List[List[Condition]]:
+        paths, _incomplete = self._enumerate_paths_with_conditions_result(
+            start_block=start_block,
+            target_block=target_block,
+            header_block=header_block,
+            placeholders=placeholders,
+            stop_block=stop_block,
+            limit=limit,
+        )
+        return paths
+
+    def _enumerate_paths_with_conditions_result(
+        self,
+        *,
+        start_block,
+        target_block,
+        header_block,
+        placeholders: Dict[object, Expression],
+        stop_block=None,
+        limit: int = 8,
+    ) -> Tuple[List[List[Condition]], bool]:
         if start_block is None or target_block is None:
-            return [[]]
+            return [[]], False
         target_key = self._block_key(target_block)
         header_key = self._block_key(header_block)
         stop_key = self._block_key(stop_block)
         paths: List[List[Condition]] = []
+        incomplete = False
 
         def dfs(current, active_conditions: List[Condition], visited: set) -> None:
+            nonlocal incomplete
             if len(paths) >= limit:
+                incomplete = True
                 return
             current_key = self._block_key(current)
             if current_key == target_key:
@@ -1807,7 +2434,7 @@ class StructuralRecurrenceSummarizer:
                 dfs(successor, next_conditions, visited)
 
         dfs(start_block, [], set())
-        return paths
+        return paths, incomplete
 
     def _build_block_edge_condition(
         self,

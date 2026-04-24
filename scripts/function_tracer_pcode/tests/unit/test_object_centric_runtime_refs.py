@@ -5,19 +5,27 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.model import (
+    COUNTED_LOOP_SUM_OPCODE,
     CallTargetRef,
     DeferredCallInfo,
     CountedLoopSummaryRef,
+    Expression,
     LocationBaseRef,
+    LoopBodyEffectRef,
+    LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
     PostStateReadRef,
     PostStateSnapshotRef,
     ReadonlyReductionRef,
+    ReturnInfo,
     StorageInfo,
     coerce_call_target_ref,
     compare_loop_summaries,
 )
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -37,6 +45,214 @@ def test_loop_summary_comparator_interface_is_explicitly_unknown():
 
     assert result.status == "unknown"
     assert result.is_equivalent() is None
+
+
+def test_loop_summary_comparator_rejects_different_side_effect_profiles():
+    pure = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    effectful = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="effect_aware",
+            memory_writes=True,
+            effect_count=1,
+            effect_descriptors=(
+                LoopBodyEffectRef(
+                    kind="memory_write",
+                    source="pcode_scan",
+                    scope="loop",
+                    order_key=1,
+                ),
+            ),
+        ),
+    )
+
+    result = compare_loop_summaries(pure, effectful)
+
+    assert result.status == "incompatible"
+    assert result.is_equivalent() is None
+    assert result.blocks_shortcut() is True
+
+
+def _pure_counted_loop_summary() -> LoopSummaryRef:
+    return LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+
+
+def _effect_aware_counted_loop_summary() -> LoopSummaryRef:
+    return LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="effect_aware",
+            memory_writes=True,
+            effect_count=1,
+            effect_descriptors=(
+                LoopBodyEffectRef(
+                    kind="memory_write",
+                    source="pcode_scan",
+                    scope="loop",
+                    address_space="ram",
+                    location="addr",
+                    value_expr="value",
+                    order_key=1,
+                ),
+            ),
+        ),
+    )
+
+
+def _counted_loop_expr(loop_summary: LoopSummaryRef) -> Expression:
+    return Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [Expression.constant(0), Expression.constant(0), Expression.parameter("n", size=4)],
+        size=4,
+        runtime_ref=CountedLoopSummaryRef(
+            induction_step=1,
+            result_size=4,
+            signed_loop=True,
+            residue_cases=((1, 0, 1, 0),),
+            loop_summary=loop_summary,
+        ),
+        opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+
+def _return_case_for_expr(expr: Expression) -> ReturnCase:
+    return ReturnCase(0, [], expr, ReturnInfo(address="0x1000", value=expr, conditions=[]))
+
+
+def test_loop_side_effect_stable_key_ignores_function_context_descriptors():
+    base_profile = LoopSideEffectProfileRef(
+        profile="pure",
+        context_memory_writes=True,
+        context_descriptors=(
+            LoopBodyEffectRef(
+                kind="memory_write",
+                source="function_effect_summary",
+                scope="function",
+                location="outside_a",
+                value_expr=1,
+            ),
+        ),
+    )
+    other_context_profile = LoopSideEffectProfileRef(
+        profile="pure",
+        context_memory_writes=True,
+        context_descriptors=(
+            LoopBodyEffectRef(
+                kind="memory_write",
+                source="function_effect_summary",
+                scope="function",
+                location="outside_b",
+                value_expr=2,
+            ),
+        ),
+    )
+
+    assert base_profile.stable_key() == other_context_profile.stable_key()
+
+
+def test_effect_aware_loop_summary_disables_exact_and_smt_shortcuts():
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="effect_aware",
+            memory_writes=True,
+            effect_count=1,
+            effect_descriptors=(
+                LoopBodyEffectRef(
+                    kind="memory_write",
+                    source="pcode_scan",
+                    scope="loop",
+                    address_space="ram",
+                    location="addr",
+                    value_expr="value",
+                    order_key=1,
+                ),
+            ),
+        ),
+    )
+    ref = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=True,
+        residue_cases=((1, 0, 1, 0),),
+        loop_summary=summary,
+    )
+    expr = Expression.intrinsic("COUNTED_LOOP_SUM", [Expression.constant(0), Expression.constant(0), Expression.parameter("n")], runtime_ref=ref)
+
+    assert summary.stable_key() is not None
+    assert summary.pairwise_exact_key() is None
+    assert ref.pairwise_exact_key() is None
+    smt_identity = _runtime_ref_smt_identity(expr, ref)
+    assert smt_identity[0] == "opaque_loop_summary_identity"
+    assert smt_identity[3] == "effect_proof_required"
+
+
+def test_counted_loop_proof_does_not_bypass_effect_aware_summaries():
+    left = _counted_loop_expr(_effect_aware_counted_loop_summary())
+    right = _counted_loop_expr(_effect_aware_counted_loop_summary())
+    strategy = PairwiseStrategy(None, None)
+
+    assert strategy._counted_loop_values_are_provably_equivalent(
+        left,
+        right,
+        left_case=_return_case_for_expr(left),
+        right_case=_return_case_for_expr(right),
+    ) is False
+
+
+def test_counted_loop_proof_does_not_bypass_incompatible_loop_summaries():
+    left = _counted_loop_expr(_pure_counted_loop_summary())
+    right = _counted_loop_expr(_effect_aware_counted_loop_summary())
+    strategy = PairwiseStrategy(None, None)
+
+    assert strategy._counted_loop_values_are_provably_equivalent(
+        left,
+        right,
+        left_case=_return_case_for_expr(left),
+        right_case=_return_case_for_expr(right),
+    ) is False
+
+
+def test_intrinsic_runtime_values_equivalent_does_not_bypass_effect_loop_summaries():
+    strategy = PairwiseStrategy(None, None)
+    effect_left = _counted_loop_expr(_effect_aware_counted_loop_summary())
+    effect_right = _counted_loop_expr(_effect_aware_counted_loop_summary())
+    incompatible_left = _counted_loop_expr(_pure_counted_loop_summary())
+    incompatible_right = _counted_loop_expr(_effect_aware_counted_loop_summary())
+
+    assert strategy._intrinsic_runtime_values_equivalent(
+        effect_left,
+        effect_right,
+        left_case=_return_case_for_expr(effect_left),
+        right_case=_return_case_for_expr(effect_right),
+    ) is False
+    assert strategy._intrinsic_runtime_values_equivalent(
+        incompatible_left,
+        incompatible_right,
+        left_case=_return_case_for_expr(incompatible_left),
+        right_case=_return_case_for_expr(incompatible_right),
+    ) is False
 
 
 def test_loop_summary_unkeyable_refs_disable_pairwise_exact_shortcut():

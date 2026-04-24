@@ -473,6 +473,8 @@ class PairwiseStrategy(CheckStrategy):
             decisive = loop_result.is_equivalent()
             if decisive is not None:
                 return bool(decisive), True
+            if loop_result.blocks_shortcut():
+                return False, True
 
         left_exact_key_fn = getattr(left_ref, "pairwise_exact_key", None)
         right_exact_key_fn = getattr(right_ref, "pairwise_exact_key", None)
@@ -525,6 +527,8 @@ class PairwiseStrategy(CheckStrategy):
 
         left_ref = getattr(left, "runtime_ref", None)
         right_ref = getattr(right, "runtime_ref", None)
+        if not self._counted_loop_refs_allow_value_proof(left_ref, right_ref):
+            return False
         if not self._counted_loop_refs_match_ignoring_signedness(left_ref, right_ref):
             return False
         if not all(
@@ -549,6 +553,24 @@ class PairwiseStrategy(CheckStrategy):
             conditions,
             parameters,
         )
+
+    def _counted_loop_refs_allow_value_proof(self, left_ref, right_ref) -> bool:
+        if left_ref is None or right_ref is None:
+            return False
+        if not isinstance(left_ref, CountedLoopSummaryRef) or not isinstance(right_ref, CountedLoopSummaryRef):
+            return False
+        left_loop_summary = getattr(left_ref, "loop_summary", None)
+        right_loop_summary = getattr(right_ref, "loop_summary", None)
+        if left_loop_summary is None and right_loop_summary is None:
+            return True
+        for loop_summary in (left_loop_summary, right_loop_summary):
+            requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+            if callable(requires_effect_proof) and requires_effect_proof():
+                return False
+        loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
+        if loop_result.blocks_shortcut():
+            return False
+        return True
 
     def _counted_loop_refs_match_ignoring_signedness(self, left_ref, right_ref) -> bool:
         if left_ref is None or right_ref is None:

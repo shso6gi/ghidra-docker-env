@@ -612,6 +612,98 @@ def _loop_object_to_dict(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class LoopBodyEffectRef:
+    """Object-centric descriptor for one loop-body effect or guard."""
+
+    kind: str
+    source: str = "loop_body"
+    scope: str = "loop"
+    address_space: Any = None
+    location: Any = None
+    value_expr: Any = None
+    guard_constraints: Tuple[Any, ...] = ()
+    path_condition_sets: Tuple[Tuple[Any, ...], ...] = ()
+    guard_paths_incomplete: bool = False
+    target_ref: Any = None
+    order_key: Optional[int] = None
+    keyable: bool = True
+    unkeyable_reason: Optional[str] = None
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        if not self.keyable:
+            return None
+        if self.guard_paths_incomplete:
+            return None
+        if (
+            self.kind == "memory_write"
+            and self.source == "pcode_scan"
+            and self.scope == "loop"
+            and (self.address_space is None or self.location is None or self.value_expr is None)
+        ):
+            return None
+        address_space_key = _loop_object_key(self.address_space)
+        location_key = _loop_object_key(self.location)
+        value_key = _loop_object_key(self.value_expr)
+        guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        path_keys = tuple(
+            tuple(_loop_object_key(condition) for condition in path_conditions)
+            for path_conditions in self.path_condition_sets
+        )
+        target_key = _loop_object_key(self.target_ref)
+        if (
+            address_space_key is None
+            or location_key is None
+            or value_key is None
+            or target_key is None
+            or any(guard_key is None for guard_key in guard_keys)
+            or any(any(condition_key is None for condition_key in path_key) for path_key in path_keys)
+        ):
+            return None
+        return (
+            "loop_body_effect",
+            self.kind,
+            self.source,
+            self.scope,
+            address_space_key,
+            location_key,
+            value_key,
+            guard_keys,
+            path_keys,
+            bool(self.guard_paths_incomplete),
+            target_key,
+            None if self.order_key is None else int(self.order_key),
+            bool(self.keyable),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_body_effect",
+            "effect_kind": self.kind,
+            "source": self.source,
+            "scope": self.scope,
+            "address_space": _loop_object_to_dict(self.address_space),
+            "location": _loop_object_to_dict(self.location),
+            "value_expr": _loop_object_to_dict(self.value_expr),
+            "guard_constraints": [
+                _loop_object_to_dict(guard)
+                for guard in self.guard_constraints
+            ],
+            "path_condition_sets": [
+                [
+                    _loop_object_to_dict(condition)
+                    for condition in path_conditions
+                ]
+                for path_conditions in self.path_condition_sets
+            ],
+            "guard_paths_incomplete": bool(self.guard_paths_incomplete),
+            "target_ref": _loop_object_to_dict(self.target_ref),
+            "order_key": self.order_key,
+            "keyable": bool(self.keyable),
+            "unkeyable_reason": self.unkeyable_reason,
+        }
+
+
+@dataclass(frozen=True)
 class LoopSideEffectProfileRef:
     """Object-centric side-effect profile for a loop summary."""
 
@@ -620,8 +712,20 @@ class LoopSideEffectProfileRef:
     memory_writes: bool = False
     calls: bool = False
     escapes: bool = False
+    conditional_guards: bool = False
+    context_memory_writes: bool = False
+    context_calls: bool = False
+    context_escapes: bool = False
+    context_conditional_guards: bool = False
+    effect_count: int = 0
+    guard_count: int = 0
+    effect_descriptors: Tuple[LoopBodyEffectRef, ...] = ()
+    context_descriptors: Tuple[LoopBodyEffectRef, ...] = ()
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        effect_keys = tuple(effect.stable_key() for effect in self.effect_descriptors)
+        if any(effect_key is None for effect_key in effect_keys):
+            return None
         return (
             "loop_side_effect_profile",
             self.profile,
@@ -629,6 +733,18 @@ class LoopSideEffectProfileRef:
             bool(self.memory_writes),
             bool(self.calls),
             bool(self.escapes),
+            bool(self.conditional_guards),
+            int(self.effect_count),
+            int(self.guard_count),
+            effect_keys,
+        )
+
+    def requires_effect_proof(self) -> bool:
+        return bool(
+            self.memory_writes
+            or self.calls
+            or self.escapes
+            or self.conditional_guards
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -639,6 +755,21 @@ class LoopSideEffectProfileRef:
             "memory_writes": bool(self.memory_writes),
             "calls": bool(self.calls),
             "escapes": bool(self.escapes),
+            "conditional_guards": bool(self.conditional_guards),
+            "context_memory_writes": bool(self.context_memory_writes),
+            "context_calls": bool(self.context_calls),
+            "context_escapes": bool(self.context_escapes),
+            "context_conditional_guards": bool(self.context_conditional_guards),
+            "effect_count": int(self.effect_count),
+            "guard_count": int(self.guard_count),
+            "effect_descriptors": [
+                effect.to_dict()
+                for effect in self.effect_descriptors
+            ],
+            "context_descriptors": [
+                effect.to_dict()
+                for effect in self.context_descriptors
+            ],
         }
 
 
@@ -728,6 +859,7 @@ class LoopSummaryRef:
         seed_keys = tuple(_loop_object_key(term) for term in self.seed_terms)
         witness_keys = tuple(_loop_object_key(witness) for witness in self.witnesses)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        side_effect_key = self.side_effect_profile.stable_key()
         if (
             start_key is None
             or limit_key is None
@@ -735,6 +867,7 @@ class LoopSummaryRef:
             or any(seed_key is None for seed_key in seed_keys)
             or any(witness_key is None for witness_key in witness_keys)
             or any(guard_key is None for guard_key in guard_keys)
+            or side_effect_key is None
         ):
             return None
         return (
@@ -746,15 +879,20 @@ class LoopSummaryRef:
             self.term_descriptor.stable_key(),
             seed_keys,
             witness_keys,
-            self.side_effect_profile.stable_key(),
+            side_effect_key,
             guard_keys,
             self.source,
         )
+
+    def requires_effect_proof(self) -> bool:
+        return self.side_effect_profile.requires_effect_proof()
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return None
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.requires_effect_proof():
+            return None
         return self.stable_key()
 
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
@@ -784,7 +922,7 @@ class LoopSummaryComparisonResult:
     reason: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.status not in {"equivalent", "different", "unknown"}:
+        if self.status not in {"equivalent", "different", "incompatible", "unknown"}:
             raise ValueError(f"Unsupported loop summary comparison status: {self.status}")
 
     def is_equivalent(self) -> Optional[bool]:
@@ -793,6 +931,9 @@ class LoopSummaryComparisonResult:
         if self.status == "different":
             return False
         return None
+
+    def blocks_shortcut(self) -> bool:
+        return self.status in {"different", "incompatible"}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -808,14 +949,42 @@ def compare_loop_summaries(
 ) -> LoopSummaryComparisonResult:
     """Compare Method-B loop summaries.
 
-    This is intentionally a non-decisive interface for Task A. The concrete
-    seed/tail, guard-aware, and SMT-backed comparison belongs to the follow-up
-    integration work; callers can route through this API without re-enabling
-    runtime-ref-specific semantic shortcuts.
+    The full seed/tail, guard-aware, and SMT-backed proof is intentionally still
+    non-decisive. We can, however, safely reject summaries whose loop-body
+    effect surfaces are already structurally different.
     """
 
     if left is None or right is None:
         return LoopSummaryComparisonResult("unknown", "missing loop summary")
+    left_profile = getattr(left, "side_effect_profile", None)
+    right_profile = getattr(right, "side_effect_profile", None)
+    if left_profile is not None and right_profile is not None:
+        left_shape = (
+            left_profile.profile,
+            bool(left_profile.memory_reads),
+            bool(left_profile.memory_writes),
+            bool(left_profile.calls),
+            bool(left_profile.escapes),
+            bool(left_profile.conditional_guards),
+            int(left_profile.effect_count),
+            int(left_profile.guard_count),
+        )
+        right_shape = (
+            right_profile.profile,
+            bool(right_profile.memory_reads),
+            bool(right_profile.memory_writes),
+            bool(right_profile.calls),
+            bool(right_profile.escapes),
+            bool(right_profile.conditional_guards),
+            int(right_profile.effect_count),
+            int(right_profile.guard_count),
+        )
+        if left_shape != right_shape:
+            return LoopSummaryComparisonResult("incompatible", "loop side-effect profiles differ")
+        left_effect_key = left_profile.stable_key()
+        right_effect_key = right_profile.stable_key()
+        if left_effect_key is not None and right_effect_key is not None and left_effect_key != right_effect_key:
+            return LoopSummaryComparisonResult("incompatible", "loop body effects differ")
     return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
 
 
@@ -960,7 +1129,7 @@ class ReadonlyReductionRef:
         return tuple(prefix)
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
-        if self.loop_summary is not None and self.loop_summary.stable_key() is None:
+        if self.loop_summary is not None and self.loop_summary.pairwise_exact_key() is None:
             return None
         return self.stable_key()
 
@@ -1040,7 +1209,7 @@ class CountedLoopSummaryRef:
         )
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
-        if self.loop_summary is not None and self.loop_summary.stable_key() is None:
+        if self.loop_summary is not None and self.loop_summary.pairwise_exact_key() is None:
             return None
         return self.stable_key()
 
