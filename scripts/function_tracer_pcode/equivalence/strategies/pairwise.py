@@ -567,6 +567,9 @@ class PairwiseStrategy(CheckStrategy):
             requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
             if callable(requires_effect_proof) and requires_effect_proof():
                 return False
+            requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+            if callable(requires_path_proof) and requires_path_proof():
+                return False
         loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
         if loop_result.blocks_shortcut():
             return False

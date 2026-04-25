@@ -543,12 +543,23 @@ def _runtime_ref_smt_identity(expr, runtime_ref):
     if loop_summary is not None:
         loop_key = loop_summary.stable_key()
         requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
-        if loop_key is None or (callable(requires_effect_proof) and requires_effect_proof()):
+        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+        if (
+            loop_key is None
+            or (callable(requires_effect_proof) and requires_effect_proof())
+            or (callable(requires_path_proof) and requires_path_proof())
+        ):
             return (
                 "opaque_loop_summary_identity",
                 type(runtime_ref).__module__,
                 type(runtime_ref).__qualname__,
-                "effect_proof_required" if loop_key is not None else "unkeyable",
+                (
+                    "unkeyable"
+                    if loop_key is None
+                    else "effect_proof_required"
+                    if callable(requires_effect_proof) and requires_effect_proof()
+                    else "path_proof_required"
+                ),
                 id(runtime_ref),
                 id(loop_summary),
                 id(expr),

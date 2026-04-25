@@ -15,6 +15,7 @@ from ..model import (
     Expression,
     ExpressionType,
     LoopBodyEffectRef,
+    LoopCaseRef,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
@@ -728,6 +729,8 @@ class StructuralRecurrenceSummarizer:
             return None
 
         induction, accumulator, guard, residue_cases = model
+        update_cases = self._try_extract_counted_loop_update_cases_for_summary(accumulator, induction, guard)
+        loop_cases = self._build_counted_loop_case_refs(update_cases)
         start_expr = induction.init_expr
         limit_expr = guard.bound_expr
         header_block = getattr(induction.phi_op, "getParent", lambda: None)()
@@ -790,6 +793,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=induction.signed_guard or guard.signed_comparison,
             side_effect_profile=side_effect_profile,
             guard_constraints=continue_conditions,
+            cases=loop_cases,
         )
         if loop_value is None:
             return None
@@ -841,6 +845,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=induction.signed_guard or guard.signed_comparison,
             side_effect_profile=side_effect_profile,
             guard_constraints=continue_conditions,
+            cases=loop_cases,
         )
         canonical_value = self._canonicalize_zero_prefix_counted_loop_value(
             canonical_value,
@@ -852,6 +857,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=induction.signed_guard or guard.signed_comparison,
             side_effect_profile=side_effect_profile,
             guard_constraints=continue_conditions,
+            cases=loop_cases,
         )
         if canonical_value is not None and not canonical_value.equals(loop_case.value):
             summarized[-1] = ReturnInfo(
@@ -900,6 +906,7 @@ class StructuralRecurrenceSummarizer:
         signed_loop: bool,
         side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
         guard_constraints: Sequence[Condition] = (),
+        cases: Sequence[LoopCaseRef] = (),
     ) -> Optional[Expression]:
         if any(
             self._expression_is_unresolved(expr)
@@ -916,6 +923,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=signed_loop,
             side_effect_profile=side_effect_profile,
             guard_constraints=guard_constraints,
+            cases=cases,
         )
         if intrinsic is not None:
             return intrinsic
@@ -933,6 +941,7 @@ class StructuralRecurrenceSummarizer:
         signed_loop: bool,
         side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
         guard_constraints: Sequence[Condition] = (),
+        cases: Sequence[LoopCaseRef] = (),
     ) -> Optional[Expression]:
         if induction_step == 0 or not residue_cases:
             return None
@@ -963,6 +972,7 @@ class StructuralRecurrenceSummarizer:
             witnesses=(),
             side_effect_profile=side_effect_profile or LoopSideEffectProfileRef(profile="pure"),
             guard_constraints=tuple(guard_constraints or ()),
+            cases=tuple(cases or ()),
             loop_var_unit="induction_value",
         )
         runtime_ref = CountedLoopSummaryRef(
@@ -1021,6 +1031,7 @@ class StructuralRecurrenceSummarizer:
         signed_loop: bool,
         side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
         guard_constraints: Sequence[Condition] = (),
+        cases: Sequence[LoopCaseRef] = (),
     ) -> Optional[Expression]:
         if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
             return value
@@ -1051,6 +1062,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=signed_loop,
             side_effect_profile=side_effect_profile,
             guard_constraints=guard_constraints,
+            cases=cases,
         )
         if canonical is None:
             return value
@@ -1094,6 +1106,7 @@ class StructuralRecurrenceSummarizer:
         signed_loop: bool,
         side_effect_profile: Optional[LoopSideEffectProfileRef] = None,
         guard_constraints: Sequence[Condition] = (),
+        cases: Sequence[LoopCaseRef] = (),
     ) -> Optional[Expression]:
         if value is None or getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
             return value
@@ -1120,6 +1133,7 @@ class StructuralRecurrenceSummarizer:
             signed_loop=signed_loop,
             side_effect_profile=side_effect_profile,
             guard_constraints=guard_constraints,
+            cases=cases,
         )
         if canonical is None:
             return value
@@ -2262,6 +2276,41 @@ class StructuralRecurrenceSummarizer:
                 )
             )
         return cases
+
+    def _try_extract_counted_loop_update_cases_for_summary(
+        self,
+        accumulator: CountedLoopAccumulator,
+        induction: CountedLoopInduction,
+        guard: CountedLoopGuard,
+    ) -> Tuple[CountedLoopUpdateCase, ...]:
+        try:
+            return tuple(self._extract_counted_loop_update_cases(accumulator, induction, guard))
+        except (AttributeError, TypeError, IndexError, RecursionError):
+            return ()
+
+    def _build_counted_loop_case_refs(
+        self,
+        cases: Sequence[CountedLoopUpdateCase],
+    ) -> Tuple[LoopCaseRef, ...]:
+        refs: List[LoopCaseRef] = []
+        for case in cases or ():
+            body_effect = LoopBodyEffectRef(
+                kind="accumulator_update",
+                source="pcode_summary",
+                scope="loop",
+                guard_constraints=tuple(case.conditions or ()),
+                value_expr=case.update_expr,
+            )
+            refs.append(
+                LoopCaseRef(
+                    path_conditions=tuple(case.conditions or ()),
+                    body_effect=body_effect,
+                    term_expr=case.delta_expr,
+                    case_kind="accumulator_delta",
+                    source="counted_loop_update_case",
+                )
+            )
+        return tuple(refs)
 
     def _collect_affine_loop_state_placeholders(
         self,

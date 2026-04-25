@@ -998,6 +998,13 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert "rtunk_" not in loop_smt
     assert "rt_counted_loop_sum_" not in loop_smt
     assert "(ite " in loop_smt
+    loop_summary = loop_case.value.runtime_ref.loop_summary
+    assert len(loop_summary.cases) == 2
+    assert all(case.case_kind == "accumulator_delta" for case in loop_summary.cases)
+    assert all(case.path_conditions for case in loop_summary.cases)
+    assert all(case.body_effect.kind == "accumulator_update" for case in loop_summary.cases)
+    assert all(case.term_expr is not None for case in loop_summary.cases)
+    assert all(case.stable_key() is not None for case in loop_summary.cases)
 
 
 def test_path_enumeration_no_path_is_not_unconditional_success():

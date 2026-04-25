@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     LocationBaseRef,
     LoopBodyEffectRef,
+    LoopCaseRef,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
@@ -25,6 +26,7 @@ from scripts.function_tracer_pcode.model import (
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import build_pair_query
 from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
@@ -112,6 +114,23 @@ def _effect_aware_counted_loop_summary() -> LoopSummaryRef:
                     value_expr="value",
                     order_key=1,
                 ),
+            ),
+        ),
+    )
+
+
+def _path_sensitive_counted_loop_summary() -> LoopSummaryRef:
+    return LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(
+            LoopCaseRef(
+                path_conditions=("i_is_even",),
+                body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+                term_expr="i",
+                case_kind="accumulator_delta",
             ),
         ),
     )
@@ -208,6 +227,107 @@ def test_effect_aware_loop_summary_disables_exact_and_smt_shortcuts():
     assert smt_identity[3] == "effect_proof_required"
 
 
+def test_path_sensitive_loop_summary_disables_exact_and_smt_identity_shortcuts():
+    loop_case = LoopCaseRef(
+        path_conditions=("i_is_even",),
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+        term_expr="i",
+        case_kind="accumulator_delta",
+    )
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(loop_case,),
+    )
+    ref = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=True,
+        residue_cases=((1, 0, 1, 0),),
+        loop_summary=summary,
+    )
+    expr = Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [Expression.constant(0), Expression.constant(0), Expression.parameter("n")],
+        runtime_ref=ref,
+    )
+
+    assert summary.stable_key() is not None
+    assert summary.requires_path_proof() is True
+    assert summary.pairwise_exact_key() is None
+    assert ref.pairwise_exact_key() is None
+    smt_identity = _runtime_ref_smt_identity(expr, ref)
+    assert smt_identity[0] == "opaque_loop_summary_identity"
+    assert smt_identity[3] == "path_proof_required"
+
+
+def test_loop_summary_comparator_blocks_different_path_cases():
+    base = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(
+            LoopCaseRef(
+                path_conditions=("i_is_even",),
+                term_expr="i",
+                case_kind="accumulator_delta",
+            ),
+        ),
+    )
+    changed = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(
+            LoopCaseRef(
+                path_conditions=("i_is_odd",),
+                term_expr="i",
+                case_kind="accumulator_delta",
+            ),
+        ),
+    )
+
+    result = compare_loop_summaries(base, changed)
+
+    assert result.status == "incompatible"
+    assert result.blocks_shortcut() is True
+
+
+def test_pairwise_query_records_loop_summary_cases_as_smt_comments():
+    loop_case = LoopCaseRef(
+        path_conditions=("i_is_even",),
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", value_expr="acc+i"),
+        term_expr="i",
+        case_kind="accumulator_delta",
+    )
+    summary = LoopSummaryRef(
+        start_expr=0,
+        limit_expr="n",
+        step_expr=1,
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        cases=(loop_case,),
+    )
+    expr = _counted_loop_expr(summary)
+    return_case = _return_case_for_expr(expr)
+    render = lambda value: value.to_smt() if hasattr(value, "to_smt") else str(value)
+
+    query = build_pair_query(
+        {"header_lines": [], "return_size1": 32, "return_size2": 32},
+        return_case,
+        return_case,
+        render,
+        render,
+        "loop-case-comments",
+    )
+
+    assert "; Case1 loop summary cases: 1" in query
+    assert "loop_case[0] kind=accumulator_delta path=[i_is_even] term=i" in query
+
+
 def test_counted_loop_proof_does_not_bypass_effect_aware_summaries():
     left = _counted_loop_expr(_effect_aware_counted_loop_summary())
     right = _counted_loop_expr(_effect_aware_counted_loop_summary())
@@ -252,6 +372,40 @@ def test_intrinsic_runtime_values_equivalent_does_not_bypass_effect_loop_summari
         incompatible_right,
         left_case=_return_case_for_expr(incompatible_left),
         right_case=_return_case_for_expr(incompatible_right),
+    ) is False
+
+
+def test_counted_loop_proof_does_not_bypass_path_sensitive_summaries():
+    left = _counted_loop_expr(_path_sensitive_counted_loop_summary())
+    right = _counted_loop_expr(_path_sensitive_counted_loop_summary())
+    strategy = PairwiseStrategy(None, None)
+
+    assert strategy._counted_loop_values_are_provably_equivalent(
+        left,
+        right,
+        left_case=_return_case_for_expr(left),
+        right_case=_return_case_for_expr(right),
+    ) is False
+
+
+def test_intrinsic_runtime_values_equivalent_does_not_bypass_path_sensitive_summaries():
+    strategy = PairwiseStrategy(None, None)
+    path_left = _counted_loop_expr(_path_sensitive_counted_loop_summary())
+    path_right = _counted_loop_expr(_path_sensitive_counted_loop_summary())
+    mixed_left = _counted_loop_expr(_pure_counted_loop_summary())
+    mixed_right = _counted_loop_expr(_path_sensitive_counted_loop_summary())
+
+    assert strategy._intrinsic_runtime_values_equivalent(
+        path_left,
+        path_right,
+        left_case=_return_case_for_expr(path_left),
+        right_case=_return_case_for_expr(path_right),
+    ) is False
+    assert strategy._intrinsic_runtime_values_equivalent(
+        mixed_left,
+        mixed_right,
+        left_case=_return_case_for_expr(mixed_left),
+        right_case=_return_case_for_expr(mixed_right),
     ) is False
 
 

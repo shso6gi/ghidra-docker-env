@@ -832,6 +832,49 @@ class LoopTermDescriptorRef:
 
 
 @dataclass(frozen=True)
+class LoopCaseRef:
+    """Path-sensitive loop-body case used by Method-B loop summaries."""
+
+    path_conditions: Tuple[Any, ...] = ()
+    body_effect: Any = None
+    term_expr: Any = None
+    case_kind: str = "body_term"
+    source: str = "recurrence_summary"
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        path_keys = tuple(_loop_object_key(condition) for condition in self.path_conditions)
+        body_effect_key = _loop_object_key(self.body_effect)
+        term_key = _loop_object_key(self.term_expr)
+        if (
+            any(path_key is None for path_key in path_keys)
+            or body_effect_key is None
+            or term_key is None
+        ):
+            return None
+        return (
+            "loop_case",
+            self.case_kind,
+            path_keys,
+            body_effect_key,
+            term_key,
+            self.source,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_case",
+            "case_kind": self.case_kind,
+            "path_conditions": [
+                _loop_object_to_dict(condition)
+                for condition in self.path_conditions
+            ],
+            "body_effect": _loop_object_to_dict(self.body_effect),
+            "term_expr": _loop_object_to_dict(self.term_expr),
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
 class LoopSummaryRef:
     """Unified semantic loop summary shared by all recurrence summaries.
 
@@ -849,6 +892,7 @@ class LoopSummaryRef:
     witnesses: Tuple[Any, ...] = ()
     side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
     guard_constraints: Tuple[Any, ...] = ()
+    cases: Tuple[LoopCaseRef, ...] = ()
     loop_var_unit: str = "element_index"
     source: str = "recurrence_summary"
 
@@ -859,6 +903,7 @@ class LoopSummaryRef:
         seed_keys = tuple(_loop_object_key(term) for term in self.seed_terms)
         witness_keys = tuple(_loop_object_key(witness) for witness in self.witnesses)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        case_keys = tuple(case.stable_key() for case in self.cases)
         side_effect_key = self.side_effect_profile.stable_key()
         if (
             start_key is None
@@ -867,6 +912,7 @@ class LoopSummaryRef:
             or any(seed_key is None for seed_key in seed_keys)
             or any(witness_key is None for witness_key in witness_keys)
             or any(guard_key is None for guard_key in guard_keys)
+            or any(case_key is None for case_key in case_keys)
             or side_effect_key is None
         ):
             return None
@@ -881,17 +927,21 @@ class LoopSummaryRef:
             witness_keys,
             side_effect_key,
             guard_keys,
+            case_keys,
             self.source,
         )
 
     def requires_effect_proof(self) -> bool:
         return self.side_effect_profile.requires_effect_proof()
 
+    def requires_path_proof(self) -> bool:
+        return bool(self.cases)
+
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return None
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
-        if self.requires_effect_proof():
+        if self.requires_effect_proof() or self.requires_path_proof():
             return None
         return self.stable_key()
 
@@ -910,6 +960,7 @@ class LoopSummaryRef:
             "witnesses": [_loop_object_to_dict(witness) for witness in self.witnesses],
             "side_effect_profile": self.side_effect_profile.to_dict(),
             "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
+            "cases": [case.to_dict() for case in self.cases],
             "source": self.source,
         }
 
@@ -985,6 +1036,17 @@ def compare_loop_summaries(
         right_effect_key = right_profile.stable_key()
         if left_effect_key is not None and right_effect_key is not None and left_effect_key != right_effect_key:
             return LoopSummaryComparisonResult("incompatible", "loop body effects differ")
+    left_cases = tuple(getattr(left, "cases", ()) or ())
+    right_cases = tuple(getattr(right, "cases", ()) or ())
+    if len(left_cases) != len(right_cases):
+        return LoopSummaryComparisonResult("incompatible", "loop case counts differ")
+    if left_cases or right_cases:
+        left_case_keys = tuple(case.stable_key() for case in left_cases)
+        right_case_keys = tuple(case.stable_key() for case in right_cases)
+        if any(case_key is None for case_key in left_case_keys + right_case_keys):
+            return LoopSummaryComparisonResult("incompatible", "loop cases are unkeyable")
+        if left_case_keys != right_case_keys:
+            return LoopSummaryComparisonResult("incompatible", "loop cases differ")
     return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
 
 

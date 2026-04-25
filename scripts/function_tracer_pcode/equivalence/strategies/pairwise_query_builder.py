@@ -161,6 +161,8 @@ def build_pair_query(
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
+    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
     lines.extend(
         _build_value_inequality_section(
             case1.get_value_smt(
@@ -205,6 +207,8 @@ def build_normalized_inequality_query(
     lines.extend(base_ctx["header_lines"])
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
+    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
     return_size1 = base_ctx.get("return_size1", 32)
     return_size2 = base_ctx.get("return_size2", 32)
     value1_smt_norm = coerce_value_to_bitvec_width(
@@ -233,6 +237,39 @@ def build_normalized_inequality_query(
     lines.append("(check-sat)")
     lines.append("(get-model)")
     return "\n".join(lines)
+
+
+def _build_loop_summary_case_comments(expr, label: str) -> List[str]:
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    loop_summary = getattr(runtime_ref, "loop_summary", None)
+    cases = tuple(getattr(loop_summary, "cases", ()) or ())
+    if not cases:
+        return []
+    lines = [f"; {label} loop summary cases: {len(cases)}"]
+    for index, loop_case in enumerate(cases):
+        path_conditions = ", ".join(
+            _safe_loop_case_text(condition)
+            for condition in getattr(loop_case, "path_conditions", ()) or ()
+        ) or "<unconditional>"
+        term_expr = _safe_loop_case_text(getattr(loop_case, "term_expr", None))
+        lines.append(
+            f"; {label} loop_case[{index}] "
+            f"kind={getattr(loop_case, 'case_kind', 'unknown')} "
+            f"path=[{path_conditions}] term={term_expr}"
+        )
+    return lines
+
+
+def _safe_loop_case_text(value) -> str:
+    if value is None:
+        return "None"
+    to_string = getattr(value, "to_string", None)
+    if callable(to_string):
+        try:
+            return str(to_string())
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            pass
+    return str(value)
 
 
 def save_unknown_query(debug_print, query: str, pair_id: str, stage: str, output_dir: str) -> None:
