@@ -9,6 +9,12 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
+    LoopSideEffectProfileRef,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
+    READONLY_SUM_OPCODE,
+    ReadonlyReductionRef,
     ReturnInfo,
 )
 from conftest import resolve_mock_data_type
@@ -26,6 +32,44 @@ def _simple_analysis(func_name: str, param_name: str, size: int = 4) -> Function
                 value=Expression(ExpressionType.PARAMETER, name=param_name, size=size),
             )
         ],
+    )
+
+
+def _readonly_loop_summary_expr() -> Expression:
+    base = Expression.parameter("base", index=0, data_type="int *", size=8)
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=count,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
+        loop_var_unit="element_index",
+    )
+    return Expression.intrinsic(
+        "READONLY_SUM",
+        [base, count],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            loop_summary=loop_summary,
+        ),
+        opcode=READONLY_SUM_OPCODE,
     )
 
 
@@ -560,3 +604,41 @@ class TestBooleanReturnNormalization:
 
         assert "in_a1_hi_1" in base_ctx["constrained_fragments"]
         assert "(assert (= in_a1_hi_1 ((_ extract 63 32) ((_ sign_extend 32) param_2_1))))" in header_text
+
+    def test_build_base_context_records_loop_summary_smt_identity_notes(self):
+        builder = FormulaBuilder(debug=False)
+        analysis1 = FunctionReturnAnalysis(
+            function_name="loop_left",
+            entry_point="0x00401000",
+            parameters=[
+                {"name": "base", "size": 8, "index": 0, "is_signed": False, "data_type": "int *"},
+                {"name": "count", "size": 4, "index": 1, "is_signed": True, "data_type": "int"},
+            ],
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=_readonly_loop_summary_expr(),
+                )
+            ],
+            return_type="int",
+        )
+        analysis2 = FunctionReturnAnalysis(
+            function_name="loop_right",
+            entry_point="0x00402000",
+            parameters=analysis1.parameters,
+            returns=[
+                ReturnInfo(
+                    address="0x00402000",
+                    conditions=[],
+                    value=_readonly_loop_summary_expr(),
+                )
+            ],
+            return_type="int",
+        )
+
+        base_ctx = builder.build_base_context(analysis1, analysis2)
+        header_text = "\n".join(base_ctx["header_lines"])
+
+        assert "Loop summary SMT identities" in header_text
+        assert "loop-summary READONLY_SUM ReadonlyReductionRef method_b:" in header_text

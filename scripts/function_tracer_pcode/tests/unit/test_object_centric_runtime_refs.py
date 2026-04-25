@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from unittest.mock import Mock
+
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     post_state_read_expression_for_location,
@@ -7,9 +9,11 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     CallTargetRef,
+    Condition,
     DeferredCallInfo,
     CountedLoopSummaryRef,
     Expression,
+    FunctionReturnAnalysis,
     LocationBaseRef,
     LoopBodyEffectRef,
     LoopCaseRef,
@@ -205,6 +209,40 @@ def _return_case_for_expr(expr: Expression) -> ReturnCase:
     return ReturnCase(0, [], expr, ReturnInfo(address="0x1000", value=expr, conditions=[]))
 
 
+def _analysis_with_return(function_name: str, value: Expression, conditions=()) -> FunctionReturnAnalysis:
+    return FunctionReturnAnalysis(
+        function_name=function_name,
+        entry_point="0x1000",
+        parameters=[
+            {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "count", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=value,
+                conditions=list(conditions or ()),
+            )
+        ],
+        return_type="int",
+    )
+
+
+def _pairwise_strategy_for_full_path() -> PairwiseStrategy:
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy.formula_builder.build_base_context.return_value = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+    return strategy
+
+
 def test_loop_summary_method_b_key_normalizes_seed_compensated_suffix():
     full = _readonly_loop_summary(start=0)
     suffix = _readonly_loop_summary(
@@ -316,6 +354,119 @@ def test_pairwise_readonly_runtime_values_use_method_b_seed_compensation():
         left_case=_return_case_for_expr(full),
         right_case=_return_case_for_expr(suffix),
     ) is True
+
+
+def test_pairwise_full_path_prefers_method_b_loop_meaning_signature():
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        )
+    )
+    strategy = _pairwise_strategy_for_full_path()
+
+    result = strategy.check(
+        _analysis_with_return("full", full),
+        _analysis_with_return("suffix", suffix),
+    )
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_full_path_falls_back_unknown_for_unproven_loop_summary():
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix_with_gap = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        )
+    )
+    strategy = _pairwise_strategy_for_full_path()
+
+    result = strategy.check(
+        _analysis_with_return("full", full),
+        _analysis_with_return("suffix_gap", suffix_with_gap),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_full_path_recursively_falls_back_unknown_for_nested_unproven_loop_summary():
+    full = Expression.binary_op(
+        "INT_ADD",
+        _readonly_sum_expr(_readonly_loop_summary(start=0)),
+        Expression.parameter("bias", index=2, data_type="int", size=4),
+    )
+    suffix_with_gap = Expression.binary_op(
+        "INT_ADD",
+        _readonly_sum_expr(
+            _readonly_loop_summary(
+                start=3,
+                seed_terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ),
+            )
+        ),
+        Expression.parameter("bias", index=2, data_type="int", size=4),
+    )
+    strategy = _pairwise_strategy_for_full_path()
+
+    result = strategy.check(
+        _analysis_with_return("full", full),
+        _analysis_with_return("suffix_gap", suffix_with_gap),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_full_path_does_not_bypass_loop_guard_mismatch():
+    count = Expression.parameter("count", index=1, data_type="int", size=4)
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        )
+    )
+    full_guard = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), count))
+    suffix_guard = Condition(Expression.binary_op("INT_SLESS", Expression.constant(3, size=4), count))
+    strategy = _pairwise_strategy_for_full_path()
+
+    result = strategy.check(
+        _analysis_with_return("full", full, conditions=[full_guard]),
+        _analysis_with_return("suffix", suffix, conditions=[suffix_guard]),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    strategy.solver_runner.run_sequential.assert_not_called()
 
 
 def test_method_b_smt_identity_uses_seed_compensated_loop_summary():
@@ -600,6 +751,38 @@ def test_intrinsic_runtime_values_equivalent_does_not_bypass_path_sensitive_summ
         mixed_right,
         left_case=_return_case_for_expr(mixed_left),
         right_case=_return_case_for_expr(mixed_right),
+    ) is False
+
+
+def test_counted_loop_method_b_match_does_not_bypass_guard_mismatch():
+    strategy = PairwiseStrategy(None, None)
+    left = _counted_loop_expr(_pure_counted_loop_summary())
+    right = _counted_loop_expr(_pure_counted_loop_summary())
+    n = Expression.parameter("n", size=4)
+    left_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=4), n))],
+        left,
+        ReturnInfo(address="0x1000", value=left, conditions=[]),
+    )
+    right_case = ReturnCase(
+        0,
+        [Condition(Expression.binary_op("INT_SLESS", Expression.constant(1, size=4), n))],
+        right,
+        ReturnInfo(address="0x1004", value=right, conditions=[]),
+    )
+
+    assert strategy._intrinsic_runtime_values_equivalent(
+        left,
+        right,
+        left_case=left_case,
+        right_case=right_case,
+    ) is False
+    assert strategy._counted_loop_values_are_provably_equivalent(
+        left,
+        right,
+        left_case=left_case,
+        right_case=right_case,
     ) is False
 
 

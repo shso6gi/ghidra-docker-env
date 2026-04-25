@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """SMT式構築モジュール"""
 
+import hashlib
 from typing import List, Dict, Optional, Tuple, Set, Any
 
-from ...model import FunctionReturnAnalysis
+from ...model import FunctionReturnAnalysis, loop_summary_method_b_key
 from ...model.render_smt import (
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
@@ -306,6 +307,13 @@ class FormulaBuilder:
         if intrinsic_decls:
             lines.extend(self._build_intrinsic_smt_declarations(intrinsic_decls))
 
+        loop_summary_notes = self._collect_loop_summary_smt_notes(
+            analysis1,
+            analysis2,
+        )
+        if loop_summary_notes:
+            lines.extend(self._build_loop_summary_smt_notes(loop_summary_notes))
+
         semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
         if semantic_lines:
             lines.extend(semantic_lines)
@@ -546,6 +554,19 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
+    def _build_loop_summary_smt_notes(
+        self,
+        notes: List[str],
+    ) -> List[str]:
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Loop summary SMT identities")
+        lines.append("; Method-B identities are canonicalized before declaration sharing")
+        lines.append("; " + "-" * 40)
+        lines.extend(notes)
+        lines.append("")
+        return lines
+
     def _collect_runtime_unknown_declarations(
         self,
         *analyses: FunctionReturnAnalysis,
@@ -618,6 +639,84 @@ class FormulaBuilder:
                     extend_from_conditions(getattr(effect, "conditions", None))
 
         return declarations
+
+    def _collect_loop_summary_smt_notes(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[str]:
+        notes: List[str] = []
+        seen = set()
+
+        def extend_from_expression(expr) -> None:
+            if expr is None or getattr(expr, "expr_type", None) is None:
+                return
+            expr_kind = expr.expr_type.__class__
+            if expr.expr_type == expr_kind.INTRINSIC:
+                runtime_ref = getattr(expr, "runtime_ref", None)
+                loop_summary = getattr(runtime_ref, "loop_summary", None)
+                if loop_summary is not None:
+                    note = self._loop_summary_smt_note(expr, runtime_ref, loop_summary)
+                    if note not in seen:
+                        seen.add(note)
+                        notes.append(note)
+            if expr.expr_type == expr_kind.PHI and getattr(expr, "value", None):
+                for condition, value in expr.value:
+                    if condition is not None:
+                        extend_from_expression(getattr(condition, "expression", None))
+                    extend_from_expression(value)
+                return
+            for operand in getattr(expr, "operands", []) or []:
+                extend_from_expression(operand)
+
+        def extend_from_conditions(conditions) -> None:
+            for condition in conditions or []:
+                extend_from_expression(getattr(condition, "expression", None))
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for ret in getattr(analysis, "returns", []) or []:
+                extend_from_expression(getattr(ret, "value", None))
+                extend_from_conditions(getattr(ret, "conditions", None))
+
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                extend_from_expression(getattr(effect_summary, "synthetic_expr", None))
+                for effect in getattr(effect_summary, "effects", []) or []:
+                    extend_from_expression(getattr(effect, "value", None))
+                    extend_from_conditions(getattr(effect, "conditions", None))
+
+        return notes
+
+    def _loop_summary_smt_note(
+        self,
+        expr,
+        runtime_ref,
+        loop_summary,
+    ) -> str:
+        method_b_key = loop_summary_method_b_key(loop_summary)
+        if method_b_key is not None:
+            digest = hashlib.sha1(repr(method_b_key).encode("utf-8")).hexdigest()[:12]
+            status = f"method_b:{digest}"
+        else:
+            requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+            requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+            try:
+                stable_key = getattr(loop_summary, "stable_key", lambda: None)()
+            except (AttributeError, TypeError, ValueError):
+                stable_key = None
+            if callable(requires_effect_proof) and requires_effect_proof():
+                status = "opaque:effect_proof_required"
+            elif callable(requires_path_proof) and requires_path_proof():
+                status = "opaque:path_proof_required"
+            elif stable_key is None:
+                status = "opaque:unkeyable"
+            else:
+                digest = hashlib.sha1(repr(stable_key).encode("utf-8")).hexdigest()[:12]
+                status = f"stable:{digest}"
+        intrinsic_name = getattr(expr, "name", None) or "INTRINSIC"
+        runtime_name = type(runtime_ref).__qualname__
+        return f"; loop-summary {intrinsic_name} {runtime_name} {status}"
     
     def _build_param_constraints_section(
         self,

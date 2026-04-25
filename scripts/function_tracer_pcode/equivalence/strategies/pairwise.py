@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Pairwise戦略（分岐ペア分割方式・二段階チェック対応）"""
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 import time
 
@@ -57,6 +58,13 @@ from ..normalize import (
 from ..param_semantics import infer_parameter_semantics
 from ..semantic_width import normalize_analysis_semantic_width
 from ..debug_trace import NormalizationRuleApplication
+
+
+@dataclass(frozen=True)
+class _RuntimeShortcutDecision:
+    equivalent: bool
+    requires_guard_equivalence: bool
+    reason: str = "unknown"
 
 
 class PairwiseStrategy(CheckStrategy):
@@ -230,9 +238,17 @@ class PairwiseStrategy(CheckStrategy):
                     unsat_count += 1
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(
-                            f"  Pair {pair_id}: object-centric readonly reduction match -> UNSAT "
+                            f"  Pair {pair_id}: object-centric runtime summary match -> UNSAT "
                             f"({unsat_count}/{total_pairs})"
                         )
+                    continue
+                loop_fallback_reason = self._case_pair_loop_summary_safe_fallback_reason(case1, case2)
+                if loop_fallback_reason is not None:
+                    unknown_count += 1
+                    self._debug_print(
+                        f"  Pair {pair_id}: loop summary requires semantic proof "
+                        f"({loop_fallback_reason}) -> UNKNOWN"
+                    )
                     continue
                 if self._case_contains_unresolved_expression(
                     case1,
@@ -429,11 +445,11 @@ class PairwiseStrategy(CheckStrategy):
             return False
         if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
             return False
-        refs_equivalent, requires_guard_equivalence = self._runtime_refs_share_shortcut_semantics(
+        shortcut_decision = self._runtime_refs_shortcut_decision(
             getattr(left, "runtime_ref", None),
             getattr(right, "runtime_ref", None),
         )
-        if not refs_equivalent:
+        if not shortcut_decision.equivalent:
             if self._counted_loop_values_are_provably_equivalent(
                 left,
                 right,
@@ -442,18 +458,11 @@ class PairwiseStrategy(CheckStrategy):
             ):
                 return True
             return False
-        if requires_guard_equivalence and (
+        if shortcut_decision.requires_guard_equivalence and (
             left_case is None
             or right_case is None
             or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
         ):
-            if self._counted_loop_values_are_provably_equivalent(
-                left,
-                right,
-                left_case=left_case,
-                right_case=right_case,
-            ):
-                return True
             return False
         if len(left.operands) != len(right.operands):
             return False
@@ -463,8 +472,12 @@ class PairwiseStrategy(CheckStrategy):
         )
 
     def _runtime_refs_share_shortcut_semantics(self, left_ref, right_ref) -> tuple[bool, bool]:
+        decision = self._runtime_refs_shortcut_decision(left_ref, right_ref)
+        return decision.equivalent, decision.requires_guard_equivalence
+
+    def _runtime_refs_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         if left_ref is None or right_ref is None:
-            return False, False
+            return _RuntimeShortcutDecision(False, False, reason="missing_runtime_ref")
 
         left_loop_summary = getattr(left_ref, "loop_summary", None)
         right_loop_summary = getattr(right_ref, "loop_summary", None)
@@ -472,10 +485,50 @@ class PairwiseStrategy(CheckStrategy):
             loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
             decisive = loop_result.is_equivalent()
             if decisive is not None:
-                return bool(decisive), True
+                return _RuntimeShortcutDecision(
+                    bool(decisive),
+                    True,
+                    reason=f"loop_summary_{loop_result.status}",
+                )
             if loop_result.blocks_shortcut():
-                return False, True
+                return _RuntimeShortcutDecision(
+                    False,
+                    True,
+                    reason=f"loop_summary_{loop_result.status}",
+                )
+            exact_decision = self._runtime_refs_exact_shortcut_decision(
+                left_ref,
+                right_ref,
+                requires_guard_equivalence=True,
+            )
+            if exact_decision.equivalent:
+                return exact_decision
+            return _RuntimeShortcutDecision(
+                False,
+                True,
+                reason="loop_summary_unproven",
+            )
 
+        exact_decision = self._runtime_refs_exact_shortcut_decision(
+            left_ref,
+            right_ref,
+            requires_guard_equivalence=False,
+        )
+        if exact_decision.equivalent:
+            return exact_decision
+
+        semantic_decision = self._runtime_refs_semantic_shortcut_decision(left_ref, right_ref)
+        if semantic_decision.equivalent:
+            return semantic_decision
+        return _RuntimeShortcutDecision(False, False, reason="no_shortcut")
+
+    def _runtime_refs_exact_shortcut_decision(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        requires_guard_equivalence: bool,
+    ) -> _RuntimeShortcutDecision:
         left_exact_key_fn = getattr(left_ref, "pairwise_exact_key", None)
         right_exact_key_fn = getattr(right_ref, "pairwise_exact_key", None)
         if callable(left_exact_key_fn) and callable(right_exact_key_fn):
@@ -483,30 +536,139 @@ class PairwiseStrategy(CheckStrategy):
                 left_exact_key = left_exact_key_fn()
                 right_exact_key = right_exact_key_fn()
                 if left_exact_key is not None and right_exact_key is not None and left_exact_key == right_exact_key:
-                    return True, False
-            except Exception:
-                pass
+                    return _RuntimeShortcutDecision(
+                        True,
+                        requires_guard_equivalence,
+                        reason="exact_runtime_key",
+                    )
+            except (AttributeError, TypeError, ValueError):
+                return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="exact_key_unavailable")
+        return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="exact_key_mismatch")
 
+    def _runtime_refs_semantic_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
         right_semantic_key_fn = getattr(right_ref, "pairwise_semantic_key", None)
         if not callable(left_semantic_key_fn) or not callable(right_semantic_key_fn):
-            return False, False
+            return _RuntimeShortcutDecision(False, False, reason="semantic_key_missing")
         try:
             left_semantic_key = left_semantic_key_fn()
             right_semantic_key = right_semantic_key_fn()
-        except Exception:
-            return False, False
+        except (AttributeError, TypeError, ValueError):
+            return _RuntimeShortcutDecision(False, False, reason="semantic_key_unavailable")
         if left_semantic_key is None or right_semantic_key is None:
-            return False, False
+            return _RuntimeShortcutDecision(False, False, reason="semantic_key_none")
         if left_semantic_key != right_semantic_key:
-            return False, False
+            return _RuntimeShortcutDecision(False, False, reason="semantic_key_mismatch")
 
         left_guard_fn = getattr(left_ref, "pairwise_requires_guard_equivalence", None)
         right_guard_fn = getattr(right_ref, "pairwise_requires_guard_equivalence", None)
         requires_guard_equivalence = bool(callable(left_guard_fn) and left_guard_fn()) or bool(
             callable(right_guard_fn) and right_guard_fn()
         )
-        return True, requires_guard_equivalence
+        return _RuntimeShortcutDecision(
+            True,
+            requires_guard_equivalence,
+            reason="semantic_runtime_key",
+        )
+
+    def _case_pair_loop_summary_safe_fallback_reason(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> Optional[str]:
+        return self._loop_summary_safe_fallback_reason_for_values(
+            case1.value_expr,
+            case2.value_expr,
+            left_case=case1,
+            right_case=case2,
+        )
+
+    def _loop_summary_safe_fallback_reason_for_values(
+        self,
+        left: Optional[Expression],
+        right: Optional[Expression],
+        *,
+        left_case: Optional[ReturnCase],
+        right_case: Optional[ReturnCase],
+    ) -> Optional[str]:
+        if left is None or right is None:
+            return None
+        left_has_loop = self._expression_contains_loop_summary_runtime(left)
+        right_has_loop = self._expression_contains_loop_summary_runtime(right)
+        if not left_has_loop and not right_has_loop:
+            return None
+        if left_has_loop != right_has_loop:
+            return "loop_summary_shape_mismatch"
+        if left.expr_type != right.expr_type:
+            return "loop_summary_shape_mismatch"
+
+        if left.expr_type == ExpressionType.INTRINSIC:
+            if getattr(left, "opcode", None) != getattr(right, "opcode", None):
+                return "loop_summary_intrinsic_mismatch"
+            if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
+                return "loop_summary_intrinsic_mismatch"
+            left_ref = getattr(left, "runtime_ref", None)
+            right_ref = getattr(right, "runtime_ref", None)
+            if (
+                getattr(left_ref, "loop_summary", None) is not None
+                or getattr(right_ref, "loop_summary", None) is not None
+            ):
+                decision = self._runtime_refs_shortcut_decision(left_ref, right_ref)
+                if not decision.equivalent:
+                    return decision.reason
+                if decision.requires_guard_equivalence and (
+                    left_case is None
+                    or right_case is None
+                    or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
+                ):
+                    return "loop_summary_guard_mismatch"
+            left_operands = list(getattr(left, "operands", []) or [])
+            right_operands = list(getattr(right, "operands", []) or [])
+            if len(left_operands) != len(right_operands):
+                return "loop_summary_operand_mismatch"
+            for left_operand, right_operand in zip(left_operands, right_operands):
+                reason = self._loop_summary_safe_fallback_reason_for_values(
+                    left_operand,
+                    right_operand,
+                    left_case=left_case,
+                    right_case=right_case,
+                )
+                if reason is not None:
+                    return reason
+            return None
+
+        left_operands = list(getattr(left, "operands", []) or [])
+        right_operands = list(getattr(right, "operands", []) or [])
+        if len(left_operands) != len(right_operands):
+            return "loop_summary_shape_mismatch"
+        for left_operand, right_operand in zip(left_operands, right_operands):
+            reason = self._loop_summary_safe_fallback_reason_for_values(
+                left_operand,
+                right_operand,
+                left_case=left_case,
+                right_case=right_case,
+            )
+            if reason is not None:
+                return reason
+        return None
+
+    def _expression_contains_loop_summary_runtime(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if getattr(runtime_ref, "loop_summary", None) is not None:
+            return True
+        if expr.expr_type == ExpressionType.PHI and getattr(expr, "value", None):
+            for condition, value in expr.value:
+                if condition is not None and self._expression_contains_loop_summary_runtime(condition.expression):
+                    return True
+                if self._expression_contains_loop_summary_runtime(value):
+                    return True
+            return False
+        return any(
+            self._expression_contains_loop_summary_runtime(operand)
+            for operand in getattr(expr, "operands", []) or []
+        )
 
     def _counted_loop_values_are_provably_equivalent(
         self,
@@ -528,6 +690,11 @@ class PairwiseStrategy(CheckStrategy):
         left_ref = getattr(left, "runtime_ref", None)
         right_ref = getattr(right, "runtime_ref", None)
         if not self._counted_loop_refs_allow_value_proof(left_ref, right_ref):
+            return False
+        if (
+            getattr(left_ref, "loop_summary", None) is not None
+            or getattr(right_ref, "loop_summary", None) is not None
+        ) and not self._cases_have_equivalent_summary_conditions(left_case, right_case):
             return False
         if not self._counted_loop_refs_match_ignoring_signedness(left_ref, right_ref):
             return False
@@ -573,7 +740,7 @@ class PairwiseStrategy(CheckStrategy):
         loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
         if loop_result.blocks_shortcut():
             return False
-        return True
+        return loop_result.is_equivalent() is True
 
     def _counted_loop_refs_match_ignoring_signedness(self, left_ref, right_ref) -> bool:
         if left_ref is None or right_ref is None:
