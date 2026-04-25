@@ -1007,6 +1007,11 @@ def compare_loop_summaries(
 
     if left is None or right is None:
         return LoopSummaryComparisonResult("unknown", "missing loop summary")
+    left_method_b_key = loop_summary_method_b_key(left)
+    right_method_b_key = loop_summary_method_b_key(right)
+    if left_method_b_key is not None and right_method_b_key is not None:
+        if left_method_b_key == right_method_b_key:
+            return LoopSummaryComparisonResult("equivalent", "loop summaries match by seed compensation")
     left_profile = getattr(left, "side_effect_profile", None)
     right_profile = getattr(right, "side_effect_profile", None)
     if left_profile is not None and right_profile is not None:
@@ -1048,6 +1053,102 @@ def compare_loop_summaries(
         if left_case_keys != right_case_keys:
             return LoopSummaryComparisonResult("incompatible", "loop cases differ")
     return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
+
+
+def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
+    """Canonical Method-B key for pure loop summaries.
+
+    The key normalizes a suffix loop whose ``seed_terms`` exactly cover the
+    omitted prefix back to the earliest represented start.  This is not a broad
+    semantic proof; it is a deterministic object-centric identity for the
+    current pure, path-insensitive loop-summary subset.
+    """
+
+    if summary is None:
+        return None
+    requires_effect_proof = getattr(summary, "requires_effect_proof", None)
+    if callable(requires_effect_proof) and requires_effect_proof():
+        return None
+    requires_path_proof = getattr(summary, "requires_path_proof", None)
+    if callable(requires_path_proof) and requires_path_proof():
+        return None
+    start_value = _loop_summary_int_constant(getattr(summary, "start_expr", None))
+    step_value = _loop_summary_int_constant(getattr(summary, "step_expr", None))
+    if start_value is None or step_value is None or step_value <= 0:
+        return None
+
+    term_descriptor = getattr(summary, "term_descriptor", None)
+    if term_descriptor is None:
+        return None
+    if (
+        getattr(term_descriptor, "kind", None) == "memory_load"
+        and getattr(term_descriptor, "location_base_ref", None) is None
+    ):
+        return None
+    term_key = term_descriptor.stable_key()
+    limit_key = _loop_object_key(getattr(summary, "limit_expr", None))
+    side_effect_key = summary.side_effect_profile.stable_key()
+    if limit_key is None or side_effect_key is None:
+        return None
+
+    canonical_start = int(start_value)
+    remaining_seed_terms = list(getattr(summary, "seed_terms", ()) or ())
+    while remaining_seed_terms:
+        previous_index = canonical_start - int(step_value)
+        expected_term = _loop_summary_term_at_index(summary, previous_index)
+        if expected_term is None:
+            break
+        expected_key = _loop_object_key(expected_term)
+        actual_key = _loop_object_key(remaining_seed_terms[-1])
+        if expected_key is None or actual_key is None or expected_key != actual_key:
+            break
+        remaining_seed_terms.pop()
+        canonical_start = previous_index
+
+    seed_keys = tuple(_loop_object_key(term) for term in remaining_seed_terms)
+    if any(seed_key is None for seed_key in seed_keys):
+        return None
+    return (
+        "loop_summary_method_b",
+        getattr(summary, "loop_var_unit", None),
+        int(canonical_start),
+        limit_key,
+        int(step_value),
+        term_key,
+        seed_keys,
+        side_effect_key,
+    )
+
+
+def _loop_summary_int_constant(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    expr_type = getattr(value, "expr_type", None)
+    if getattr(expr_type, "name", None) == "CONSTANT":
+        try:
+            return int(getattr(value, "value"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _loop_summary_term_at_index(summary: LoopSummaryRef, index: int) -> Optional[Any]:
+    term_descriptor = getattr(summary, "term_descriptor", None)
+    if term_descriptor is None:
+        return None
+    if getattr(term_descriptor, "kind", None) != "memory_load":
+        return None
+    element_size = int(getattr(term_descriptor, "element_size", 0) or 0)
+    stride = int(getattr(term_descriptor, "stride", 0) or 0)
+    if element_size <= 0 or stride <= 0:
+        return None
+    start_offset = int(getattr(term_descriptor, "start_offset", 0) or 0)
+    return ReadonlyReductionTermRef(
+        byte_offset=start_offset + int(index) * stride,
+        access_size=element_size,
+    )
 
 
 @dataclass(frozen=True)

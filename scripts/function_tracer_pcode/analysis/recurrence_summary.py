@@ -3446,6 +3446,7 @@ class StructuralRecurrenceSummarizer:
             loop_shape,
             result_size=result_size,
         )
+        seed_terms = self._readonly_loop_seed_terms_from_shape(loop_shape)
         pointer_base_ref = LocationBaseRef.parameter(
             pointer_param.get("name", "ptr"),
             index=pointer_param.get("index"),
@@ -3461,6 +3462,7 @@ class StructuralRecurrenceSummarizer:
             loop_shape=loop_shape,
             result_size=result_size,
             semantic_witnesses=semantic_witnesses,
+            seed_terms=seed_terms,
             guard_constraints=positive_conditions,
         )
         reduction_ref = ReadonlyReductionRef(
@@ -3511,7 +3513,8 @@ class StructuralRecurrenceSummarizer:
         loop_shape: Dict[str, int],
         result_size: int,
         semantic_witnesses: Sequence[ReadonlyReductionWitness],
-        guard_constraints: Sequence[Condition],
+        seed_terms: Sequence[ReadonlyReductionTermRef] = (),
+        guard_constraints: Sequence[Condition] = (),
     ) -> Optional[LoopSummaryRef]:
         stride = int(loop_shape.get("stride", 0) or 0)
         start_offset = int(loop_shape.get("start_offset", 0) or 0)
@@ -3545,7 +3548,7 @@ class StructuralRecurrenceSummarizer:
                 element_size=element_size,
                 result_size=result_size,
             ),
-            seed_terms=(),
+            seed_terms=tuple(seed_terms or ()),
             witnesses=tuple(semantic_witnesses or ()),
             side_effect_profile=LoopSideEffectProfileRef(
                 profile="pure_memory_read",
@@ -3554,6 +3557,20 @@ class StructuralRecurrenceSummarizer:
             guard_constraints=tuple(guard_constraints or ()),
             loop_var_unit="element_index",
         )
+
+    def _readonly_loop_seed_terms_from_shape(
+        self,
+        loop_shape: Optional[Dict[str, object]],
+    ) -> Tuple[ReadonlyReductionTermRef, ...]:
+        if not loop_shape:
+            return ()
+        seed_terms = loop_shape.get("seed_terms")
+        if seed_terms is None:
+            return ()
+        seed_tuple = tuple(seed_terms)
+        if any(not isinstance(term, ReadonlyReductionTermRef) for term in seed_tuple):
+            return ()
+        return seed_tuple
 
     def _infer_readonly_pointer_reduction_parameters(
         self,
@@ -4168,8 +4185,6 @@ class StructuralRecurrenceSummarizer:
         input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
         for init_index in range(input_count):
             init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
-            if self._varnode_constant_value(init_varnode) != 0:
-                continue
             for back_index in range(input_count):
                 if back_index == init_index:
                     continue
@@ -4204,6 +4219,13 @@ class StructuralRecurrenceSummarizer:
                     for signature in load_progressions[1:]
                 ):
                     continue
+                seed_terms = self._extract_readonly_accumulator_seed_terms(
+                    init_varnode,
+                    pointer_param,
+                    first,
+                )
+                if seed_terms is None:
+                    continue
                 return {
                     "stride": int(first["stride"]),
                     "element_size": int(first["element_size"]),
@@ -4211,8 +4233,58 @@ class StructuralRecurrenceSummarizer:
                     "start_index": int(first.get("start_index", 0) or 0),
                     "index_step": int(first.get("index_step", 1) or 1),
                     "index_scale": int(first.get("index_scale", first["stride"]) or first["stride"]),
+                    "seed_terms": tuple(seed_terms),
                 }
         return None
+
+    def _extract_readonly_accumulator_seed_terms(
+        self,
+        init_varnode,
+        pointer_param: dict,
+        loop_shape: Dict[str, int],
+    ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        if self._varnode_constant_value(init_varnode) == 0:
+            return ()
+
+        expected = self._expected_readonly_prefix_seed_terms(loop_shape)
+        if not expected:
+            return None
+
+        init_expr = self._build_pcode_expression(init_varnode, placeholders={})
+        if init_expr is None:
+            init_expr = self._trace_varnode_expression(init_varnode)
+        terms = self._extract_readonly_reduction_terms(
+            init_expr,
+            [pointer_param],
+            pointer_param,
+        )
+        if terms is None:
+            return None
+        seed_terms = tuple(terms)
+        if tuple(term.stable_key() for term in seed_terms) != tuple(term.stable_key() for term in expected):
+            return None
+        return seed_terms
+
+    def _expected_readonly_prefix_seed_terms(
+        self,
+        loop_shape: Dict[str, int],
+    ) -> Tuple[ReadonlyReductionTermRef, ...]:
+        start_index = int(loop_shape.get("start_index", 0) or 0)
+        index_step = int(loop_shape.get("index_step", 1) or 1)
+        index_scale = int(loop_shape.get("index_scale", loop_shape.get("stride", 0)) or 0)
+        element_size = int(loop_shape.get("element_size", 0) or 0)
+        if start_index <= 0 or index_step <= 0 or index_scale <= 0 or element_size <= 0:
+            return ()
+        first_index = start_index % index_step
+        if first_index == start_index:
+            return ()
+        return tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=int(index * index_scale),
+                access_size=element_size,
+            )
+            for index in range(first_index, start_index, index_step)
+        )
 
     def _collect_load_progressions_from_varnode(
         self,

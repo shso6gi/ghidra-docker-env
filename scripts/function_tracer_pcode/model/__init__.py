@@ -30,6 +30,7 @@ from .runtime_refs import (
     ReadonlyReductionWitness,
     UnknownValueRef,
     compare_loop_summaries,
+    loop_summary_method_b_key,
 )
 from .intrinsics import (
     COUNTED_LOOP_SUM_OPCODE,
@@ -94,6 +95,7 @@ __all__ = [
     "ReadonlyReductionWitness",
     "UnknownValueRef",
     "compare_loop_summaries",
+    "loop_summary_method_b_key",
     "COUNTED_LOOP_SUM_OPCODE",
     "READONLY_SUM_OPCODE",
     "PTRADD_OPCODE",

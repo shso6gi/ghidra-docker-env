@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionRef,
     ReadonlyReductionWitness,
     UnknownValueRef,
+    loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.equivalence.formula.returns import expression_has_unresolved_value
 from scripts.function_tracer_pcode.model.render_smt import expression_to_smt
@@ -3294,6 +3295,195 @@ def test_readonly_reduction_summary_preserves_nonzero_start_offset_object_centri
         ),
     )
     assert [cond.to_string() for cond in positive_case.conditions] == ["(param_1 != 0)", "(1 < param_2)"]
+
+
+def test_readonly_reduction_summary_records_prefix_seed_terms_from_accumulator_init():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    ptr_param = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count_param = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_EQUAL", ptr_param, Expression.constant(0, size=8))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_mem("param_1", 0),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESSEQUAL", count_param, _const(1)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.unknown("phi_circular"),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESS", _const(1), count_param),
+                ],
+            ),
+        ],
+    )
+
+    ptr_varnode = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    one32 = _FakeVarnode("one32", size=4, expr=Expression.constant(1, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    idx_add_op = _FakePcodeOp("INT_ADD", [idx_phi, one32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [one32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_varnode, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    acc_seed = _FakeVarnode("acc_seed", size=4, expr=_mem("param_1", 0))
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [acc_seed, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_add_op, idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("ptr_sum_window"),
+        high_function,
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "readonly_pointer_reduction_summary"
+    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    runtime_ref = positive_case.value.runtime_ref
+    loop_summary = runtime_ref.loop_summary
+    assert loop_summary.seed_terms == (ReadonlyReductionTermRef(byte_offset=0, access_size=4),)
+
+    full_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=loop_summary.limit_expr,
+        step_expr=loop_summary.step_expr,
+        term_descriptor=loop_summary.term_descriptor,
+        side_effect_profile=loop_summary.side_effect_profile,
+        loop_var_unit=loop_summary.loop_var_unit,
+    )
+    assert loop_summary_method_b_key(loop_summary) == loop_summary_method_b_key(full_summary)
+
+
+def test_readonly_reduction_summary_records_non_unit_step_prefix_seed_terms():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    ptr_param = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count_param = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    analysis = create_mock_analysis(
+        "ptr_sum_window",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[_cond("INT_EQUAL", ptr_param, Expression.constant(0, size=8))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_mem("param_1", 4),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESSEQUAL", count_param, _const(3)),
+                ],
+            ),
+            ReturnInfo(
+                address="0x1008",
+                value=Expression.unknown("phi_circular"),
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_param, Expression.constant(0, size=8)),
+                    _cond("INT_SLESS", _const(3), count_param),
+                ],
+            ),
+        ],
+    )
+
+    ptr_varnode = _FakeVarnode(
+        "param_1",
+        size=8,
+        expr=Expression.parameter("param_1", index=0, data_type="int *", size=8),
+    )
+    two32 = _FakeVarnode("two32", size=4, expr=Expression.constant(2, 4))
+    three32 = _FakeVarnode("three32", size=4, expr=Expression.constant(3, 4))
+    four64 = _FakeVarnode("four64", size=8, expr=Expression.constant(4, 8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, 8))
+
+    idx_high = _FakeHighVar("idx")
+    idx_phi = _FakeVarnode("idx_phi", size=4, high=idx_high)
+    idx_next = _FakeVarnode("idx_next", size=4)
+    idx_add_op = _FakePcodeOp("INT_ADD", [idx_phi, two32], idx_next)
+    idx_phi_op = _FakePcodeOp("MULTIEQUAL", [three32, idx_next], idx_phi)
+
+    addr = _FakeVarnode("addr", size=8)
+    ptradd_op = _FakePcodeOp("PTRADD", [ptr_varnode, idx_phi, four64], addr)
+    load_value = _FakeVarnode("load_value", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, addr], load_value)
+
+    acc_high = _FakeHighVar("acc")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_next = _FakeVarnode("acc_next", size=4)
+    acc_seed = _FakeVarnode("acc_seed", size=4, expr=_mem("param_1", 4))
+    acc_add_op = _FakePcodeOp("INT_ADD", [acc_phi, load_value], acc_next)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [acc_seed, acc_next], acc_phi)
+
+    high_function = _FakeHighFunction([idx_add_op, idx_phi_op, ptradd_op, load_op, acc_add_op, acc_phi_op])
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("ptr_sum_window"),
+        high_function,
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "readonly_pointer_reduction_summary"
+    positive_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    runtime_ref = positive_case.value.runtime_ref
+    loop_summary = runtime_ref.loop_summary
+    assert runtime_ref.start_offset == 12
+    assert runtime_ref.stride == 8
+    assert loop_summary.start_expr.equals(Expression.constant(3, size=4))
+    assert loop_summary.step_expr.equals(Expression.constant(2, size=4))
+    assert loop_summary.seed_terms == (ReadonlyReductionTermRef(byte_offset=4, access_size=4),)
+
+    full_summary = LoopSummaryRef(
+        start_expr=Expression.constant(1, size=4),
+        limit_expr=loop_summary.limit_expr,
+        step_expr=loop_summary.step_expr,
+        term_descriptor=loop_summary.term_descriptor,
+        side_effect_profile=loop_summary.side_effect_profile,
+        loop_var_unit=loop_summary.loop_var_unit,
+    )
+    assert loop_summary_method_b_key(loop_summary) == loop_summary_method_b_key(full_summary)
 
 
 def test_structural_recurrence_summarizer_infers_pointer_parameter_object_centrically():

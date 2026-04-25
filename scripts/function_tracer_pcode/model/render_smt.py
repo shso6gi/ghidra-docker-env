@@ -20,6 +20,7 @@ from .runtime_refs import (
     PostStateReadRef,
     PostStateValueRef,
     ReadonlyReductionRef,
+    loop_summary_method_b_key,
 )
 
 
@@ -541,12 +542,10 @@ def _readonly_reduction_ref(expr) -> Optional[ReadonlyReductionRef]:
 def _runtime_ref_smt_identity(expr, runtime_ref):
     loop_summary = getattr(runtime_ref, "loop_summary", None)
     if loop_summary is not None:
-        loop_key = loop_summary.stable_key()
         requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
         requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
         if (
-            loop_key is None
-            or (callable(requires_effect_proof) and requires_effect_proof())
+            (callable(requires_effect_proof) and requires_effect_proof())
             or (callable(requires_path_proof) and requires_path_proof())
         ):
             return (
@@ -554,12 +553,29 @@ def _runtime_ref_smt_identity(expr, runtime_ref):
                 type(runtime_ref).__module__,
                 type(runtime_ref).__qualname__,
                 (
-                    "unkeyable"
-                    if loop_key is None
-                    else "effect_proof_required"
+                    "effect_proof_required"
                     if callable(requires_effect_proof) and requires_effect_proof()
                     else "path_proof_required"
                 ),
+                id(runtime_ref),
+                id(loop_summary),
+                id(expr),
+            )
+        method_b_key = loop_summary_method_b_key(loop_summary)
+        if method_b_key is not None:
+            return (
+                "loop_summary_method_b_runtime",
+                type(runtime_ref).__module__,
+                type(runtime_ref).__qualname__,
+                method_b_key,
+            )
+        loop_key = loop_summary.stable_key()
+        if loop_key is None:
+            return (
+                "opaque_loop_summary_identity",
+                type(runtime_ref).__module__,
+                type(runtime_ref).__qualname__,
+                "unkeyable",
                 id(runtime_ref),
                 id(loop_summary),
                 id(expr),

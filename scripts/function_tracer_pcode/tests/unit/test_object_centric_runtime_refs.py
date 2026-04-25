@@ -19,10 +19,12 @@ from scripts.function_tracer_pcode.model import (
     PostStateReadRef,
     PostStateSnapshotRef,
     ReadonlyReductionRef,
+    ReadonlyReductionTermRef,
     ReturnInfo,
     StorageInfo,
     coerce_call_target_ref,
     compare_loop_summaries,
+    loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
@@ -136,6 +138,53 @@ def _path_sensitive_counted_loop_summary() -> LoopSummaryRef:
     )
 
 
+def _readonly_loop_summary(
+    *,
+    start: int,
+    seed_terms=(),
+    step: int = 1,
+) -> LoopSummaryRef:
+    return LoopSummaryRef(
+        start_expr=Expression.constant(start, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(step, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        seed_terms=tuple(seed_terms or ()),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
+        loop_var_unit="element_index",
+    )
+
+
+def _readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
+    return Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("base", index=0, data_type="int *", size=8),
+            Expression.parameter("count", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            loop_summary=loop_summary,
+        ),
+    )
+
+
 def _counted_loop_expr(loop_summary: LoopSummaryRef) -> Expression:
     return Expression.intrinsic(
         "COUNTED_LOOP_SUM",
@@ -154,6 +203,151 @@ def _counted_loop_expr(loop_summary: LoopSummaryRef) -> Expression:
 
 def _return_case_for_expr(expr: Expression) -> ReturnCase:
     return ReturnCase(0, [], expr, ReturnInfo(address="0x1000", value=expr, conditions=[]))
+
+
+def test_loop_summary_method_b_key_normalizes_seed_compensated_suffix():
+    full = _readonly_loop_summary(start=0)
+    suffix = _readonly_loop_summary(
+        start=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+
+    assert loop_summary_method_b_key(full) == loop_summary_method_b_key(suffix)
+    result = compare_loop_summaries(full, suffix)
+    assert result.status == "equivalent"
+    assert result.is_equivalent() is True
+
+
+def test_loop_summary_method_b_key_requires_seed_to_cover_omitted_prefix():
+    full = _readonly_loop_summary(start=0)
+    suffix_with_gap = _readonly_loop_summary(
+        start=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ),
+    )
+
+    assert loop_summary_method_b_key(full) != loop_summary_method_b_key(suffix_with_gap)
+    result = compare_loop_summaries(full, suffix_with_gap)
+    assert result.status == "unknown"
+    assert result.is_equivalent() is None
+
+
+def test_loop_summary_method_b_key_ignores_witness_evidence_identity():
+    left = _readonly_loop_summary(start=0)
+    right = _readonly_loop_summary(start=0)
+    right = LoopSummaryRef(
+        start_expr=right.start_expr,
+        limit_expr=right.limit_expr,
+        step_expr=right.step_expr,
+        term_descriptor=right.term_descriptor,
+        seed_terms=right.seed_terms,
+        witnesses=(object(),),
+        side_effect_profile=right.side_effect_profile,
+        guard_constraints=right.guard_constraints,
+        cases=right.cases,
+        loop_var_unit=right.loop_var_unit,
+        source=right.source,
+    )
+
+    assert right.stable_key() is None
+    assert loop_summary_method_b_key(left) == loop_summary_method_b_key(right)
+    assert compare_loop_summaries(left, right).status == "equivalent"
+
+
+def test_loop_summary_method_b_key_treats_guards_as_applicability_conditions():
+    full = _readonly_loop_summary(start=0)
+    suffix = _readonly_loop_summary(
+        start=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    full = LoopSummaryRef(
+        start_expr=full.start_expr,
+        limit_expr=full.limit_expr,
+        step_expr=full.step_expr,
+        term_descriptor=full.term_descriptor,
+        seed_terms=full.seed_terms,
+        side_effect_profile=full.side_effect_profile,
+        guard_constraints=("0 < count",),
+        loop_var_unit=full.loop_var_unit,
+    )
+    suffix = LoopSummaryRef(
+        start_expr=suffix.start_expr,
+        limit_expr=suffix.limit_expr,
+        step_expr=suffix.step_expr,
+        term_descriptor=suffix.term_descriptor,
+        seed_terms=suffix.seed_terms,
+        side_effect_profile=suffix.side_effect_profile,
+        guard_constraints=("3 < count",),
+        loop_var_unit=suffix.loop_var_unit,
+    )
+
+    assert full.stable_key() != suffix.stable_key()
+    assert loop_summary_method_b_key(full) == loop_summary_method_b_key(suffix)
+    assert compare_loop_summaries(full, suffix).status == "equivalent"
+
+
+def test_pairwise_readonly_runtime_values_use_method_b_seed_compensation():
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        )
+    )
+    strategy = PairwiseStrategy(None, None)
+
+    assert strategy._intrinsic_runtime_values_equivalent(
+        full,
+        suffix,
+        left_case=_return_case_for_expr(full),
+        right_case=_return_case_for_expr(suffix),
+    ) is True
+
+
+def test_method_b_smt_identity_uses_seed_compensated_loop_summary():
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        )
+    )
+    suffix_with_gap = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        )
+    )
+
+    assert _runtime_ref_smt_identity(full, full.runtime_ref) == _runtime_ref_smt_identity(
+        suffix,
+        suffix.runtime_ref,
+    )
+    assert _runtime_ref_smt_identity(full, full.runtime_ref) != _runtime_ref_smt_identity(
+        suffix_with_gap,
+        suffix_with_gap.runtime_ref,
+    )
 
 
 def test_loop_side_effect_stable_key_ignores_function_context_descriptors():

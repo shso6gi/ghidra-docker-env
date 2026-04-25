@@ -588,6 +588,76 @@ def test_readonly_sum_smt_declarations_share_semantic_identity_when_witness_pref
     assert left_name == right_name
 
 
+def test_readonly_sum_smt_declarations_share_method_b_seed_compensated_identity():
+    def _loop_summary(start: int, seed_terms=()):
+        return LoopSummaryRef(
+            start_expr=Expression.constant(start, size=4),
+            limit_expr=Expression.parameter("count", size=4, data_type="int"),
+            step_expr=Expression.constant(1, size=4),
+            term_descriptor=LoopTermDescriptorRef(
+                kind="memory_load",
+                reduction_kind="sum",
+                location_base_ref=LocationBaseRef.parameter("base", index=0),
+                start_offset=0,
+                stride=4,
+                element_size=4,
+                result_size=4,
+            ),
+            seed_terms=tuple(seed_terms),
+            loop_var_unit="element_index",
+        )
+
+    def _expr(summary):
+        return Expression.intrinsic(
+            "READONLY_SUM",
+            [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+            size=4,
+            runtime_ref=ReadonlyReductionRef(
+                reduction_kind="memory_sum",
+                pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+                count_parameter_name="count",
+                count_parameter_index=1,
+                stride=4,
+                element_size=4,
+                result_size=4,
+                signed_counter=True,
+                loop_summary=summary,
+            ),
+            opcode=READONLY_SUM_OPCODE,
+        )
+
+    left = _expr(_loop_summary(0))
+    right = _expr(
+        _loop_summary(
+            3,
+            (
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        )
+    )
+    mismatch = _expr(
+        _loop_summary(
+            3,
+            (
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        )
+    )
+
+    left_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(left)[0]).group(1)
+    right_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(right)[0]).group(1)
+    mismatch_name = re.search(
+        r"\(declare-fun ([^ ]+)",
+        collect_intrinsic_smt_declarations(mismatch)[0],
+    ).group(1)
+
+    assert left_name == right_name
+    assert left_name != mismatch_name
+
+
 def test_readonly_sum_smt_identity_does_not_fallback_to_coarse_stable_key_for_unkeyable_loop_summary():
     def _expr_with_unkeyable_summary():
         loop_summary = LoopSummaryRef(
