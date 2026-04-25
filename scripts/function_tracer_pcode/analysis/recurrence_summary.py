@@ -3882,7 +3882,8 @@ class StructuralRecurrenceSummarizer:
         if stride <= 0 or element_size <= 0 or element_size != access_size or index_step <= 0:
             return ()
         witnesses: List[ReadonlyReductionWitness] = []
-        for exact_count in range(1, max(4, start_index + index_step + 1) + 1):
+        max_count = max(4, start_index + min(index_step * 2, 32) + 1)
+        for exact_count in range(1, max_count + 1):
             trip_count = self._readonly_loop_trip_count_for_count_value(loop_shape, exact_count)
             if trip_count is None:
                 continue
@@ -4096,7 +4097,7 @@ class StructuralRecurrenceSummarizer:
                     continue
                 back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
                 step = self._extract_index_step(back_varnode, output)
-                if step == 1:
+                if step is not None and step > 0:
                     return {
                         "phi_output": output,
                         "start": int(init_value),
@@ -4420,6 +4421,17 @@ class StructuralRecurrenceSummarizer:
         varnode,
         phi_output,
     ) -> Optional[int]:
+        step_expr = self._extract_index_step_expression(varnode, phi_output)
+        if step_expr is None:
+            return None
+        bit_width = int(getattr(step_expr, "size", 0) or getattr(varnode, "getSize", lambda: 0)() or 4) * 8
+        return self._signed_constant_value(step_expr, bit_width_hint=bit_width)
+
+    def _extract_index_step_expression(
+        self,
+        varnode,
+        phi_output,
+    ) -> Optional[Expression]:
         varnode = self._follow_passthrough_varnode(varnode)
         def_op = getattr(varnode, "getDef", lambda: None)()
         if def_op is None:
@@ -4429,17 +4441,21 @@ class StructuralRecurrenceSummarizer:
             left = self._follow_passthrough_varnode(def_op.getInput(0))
             right = self._follow_passthrough_varnode(def_op.getInput(1))
             if self._same_varnode_value(left, phi_output):
-                step_value = self._varnode_constant_value(right)
-                if step_value is None:
-                    return None
-                return step_value if mnemonic == "INT_ADD" else -step_value
-            if self._same_varnode_value(right, phi_output):
-                step_value = self._varnode_constant_value(left)
-                if step_value is None:
+                step_expr = self._build_pcode_expression(right, placeholders={})
+                if step_expr is None or self._expression_is_unresolved(step_expr):
                     return None
                 if mnemonic == "INT_ADD":
-                    return step_value
-                return None
+                    return step_expr
+                negated = Expression.unary_op("INT_2COMP", step_expr)
+                negated.size = int(getattr(step_expr, "size", 0) or getattr(varnode, "getSize", lambda: 0)() or 4)
+                return negated
+            if self._same_varnode_value(right, phi_output):
+                if mnemonic != "INT_ADD":
+                    return None
+                step_expr = self._build_pcode_expression(left, placeholders={})
+                if step_expr is None or self._expression_is_unresolved(step_expr):
+                    return None
+                return step_expr
         return None
 
     def _follow_passthrough_varnode(self, varnode):

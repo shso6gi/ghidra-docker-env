@@ -736,6 +736,129 @@ def test_extract_index_step_accepts_subtractive_phi_updates():
     assert summarizer._extract_index_step(next_vn, phi_output) == -1
 
 
+def test_match_index_progression_phi_accepts_positive_non_unit_step():
+    phi_output = _FakeVarnode("loop_index")
+    init_vn = _FakeVarnode("zero", expr=_const(0))
+    two_vn = _FakeVarnode("two", expr=_const(2))
+    next_vn = _FakeVarnode("loop_index_next")
+    _FakePcodeOp("INT_ADD", [phi_output, two_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_output)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    match = summarizer._match_index_progression_phi(phi_op)
+
+    assert match is not None
+    assert match["start"] == 0
+    assert match["step"] == 2
+
+
+def test_readonly_index_progression_declines_negative_step():
+    phi_output = _FakeVarnode("loop_index")
+    init_vn = _FakeVarnode("limit_minus_one", expr=_const(7))
+    one_vn = _FakeVarnode("one", expr=_const(1))
+    next_vn = _FakeVarnode("loop_index_next")
+    _FakePcodeOp("INT_SUB", [phi_output, one_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_output)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._extract_index_step(next_vn, phi_output) == -1
+    assert summarizer._match_index_progression_phi(phi_op) is None
+
+
+def test_dynamic_index_step_is_parsed_but_not_accepted_as_constant_progression():
+    phi_output = _FakeVarnode("loop_index")
+    init_vn = _FakeVarnode("zero", expr=_const(0))
+    step_expr = Expression.parameter("step", index=1, data_type="int", size=4)
+    step_vn = _FakeVarnode("step", expr=step_expr)
+    next_vn = _FakeVarnode("loop_index_next")
+    _FakePcodeOp("INT_ADD", [phi_output, step_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_output)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    extracted_step = summarizer._extract_index_step_expression(next_vn, phi_output)
+
+    assert extracted_step is not None
+    assert extracted_step.equals(step_expr)
+    assert summarizer._extract_index_step(next_vn, phi_output) is None
+    assert summarizer._match_index_progression_phi(phi_op) is None
+
+
+def test_counted_loop_induction_preserves_positive_non_unit_step_in_loop_summary():
+    phi_output = _FakeVarnode("loop_iv")
+    init_vn = _FakeVarnode("zero", expr=_const(0))
+    two_vn = _FakeVarnode("two", expr=_const(2))
+    next_vn = _FakeVarnode("loop_iv_next")
+    _FakePcodeOp("INT_ADD", [phi_output, two_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_output)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    induction = summarizer._match_counted_loop_induction(phi_op)
+    value = summarizer._build_counted_loop_summary_intrinsic(
+        base_expr=_const(0),
+        start_expr=_const(0),
+        limit_expr=_param("param_1"),
+        induction_step=2,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert induction is not None
+    assert induction.step == 2
+    assert value is not None
+    assert value.runtime_ref.induction_step == 2
+    assert value.runtime_ref.loop_summary.step_expr.value == 2
+
+
+def test_counted_loop_induction_preserves_decrement_step_in_loop_summary():
+    phi_output = _FakeVarnode("loop_iv")
+    init_vn = _FakeVarnode("start", expr=_const(7))
+    one_vn = _FakeVarnode("one", expr=_const(1))
+    next_vn = _FakeVarnode("loop_iv_next")
+    _FakePcodeOp("INT_SUB", [phi_output, one_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_output)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    induction = summarizer._match_counted_loop_induction(phi_op)
+    value = summarizer._build_counted_loop_summary_intrinsic(
+        base_expr=_const(0),
+        start_expr=_const(7),
+        limit_expr=_const(0),
+        induction_step=-1,
+        residue_cases=(ResidueLoopCase(modulus=1, residue=0, affine=(1, 0)),),
+        result_size=4,
+        signed_loop=True,
+    )
+
+    assert induction is not None
+    assert induction.step == -1
+    assert value is not None
+    assert value.runtime_ref.induction_step == -1
+    assert value.runtime_ref.loop_summary.step_expr.value == -1
+
+
+def test_counted_loop_continue_guard_accepts_decrementing_counter():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    counter = Expression.parameter("__loop_iv", index=-10000, size=4)
+    raw_guard = Expression.binary_op("INT_SLESS", _const(0), counter)
+    raw_guard.size = 1
+
+    normalized = summarizer._normalize_loop_continue_guard(
+        raw_guard,
+        counter,
+        body_on_true=True,
+        step=-1,
+    )
+
+    assert normalized is not None
+    condition_expr, bound_expr, signed = normalized
+    assert signed is True
+    assert bound_expr.equals(_const(0))
+    assert condition_expr.operator == "INT_SLESS"
+    assert condition_expr.operands[0].equals(_const(0))
+    assert condition_expr.operands[1].equals(counter)
+
+
 def test_affine_loop_state_phi_uses_entry_counter_placeholder():
     start_expr = Expression.binary_op("INT_AND", _param("param_1"), _const(0xFFFFFFF8))
     one_vn = _FakeVarnode("one", expr=_const(1))
@@ -1524,6 +1647,42 @@ def test_counted_scalar_loop_summary_keeps_function_memory_writes_as_context():
     assert profile.context_descriptors[0].kind == "memory_write"
     assert profile.context_descriptors[0].source == "function_effect_summary"
     assert profile.context_descriptors[0].scope == "function"
+
+
+def test_readonly_loop_summary_preserves_non_unit_index_step_object_centrically():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    loop_shape = {
+        "stride": 8,
+        "element_size": 4,
+        "start_offset": 0,
+        "start_index": 0,
+        "index_step": 2,
+        "index_scale": 4,
+    }
+    pointer_base_ref = LocationBaseRef.parameter("ptr", index=0)
+
+    summary = summarizer._build_readonly_loop_summary_ref(
+        summary_count_expr=count_expr,
+        pointer_base_ref=pointer_base_ref,
+        loop_shape=loop_shape,
+        result_size=4,
+        semantic_witnesses=(),
+        guard_constraints=(),
+    )
+    witnesses = summarizer._synthesize_linear_readonly_reduction_witnesses(
+        {"name": "ptr", "index": 0},
+        loop_shape,
+        result_size=4,
+    )
+
+    assert summary is not None
+    assert summary.start_expr.value == 0
+    assert summary.step_expr.value == 2
+    assert summary.term_descriptor.stride == 4
+    assert summarizer._readonly_loop_trip_count_for_count_value(loop_shape, 5) == 3
+    count_five = next(witness for witness in witnesses if witness.exact_count == 5)
+    assert [term.byte_offset for term in count_five.terms] == [0, 8, 16]
 
 
 def test_loop_side_effect_profile_records_pcode_store_address_and_value():
