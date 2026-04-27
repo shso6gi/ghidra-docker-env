@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from .call_target import CallTargetRef, coerce_call_target_ref
@@ -417,6 +417,28 @@ class PcodeOpRef:
             "seq_order": self.seq_order,
             "block_index": self.block_index,
             "mnemonic": self.mnemonic,
+        }
+
+
+@dataclass(frozen=True)
+class PcodeBlockRef:
+    """Stable identity for a concrete Ghidra decompiler basic block."""
+
+    block_index: Optional[int] = None
+    start_address_offset: Optional[int] = None
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "pcode_block",
+            None if self.block_index is None else int(self.block_index),
+            None if self.start_address_offset is None else int(self.start_address_offset),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "pcode_block",
+            "block_index": self.block_index,
+            "start_address_offset": self.start_address_offset,
         }
 
 
@@ -1592,6 +1614,386 @@ class ReadonlyReductionWitness:
 
 
 @dataclass(frozen=True)
+class ReductionAccumulatorProof:
+    """Object-centric proof that a loop accumulator is a readonly reduction.
+
+    This is intentionally richer than the runtime summaries it can lower to.
+    Runtime refs describe what can be compared today; this proof records the
+    Ghidra/SMT-relevant evidence used to justify that lowering, including PHI
+    roles, CFG anchors, seed terms, lane terms, exact return witnesses, and
+    constant bias.  Consumers should preserve this object when future lowerings
+    need more detail than ``READONLY_SUM(base, count)`` can currently express.
+    """
+
+    reduction_kind: str
+    pointer_base_ref: LocationBaseRef
+    count_parameter_name: str
+    count_parameter_index: Optional[int]
+    limit_expr: Any
+    result_size: int
+    stride: int
+    element_size: int
+    start_offset: int = 0
+    start_index: int = 0
+    index_step: int = 1
+    index_scale: int = 0
+    signed_counter: bool = True
+    seed_terms: Tuple[ReadonlyReductionTermRef, ...] = ()
+    lane_terms: Tuple[Tuple[int, int], ...] = ()
+    loop_body_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
+    exact_return_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
+    guard_constraints: Tuple[Any, ...] = ()
+    side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef(
+        profile="pure_memory_read",
+        memory_reads=True,
+    )
+    constant_bias: int = 0
+    induction_phi_ref: Optional[PcodeOpRef] = None
+    accumulator_phi_ref: Optional[PcodeOpRef] = None
+    update_op_ref: Optional[PcodeOpRef] = None
+    load_op_refs: Tuple[PcodeOpRef, ...] = ()
+    entry_block_ref: Optional[PcodeBlockRef] = None
+    backedge_block_ref: Optional[PcodeBlockRef] = None
+    source: str = "recurrence_summary"
+
+    def __post_init__(self) -> None:
+        if int(self.stride) <= 0:
+            raise ValueError("ReductionAccumulatorProof requires a positive stride")
+        if int(self.element_size) <= 0:
+            raise ValueError("ReductionAccumulatorProof requires a positive element_size")
+        if int(self.result_size) <= 0:
+            raise ValueError("ReductionAccumulatorProof requires a positive result_size")
+        if int(self.index_step) <= 0:
+            raise ValueError("ReductionAccumulatorProof requires a positive index_step")
+        lane_terms = tuple(
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+        )
+        if lane_terms:
+            start_offset = int(self.start_offset)
+            min_offset = min(offset for offset, _size in lane_terms)
+            if start_offset != 0 and min_offset == start_offset:
+                lane_terms = tuple((offset - start_offset, size) for offset, size in lane_terms)
+            object.__setattr__(self, "lane_terms", lane_terms)
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        limit_key = _loop_object_key(self.limit_expr)
+        guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if limit_key is None or side_effect_key is None or any(key is None for key in guard_keys):
+            return None
+        return (
+            "reduction_accumulator_proof",
+            self.reduction_kind,
+            self.pointer_base_ref.stable_key(),
+            self.count_parameter_name,
+            None if self.count_parameter_index is None else int(self.count_parameter_index),
+            limit_key,
+            max(1, int(self.result_size)),
+            int(self.stride),
+            int(self.element_size),
+            int(self.start_offset),
+            int(self.start_index),
+            int(self.index_step),
+            int(self.index_scale or self.stride),
+            bool(self.signed_counter),
+            tuple(term.stable_key() for term in self.seed_terms),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
+            tuple(witness.stable_key() for witness in self.loop_body_witnesses),
+            tuple(witness.stable_key() for witness in self.exact_return_witnesses),
+            guard_keys,
+            side_effect_key,
+            int(self.constant_bias),
+            self.induction_phi_ref.stable_key() if self.induction_phi_ref is not None else None,
+            self.accumulator_phi_ref.stable_key() if self.accumulator_phi_ref is not None else None,
+            self.update_op_ref.stable_key() if self.update_op_ref is not None else None,
+            tuple(ref.stable_key() for ref in self.load_op_refs),
+            self.entry_block_ref.stable_key() if self.entry_block_ref is not None else None,
+            self.backedge_block_ref.stable_key() if self.backedge_block_ref is not None else None,
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        loop_summary = self.to_loop_summary_ref()
+        if loop_summary is None:
+            return None
+        return loop_summary.semantic_key()
+
+    def trip_count_for_count_value(self, count_value: int) -> Optional[int]:
+        if int(count_value) <= 0:
+            return None
+        start_index = int(self.start_index)
+        index_step = int(self.index_step)
+        if index_step <= 0:
+            return None
+        if int(count_value) <= start_index:
+            return 0
+        distance = int(count_value) - start_index
+        return (distance + index_step - 1) // index_step
+
+    def loop_body_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        trip_count = self.trip_count_for_count_value(count_value)
+        if trip_count is None:
+            return None
+        access_size = max(1, int(self.result_size))
+        lane_terms = tuple(
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+        )
+        if lane_terms:
+            if self.loop_var_unit() != "scalar_element_index":
+                return None
+            if not all(size == access_size for _offset, size in lane_terms):
+                return None
+            lane_count = len(lane_terms)
+            if lane_count <= 0:
+                return None
+            stride = int(self.index_scale or self.stride)
+            return tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=int(self.start_offset)
+                    + (scalar_index // lane_count) * stride
+                    + lane_terms[scalar_index % lane_count][0],
+                    access_size=access_size,
+                )
+                for scalar_index in range(trip_count)
+            )
+        if int(self.element_size) != access_size:
+            return None
+        return tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=int(self.start_offset) + index * int(self.stride),
+                access_size=access_size,
+            )
+            for index in range(trip_count)
+        )
+
+    def full_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        seed_terms = self.seed_terms_for_count_value(count_value)
+        if seed_terms is None:
+            return None
+        loop_terms = self.loop_body_terms_for_count_value(count_value)
+        if loop_terms is None:
+            return None
+        return tuple(seed_terms) + tuple(loop_terms)
+
+    def seed_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        seed_terms = tuple(self.seed_terms or ())
+        if not seed_terms:
+            return ()
+        count_value = int(count_value)
+        if count_value <= 0:
+            return None
+        start_index = int(self.start_index)
+        if count_value >= start_index:
+            return seed_terms
+        index_scale = int(self.index_scale or self.stride)
+        if index_scale <= 0:
+            return None
+        selected = []
+        for term in seed_terms:
+            byte_offset = int(term.byte_offset)
+            if byte_offset % index_scale != 0:
+                return None
+            logical_index = byte_offset // index_scale
+            if logical_index < count_value:
+                selected.append(term)
+        return tuple(selected)
+
+    def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+        if int(self.constant_bias) != 0:
+            return None
+        stride = int(self.stride)
+        element_size = int(self.element_size)
+        index_scale = int(self.index_scale or stride)
+        if stride <= 0 or element_size <= 0 or index_scale <= 0:
+            return None
+        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        return LoopSummaryRef(
+            start_expr=_loop_int_expr(int(self.start_index), self.limit_expr),
+            limit_expr=self.limit_expr,
+            step_expr=_loop_int_expr(int(self.index_step), self.limit_expr),
+            term_descriptor=LoopTermDescriptorRef(
+                kind="memory_load",
+                reduction_kind="sum",
+                location_base_ref=self.pointer_base_ref,
+                start_offset=term_start_offset,
+                stride=index_scale,
+                element_size=element_size,
+                result_size=max(1, int(self.result_size)),
+                lane_terms=tuple(self.lane_terms or ()),
+            ),
+            seed_terms=tuple(self.seed_terms or ()),
+            witnesses=tuple(self.loop_body_witnesses or ()),
+            side_effect_profile=self.side_effect_profile,
+            guard_constraints=tuple(self.guard_constraints or ()),
+            loop_var_unit=self.loop_var_unit(),
+            source=self.source,
+        )
+
+    def with_runtime_evidence(
+        self,
+        *,
+        limit_expr: Any,
+        result_size: int,
+        loop_body_witnesses: Tuple[ReadonlyReductionWitness, ...],
+        exact_return_witnesses: Tuple[ReadonlyReductionWitness, ...],
+        guard_constraints: Tuple[Any, ...],
+        signed_counter: bool,
+    ) -> "ReductionAccumulatorProof":
+        normalized_result_size = max(1, int(result_size or 0))
+        lane_terms = tuple(self.lane_terms or ())
+        if not lane_terms:
+            lane_terms = self._infer_lane_terms_from_witnesses(
+                access_size=normalized_result_size,
+                witnesses=tuple(loop_body_witnesses or ()),
+            )
+        return replace(
+            self,
+            limit_expr=limit_expr,
+            result_size=normalized_result_size,
+            lane_terms=lane_terms,
+            loop_body_witnesses=tuple(loop_body_witnesses or ()),
+            exact_return_witnesses=tuple(exact_return_witnesses or ()),
+            guard_constraints=tuple(guard_constraints or ()),
+            signed_counter=bool(signed_counter),
+        )
+
+    def _infer_lane_terms_from_witnesses(
+        self,
+        *,
+        access_size: int,
+        witnesses: Tuple[ReadonlyReductionWitness, ...],
+    ) -> Tuple[Tuple[int, int], ...]:
+        stride = int(self.index_scale or self.stride)
+        element_size = int(self.element_size)
+        if (
+            stride <= 0
+            or access_size <= 0
+            or stride % access_size != 0
+            or element_size <= access_size
+            or int(self.start_index) != 0
+            or int(self.index_step) != 1
+        ):
+            return ()
+        lane_count = stride // access_size
+        if lane_count <= 1:
+            return ()
+        witnesses_by_count = {int(witness.exact_count): tuple(witness.terms) for witness in witnesses or ()}
+        for count in range(1, lane_count + 1):
+            terms = witnesses_by_count.get(count)
+            expected = tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=int(self.start_offset) + index * access_size,
+                    access_size=access_size,
+                )
+                for index in range(count)
+            )
+            if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+                term.stable_key() for term in expected
+            ):
+                return ()
+        return tuple((index * access_size, access_size) for index in range(lane_count))
+
+    def to_readonly_reduction_ref(self) -> Optional["ReadonlyReductionRef"]:
+        loop_summary = self.to_loop_summary_ref()
+        if loop_summary is None:
+            return None
+        return ReadonlyReductionRef(
+            reduction_kind=self.reduction_kind,
+            pointer_base_ref=self.pointer_base_ref,
+            count_parameter_name=self.count_parameter_name,
+            count_parameter_index=self.count_parameter_index,
+            stride=int(self.stride),
+            element_size=int(self.element_size),
+            result_size=max(1, int(self.result_size)),
+            start_offset=int(self.start_offset),
+            signed_counter=bool(self.signed_counter),
+            source=self.source,
+            semantic_witnesses=tuple(self.loop_body_witnesses or ()),
+            loop_summary=loop_summary,
+            accumulator_proof=self,
+        )
+
+    def loop_var_unit(self) -> str:
+        normalized_lanes = tuple(
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+        )
+        if not normalized_lanes:
+            return "element_index"
+        access_size = max(1, int(self.result_size))
+        offsets = [offset for offset, _size in normalized_lanes]
+        expected_offsets = [index * access_size for index in range(len(offsets))]
+        if (
+            all(size == access_size for _offset, size in normalized_lanes)
+            and offsets == expected_offsets
+            and int(self.index_scale or self.stride) == access_size * len(offsets)
+            and int(self.start_index) == 0
+            and int(self.index_step) == 1
+        ):
+            witnesses_by_count = {
+                int(witness.exact_count): tuple(witness.terms)
+                for witness in self.loop_body_witnesses or ()
+            }
+            for count in range(1, len(offsets)):
+                terms = witnesses_by_count.get(count)
+                expected = tuple(
+                    ReadonlyReductionTermRef(
+                        byte_offset=int(self.start_offset) + index * access_size,
+                        access_size=access_size,
+                    )
+                    for index in range(count)
+                )
+                if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+                    term.stable_key() for term in expected
+                ):
+                    return "element_index"
+            return "scalar_element_index"
+        return "element_index"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "reduction_accumulator_proof",
+            "reduction_kind": self.reduction_kind,
+            "pointer_base_ref": self.pointer_base_ref.to_dict(),
+            "count_parameter_name": self.count_parameter_name,
+            "count_parameter_index": self.count_parameter_index,
+            "result_size": max(1, int(self.result_size)),
+            "stride": int(self.stride),
+            "element_size": int(self.element_size),
+            "start_offset": int(self.start_offset),
+            "start_index": int(self.start_index),
+            "index_step": int(self.index_step),
+            "index_scale": int(self.index_scale or self.stride),
+            "signed_counter": bool(self.signed_counter),
+            "seed_terms": [term.to_dict() for term in self.seed_terms],
+            "lane_terms": [
+                {"byte_offset": int(offset), "access_size": max(1, int(size or 0))}
+                for offset, size in self.lane_terms
+            ],
+            "loop_body_witnesses": [witness.to_dict() for witness in self.loop_body_witnesses],
+            "exact_return_witnesses": [witness.to_dict() for witness in self.exact_return_witnesses],
+            "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
+            "side_effect_profile": self.side_effect_profile.to_dict(),
+            "constant_bias": int(self.constant_bias),
+            "induction_phi_ref": self.induction_phi_ref.to_dict() if self.induction_phi_ref is not None else None,
+            "accumulator_phi_ref": self.accumulator_phi_ref.to_dict() if self.accumulator_phi_ref is not None else None,
+            "update_op_ref": self.update_op_ref.to_dict() if self.update_op_ref is not None else None,
+            "load_op_refs": [ref.to_dict() for ref in self.load_op_refs],
+            "entry_block_ref": self.entry_block_ref.to_dict() if self.entry_block_ref is not None else None,
+            "backedge_block_ref": self.backedge_block_ref.to_dict() if self.backedge_block_ref is not None else None,
+            "source": self.source,
+        }
+
+
+def _loop_int_expr(value: int, like_expr: Any) -> Any:
+    expression_cls = getattr(like_expr, "__class__", None)
+    constant = getattr(expression_cls, "constant", None)
+    if callable(constant):
+        size = max(1, int(getattr(like_expr, "size", 0) or 4))
+        return constant(int(value), size=size)
+    return int(value)
+
+
+@dataclass(frozen=True)
 class ReadonlyReductionRef:
     """Structured identity for a readonly pointer-reduction summary."""
 
@@ -1607,9 +2009,11 @@ class ReadonlyReductionRef:
     source: str = "recurrence_summary"
     semantic_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
     loop_summary: Optional[LoopSummaryRef] = None
+    accumulator_proof: Optional[ReductionAccumulatorProof] = None
 
     def stable_key(self) -> Tuple[Any, ...]:
         loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
+        proof_key = self.accumulator_proof.stable_key() if self.accumulator_proof is not None else None
         return (
             "readonly_reduction",
             self.reduction_kind,
@@ -1623,6 +2027,7 @@ class ReadonlyReductionRef:
             bool(self.signed_counter),
             self.source,
             loop_summary_key,
+            proof_key,
         )
 
     def display_name(self) -> str:
@@ -1722,6 +2127,7 @@ class ReadonlyReductionRef:
             "source": self.source,
             "semantic_witnesses": [witness.to_dict() for witness in self.semantic_witnesses],
             "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
+            "accumulator_proof": self.accumulator_proof.to_dict() if self.accumulator_proof is not None else None,
             "display_name": self.display_name(),
         }
 

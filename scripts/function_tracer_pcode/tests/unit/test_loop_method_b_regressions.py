@@ -24,8 +24,10 @@ from scripts.function_tracer_pcode.model import (
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
+    ReductionAccumulatorProof,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     ReturnInfo,
     loop_summary_method_b_key,
 )
@@ -53,6 +55,25 @@ def _count_gt(value: int) -> Condition:
 
 def _term(byte_offset: int) -> ReadonlyReductionTermRef:
     return ReadonlyReductionTermRef(byte_offset=byte_offset, access_size=4)
+
+
+def _load_term_expr(index: int) -> Expression:
+    return Expression.memory(
+        Expression.intrinsic(
+            "PTRADD",
+            [_base_param(), Expression.constant(index, size=8), Expression.constant(4, size=8)],
+            size=8,
+        ),
+        size=4,
+    )
+
+
+def _sum_expr(*terms: Expression) -> Expression:
+    assert terms
+    result = terms[0]
+    for term in terms[1:]:
+        result = Expression.binary_op("INT_ADD", result, term)
+    return result
 
 
 def _readonly_summary(
@@ -104,6 +125,18 @@ def _readonly_sum(summary: LoopSummaryRef) -> Expression:
             signed_counter=True,
             loop_summary=summary,
         ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+
+
+def _readonly_sum_from_proof(proof: ReductionAccumulatorProof) -> Expression:
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    return Expression.intrinsic(
+        "READONLY_SUM",
+        [_base_param(), _count_param()],
+        size=4,
+        runtime_ref=reduction_ref,
         opcode=READONLY_SUM_OPCODE,
     )
 
@@ -261,6 +294,103 @@ def test_ptr_sum_window_branch_fixture_uses_method_b_for_n_1_2_3_and_ge_4():
     assert result.unsat_pairs == 16
     assert result.unknown_pairs == 0
     strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_exact_prefix_return_matches_readonly_reduction_accumulator_proof():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        index_step=1,
+        index_scale=4,
+        seed_terms=(_term(0), _term(4), _term(8)),
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=(),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    exact = _sum_expr(_load_term_expr(0), _load_term_expr(1), _load_term_expr(2))
+    summarized = _readonly_sum_from_proof(proof)
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis("exact_prefix", [ReturnInfo(address="0x1100", value=exact, conditions=[_eq_count(3)])]),
+        _analysis("summary_prefix", [ReturnInfo(address="0x1200", value=summarized, conditions=[_count_gt(0)])]),
+    )
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_exact_load_sum_matches_synthesized_readonly_reduction_witness():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),
+            ReadonlyReductionWitness(exact_count=2, terms=(_term(0), _term(4))),
+        ),
+        exact_return_witnesses=(),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    exact = _sum_expr(_load_term_expr(0), _load_term_expr(1))
+    summarized = _readonly_sum_from_proof(proof)
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis("exact_two", [ReturnInfo(address="0x1300", value=exact, conditions=[_eq_count(2)])]),
+        _analysis("summary_two", [ReturnInfo(address="0x1400", value=summarized, conditions=[_count_gt(0)])]),
+    )
+
+    assert result.is_equivalent is True
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_exact_load_matcher_does_not_guess_endianness_for_subpiece():
+    strategy = _pairwise_strategy()
+    subpiece = Expression.binary_op("SUBPIECE", _load_term_expr(0), Expression.constant(0, size=4))
+    subpiece.size = 1
+
+    assert strategy._extract_readonly_reduction_terms_from_expression(
+        subpiece,
+        [
+            {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "count", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+        ],
+        LocationBaseRef.parameter("base", index=0),
+    ) is None
 
 
 def test_ptr_sum_window_prior_missed_fixture_allows_nonzero_start_with_nonunit_step_seed():

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from typing import Optional
+
 from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     CountedLoopAccumulator,
     CountedLoopGuard,
@@ -28,6 +30,7 @@ from scripts.function_tracer_pcode.model import (
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LocationBaseRef,
+    ReductionAccumulatorProof,
     ReadonlyReductionTermRef,
     ReturnInfo,
     ReadonlyReductionRef,
@@ -42,6 +45,40 @@ from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 def _param(name: str = "param_1", size: int = 4) -> Expression:
     return Expression.parameter(name, index=0, data_type="int", size=size)
+
+
+def _readonly_accumulator_proof(
+    *,
+    base_ref: LocationBaseRef,
+    count_expr: Expression,
+    stride: int,
+    element_size: int,
+    result_size: int = 4,
+    start_offset: int = 0,
+    start_index: int = 0,
+    index_step: int = 1,
+    index_scale: Optional[int] = None,
+    seed_terms=(),
+    lane_terms=(),
+    witnesses=(),
+) -> ReductionAccumulatorProof:
+    return ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=base_ref,
+        count_parameter_name=getattr(count_expr, "name", None) or "count",
+        count_parameter_index=getattr(count_expr, "value", None),
+        limit_expr=count_expr,
+        result_size=result_size,
+        stride=stride,
+        element_size=element_size,
+        start_offset=start_offset,
+        start_index=start_index,
+        index_step=index_step,
+        index_scale=stride if index_scale is None else index_scale,
+        seed_terms=tuple(seed_terms or ()),
+        lane_terms=tuple(lane_terms or ()),
+        loop_body_witnesses=tuple(witnesses or ()),
+    )
 
 
 def _const(value: int, size: int = 4) -> Expression:
@@ -1674,27 +1711,28 @@ def test_counted_scalar_loop_summary_keeps_function_memory_writes_as_context():
 def test_readonly_loop_summary_preserves_non_unit_index_step_object_centrically():
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
     count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
-    loop_shape = {
-        "stride": 8,
-        "element_size": 4,
-        "start_offset": 0,
-        "start_index": 0,
-        "index_step": 2,
-        "index_scale": 4,
-    }
     pointer_base_ref = LocationBaseRef.parameter("ptr", index=0)
+    proof = _readonly_accumulator_proof(
+        base_ref=pointer_base_ref,
+        count_expr=count_expr,
+        stride=8,
+        element_size=4,
+        start_index=0,
+        index_step=2,
+        index_scale=4,
+    )
 
     summary = summarizer._build_readonly_loop_summary_ref(
         summary_count_expr=count_expr,
         pointer_base_ref=pointer_base_ref,
-        loop_shape=loop_shape,
+        accumulator_proof=proof,
         result_size=4,
         semantic_witnesses=(),
         guard_constraints=(),
     )
     witnesses = summarizer._synthesize_linear_readonly_reduction_witnesses(
         {"name": "ptr", "index": 0},
-        loop_shape,
+        proof,
         result_size=4,
     )
 
@@ -1702,7 +1740,7 @@ def test_readonly_loop_summary_preserves_non_unit_index_step_object_centrically(
     assert summary.start_expr.value == 0
     assert summary.step_expr.value == 2
     assert summary.term_descriptor.stride == 4
-    assert summarizer._readonly_loop_trip_count_for_count_value(loop_shape, 5) == 3
+    assert summarizer._readonly_loop_trip_count_for_count_value(proof, 5) == 3
     count_five = next(witness for witness in witnesses if witness.exact_count == 5)
     assert [term.byte_offset for term in count_five.terms] == [0, 8, 16]
 
@@ -3626,13 +3664,245 @@ def test_readonly_reduction_detects_vector_pointer_loop_with_ptradd_tail():
     tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
     summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
 
-    shape = summarizer._detect_readonly_sum_loop_shape(high_function, analysis, params[0], params[1])
+    proof = summarizer._detect_readonly_sum_accumulator_proof(high_function, analysis, params[0], params[1])
 
-    assert shape is not None
-    assert shape["stride"] == 4
-    assert shape["element_size"] == 4
-    assert shape["start_index"] == 0
-    assert shape["index_step"] == 1
+    assert proof is not None
+    assert proof.stride == 4
+    assert proof.element_size == 4
+    assert proof.start_index == 0
+    assert proof.index_step == 1
+    assert proof.stable_key() is not None
+
+
+def test_readonly_addend_proof_rejects_nonzero_constant_sibling():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=4)
+    const_five = _FakeVarnode("five", size=4, expr=Expression.constant(5, size=4))
+    add_vn = _FakeVarnode("load_plus_five", size=4)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("INT_ADD", [load_vn, const_five], add_vn)
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    progressions = summarizer._collect_load_progressions_from_varnode(
+        add_vn,
+        pointer_param,
+        [
+            {
+                "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+                "phi_output": phi_vn,
+                "stride": 4,
+                "start_offset": 0,
+                "start_index": 0,
+                "index_step": 1,
+                "index_scale": 4,
+            }
+        ],
+        [],
+    )
+
+    assert progressions is None
+
+
+def test_readonly_addend_proof_rejects_duplicate_load_terms():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=4)
+    doubled_vn = _FakeVarnode("load_plus_load", size=4)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("INT_ADD", [load_vn, load_vn], doubled_vn)
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    load_progressions = summarizer._collect_load_progressions_from_varnode(
+        doubled_vn,
+        pointer_param,
+        [
+            {
+                "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+                "phi_output": phi_vn,
+                "stride": 4,
+                "start_offset": 0,
+                "start_index": 0,
+                "index_step": 1,
+                "index_scale": 4,
+            }
+        ],
+        [],
+    )
+
+    assert load_progressions is not None
+    assert summarizer._readonly_load_progression_term_counter(load_progressions, result_size=4) == {
+        (0, 4): 2,
+    }
+
+
+def test_readonly_addend_proof_rejects_signed_extension_until_mode_is_represented():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "char *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=1)
+    sext_vn = _FakeVarnode("sext_load", size=4)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("INT_SEXT", [load_vn], sext_vn)
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    progressions = summarizer._collect_load_progressions_from_varnode(
+        sext_vn,
+        pointer_param,
+        [
+            {
+                "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+                "phi_output": phi_vn,
+                "stride": 1,
+                "start_offset": 0,
+                "start_index": 0,
+                "index_step": 1,
+                "index_scale": 1,
+            }
+        ],
+        [],
+    )
+
+    assert progressions is None
+
+
+def test_readonly_addend_proof_rejects_signed_extension_behind_copy():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "char *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=1)
+    sext_vn = _FakeVarnode("sext_load", size=4)
+    copy_vn = _FakeVarnode("copy_sext_load", size=4)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("INT_SEXT", [load_vn], sext_vn)
+    _FakePcodeOp("COPY", [sext_vn], copy_vn)
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    progressions = summarizer._collect_load_progressions_from_varnode(
+        copy_vn,
+        pointer_param,
+        [
+            {
+                "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+                "phi_output": phi_vn,
+                "stride": 1,
+                "start_offset": 0,
+                "start_index": 0,
+                "index_step": 1,
+                "index_scale": 1,
+            }
+        ],
+        [],
+    )
+
+    assert progressions is None
+
+
+def test_readonly_addend_proof_preserves_subpiece_behind_copy():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=4)
+    offset_vn = _FakeVarnode("offset", size=4, expr=Expression.constant(1, size=4))
+    subpiece_vn = _FakeVarnode("subpiece", size=2)
+    copy_vn = _FakeVarnode("copy_subpiece", size=2)
+    mask_vn = _FakeVarnode("mask", size=4, expr=Expression.constant(0xFF, size=4))
+    masked_copy_vn = _FakeVarnode("masked_copy_subpiece", size=2)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("SUBPIECE", [load_vn, offset_vn], subpiece_vn)
+    _FakePcodeOp("COPY", [subpiece_vn], copy_vn)
+    _FakePcodeOp("INT_AND", [copy_vn, mask_vn], masked_copy_vn)
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    pointer_phis = [
+        {
+            "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+            "phi_output": phi_vn,
+            "stride": 4,
+            "start_offset": 0,
+            "start_index": 0,
+            "index_step": 1,
+            "index_scale": 4,
+        }
+    ]
+
+    progressions = summarizer._collect_load_progressions_from_varnode(
+        copy_vn,
+        pointer_param,
+        pointer_phis,
+        [],
+    )
+    masked_progressions = summarizer._collect_load_progressions_from_varnode(
+        masked_copy_vn,
+        pointer_param,
+        pointer_phis,
+        [],
+    )
+
+    assert progressions is not None
+    assert progressions[0]["start_offset"] == 1
+    assert progressions[0]["element_size"] == 2
+    assert masked_progressions is not None
+    assert masked_progressions[0]["start_offset"] == 1
+    assert masked_progressions[0]["element_size"] == 1
+
+
+def test_readonly_addend_proof_reflects_mask_and_subpiece_access_size():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    phi_vn = _FakeVarnode("ptr_phi", size=8)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_vn = _FakeVarnode("load", size=4)
+    mask_vn = _FakeVarnode("mask", size=4, expr=Expression.constant(0xFF, size=4))
+    masked_vn = _FakeVarnode("masked", size=4)
+    offset_vn = _FakeVarnode("offset", size=4, expr=Expression.constant(1, size=4))
+    subpiece_vn = _FakeVarnode("subpiece", size=2)
+    _FakePcodeOp("LOAD", [ram_space, phi_vn], load_vn)
+    _FakePcodeOp("INT_AND", [load_vn, mask_vn], masked_vn)
+    _FakePcodeOp("SUBPIECE", [load_vn, offset_vn], subpiece_vn)
+    pointer_phis = [
+        {
+            "phi_op": _FakePcodeOp("MULTIEQUAL", [], phi_vn),
+            "phi_output": phi_vn,
+            "stride": 4,
+            "start_offset": 0,
+            "start_index": 0,
+            "index_step": 1,
+            "index_scale": 4,
+        }
+    ]
+    tracer = _FakeTracer("unused", Expression.unknown("unknown"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    masked_progressions = summarizer._collect_load_progressions_from_varnode(
+        masked_vn,
+        pointer_param,
+        pointer_phis,
+        [],
+    )
+    subpiece_progressions = summarizer._collect_load_progressions_from_varnode(
+        subpiece_vn,
+        pointer_param,
+        pointer_phis,
+        [],
+    )
+
+    assert masked_progressions is not None
+    assert masked_progressions[0]["start_offset"] == 0
+    assert masked_progressions[0]["element_size"] == 1
+    assert subpiece_progressions is not None
+    assert subpiece_progressions[0]["start_offset"] == 1
+    assert subpiece_progressions[0]["element_size"] == 2
 
 
 def test_vector_prefix_lanes_must_flow_additively_to_return():
@@ -4068,44 +4338,43 @@ def test_readonly_vector_lane_summary_enters_scalar_iteration_space_only_with_wi
     scalar_summary = summarizer._build_readonly_loop_summary_ref(
         summary_count_expr=count_expr,
         pointer_base_ref=base_ref,
-        loop_shape={
-            "stride": 4,
-            "element_size": 4,
-            "start_offset": 0,
-            "start_index": 0,
-            "index_step": 1,
-            "index_scale": 4,
-        },
+        accumulator_proof=_readonly_accumulator_proof(
+            base_ref=base_ref,
+            count_expr=count_expr,
+            stride=4,
+            element_size=4,
+            index_scale=4,
+            witnesses=witnesses,
+        ),
         result_size=4,
         semantic_witnesses=witnesses,
     )
     vector_summary = summarizer._build_readonly_loop_summary_ref(
         summary_count_expr=count_expr,
         pointer_base_ref=base_ref,
-        loop_shape={
-            "stride": 16,
-            "element_size": 8,
-            "start_offset": 0,
-            "start_index": 0,
-            "index_step": 1,
-            "index_scale": 16,
-            "lane_loads": ((0, 8), (8, 8)),
-        },
+        accumulator_proof=_readonly_accumulator_proof(
+            base_ref=base_ref,
+            count_expr=count_expr,
+            stride=16,
+            element_size=8,
+            index_scale=16,
+            lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+            witnesses=witnesses,
+        ),
         result_size=4,
         semantic_witnesses=witnesses,
     )
     unproven_vector_summary = summarizer._build_readonly_loop_summary_ref(
         summary_count_expr=count_expr,
         pointer_base_ref=base_ref,
-        loop_shape={
-            "stride": 16,
-            "element_size": 8,
-            "start_offset": 0,
-            "start_index": 0,
-            "index_step": 1,
-            "index_scale": 16,
-            "lane_loads": ((0, 8), (8, 8)),
-        },
+        accumulator_proof=_readonly_accumulator_proof(
+            base_ref=base_ref,
+            count_expr=count_expr,
+            stride=16,
+            element_size=8,
+            index_scale=16,
+            lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+        ),
         result_size=4,
         semantic_witnesses=(),
     )
@@ -4153,7 +4422,7 @@ def test_readonly_reduction_result_size_uses_positive_region_return():
     assert summarizer._readonly_reduction_result_size(analysis, positive_conditions=positive) == 8
 
 
-def test_readonly_reduction_summary_passes_positive_region_to_loop_shape(monkeypatch):
+def test_readonly_reduction_summary_passes_positive_region_to_accumulator_proof(monkeypatch):
     ptr_expr = Expression.parameter("param_1", index=0, data_type="long *", size=8)
     count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
     pointer_param = {"name": "param_1", "index": 0, "data_type": "long *", "size": 8}
@@ -4188,11 +4457,11 @@ def test_readonly_reduction_summary_passes_positive_region_to_loop_shape(monkeyp
         lambda _analysis, _high_function: (pointer_param, count_param),
     )
 
-    def capture_loop_shape(_high_function, _analysis, _pointer_param, _count_param, *, positive_conditions=()):
+    def capture_accumulator_proof(_high_function, _analysis, _pointer_param, _count_param, *, positive_conditions=()):
         captured["positive_conditions"] = tuple(positive_conditions)
         return None
 
-    monkeypatch.setattr(summarizer, "_detect_readonly_sum_loop_shape", capture_loop_shape)
+    monkeypatch.setattr(summarizer, "_detect_readonly_sum_accumulator_proof", capture_accumulator_proof)
 
     assert summarizer._try_summarize_readonly_pointer_reduction(
         _FakeFunction("wide_sum"),
@@ -4504,6 +4773,63 @@ def test_structural_recurrence_summarizer_synthesizes_linear_semantic_witnesses_
             ),
         ),
     )
+
+
+def test_readonly_semantic_witnesses_use_exact_returns_as_provisional_lane_evidence(monkeypatch):
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=8,
+        element_size=8,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=8,
+        lane_terms=((0, 4), (4, 4)),
+    )
+    exact_witnesses = (
+        ReadonlyReductionWitness(
+            exact_count=1,
+            terms=(ReadonlyReductionTermRef(byte_offset=4, access_size=4),),
+        ),
+        ReadonlyReductionWitness(
+            exact_count=2,
+            terms=(
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+            ),
+        ),
+    )
+    analysis = create_mock_analysis(
+        "shifted_lane_sum",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: exact_witnesses,
+    )
+
+    witnesses = summarizer._build_readonly_reduction_semantic_witnesses(
+        analysis,
+        pointer_param,
+        count_param,
+        [],
+        proof,
+        result_size=4,
+    )
+
+    assert witnesses == exact_witnesses
 
 
 def test_structural_recurrence_summarizer_merges_exact_and_synthesized_semantic_witnesses():

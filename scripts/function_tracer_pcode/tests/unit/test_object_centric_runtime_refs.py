@@ -22,8 +22,10 @@ from scripts.function_tracer_pcode.model import (
     LoopTermDescriptorRef,
     PostStateReadRef,
     PostStateSnapshotRef,
+    ReductionAccumulatorProof,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
+    ReadonlyReductionWitness,
     ReturnInfo,
     StorageInfo,
     coerce_call_target_ref,
@@ -187,6 +189,302 @@ def _readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
             loop_summary=loop_summary,
         ),
     )
+
+
+def test_reduction_accumulator_proof_lowers_to_readonly_reduction_ref_object_centrically():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        index_step=1,
+        index_scale=4,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=4,
+                terms=(ReadonlyReductionTermRef(byte_offset=12, access_size=4),),
+            ),
+        ),
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=3,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ),
+            ),
+        ),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+
+    ref = proof.to_readonly_reduction_ref()
+
+    assert ref is not None
+    assert ref.accumulator_proof == proof
+    assert ref.loop_summary is not None
+    assert proof.full_terms_for_count_value(1) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+    )
+    assert proof.full_terms_for_count_value(2) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+    )
+    assert proof.full_terms_for_count_value(4) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+    )
+    assert loop_summary_method_b_key(ref.loop_summary) == loop_summary_method_b_key(_readonly_loop_summary(start=0))
+
+
+def test_reduction_accumulator_proof_with_constant_bias_does_not_lower_to_readonly_sum():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=1,
+    )
+
+    assert proof.to_loop_summary_ref() is None
+    assert proof.to_readonly_reduction_ref() is None
+
+
+def test_reduction_accumulator_proof_preserves_independent_start_offset_in_loop_summary():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    base_ref = LocationBaseRef.parameter("base", index=0)
+    shifted = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=base_ref,
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    ).to_loop_summary_ref()
+    unshifted = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=base_ref,
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    ).to_loop_summary_ref()
+
+    assert shifted is not None
+    assert unshifted is not None
+    assert shifted.term_descriptor.start_offset == 4
+    assert loop_summary_method_b_key(shifted) != loop_summary_method_b_key(unshifted)
+
+
+def test_reduction_accumulator_proof_materializes_scalar_lane_terms():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=16,
+        element_size=8,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=16,
+        lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=2,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=3,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ),
+            ),
+        ),
+    )
+
+    assert proof.loop_var_unit() == "scalar_element_index"
+    assert proof.loop_body_terms_for_count_value(2) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+    )
+    assert proof.loop_body_terms_for_count_value(5) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=16, access_size=4),
+    )
+
+
+def test_reduction_accumulator_proof_materializes_shifted_scalar_lane_terms():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=8,
+        element_size=8,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=8,
+        lane_terms=((4, 4), (8, 4)),
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=4, access_size=4),),
+            ),
+        ),
+    )
+
+    assert proof.lane_terms == ((0, 4), (4, 4))
+    assert proof.loop_var_unit() == "scalar_element_index"
+    assert proof.loop_body_terms_for_count_value(3) == (
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+    )
+
+
+def test_reduction_accumulator_proof_infers_shifted_lane_terms_from_witnesses():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    prefix_only = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=8,
+        element_size=8,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=8,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=4, access_size=4),),
+            ),
+        ),
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+    full_prefix = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=8,
+        element_size=8,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=8,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=4, access_size=4),),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=2,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ),
+            ),
+        ),
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+
+    assert prefix_only.lane_terms == ()
+    assert prefix_only.loop_var_unit() == "element_index"
+    assert full_prefix.lane_terms == ((0, 4), (4, 4))
+    assert full_prefix.loop_var_unit() == "scalar_element_index"
+
+
+def test_reduction_accumulator_proof_does_not_materialize_lanes_without_scalar_proof():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=16,
+        element_size=8,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=16,
+        lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+    )
+
+    assert proof.loop_var_unit() == "element_index"
+    assert proof.loop_body_terms_for_count_value(2) is None
 
 
 def _counted_loop_expr(loop_summary: LoopSummaryRef) -> Expression:

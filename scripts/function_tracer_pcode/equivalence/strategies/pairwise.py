@@ -12,8 +12,10 @@ from ...model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    ReadonlyReductionTermRef,
     compare_loop_summaries,
 )
+from ...analysis.effect_summary import canonicalize_location
 from ...model.render_smt import (
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
@@ -422,12 +424,97 @@ class PairwiseStrategy(CheckStrategy):
         case1: ReturnCase,
         case2: ReturnCase,
     ) -> bool:
-        return self._intrinsic_runtime_values_equivalent(
+        if self._intrinsic_runtime_values_equivalent(
             case1.value_expr,
             case2.value_expr,
             left_case=case1,
             right_case=case2,
+        ):
+            return True
+        return self._cases_have_equivalent_readonly_reduction_proof(case1, case2)
+
+    def _cases_have_equivalent_readonly_reduction_proof(
+        self,
+        case1: ReturnCase,
+        case2: ReturnCase,
+    ) -> bool:
+        return (
+            self._exact_value_matches_readonly_reduction_proof(case1, case2)
+            or self._exact_value_matches_readonly_reduction_proof(case2, case1)
         )
+
+    def _exact_value_matches_readonly_reduction_proof(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+    ) -> bool:
+        summary_ref = getattr(summary_case.value_expr, "runtime_ref", None)
+        accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
+        if accumulator_proof is None or getattr(summary_ref, "loop_summary", None) is None:
+            return False
+        extracted_terms = self._extract_readonly_reduction_terms_from_expression(
+            exact_case.value_expr,
+            exact_case.parameters,
+            getattr(accumulator_proof, "pointer_base_ref", None),
+        )
+        if extracted_terms is None:
+            return False
+        extracted_key = tuple(term.stable_key() for term in extracted_terms)
+        exact_witnesses = tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
+        for witness in exact_witnesses:
+            if extracted_key != tuple(term.stable_key() for term in getattr(witness, "terms", ()) or ()):
+                continue
+            if self._combined_conditions_imply_reduction_count(
+                exact_case,
+                summary_case,
+                accumulator_proof,
+                int(getattr(witness, "exact_count", 0) or 0),
+            ):
+                return True
+        return self._exact_terms_match_reduction_proof_under_case_conditions(
+            exact_case,
+            summary_case,
+            accumulator_proof,
+            extracted_key,
+        )
+
+    def _exact_terms_match_reduction_proof_under_case_conditions(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        accumulator_proof,
+        extracted_key: tuple,
+    ) -> bool:
+        max_count = max(
+            int(getattr(accumulator_proof, "start_index", 0) or 0),
+            len(tuple(getattr(accumulator_proof, "seed_terms", ()) or ())),
+            *(
+                int(getattr(witness, "exact_count", 0) or 0)
+                for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ())
+            ),
+            *(
+                int(getattr(witness, "exact_count", 0) or 0)
+                for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
+            ),
+            1,
+        )
+        for count_value in range(1, max_count + 1):
+            expected_terms_fn = getattr(accumulator_proof, "full_terms_for_count_value", None)
+            if not callable(expected_terms_fn):
+                return False
+            expected_terms = expected_terms_fn(count_value)
+            if expected_terms is None:
+                continue
+            if extracted_key != tuple(term.stable_key() for term in expected_terms):
+                continue
+            if self._combined_conditions_imply_reduction_count(
+                exact_case,
+                summary_case,
+                accumulator_proof,
+                count_value,
+            ):
+                return True
+        return False
 
     def _intrinsic_runtime_values_equivalent(
         self,
@@ -1048,6 +1135,206 @@ class PairwiseStrategy(CheckStrategy):
         if solver_result is not None:
             return solver_result
         return ConditionSimplifier.object_centric_is_contradiction(implication_conditions)
+
+    def _combined_conditions_imply_reduction_count(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> bool:
+        if exact_count <= 0:
+            return False
+        count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
+        count_index = getattr(accumulator_proof, "count_parameter_index", None)
+        if not count_name and count_index is None:
+            return False
+        count_size = max(1, int(getattr(getattr(accumulator_proof, "limit_expr", None), "size", 0) or 0))
+        for case in (exact_case, summary_case):
+            for parameter in getattr(case, "parameters", None) or []:
+                if count_index is not None and parameter.get("index") is not None:
+                    try:
+                        if int(parameter.get("index")) == int(count_index):
+                            count_size = max(count_size, int(parameter.get("size", 0) or count_size))
+                    except (TypeError, ValueError):
+                        pass
+                elif count_name and parameter.get("name") == count_name:
+                    count_size = max(count_size, int(parameter.get("size", 0) or count_size))
+        count_expr = Expression.parameter(
+            count_name or "count",
+            index=int(count_index) if count_index is not None else -1,
+            size=count_size,
+        )
+        equality = Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                count_expr,
+                Expression.constant(int(exact_count), size=count_size),
+            ),
+            False,
+        )
+        conditions = self._combined_summary_conditions(exact_case, summary_case)
+        implication_conditions = list(conditions or []) + [equality.negate()]
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(implication_conditions)
+        if solver_result is not None:
+            return solver_result
+        return ConditionSimplifier.object_centric_is_contradiction(implication_conditions)
+
+    def _extract_readonly_reduction_terms_from_expression(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        pointer_base_ref,
+    ) -> Optional[tuple[ReadonlyReductionTermRef, ...]]:
+        if expr is None or pointer_base_ref is None:
+            return None
+        extracted: List[ReadonlyReductionTermRef] = []
+        for sign, term in self._flatten_readonly_add_terms(expr):
+            if getattr(term, "expr_type", None) == ExpressionType.CONSTANT:
+                value = self._raw_constant_value(term)
+                if value is None or int(value) != 0:
+                    return None
+                continue
+            if sign != 1:
+                return None
+            descriptor = self._extract_readonly_reduction_term_descriptor(
+                term,
+                parameters,
+                pointer_base_ref,
+            )
+            if descriptor is None:
+                return None
+            extracted.append(descriptor)
+        if not extracted:
+            return None
+        extracted.sort(key=lambda item: (int(item.byte_offset), int(item.access_size)))
+        return tuple(extracted)
+
+    def _flatten_readonly_add_terms(
+        self,
+        expr: Expression,
+        sign: int = 1,
+    ) -> List[tuple[int, Expression]]:
+        if getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP and len(getattr(expr, "operands", []) or []) == 2:
+            if getattr(expr, "operator", None) == "INT_ADD":
+                return self._flatten_readonly_add_terms(expr.operands[0], sign) + self._flatten_readonly_add_terms(
+                    expr.operands[1],
+                    sign,
+                )
+            if getattr(expr, "operator", None) == "INT_SUB":
+                return self._flatten_readonly_add_terms(expr.operands[0], sign) + self._flatten_readonly_add_terms(
+                    expr.operands[1],
+                    -sign,
+                )
+        return [(sign, expr)]
+
+    def _extract_readonly_reduction_term_descriptor(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        pointer_base_ref,
+        *,
+        lsb_byte_offset: int = 0,
+        narrowed_size: Optional[int] = None,
+    ) -> Optional[ReadonlyReductionTermRef]:
+        if expr is None:
+            return None
+
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+            if expr.operator == "INT_SEXT":
+                return None
+            if expr.operator in {"INT_ZEXT", "CAST", "COPY"}:
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    lsb_byte_offset=lsb_byte_offset,
+                    narrowed_size=narrowed_size,
+                )
+
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            if expr.operator == "SUBPIECE":
+                byte_offset = self._raw_constant_value(expr.operands[1])
+                if byte_offset is None or byte_offset < 0:
+                    return None
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    lsb_byte_offset=lsb_byte_offset + int(byte_offset),
+                    narrowed_size=max(1, int(expr.size or 0)),
+                )
+            if expr.operator == "INT_RIGHT":
+                shift_bits = self._raw_constant_value(expr.operands[1])
+                if shift_bits is None or shift_bits < 0 or (int(shift_bits) % 8) != 0:
+                    return None
+                return self._extract_readonly_reduction_term_descriptor(
+                    expr.operands[0],
+                    parameters,
+                    pointer_base_ref,
+                    lsb_byte_offset=lsb_byte_offset + (int(shift_bits) // 8),
+                    narrowed_size=narrowed_size or max(1, int(expr.size or 0)),
+                )
+            if expr.operator == "INT_AND":
+                mask_width = self._low_mask_width_bytes(expr.operands[0], expr.operands[1])
+                value_expr = expr.operands[0]
+                if mask_width is None:
+                    mask_width = self._low_mask_width_bytes(expr.operands[1], expr.operands[0])
+                    value_expr = expr.operands[1]
+                if mask_width is not None:
+                    return self._extract_readonly_reduction_term_descriptor(
+                        value_expr,
+                        parameters,
+                        pointer_base_ref,
+                        lsb_byte_offset=lsb_byte_offset,
+                        narrowed_size=narrowed_size or mask_width,
+                    )
+
+        if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
+            return None
+        load_size = max(1, int(expr.size or 0))
+        access_size = max(1, int(narrowed_size or load_size))
+        if lsb_byte_offset < 0 or access_size > load_size or lsb_byte_offset + access_size > load_size:
+            return None
+        if int(lsb_byte_offset) != 0 or access_size != load_size:
+            return None
+        location = canonicalize_location(expr.operands[0], parameters, size=load_size)
+        if location is None:
+            return None
+        base_ref = getattr(location, "base_ref", None)
+        if (
+            base_ref is None
+            or getattr(base_ref, "semantic_key", lambda: None)()
+            != getattr(pointer_base_ref, "semantic_key", lambda: None)()
+        ):
+            return None
+        return ReadonlyReductionTermRef(byte_offset=int(location.offset), access_size=access_size)
+
+    def _raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
+            return None
+        try:
+            return int(expr.value)
+        except (TypeError, ValueError):
+            return None
+
+    def _low_mask_width_bytes(
+        self,
+        value_expr: Optional[Expression],
+        mask_expr: Optional[Expression],
+    ) -> Optional[int]:
+        del value_expr
+        mask = self._raw_constant_value(mask_expr)
+        if mask is None or mask < 0:
+            return None
+        width = 0
+        current = int(mask)
+        while current & 0xFF == 0xFF:
+            width += 1
+            current >>= 8
+        if current != 0 or width <= 0:
+            return None
+        return width
 
     def _readonly_reduction_values_equivalent(
         self,
