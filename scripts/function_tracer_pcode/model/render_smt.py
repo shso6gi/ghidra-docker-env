@@ -567,6 +567,7 @@ def _runtime_ref_smt_identity(expr, runtime_ref):
                 "loop_summary_method_b_runtime",
                 type(runtime_ref).__module__,
                 type(runtime_ref).__qualname__,
+                ("ref_constant_bias", int(getattr(runtime_ref, "constant_bias", 0) or 0)),
                 method_b_key,
             )
         loop_key = loop_summary.stable_key()

@@ -1722,14 +1722,14 @@ def test_readonly_loop_summary_preserves_non_unit_index_step_object_centrically(
         index_scale=4,
     )
 
-    summary = summarizer._build_readonly_loop_summary_ref(
-        summary_count_expr=count_expr,
-        pointer_base_ref=pointer_base_ref,
-        accumulator_proof=proof,
+    summary = proof.with_runtime_evidence(
+        limit_expr=count_expr,
         result_size=4,
-        semantic_witnesses=(),
+        loop_body_witnesses=(),
+        exact_return_witnesses=(),
         guard_constraints=(),
-    )
+        signed_counter=True,
+    ).lower_to_loop_summary_ref()
     witnesses = summarizer._synthesize_linear_readonly_reduction_witnesses(
         {"name": "ptr", "index": 0},
         proof,
@@ -3773,6 +3773,65 @@ def test_readonly_addend_proof_rejects_signed_extension_until_mode_is_represente
     assert progressions is None
 
 
+def test_readonly_exact_expression_extracts_terms_and_constant_bias_object_centrically():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    expr = Expression.binary_op("INT_ADD", _mem("param_1", 0), Expression.constant(5, size=4))
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", Expression.unknown("unknown")), debug=False)
+
+    extracted = summarizer._extract_readonly_reduction_terms_and_bias(
+        expr,
+        [pointer_param],
+        pointer_param,
+    )
+
+    assert extracted == (
+        (ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+        5,
+    )
+    assert summarizer._extract_readonly_reduction_terms(expr, [pointer_param], pointer_param) is None
+
+
+def test_readonly_exact_return_witness_rejects_bias_width_mismatch():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+    )
+    wide_bias = Expression.constant(1 << 32, size=8)
+    wide_return = Expression.binary_op("INT_ADD", _mem("param_1", 0), wide_bias)
+    wide_return.size = 8
+    ret = ReturnInfo(
+        address="0x2000",
+        value=wide_return,
+        conditions=[_cond("INT_EQUAL", count_expr, _const(1))],
+    )
+    analysis = create_mock_analysis(
+        "readonly_wide_bias",
+        return_type="long",
+        parameters=[pointer_param, count_param],
+        returns=[ret],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", Expression.unknown("unknown")), debug=False)
+
+    witnesses = summarizer._extract_readonly_reduction_exact_witnesses(
+        analysis,
+        pointer_param,
+        count_param,
+        [ret],
+        proof,
+    )
+
+    assert witnesses == ()
+
+
 def test_readonly_addend_proof_rejects_signed_extension_behind_copy():
     pointer_param = {"name": "param_1", "index": 0, "data_type": "char *", "size": 8}
     phi_vn = _FakeVarnode("ptr_phi", size=8)
@@ -4335,24 +4394,23 @@ def test_readonly_vector_lane_summary_enters_scalar_iteration_space_only_with_wi
         )
         for count in (1, 2, 3)
     )
-    scalar_summary = summarizer._build_readonly_loop_summary_ref(
-        summary_count_expr=count_expr,
-        pointer_base_ref=base_ref,
-        accumulator_proof=_readonly_accumulator_proof(
+    scalar_proof = _readonly_accumulator_proof(
             base_ref=base_ref,
             count_expr=count_expr,
             stride=4,
             element_size=4,
             index_scale=4,
             witnesses=witnesses,
-        ),
-        result_size=4,
-        semantic_witnesses=witnesses,
     )
-    vector_summary = summarizer._build_readonly_loop_summary_ref(
-        summary_count_expr=count_expr,
-        pointer_base_ref=base_ref,
-        accumulator_proof=_readonly_accumulator_proof(
+    scalar_summary = scalar_proof.with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=witnesses,
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    ).lower_to_loop_summary_ref()
+    vector_proof = _readonly_accumulator_proof(
             base_ref=base_ref,
             count_expr=count_expr,
             stride=16,
@@ -4360,24 +4418,31 @@ def test_readonly_vector_lane_summary_enters_scalar_iteration_space_only_with_wi
             index_scale=16,
             lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
             witnesses=witnesses,
-        ),
-        result_size=4,
-        semantic_witnesses=witnesses,
     )
-    unproven_vector_summary = summarizer._build_readonly_loop_summary_ref(
-        summary_count_expr=count_expr,
-        pointer_base_ref=base_ref,
-        accumulator_proof=_readonly_accumulator_proof(
+    vector_summary = vector_proof.with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=witnesses,
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    ).lower_to_loop_summary_ref()
+    unproven_vector_proof = _readonly_accumulator_proof(
             base_ref=base_ref,
             count_expr=count_expr,
             stride=16,
             element_size=8,
             index_scale=16,
             lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
-        ),
-        result_size=4,
-        semantic_witnesses=(),
     )
+    unproven_vector_summary = unproven_vector_proof.with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    ).lower_to_loop_summary_ref()
 
     assert scalar_summary is not None
     assert vector_summary is not None

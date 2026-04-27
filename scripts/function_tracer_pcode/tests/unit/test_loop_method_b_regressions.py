@@ -11,6 +11,7 @@ through legacy shortcuts.
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
@@ -376,6 +377,133 @@ def test_exact_load_sum_matches_synthesized_readonly_reduction_witness():
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
     strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_exact_load_sum_does_not_match_biased_readonly_reduction_without_bias_proof():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=5,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    exact_info = ReturnInfo(address="0x1500", value=_load_term_expr(0), conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(address="0x1600", value=_readonly_sum_from_proof(proof), conditions=[_count_gt(0)])
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("exact_biased_guard", [exact_info]).parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=_analysis("summary_biased_guard", [summary_info]).parameters,
+    )
+    strategy = _pairwise_strategy()
+
+    assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case) is False
+
+
+def test_biased_exact_load_sum_matches_biased_readonly_reduction_proof():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=5,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    exact_value = Expression.binary_op("INT_ADD", _load_term_expr(0), _const(5))
+    exact_info = ReturnInfo(address="0x1700", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(address="0x1800", value=_readonly_sum_from_proof(proof), conditions=[_count_gt(0)])
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("exact_biased", [exact_info]).parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=_analysis("summary_biased", [summary_info]).parameters,
+    )
+    strategy = _pairwise_strategy()
+
+    assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case) is True
+
+
+def test_biased_exact_load_sum_requires_matching_result_width():
+    count_expr = _count_param()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=0,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        exact_return_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+        guard_constraints=(_count_gt(0),),
+        signed_counter=True,
+    )
+    wide_bias = Expression.constant(0x100000000, size=8)
+    exact_value = Expression.binary_op("INT_ADD", _load_term_expr(0), wide_bias)
+    exact_value.size = 8
+    exact_info = ReturnInfo(address="0x1710", value=exact_value, conditions=[_eq_count(1)])
+    summary_info = ReturnInfo(address="0x1810", value=_readonly_sum_from_proof(proof), conditions=[_count_gt(0)])
+    exact_case = ReturnCase(
+        0,
+        list(exact_info.conditions),
+        exact_info.value,
+        exact_info,
+        parameters=_analysis("exact_wide_bias", [exact_info]).parameters,
+    )
+    summary_case = ReturnCase(
+        0,
+        list(summary_info.conditions),
+        summary_info.value,
+        summary_info,
+        parameters=_analysis("summary_narrow_bias", [summary_info]).parameters,
+    )
+    strategy = _pairwise_strategy()
+
+    assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case) is False
 
 
 def test_pairwise_exact_load_matcher_does_not_guess_endianness_for_subpiece():

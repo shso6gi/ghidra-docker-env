@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.model import (
     PostStateReadRef,
     PostStateSnapshotRef,
     ReductionAccumulatorProof,
+    ReadonlyReductionLowering,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
@@ -234,8 +235,15 @@ def test_reduction_accumulator_proof_lowers_to_readonly_reduction_ref_object_cen
         signed_counter=True,
     )
 
-    ref = proof.to_readonly_reduction_ref()
+    lowering = proof.lower_to_readonly_reduction()
 
+    assert isinstance(lowering, ReadonlyReductionLowering)
+    ref = lowering.readonly_reduction
+    alias_ref = proof.lower_to_readonly_reduction_ref()
+    assert alias_ref is not None
+    assert alias_ref.stable_key() == ref.stable_key()
+    assert lowering.loop_summary == ref.loop_summary
+    assert lowering.stable_key() is not None
     assert ref is not None
     assert ref.accumulator_proof == proof
     assert ref.loop_summary is not None
@@ -255,7 +263,7 @@ def test_reduction_accumulator_proof_lowers_to_readonly_reduction_ref_object_cen
     assert loop_summary_method_b_key(ref.loop_summary) == loop_summary_method_b_key(_readonly_loop_summary(start=0))
 
 
-def test_reduction_accumulator_proof_with_constant_bias_does_not_lower_to_readonly_sum():
+def test_reduction_accumulator_proof_lowers_constant_bias_object_centrically():
     count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
     proof = ReductionAccumulatorProof(
         reduction_kind="memory_sum",
@@ -268,9 +276,282 @@ def test_reduction_accumulator_proof_with_constant_bias_does_not_lower_to_readon
         element_size=4,
         constant_bias=1,
     )
+    unbiased = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+    )
+    biased_ref = proof.lower_to_readonly_reduction_ref()
+    unbiased_ref = unbiased.lower_to_readonly_reduction_ref()
 
-    assert proof.to_loop_summary_ref() is None
-    assert proof.to_readonly_reduction_ref() is None
+    assert biased_ref is not None
+    assert unbiased_ref is not None
+    assert biased_ref.constant_bias == 1
+    assert biased_ref.loop_summary is not None
+    assert biased_ref.loop_summary.constant_bias == 1
+    assert biased_ref.semantic_key() != unbiased_ref.semantic_key()
+    assert loop_summary_method_b_key(biased_ref.loop_summary) != loop_summary_method_b_key(unbiased_ref.loop_summary)
+
+
+def test_readonly_constant_bias_is_width_normalized_object_centrically():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    negative_bias = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=-1,
+    ).lower_to_readonly_reduction_ref()
+    unsigned_bias = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=0xFFFFFFFF,
+    ).lower_to_readonly_reduction_ref()
+    wrapped_zero = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=1 << 32,
+    ).lower_to_readonly_reduction_ref()
+    zero_bias = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+    ).lower_to_readonly_reduction_ref()
+
+    assert negative_bias is not None
+    assert unsigned_bias is not None
+    assert wrapped_zero is not None
+    assert zero_bias is not None
+    assert negative_bias.constant_bias == 0xFFFFFFFF
+    assert negative_bias.semantic_key() == unsigned_bias.semantic_key()
+    assert wrapped_zero.semantic_key() == zero_bias.semantic_key()
+
+
+def test_readonly_ref_rejects_ref_level_bias_mismatch_with_loop_summary():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=count_expr,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+    )
+
+    try:
+        ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            loop_summary=loop_summary,
+            constant_bias=5,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bias mismatch must be rejected")
+
+
+def test_readonly_ref_rejects_accumulator_proof_bias_mismatch():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=count_expr,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        constant_bias=5,
+    )
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=0,
+    )
+
+    try:
+        ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            loop_summary=loop_summary,
+            accumulator_proof=proof,
+            constant_bias=5,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("proof/ref bias mismatch must be rejected")
+
+
+def test_readonly_ref_rejects_result_width_mismatch_before_bias_sync():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=count_expr,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=8,
+        ),
+        constant_bias=1 << 32,
+    )
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=0,
+    )
+
+    try:
+        ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            loop_summary=loop_summary,
+            accumulator_proof=proof,
+            constant_bias=0,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("result-width mismatch must be rejected before bias normalization")
+
+
+def test_loop_summary_rejects_widthless_nonzero_bias_before_normalization():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+
+    try:
+        LoopSummaryRef(
+            start_expr=Expression.constant(0, size=4),
+            limit_expr=count_expr,
+            step_expr=Expression.constant(1, size=4),
+            term_descriptor=LoopTermDescriptorRef(
+                kind="memory_load",
+                reduction_kind="sum",
+                location_base_ref=LocationBaseRef.parameter("base", index=0),
+                start_offset=0,
+                stride=4,
+                element_size=4,
+                result_size=0,
+            ),
+            constant_bias=256,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("widthless nonzero bias must not be normalized away")
+
+
+def test_readonly_bias_to_dict_uses_normalized_bias_at_each_layer():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        constant_bias=-1,
+    )
+    lowering = proof.lower_to_readonly_reduction()
+
+    assert lowering is not None
+    assert proof.to_dict()["constant_bias"] == 0xFFFFFFFF
+    assert lowering.loop_summary.to_dict()["constant_bias"] == 0xFFFFFFFF
+    assert lowering.readonly_reduction.to_dict()["constant_bias"] == 0xFFFFFFFF
+    assert lowering.to_dict()["proof"]["constant_bias"] == 0xFFFFFFFF
+    assert lowering.to_dict()["readonly_reduction"]["constant_bias"] == 0xFFFFFFFF
+
+
+def test_reduction_accumulator_proof_with_side_effects_does_not_lower_to_readonly_sum():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        side_effect_profile=LoopSideEffectProfileRef(
+            profile="effect_aware",
+            memory_reads=True,
+            memory_writes=True,
+        ),
+    )
+
+    assert proof.lower_to_loop_summary_ref() is None
+    assert proof.lower_to_readonly_reduction_ref() is None
 
 
 def test_reduction_accumulator_proof_preserves_independent_start_offset_in_loop_summary():

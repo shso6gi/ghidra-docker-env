@@ -525,6 +525,55 @@ def test_readonly_sum_smt_declarations_distinguish_different_loop_shapes():
     assert left_name != right_name
 
 
+def test_readonly_sum_smt_declarations_distinguish_constant_bias():
+    def _expr(bias: int) -> Expression:
+        summary = LoopSummaryRef(
+            start_expr=Expression.constant(0, size=4),
+            limit_expr=Expression.parameter("count", size=4, data_type="int"),
+            step_expr=Expression.constant(1, size=4),
+            term_descriptor=LoopTermDescriptorRef(
+                kind="memory_load",
+                reduction_kind="sum",
+                location_base_ref=LocationBaseRef.parameter("base", index=0),
+                start_offset=0,
+                stride=4,
+                element_size=4,
+                result_size=4,
+            ),
+            loop_var_unit="element_index",
+            constant_bias=bias,
+        )
+        return Expression.intrinsic(
+            "READONLY_SUM",
+            [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+            size=4,
+            runtime_ref=ReadonlyReductionRef(
+                reduction_kind="memory_sum",
+                pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+                count_parameter_name="count",
+                count_parameter_index=1,
+                stride=4,
+                element_size=4,
+                result_size=4,
+                signed_counter=True,
+                loop_summary=summary,
+                constant_bias=bias,
+            ),
+            opcode=READONLY_SUM_OPCODE,
+        )
+
+    unbiased = _expr(0)
+    biased = _expr(5)
+    same_bias = _expr(5)
+
+    unbiased_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(unbiased)[0]).group(1)
+    biased_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(biased)[0]).group(1)
+    same_bias_name = re.search(r"\(declare-fun ([^ ]+)", collect_intrinsic_smt_declarations(same_bias)[0]).group(1)
+
+    assert biased_name != unbiased_name
+    assert same_bias_name == biased_name
+
+
 def test_readonly_sum_smt_declarations_share_semantic_identity_when_witness_prefix_matches():
     shared_prefix = (
         ReadonlyReductionWitness(

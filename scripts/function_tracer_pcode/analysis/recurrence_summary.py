@@ -28,7 +28,7 @@ from ..model import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
-from ..model.render_smt import collect_intrinsic_smt_declarations
+from ..model.render_smt import collect_intrinsic_smt_declarations, expression_smt_bit_width
 from ..model.signature import is_integral_data_type, is_pointer_data_type
 from ..model.runtime_refs import UnknownValueRef
 from ..smt.interface import SolverStatus
@@ -3528,7 +3528,7 @@ class StructuralRecurrenceSummarizer:
             guard_constraints=positive_conditions,
             signed_counter=bool(count_param.get("is_signed", True)),
         )
-        reduction_ref = accumulator_proof.to_readonly_reduction_ref()
+        reduction_ref = accumulator_proof.lower_to_readonly_reduction_ref()
         if reduction_ref is None:
             self._debug("Declined readonly reduction summary: accumulator proof cannot lower to READONLY_SUM")
             return None
@@ -3558,48 +3558,6 @@ class StructuralRecurrenceSummarizer:
             f"stride={accumulator_proof.stride}, element_size={accumulator_proof.element_size})"
         )
         return summarized_returns, "readonly_pointer_reduction_summary"
-
-    def _build_readonly_loop_summary_ref(
-        self,
-        *,
-        summary_count_expr: Expression,
-        pointer_base_ref: LocationBaseRef,
-        accumulator_proof: ReductionAccumulatorProof,
-        result_size: int,
-        semantic_witnesses: Sequence[ReadonlyReductionWitness],
-        seed_terms: Sequence[ReadonlyReductionTermRef] = (),
-        guard_constraints: Sequence[Condition] = (),
-    ) -> Optional[LoopSummaryRef]:
-        proof = ReductionAccumulatorProof(
-            reduction_kind=accumulator_proof.reduction_kind,
-            pointer_base_ref=pointer_base_ref,
-            count_parameter_name=accumulator_proof.count_parameter_name,
-            count_parameter_index=accumulator_proof.count_parameter_index,
-            limit_expr=summary_count_expr,
-            result_size=max(1, int(result_size or 0)),
-            stride=accumulator_proof.stride,
-            element_size=accumulator_proof.element_size,
-            start_offset=accumulator_proof.start_offset,
-            start_index=accumulator_proof.start_index,
-            index_step=accumulator_proof.index_step,
-            index_scale=accumulator_proof.index_scale,
-            signed_counter=accumulator_proof.signed_counter,
-            seed_terms=tuple(seed_terms or accumulator_proof.seed_terms or ()),
-            lane_terms=accumulator_proof.lane_terms,
-            loop_body_witnesses=tuple(semantic_witnesses or ()),
-            exact_return_witnesses=accumulator_proof.exact_return_witnesses,
-            guard_constraints=tuple(guard_constraints or ()),
-            side_effect_profile=accumulator_proof.side_effect_profile,
-            constant_bias=accumulator_proof.constant_bias,
-            induction_phi_ref=accumulator_proof.induction_phi_ref,
-            accumulator_phi_ref=accumulator_proof.accumulator_phi_ref,
-            update_op_ref=accumulator_proof.update_op_ref,
-            load_op_refs=accumulator_proof.load_op_refs,
-            entry_block_ref=accumulator_proof.entry_block_ref,
-            backedge_block_ref=accumulator_proof.backedge_block_ref,
-            source=accumulator_proof.source,
-        )
-        return proof.to_loop_summary_ref()
 
     def _infer_readonly_pointer_reduction_parameters(
         self,
@@ -5459,17 +5417,45 @@ class StructuralRecurrenceSummarizer:
         for ret in positive_returns or []:
             exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
             reduced_value = _reduce_expression_under_conditions(ret.value, ret.conditions or [])
-            terms = self._extract_readonly_reduction_terms(
+            extracted_value = reduced_value
+            extracted = self._extract_readonly_reduction_terms_and_bias(
                 reduced_value,
                 analysis.parameters or [],
                 pointer_param,
             )
-            if terms is None and reduced_value is not ret.value:
-                terms = self._extract_readonly_reduction_terms(
+            if extracted is None and reduced_value is not ret.value:
+                extracted_value = ret.value
+                extracted = self._extract_readonly_reduction_terms_and_bias(
                     ret.value,
                     analysis.parameters or [],
                     pointer_param,
                 )
+            terms = None
+            constant_bias = 0
+            if extracted is not None:
+                terms, constant_bias = extracted
+                expected_bias = (
+                    int(getattr(accumulator_proof, "constant_bias", 0) or 0)
+                    if accumulator_proof is not None
+                    else 0
+                )
+                result_size = max(
+                    1,
+                    int(
+                        getattr(accumulator_proof, "result_size", 0)
+                        if accumulator_proof is not None
+                        else getattr(ret.value, "size", 0)
+                    )
+                    or 0,
+                )
+                exact_bits = int(expression_smt_bit_width(extracted_value) or 0)
+                if exact_bits != result_size * 8:
+                    terms = None
+                elif self._normalize_readonly_constant_bias(constant_bias, result_size) != self._normalize_readonly_constant_bias(
+                    expected_bias,
+                    result_size,
+                ):
+                    terms = None
             if terms is not None and (exact_count is None or exact_count <= 0):
                 exact_count = self._infer_exact_count_from_readonly_terms(
                     ret.conditions or [],
@@ -5613,15 +5599,35 @@ class StructuralRecurrenceSummarizer:
         parameters: Sequence[dict],
         pointer_param: dict,
     ) -> Optional[List[ReadonlyReductionTermRef]]:
+        extracted = self._extract_readonly_reduction_terms_and_bias(
+            expr,
+            parameters,
+            pointer_param,
+        )
+        if extracted is None:
+            return None
+        terms, constant_bias = extracted
+        if int(constant_bias) != 0:
+            return None
+        return list(terms)
+
+    def _extract_readonly_reduction_terms_and_bias(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[dict],
+        pointer_param: dict,
+    ) -> Optional[Tuple[Tuple[ReadonlyReductionTermRef, ...], int]]:
         if expr is None:
             return None
         big_endian = self._program_is_big_endian()
         extracted: List[ReadonlyReductionTermRef] = []
+        constant_bias = 0
         for sign, term in self._flatten_add_terms(expr):
             if term.expr_type == ExpressionType.CONSTANT:
                 value = self._raw_constant_value(term)
-                if value is None or int(value) != 0:
+                if value is None:
                     return None
+                constant_bias += int(sign) * int(value)
                 continue
             if sign != 1:
                 return None
@@ -5637,7 +5643,11 @@ class StructuralRecurrenceSummarizer:
         if not extracted:
             return None
         extracted.sort(key=lambda item: (int(item.byte_offset), int(item.access_size)))
-        return extracted
+        return tuple(extracted), int(constant_bias)
+
+    def _normalize_readonly_constant_bias(self, value: int, result_size: int) -> int:
+        bits = max(1, int(result_size or 0)) * 8
+        return int(value) % (1 << bits)
 
     def _extract_readonly_reduction_term_descriptor(
         self,

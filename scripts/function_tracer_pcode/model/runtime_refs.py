@@ -1165,6 +1165,11 @@ class LoopCaseRef:
         }
 
 
+def _bias_key(value: int, result_size: int) -> Tuple[int, int]:
+    bits = max(1, int(result_size or 0)) * 8
+    return bits, int(value) % (1 << bits)
+
+
 @dataclass(frozen=True)
 class LoopSummaryRef:
     """Unified semantic loop summary shared by all recurrence summaries.
@@ -1186,6 +1191,14 @@ class LoopSummaryRef:
     cases: Tuple[LoopCaseRef, ...] = ()
     loop_var_unit: str = "element_index"
     source: str = "recurrence_summary"
+    constant_bias: int = 0
+
+    def __post_init__(self) -> None:
+        result_size = int(getattr(self.term_descriptor, "result_size", 0) or 0)
+        if result_size <= 0 and int(self.constant_bias) != 0:
+            raise ValueError("LoopSummaryRef.constant_bias requires a positive term result_size")
+        result_size = max(1, result_size)
+        object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), result_size)[1])
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         start_key = _loop_object_key(self.start_expr)
@@ -1220,6 +1233,7 @@ class LoopSummaryRef:
             guard_keys,
             case_keys,
             self.source,
+            _bias_key(int(self.constant_bias), getattr(self.term_descriptor, "result_size", 0)),
         )
 
     def requires_effect_proof(self) -> bool:
@@ -1255,6 +1269,7 @@ class LoopSummaryRef:
             "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
             "cases": [case.to_dict() for case in self.cases],
             "source": self.source,
+            "constant_bias": int(self.constant_bias),
         }
 
 
@@ -1420,6 +1435,10 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         int(step_value),
         term_key,
         seed_keys,
+        _bias_key(
+            int(getattr(summary, "constant_bias", 0) or 0),
+            getattr(term_descriptor, "result_size", 0),
+        ),
         side_effect_key,
     )
 
@@ -1665,6 +1684,7 @@ class ReductionAccumulatorProof:
             raise ValueError("ReductionAccumulatorProof requires a positive result_size")
         if int(self.index_step) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive index_step")
+        object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
         lane_terms = tuple(
             sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
         )
@@ -1798,8 +1818,13 @@ class ReductionAccumulatorProof:
                 selected.append(term)
         return tuple(selected)
 
-    def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
-        if int(self.constant_bias) != 0:
+    def _readonly_lowering_failure_reason(self) -> Optional[str]:
+        if self.side_effect_profile.requires_effect_proof():
+            return "side_effects_not_representable"
+        return None
+
+    def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+        if self._readonly_lowering_failure_reason() is not None:
             return None
         stride = int(self.stride)
         element_size = int(self.element_size)
@@ -1827,7 +1852,11 @@ class ReductionAccumulatorProof:
             guard_constraints=tuple(self.guard_constraints or ()),
             loop_var_unit=self.loop_var_unit(),
             source=self.source,
+            constant_bias=int(self.constant_bias),
         )
+
+    def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+        return self.lower_to_loop_summary_ref()
 
     def with_runtime_evidence(
         self,
@@ -1893,11 +1922,11 @@ class ReductionAccumulatorProof:
                 return ()
         return tuple((index * access_size, access_size) for index in range(lane_count))
 
-    def to_readonly_reduction_ref(self) -> Optional["ReadonlyReductionRef"]:
-        loop_summary = self.to_loop_summary_ref()
+    def lower_to_readonly_reduction(self) -> Optional["ReadonlyReductionLowering"]:
+        loop_summary = self.lower_to_loop_summary_ref()
         if loop_summary is None:
             return None
-        return ReadonlyReductionRef(
+        readonly_ref = ReadonlyReductionRef(
             reduction_kind=self.reduction_kind,
             pointer_base_ref=self.pointer_base_ref,
             count_parameter_name=self.count_parameter_name,
@@ -1911,7 +1940,20 @@ class ReductionAccumulatorProof:
             semantic_witnesses=tuple(self.loop_body_witnesses or ()),
             loop_summary=loop_summary,
             accumulator_proof=self,
+            constant_bias=int(self.constant_bias),
         )
+        return ReadonlyReductionLowering(
+            proof=self,
+            loop_summary=loop_summary,
+            readonly_reduction=readonly_ref,
+        )
+
+    def lower_to_readonly_reduction_ref(self) -> Optional["ReadonlyReductionRef"]:
+        lowering = self.lower_to_readonly_reduction()
+        return lowering.readonly_reduction if lowering is not None else None
+
+    def to_readonly_reduction_ref(self) -> Optional["ReadonlyReductionRef"]:
+        return self.lower_to_readonly_reduction_ref()
 
     def loop_var_unit(self) -> str:
         normalized_lanes = tuple(
@@ -2010,6 +2052,44 @@ class ReadonlyReductionRef:
     semantic_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
     loop_summary: Optional[LoopSummaryRef] = None
     accumulator_proof: Optional[ReductionAccumulatorProof] = None
+    constant_bias: int = 0
+
+    def __post_init__(self) -> None:
+        result_size = max(1, int(self.result_size or 0))
+        ref_bias = _bias_key(int(self.constant_bias), result_size)[1]
+        loop_summary = self.loop_summary
+        accumulator_proof = self.accumulator_proof
+        source_biases = []
+        if loop_summary is not None:
+            summary_result_size_raw = int(
+                getattr(getattr(loop_summary, "term_descriptor", None), "result_size", 0) or 0
+            )
+            if summary_result_size_raw > 0 and summary_result_size_raw != result_size:
+                raise ValueError("ReadonlyReductionRef.result_size must match loop_summary term result_size")
+            if summary_result_size_raw <= 0 and int(getattr(loop_summary, "constant_bias", 0) or 0) != 0:
+                raise ValueError("ReadonlyReductionRef cannot align biased loop_summary without term result_size")
+            summary_result_size = result_size if summary_result_size_raw <= 0 else summary_result_size_raw
+            summary_bias = _bias_key(
+                int(getattr(loop_summary, "constant_bias", 0) or 0),
+                summary_result_size,
+            )[1]
+            source_biases.append(("loop_summary.constant_bias", summary_bias))
+        if accumulator_proof is not None:
+            proof_result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+            if proof_result_size != result_size:
+                raise ValueError("ReadonlyReductionRef.result_size must match accumulator_proof.result_size")
+            proof_bias = _bias_key(
+                int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+                proof_result_size,
+            )[1]
+            source_biases.append(("accumulator_proof.constant_bias", proof_bias))
+        nonzero_source_biases = [bias for _name, bias in source_biases if bias != 0]
+        if ref_bias == 0 and nonzero_source_biases:
+            ref_bias = nonzero_source_biases[0]
+        for name, source_bias in source_biases:
+            if ref_bias != source_bias:
+                raise ValueError(f"ReadonlyReductionRef.constant_bias must match {name}")
+        object.__setattr__(self, "constant_bias", ref_bias)
 
     def stable_key(self) -> Tuple[Any, ...]:
         loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
@@ -2028,6 +2108,7 @@ class ReadonlyReductionRef:
             self.source,
             loop_summary_key,
             proof_key,
+            _bias_key(int(self.constant_bias), self.result_size),
         )
 
     def display_name(self) -> str:
@@ -2036,7 +2117,8 @@ class ReadonlyReductionRef:
             f"{self.pointer_base_ref.display_name()},"
             f"{self.count_parameter_name},"
             f"stride={int(self.stride)},"
-            f"elem={int(self.element_size)})"
+            f"elem={int(self.element_size)},"
+            f"bias={int(self.constant_bias)})"
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
@@ -2056,6 +2138,7 @@ class ReadonlyReductionRef:
                 pointer_identity,
                 count_identity,
                 max(1, int(self.result_size or 0)),
+                _bias_key(int(self.constant_bias), self.result_size),
                 loop_key,
             )
         witness_prefix = self._semantic_witness_prefix(required_prefix=3, cap=3)
@@ -2074,6 +2157,7 @@ class ReadonlyReductionRef:
             count_identity,
             max(1, int(self.result_size or 0)),
             int(self.start_offset),
+            _bias_key(int(self.constant_bias), self.result_size),
             tuple(witness.stable_key() for witness in witness_prefix),
         )
 
@@ -2128,7 +2212,55 @@ class ReadonlyReductionRef:
             "semantic_witnesses": [witness.to_dict() for witness in self.semantic_witnesses],
             "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
             "accumulator_proof": self.accumulator_proof.to_dict() if self.accumulator_proof is not None else None,
+            "constant_bias": int(self.constant_bias),
             "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
+class ReadonlyReductionLowering:
+    """Materialized readonly lowering produced from a reduction proof."""
+
+    proof: ReductionAccumulatorProof
+    loop_summary: LoopSummaryRef
+    readonly_reduction: ReadonlyReductionRef
+    lowering_kind: str = "readonly_reduction"
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        proof_key = self.proof.stable_key()
+        loop_key = self.loop_summary.stable_key()
+        readonly_key = self.readonly_reduction.stable_key()
+        if proof_key is None or loop_key is None:
+            return None
+        return (
+            "readonly_reduction_lowering",
+            self.lowering_kind,
+            proof_key,
+            loop_key,
+            readonly_key,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        proof_key = self.proof.semantic_key()
+        loop_key = self.loop_summary.semantic_key()
+        readonly_key = self.readonly_reduction.semantic_key()
+        if proof_key is None or loop_key is None or readonly_key is None:
+            return None
+        return (
+            "readonly_reduction_lowering_semantic",
+            self.lowering_kind,
+            proof_key,
+            loop_key,
+            readonly_key,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "readonly_reduction_lowering",
+            "lowering_kind": self.lowering_kind,
+            "proof": self.proof.to_dict(),
+            "loop_summary": self.loop_summary.to_dict(),
+            "readonly_reduction": self.readonly_reduction.to_dict(),
         }
 
 

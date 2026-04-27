@@ -19,6 +19,7 @@ from ...analysis.effect_summary import canonicalize_location
 from ...model.render_smt import (
     collect_intrinsic_smt_declarations,
     expression_contains_unsupported_smt_ops,
+    expression_smt_bit_width,
 )
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
@@ -452,12 +453,22 @@ class PairwiseStrategy(CheckStrategy):
         accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
         if accumulator_proof is None or getattr(summary_ref, "loop_summary", None) is None:
             return False
-        extracted_terms = self._extract_readonly_reduction_terms_from_expression(
+        extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
             exact_case.value_expr,
             exact_case.parameters,
             getattr(accumulator_proof, "pointer_base_ref", None),
         )
-        if extracted_terms is None:
+        if extracted is None:
+            return False
+        extracted_terms, extracted_bias = extracted
+        result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+        exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
+        if exact_bits != result_size * 8:
+            return False
+        if self._normalize_constant_bias(extracted_bias, result_size) != self._normalize_constant_bias(
+            int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+            result_size,
+        ):
             return False
         extracted_key = tuple(term.stable_key() for term in extracted_terms)
         exact_witnesses = tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
@@ -1186,14 +1197,34 @@ class PairwiseStrategy(CheckStrategy):
         parameters: Sequence[Dict[str, Any]],
         pointer_base_ref,
     ) -> Optional[tuple[ReadonlyReductionTermRef, ...]]:
+        extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
+            expr,
+            parameters,
+            pointer_base_ref,
+        )
+        if extracted is None:
+            return None
+        terms, bias = extracted
+        if int(bias) != 0:
+            return None
+        return terms
+
+    def _extract_readonly_reduction_terms_and_bias_from_expression(
+        self,
+        expr: Optional[Expression],
+        parameters: Sequence[Dict[str, Any]],
+        pointer_base_ref,
+    ) -> Optional[tuple[tuple[ReadonlyReductionTermRef, ...], int]]:
         if expr is None or pointer_base_ref is None:
             return None
         extracted: List[ReadonlyReductionTermRef] = []
+        constant_bias = 0
         for sign, term in self._flatten_readonly_add_terms(expr):
             if getattr(term, "expr_type", None) == ExpressionType.CONSTANT:
                 value = self._raw_constant_value(term)
-                if value is None or int(value) != 0:
+                if value is None:
                     return None
+                constant_bias += int(sign) * int(value)
                 continue
             if sign != 1:
                 return None
@@ -1208,7 +1239,11 @@ class PairwiseStrategy(CheckStrategy):
         if not extracted:
             return None
         extracted.sort(key=lambda item: (int(item.byte_offset), int(item.access_size)))
-        return tuple(extracted)
+        return tuple(extracted), int(constant_bias)
+
+    def _normalize_constant_bias(self, value: int, result_size: int) -> int:
+        bits = max(1, int(result_size or 0)) * 8
+        return int(value) % (1 << bits)
 
     def _flatten_readonly_add_terms(
         self,
