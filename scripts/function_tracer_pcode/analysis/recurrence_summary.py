@@ -275,6 +275,7 @@ class StructuralRecurrenceSummarizer:
             analysis,
             pointer_param,
             count_param,
+            positive_conditions=positive_conditions,
         )
         return loop_shape is not None
 
@@ -3403,6 +3404,7 @@ class StructuralRecurrenceSummarizer:
             analysis,
             pointer_param,
             count_param,
+            positive_conditions=positive_conditions,
         )
         positive_conditions = self._readonly_reduction_positive_conditions(
             analysis,
@@ -3535,6 +3537,17 @@ class StructuralRecurrenceSummarizer:
             return None
 
         counter_size = max(1, int(getattr(summary_count_expr, "size", 0) or 4))
+        lane_terms = self._readonly_loop_lane_terms_from_shape(
+            loop_shape,
+            result_size=result_size,
+            semantic_witnesses=semantic_witnesses,
+        )
+        loop_var_unit = self._readonly_loop_var_unit_from_shape(
+            loop_shape,
+            lane_terms=lane_terms,
+            result_size=result_size,
+            semantic_witnesses=semantic_witnesses,
+        )
         return LoopSummaryRef(
             start_expr=Expression.constant(int(start_index), size=counter_size),
             limit_expr=summary_count_expr,
@@ -3547,6 +3560,7 @@ class StructuralRecurrenceSummarizer:
                 stride=index_scale,
                 element_size=element_size,
                 result_size=result_size,
+                lane_terms=lane_terms,
             ),
             seed_terms=tuple(seed_terms or ()),
             witnesses=tuple(semantic_witnesses or ()),
@@ -3555,8 +3569,135 @@ class StructuralRecurrenceSummarizer:
                 memory_reads=True,
             ),
             guard_constraints=tuple(guard_constraints or ()),
-            loop_var_unit="element_index",
+            loop_var_unit=loop_var_unit,
         )
+
+    def _readonly_loop_lane_terms_from_shape(
+        self,
+        loop_shape: Dict[str, int],
+        *,
+        result_size: int,
+        semantic_witnesses: Sequence[ReadonlyReductionWitness] = (),
+    ) -> Tuple[Tuple[int, int], ...]:
+        lane_loads = tuple(loop_shape.get("lane_loads", ()) or ())
+        access_size = max(1, int(result_size or 0))
+        if len(lane_loads) <= 1:
+            return self._infer_readonly_loop_lane_terms_from_witnesses(
+                loop_shape,
+                access_size=access_size,
+                semantic_witnesses=semantic_witnesses,
+            )
+        lane_terms = set()
+        for lane_offset, lane_size in lane_loads:
+            lane_offset = int(lane_offset)
+            lane_size = max(1, int(lane_size or 0))
+            if lane_size < access_size or lane_size % access_size != 0:
+                return ()
+            for byte_delta in range(0, lane_size, access_size):
+                lane_terms.add((lane_offset + byte_delta, access_size))
+        return tuple(sorted(lane_terms))
+
+    def _readonly_loop_var_unit_from_shape(
+        self,
+        loop_shape: Dict[str, int],
+        *,
+        lane_terms: Sequence[Tuple[int, int]],
+        result_size: int,
+        semantic_witnesses: Sequence[ReadonlyReductionWitness] = (),
+    ) -> str:
+        if self._readonly_lane_terms_have_scalar_iteration_proof(
+            loop_shape,
+            lane_terms=lane_terms,
+            result_size=result_size,
+            semantic_witnesses=semantic_witnesses,
+        ):
+            return "scalar_element_index"
+        return "element_index"
+
+    def _readonly_lane_terms_have_scalar_iteration_proof(
+        self,
+        loop_shape: Dict[str, int],
+        *,
+        lane_terms: Sequence[Tuple[int, int]],
+        result_size: int,
+        semantic_witnesses: Sequence[ReadonlyReductionWitness] = (),
+    ) -> bool:
+        normalized_lanes = tuple(
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in (lane_terms or ()))
+        )
+        if not normalized_lanes:
+            return False
+        access_size = max(1, int(result_size or 0))
+        if any(size != access_size for _, size in normalized_lanes):
+            return False
+        offsets = [offset for offset, _ in normalized_lanes]
+        if offsets[0] != 0:
+            return False
+        expected_offsets = [index * access_size for index in range(len(offsets))]
+        if offsets != expected_offsets:
+            return False
+        stride = int(loop_shape.get("index_scale", loop_shape.get("stride", 0)) or 0)
+        if stride != access_size * len(offsets):
+            return False
+        if int(loop_shape.get("start_index", 0) or 0) != 0:
+            return False
+        if int(loop_shape.get("index_step", 1) or 1) != 1:
+            return False
+
+        witnesses_by_count = {
+            int(witness.exact_count): tuple(witness.terms)
+            for witness in semantic_witnesses or ()
+        }
+        for count in range(1, len(offsets)):
+            terms = witnesses_by_count.get(count)
+            expected = tuple(
+                ReadonlyReductionTermRef(byte_offset=index * access_size, access_size=access_size)
+                for index in range(count)
+            )
+            if terms is None:
+                return False
+            if tuple(term.stable_key() for term in terms) != tuple(term.stable_key() for term in expected):
+                return False
+        return True
+
+    def _infer_readonly_loop_lane_terms_from_witnesses(
+        self,
+        loop_shape: Dict[str, int],
+        *,
+        access_size: int,
+        semantic_witnesses: Sequence[ReadonlyReductionWitness],
+    ) -> Tuple[Tuple[int, int], ...]:
+        stride = int(loop_shape.get("index_scale", loop_shape.get("stride", 0)) or 0)
+        element_size = int(loop_shape.get("element_size", 0) or 0)
+        start_index = int(loop_shape.get("start_index", 0) or 0)
+        index_step = int(loop_shape.get("index_step", 1) or 1)
+        if (
+            stride <= 0
+            or access_size <= 0
+            or stride % access_size != 0
+            or element_size <= access_size
+            or start_index != 0
+            or index_step != 1
+        ):
+            return ()
+        lane_count = stride // access_size
+        if lane_count <= 1:
+            return ()
+        witnesses_by_count = {
+            int(witness.exact_count): tuple(witness.terms)
+            for witness in semantic_witnesses or ()
+        }
+        for count in range(1, lane_count):
+            terms = witnesses_by_count.get(count)
+            expected = tuple(
+                ReadonlyReductionTermRef(byte_offset=index * access_size, access_size=access_size)
+                for index in range(count)
+            )
+            if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+                term.stable_key() for term in expected
+            ):
+                return ()
+        return tuple((index * access_size, access_size) for index in range(lane_count))
 
     def _readonly_loop_seed_terms_from_shape(
         self,
@@ -3771,6 +3912,8 @@ class StructuralRecurrenceSummarizer:
         analysis,
         pointer_param: dict,
         count_param: dict,
+        *,
+        positive_conditions: Sequence[Condition] = (),
     ) -> Optional[Dict[str, int]]:
         if not self._analysis_mentions_parameter_in_conditions(
             analysis,
@@ -3792,10 +3935,6 @@ class StructuralRecurrenceSummarizer:
             if index_match is not None:
                 index_phis.append(index_match)
 
-        if not pointer_phis and not index_phis:
-            self._debug("Declined readonly reduction summary: no pointer/index progression PHI found")
-            return None
-
         for op in all_ops:
             if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
                 continue
@@ -3807,7 +3946,1509 @@ class StructuralRecurrenceSummarizer:
             )
             if accumulator_match is not None:
                 return accumulator_match
+
+        vectorized_match = self._detect_vectorized_readonly_prefix_sum_shape(
+            all_ops,
+            pointer_param,
+            count_param,
+            analysis,
+            positive_conditions=positive_conditions,
+        )
+        if vectorized_match is not None:
+            return vectorized_match
+        if not pointer_phis and not index_phis:
+            self._debug("Declined readonly reduction summary: no pointer/index progression PHI found")
         return None
+
+    def _detect_vectorized_readonly_prefix_sum_shape(
+        self,
+        all_ops: Sequence[object],
+        pointer_param: dict,
+        count_param: dict,
+        analysis,
+        *,
+        positive_conditions: Sequence[Condition] = (),
+    ) -> Optional[Dict[str, int]]:
+        """Recognize a vector-body plus scalar-tail readonly prefix sum.
+
+        Optimizing compilers often lower ``sum(base[0:count])`` into two
+        loops: a vector/unrolled body over ``count & -K`` elements and a
+        scalar tail from that rounded count to ``count``.  The normal
+        recurrence detector intentionally expects a single canonical induction
+        PHI, so this recognizer proves the object-level coverage of the two
+        loops before collapsing them back to the scalar prefix-sum summary.
+        """
+
+        result_size = self._readonly_reduction_result_size(
+            analysis,
+            positive_conditions=positive_conditions,
+        )
+        if result_size <= 0:
+            return None
+
+        rounded_candidates = self._readonly_round_down_candidates(all_ops, count_param)
+        if not rounded_candidates:
+            self._debug("Declined vectorized readonly prefix-sum shape: no rounded-count candidate")
+            return None
+
+        for rounded_vn, lane_count in rounded_candidates:
+            if lane_count <= 1:
+                continue
+            vector_stride = lane_count * result_size
+            vector_pointer = self._match_vector_prefix_pointer(
+                all_ops,
+                pointer_param,
+                vector_stride=vector_stride,
+                element_size=result_size,
+            )
+            if vector_pointer is None:
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"no vector pointer progression for lanes={lane_count}"
+                )
+                continue
+            pointer_phi, vector_base_offset = vector_pointer
+            if not self._vector_prefix_lanes_cover_block(
+                all_ops,
+                pointer_phi,
+                base_offset=vector_base_offset,
+                vector_stride=vector_stride,
+                element_size=result_size,
+            ):
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"vector lanes do not cover one contiguous block (lanes={lane_count})"
+                )
+                continue
+            vector_region_conditions = list(positive_conditions or [])
+            count_expr = self._parameter_expression(count_param)
+            vector_region_conditions.append(
+                Condition(
+                    Expression.binary_op(
+                        "INT_SLESSEQUAL",
+                        Expression.constant(lane_count, count_expr.size or 4),
+                        count_expr,
+                    ),
+                    False,
+                )
+            )
+            return_term_proof = self._vector_prefix_lanes_have_unit_terms_in_positive_return(
+                analysis,
+                pointer_param,
+                vector_region_conditions,
+                vector_stride=vector_stride,
+                element_size=result_size,
+            )
+            def_use_term_proof = self._vector_prefix_lanes_contribute_additively_to_return(
+                all_ops,
+                pointer_phi,
+                base_offset=vector_base_offset,
+                vector_stride=vector_stride,
+                element_size=result_size,
+            )
+            if return_term_proof is not True:
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"positive return is not an exact readonly sum witness (lanes={lane_count})"
+                )
+                continue
+            if not def_use_term_proof:
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"vector lanes do not flow additively to the return (lanes={lane_count})"
+                )
+                continue
+            if not (
+                self._has_vector_countdown_loop(
+                    all_ops,
+                    rounded_vn,
+                    lane_count=lane_count,
+                )
+                or self._has_vector_loop_bound_to_rounded_count(
+                    all_ops,
+                    pointer_phi,
+                    pointer_param,
+                    rounded_vn,
+                    element_size=result_size,
+                    base_offset=vector_base_offset,
+                    vector_stride=vector_stride,
+                )
+            ):
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"no object-centric bound tying vector cursor to rounded count (lanes={lane_count})"
+                )
+                continue
+            if not self._has_scalar_tail_from_rounded_count(
+                all_ops,
+                pointer_param,
+                count_param,
+                rounded_vn,
+                element_size=result_size,
+            ):
+                self._debug(
+                    "Declined vectorized readonly prefix-sum candidate: "
+                    f"no scalar tail from rounded count to full count (lanes={lane_count})"
+                )
+                continue
+            self._debug(
+                "Recovered vectorized readonly prefix-sum loop shape "
+                f"(lanes={lane_count}, element_size={result_size})"
+            )
+            return {
+                "stride": int(result_size),
+                "element_size": int(result_size),
+                "start_offset": 0,
+                "start_index": 0,
+                "index_step": 1,
+                "index_scale": int(result_size),
+                "lane_loads": (),
+                "seed_terms": (),
+            }
+        return None
+
+    def _readonly_reduction_result_size(
+        self,
+        analysis,
+        *,
+        positive_conditions: Sequence[Condition] = (),
+    ) -> int:
+        returns = list(getattr(analysis, "returns", None) or [])
+        if positive_conditions:
+            overlapping = [
+                ret for ret in returns
+                if self._return_overlaps_conditions(ret, positive_conditions)
+            ]
+            if overlapping:
+                returns = overlapping
+        for ret in returns:
+            value = getattr(ret, "value", None)
+            size = int(getattr(value, "size", 0) or 0)
+            if size > 0:
+                return size
+        return 4
+
+    def _readonly_round_down_candidates(
+        self,
+        all_ops: Sequence[object],
+        count_param: dict,
+    ) -> List[Tuple[object, int]]:
+        candidates: List[Tuple[object, int]] = []
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "INT_AND":
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            mask = self._varnode_unsigned_constant_value(left)
+            value = right
+            if mask is None:
+                mask = self._varnode_unsigned_constant_value(right)
+                value = left
+            if mask is None or not self._varnode_matches_parameter(value, count_param.get("name", "")):
+                continue
+            count_width_bits = self._infer_counter_bit_width(
+                self._trace_varnode_expression(value),
+                str(count_param.get("name", "") or ""),
+            )
+            if count_width_bits is None:
+                count_width_bits = self._varnode_bit_width(value)
+            if count_width_bits is None:
+                count_width_bits = max(1, int(count_param.get("size", 0) or 0)) * 8
+            lane_count = self._power_of_two_rounding_from_mask(mask, count_width_bits=count_width_bits)
+            if lane_count is None:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is not None:
+                candidates.append((output, lane_count))
+        return candidates
+
+    def _power_of_two_rounding_from_mask(self, mask: int, *, count_width_bits: int) -> Optional[int]:
+        width_bits = int(count_width_bits or 0)
+        if width_bits <= 0:
+            return None
+        full_mask = (1 << width_bits) - 1
+        current = int(mask) & full_mask
+        low_clear = 0
+        while low_clear < width_bits and (current & (1 << low_clear)) == 0:
+            low_clear += 1
+        if low_clear <= 0:
+            return None
+        lane_count = 1 << low_clear
+        expected = full_mask ^ (lane_count - 1)
+        if current != expected:
+            return None
+        return lane_count
+
+    def _varnode_bit_width(self, varnode) -> Optional[int]:
+        try:
+            size = int(getattr(varnode, "getSize", lambda: 0)() or 0)
+        except Exception:
+            size = 0
+        if size > 0:
+            return size * 8
+        expr = self._trace_varnode_expression(varnode)
+        size = int(getattr(expr, "size", 0) or 0)
+        if size > 0:
+            return size * 8
+        return None
+
+    def _match_vector_prefix_pointer(
+        self,
+        all_ops: Sequence[object],
+        pointer_param: dict,
+        *,
+        vector_stride: int,
+        element_size: int,
+    ) -> Optional[Tuple[object, int]]:
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            phi_output = getattr(op, "getOutput", lambda: None)()
+            if phi_output is None:
+                continue
+            if not self._phi_has_pointer_step(
+                all_ops,
+                phi_output,
+                step_bytes=vector_stride,
+            ):
+                continue
+            lane_offsets = self._load_byte_offsets_from_pointer(all_ops, phi_output, element_size=element_size)
+            if not lane_offsets:
+                continue
+            min_offset = min(lane_offsets)
+            base_offset = -int(min_offset)
+            if base_offset < 0:
+                continue
+            if not self._has_pointer_base_plus_constant(
+                all_ops,
+                pointer_param,
+                base_offset,
+            ):
+                continue
+            return phi_output, base_offset
+        return None
+
+    def _phi_has_pointer_step(
+        self,
+        all_ops: Sequence[object],
+        phi_output,
+        *,
+        step_bytes: int,
+    ) -> bool:
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "PTRADD":
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 3:
+                continue
+            base = self._follow_passthrough_varnode(op.getInput(0))
+            if not self._same_varnode_value(base, phi_output):
+                continue
+            index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(op.getInput(1)))
+            elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(op.getInput(2)))
+            if index is not None and elem is not None and int(index) * int(elem) == int(step_bytes):
+                return True
+        return False
+
+    def _has_pointer_base_plus_constant(
+        self,
+        all_ops: Sequence[object],
+        pointer_param: dict,
+        byte_offset: int,
+    ) -> bool:
+        if int(byte_offset) == 0:
+            return True
+        for op in all_ops:
+            mnemonic = getattr(op, "getMnemonic", lambda: None)()
+            if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(op, "getNumInputs", lambda: 0)() or 0) >= 2:
+                left = self._follow_passthrough_varnode(op.getInput(0))
+                right = self._follow_passthrough_varnode(op.getInput(1))
+                if (
+                    self._varnode_matches_parameter(left, pointer_param.get("name", ""))
+                    and self._signed_varnode_constant_value(right) == int(byte_offset)
+                ):
+                    return True
+                if (
+                    mnemonic == "INT_ADD"
+                    and self._varnode_matches_parameter(right, pointer_param.get("name", ""))
+                    and self._signed_varnode_constant_value(left) == int(byte_offset)
+                ):
+                    return True
+            if mnemonic == "PTRADD" and int(getattr(op, "getNumInputs", lambda: 0)() or 0) >= 3:
+                base = self._follow_passthrough_varnode(op.getInput(0))
+                index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(op.getInput(1)))
+                elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(op.getInput(2)))
+                if (
+                    self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                    and index is not None
+                    and elem is not None
+                    and int(index) * int(elem) == int(byte_offset)
+                ):
+                    return True
+        return False
+
+    def _load_byte_offsets_from_pointer(
+        self,
+        all_ops: Sequence[object],
+        pointer_phi,
+        *,
+        element_size: int,
+    ) -> List[int]:
+        offsets: List[int] = []
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "LOAD":
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            load_size = max(1, int(getattr(output, "getSize", lambda: element_size)() or element_size))
+            address = self._follow_passthrough_varnode(op.getInput(1))
+            byte_offset = self._byte_offset_from_pointer(address, pointer_phi)
+            if byte_offset is None:
+                continue
+            for lane_delta in range(0, load_size, element_size):
+                offsets.append(int(byte_offset) + int(lane_delta))
+        return offsets
+
+    def _byte_offset_from_pointer(self, address_varnode, pointer_phi) -> Optional[int]:
+        if self._same_varnode_value(address_varnode, pointer_phi):
+            return 0
+        def_op = getattr(address_varnode, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "PTRADD":
+            return None
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 3:
+            return None
+        base = self._follow_passthrough_varnode(def_op.getInput(0))
+        if not self._same_varnode_value(base, pointer_phi):
+            return None
+        index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+        elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+        if index is None or elem is None:
+            return None
+        return int(index) * int(elem)
+
+    def _vector_prefix_lanes_cover_block(
+        self,
+        all_ops: Sequence[object],
+        pointer_phi,
+        *,
+        base_offset: int,
+        vector_stride: int,
+        element_size: int,
+    ) -> bool:
+        raw_offsets = self._load_byte_offsets_from_pointer(all_ops, pointer_phi, element_size=element_size)
+        normalized = sorted({int(offset) + int(base_offset) for offset in raw_offsets})
+        expected = list(range(0, int(vector_stride), int(element_size)))
+        return normalized == expected
+
+    def _vector_prefix_lanes_have_unit_terms_in_positive_return(
+        self,
+        analysis,
+        pointer_param: dict,
+        vector_region_conditions: Sequence[Condition],
+        *,
+        vector_stride: int,
+        element_size: int,
+    ) -> Optional[bool]:
+        expected = {
+            (int(byte_offset), int(element_size))
+            for byte_offset in range(0, int(vector_stride), int(element_size))
+        }
+        expected_counts = Counter({term_key: 1 for term_key in expected})
+        saw_overlapping_return = False
+        for ret in getattr(analysis, "returns", None) or ():
+            if not self._return_overlaps_conditions(ret, vector_region_conditions):
+                continue
+            saw_overlapping_return = True
+            value = _reduce_expression_under_conditions(ret.value, ret.conditions or ())
+            terms = self._extract_readonly_reduction_terms(
+                value,
+                getattr(analysis, "parameters", None) or (),
+                pointer_param,
+            )
+            if terms is None and value is not ret.value:
+                terms = self._extract_readonly_reduction_terms(
+                    ret.value,
+                    getattr(analysis, "parameters", None) or (),
+                    pointer_param,
+                )
+            if terms is None:
+                return False
+            counts = Counter((int(term.byte_offset), int(term.access_size)) for term in terms)
+            if counts != expected_counts:
+                return False
+        return True if saw_overlapping_return else None
+
+    def _vector_prefix_lanes_contribute_additively_to_return(
+        self,
+        all_ops: Sequence[object],
+        pointer_phi,
+        *,
+        base_offset: int,
+        vector_stride: int,
+        element_size: int,
+    ) -> bool:
+        expected_offsets = set(range(0, int(vector_stride), int(element_size)))
+        expected_counts = Counter({offset: 1 for offset in expected_offsets})
+        contributing_counts: Counter[int] = Counter()
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "LOAD":
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            load_size = max(1, int(getattr(output, "getSize", lambda: element_size)() or element_size))
+            address = self._follow_passthrough_varnode(op.getInput(1))
+            byte_offset = self._byte_offset_from_pointer(address, pointer_phi)
+            if byte_offset is None:
+                continue
+            normalized_offsets = [
+                int(byte_offset) + int(base_offset) + lane_delta
+                for lane_delta in range(0, load_size, element_size)
+            ]
+            if any(offset not in expected_offsets for offset in normalized_offsets):
+                if self._load_lanes_flow_additively_to_return(
+                    output,
+                    load_size=load_size,
+                    element_size=element_size,
+                    pointer_phi=pointer_phi,
+                    expected_offsets=expected_offsets,
+                    base_offset=base_offset,
+                ):
+                    self._debug(
+                        "Declined vectorized readonly prefix-sum load contribution: "
+                        f"unexpected_offsets={tuple(normalized_offsets)}"
+                    )
+                    return False
+                continue
+            if self._load_lanes_flow_additively_to_return(
+                output,
+                load_size=load_size,
+                element_size=element_size,
+                pointer_phi=pointer_phi,
+                expected_offsets=expected_offsets,
+                base_offset=base_offset,
+            ):
+                contributing_counts.update(normalized_offsets)
+        return contributing_counts == expected_counts
+
+    def _load_lanes_flow_additively_to_return(
+        self,
+        load_output,
+        *,
+        load_size: int,
+        element_size: int,
+        pointer_phi=None,
+        expected_offsets: Sequence[int] = (),
+        base_offset: int = 0,
+    ) -> bool:
+        required_lanes = max(1, int(load_size) // max(1, int(element_size)))
+        if required_lanes <= 1:
+            count = self._varnode_additive_return_contribution_count(load_output)
+            if count != 1:
+                self._debug(
+                    "Declined vectorized readonly prefix-sum load contribution: "
+                    f"load={self._varnode_cache_key(load_output)} contribution_count={count}"
+                )
+            return count == 1
+        lane_roots = self._collect_scalar_lane_roots(load_output, element_size=element_size)
+        if len(lane_roots) != required_lanes:
+            self._debug(
+                "Declined vectorized readonly prefix-sum load contribution: "
+                f"load={self._varnode_cache_key(load_output)} "
+                f"lane_roots={len(lane_roots)} required_lanes={required_lanes}"
+            )
+            return False
+        counts = tuple(
+            self._varnode_additive_return_contribution_count(lane)
+            for lane in lane_roots
+        )
+        if any(count != 1 for count in counts):
+            self._debug(
+                "Declined vectorized readonly prefix-sum load contribution: "
+                f"load={self._varnode_cache_key(load_output)} lane_counts={counts}"
+            )
+            return False
+        return True
+
+    def _collect_scalar_lane_roots(
+        self,
+        start_varnode,
+        *,
+        element_size: int,
+        budget: int = 64,
+    ) -> Tuple[object, ...]:
+        lanes: List[object] = []
+        stack = [start_varnode]
+        seen = set()
+        while stack and len(seen) < budget:
+            current = stack.pop()
+            key = self._varnode_cache_key(current)
+            if key in seen:
+                continue
+            seen.add(key)
+            for op in self._iter_varnode_descendant_ops(current):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is None:
+                    continue
+                output_size = max(1, int(getattr(output, "getSize", lambda: element_size)() or element_size))
+                if mnemonic == "SUBPIECE" and output_size == int(element_size):
+                    lanes.append(output)
+                    continue
+                if mnemonic in {"INT_RIGHT", "COPY", "CAST", "INT_ZEXT", "INT_SEXT"}:
+                    stack.append(output)
+        unique: Dict[Tuple[Any, ...], object] = {}
+        for lane in lanes:
+            key = self._varnode_cache_key(lane)
+            if key is not None:
+                unique[key] = lane
+        return tuple(unique.values())
+
+    def _varnode_additive_return_contribution_count(
+        self,
+        start_varnode,
+        *,
+        budget: int = 128,
+    ) -> int:
+        allowed = {
+            "INT_ADD",
+            "COPY",
+            "CAST",
+            "INT_ZEXT",
+            "INT_SEXT",
+            "SUBPIECE",
+            "MULTIEQUAL",
+        }
+        stack = [(start_varnode, 1)]
+        seen_coefficients: Dict[Tuple[Any, ...], int] = {}
+        return_count = 0
+        steps = 0
+        while stack and steps < budget:
+            current, coefficient = stack.pop()
+            steps += 1
+            if coefficient <= 0:
+                continue
+            key = self._varnode_cache_key(current)
+            previous = seen_coefficients.get(key)
+            if previous is not None and previous >= coefficient:
+                continue
+            seen_coefficients[key] = coefficient
+            for op in self._iter_varnode_descendant_ops(current):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                input_multiplicity = self._varnode_input_multiplicity(op, current)
+                if input_multiplicity <= 0:
+                    continue
+                if mnemonic == "RETURN":
+                    return_count += coefficient * input_multiplicity
+                    if return_count > 1:
+                        return 2
+                    continue
+                if mnemonic not in allowed:
+                    continue
+                if mnemonic == "MULTIEQUAL":
+                    accepted_phi_input = self._multiequal_input_is_accumulator_update(
+                        op,
+                        current,
+                    )
+                    if not accepted_phi_input:
+                        self._debug(
+                            "Declined vectorized readonly prefix-sum accumulator PHI contribution: "
+                            f"phi={self._varnode_cache_key(getattr(op, 'getOutput', lambda: None)())} "
+                            f"input={self._varnode_cache_key(current)} "
+                            f"reason={self._multiequal_accumulator_update_rejection_reason(op)}"
+                        )
+                        continue
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is not None:
+                    next_coefficient = coefficient
+                    if mnemonic == "INT_ADD":
+                        next_coefficient *= input_multiplicity
+                    if next_coefficient > 1:
+                        return 2
+                    stack.append((output, next_coefficient))
+        return min(return_count, 2)
+
+    def _multiequal_input_is_accumulator_update(self, phi_op, input_varnode) -> bool:
+        return self._same_varnode_identity(
+            input_varnode,
+            self._unique_multiequal_accumulator_update_input(phi_op),
+        )
+
+    def _unique_multiequal_accumulator_update_input(self, phi_op):
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
+        if phi_output is None:
+            return None
+        update_inputs = []
+        seed_inputs = []
+        input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
+        for index in range(input_count):
+            try:
+                candidate = phi_op.getInput(index)
+            except Exception:
+                continue
+            if self._varnode_is_accumulator_update_for_phi(candidate, phi_output):
+                update_inputs.append((index, candidate))
+            else:
+                seed_inputs.append((index, candidate))
+        if len(update_inputs) != 1:
+            return None
+        if not seed_inputs:
+            return None
+        update_indices = tuple(index for index, _candidate in update_inputs)
+        for seed_index, seed_input in seed_inputs:
+            if self._varnode_depends_on_varnode(seed_input, phi_output):
+                return None
+            if self._varnode_aliases_accumulator_object(seed_input, phi_output) and not (
+                self._phi_input_is_cfg_entry_seed(phi_op, seed_index, update_indices)
+            ):
+                return None
+        return update_inputs[0][1]
+
+    def _multiequal_accumulator_update_rejection_reason(self, phi_op) -> str:
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
+        if phi_output is None:
+            return "no_phi_output"
+        update_inputs = []
+        seed_inputs = []
+        input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
+        for index in range(input_count):
+            try:
+                candidate = phi_op.getInput(index)
+            except Exception:
+                continue
+            if self._varnode_is_accumulator_update_for_phi(candidate, phi_output):
+                update_inputs.append((index, candidate))
+            else:
+                seed_inputs.append((index, candidate))
+        seed_depends = [
+            self._varnode_depends_on_varnode(seed_input, phi_output)
+            for _seed_index, seed_input in seed_inputs
+        ]
+        seed_aliases = [
+            self._varnode_aliases_accumulator_object(seed_input, phi_output)
+            for _seed_index, seed_input in seed_inputs
+        ]
+        update_indices = tuple(index for index, _candidate in update_inputs)
+        seed_entry = [
+            self._phi_input_is_cfg_entry_seed(phi_op, seed_index, update_indices)
+            for seed_index, _seed_input in seed_inputs
+        ]
+        return (
+            f"updates={len(update_inputs)}, seeds={len(seed_inputs)}, "
+            f"seed_depends={tuple(seed_depends)}, seed_aliases={tuple(seed_aliases)}, "
+            f"seed_entry={tuple(seed_entry)}"
+        )
+
+    def _varnode_is_accumulator_update_for_phi(self, candidate, phi_output) -> bool:
+        def_op = getattr(candidate, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_ADD":
+            return False
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        for index in range(int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)):
+            try:
+                candidate = self._follow_passthrough_varnode(def_op.getInput(index))
+            except Exception:
+                continue
+            if self._same_varnode_value(candidate, phi_output):
+                return True
+        return False
+
+    def _varnode_depends_on_varnode(self, start_varnode, target_varnode, *, budget: int = 64) -> bool:
+        stack = [start_varnode]
+        seen = set()
+        steps = 0
+        while stack and steps < budget:
+            current = stack.pop()
+            steps += 1
+            key = self._varnode_cache_key(current)
+            if key in seen:
+                continue
+            seen.add(key)
+            if self._same_varnode_identity(current, target_varnode):
+                return True
+            def_op = getattr(current, "getDef", lambda: None)()
+            if def_op is None:
+                continue
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+            for index in range(input_count):
+                try:
+                    stack.append(def_op.getInput(index))
+                except Exception:
+                    continue
+        return False
+
+    def _varnode_aliases_accumulator_object(self, candidate, phi_output) -> bool:
+        """Return True when a non-update PHI input is the accumulator object itself.
+
+        This deliberately avoids storage-address equality: optimized Ghidra SSA can
+        place a real entry seed and a loop-carried value in the same register slot.
+        HighVariable and representative identity, however, mean the input is not an
+        independent seed object but an alias of the accumulator's SSA object.
+        """
+        if candidate is None or phi_output is None:
+            return False
+        try:
+            candidate_high = candidate.getHigh()
+            phi_high = phi_output.getHigh()
+        except Exception:
+            return False
+        if candidate_high is None or phi_high is None:
+            return False
+        if candidate_high is phi_high:
+            return True
+        try:
+            if candidate_high == phi_high:
+                return True
+        except Exception:
+            pass
+        try:
+            candidate_rep = candidate_high.getRepresentative()
+            phi_rep = phi_high.getRepresentative()
+        except Exception:
+            candidate_rep = None
+            phi_rep = None
+        if candidate_rep is not None and phi_rep is not None:
+            if candidate_rep is phi_rep:
+                return True
+            if self._same_varnode_identity(candidate_rep, phi_rep):
+                return True
+        return False
+
+    def _phi_input_is_cfg_entry_seed(
+        self,
+        phi_op,
+        input_index: int,
+        update_indices: Sequence[int],
+    ) -> bool:
+        parent_block = getattr(phi_op, "getParent", lambda: None)()
+        if parent_block is None:
+            return False
+        in_size = int(getattr(parent_block, "getInSize", lambda: 0)() or 0)
+        if input_index < 0 or input_index >= in_size:
+            return False
+        try:
+            seed_predecessor = parent_block.getIn(input_index)
+        except Exception:
+            return False
+        if seed_predecessor is None:
+            return False
+        for update_index in update_indices:
+            if update_index < 0 or update_index >= in_size:
+                return False
+            try:
+                update_predecessor = parent_block.getIn(update_index)
+            except Exception:
+                return False
+            if seed_predecessor is update_predecessor:
+                return False
+        return not self._cfg_block_reachable_without_reentering_header(
+            parent_block,
+            seed_predecessor,
+            budget=128,
+        )
+
+    def _cfg_block_reachable_without_reentering_header(
+        self,
+        header_block,
+        target_block,
+        *,
+        budget: int = 128,
+    ) -> bool:
+        if header_block is None or target_block is None:
+            return False
+        stack = [header_block]
+        seen = set()
+        steps = 0
+        while stack and steps < budget:
+            current = stack.pop()
+            steps += 1
+            current_key = self._block_identity_key(current)
+            if current_key in seen:
+                continue
+            seen.add(current_key)
+            out_size = int(getattr(current, "getOutSize", lambda: 0)() or 0)
+            for index in range(out_size):
+                try:
+                    successor = current.getOut(index)
+                except Exception:
+                    continue
+                if successor is target_block:
+                    return True
+                if successor is None or successor is header_block:
+                    continue
+                stack.append(successor)
+        return False
+
+    def _block_identity_key(self, block) -> object:
+        if block is None:
+            return None
+        try:
+            return ("block_index", int(block.getIndex()))
+        except Exception:
+            return ("block_id", id(block))
+
+    def _same_varnode_identity(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        left_key = self._varnode_cache_key(left)
+        right_key = self._varnode_cache_key(right)
+        return left_key is not None and right_key is not None and left_key == right_key
+
+    def _varnode_input_multiplicity(self, op, varnode) -> int:
+        count = 0
+        input_count = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+        for index in range(input_count):
+            try:
+                candidate = op.getInput(index)
+            except Exception:
+                continue
+            if self._same_varnode_value(candidate, varnode):
+                count += 1
+        return count
+
+    def _iter_varnode_descendant_ops(self, varnode):
+        descendants = getattr(varnode, "getDescendants", lambda: None)()
+        if descendants is None:
+            return ()
+        try:
+            return tuple(iter(descendants))
+        except TypeError:
+            pass
+        ops = []
+        try:
+            while descendants.hasNext():
+                ops.append(descendants.next())
+        except Exception:
+            return ()
+        return tuple(ops)
+
+    def _has_vector_countdown_loop(
+        self,
+        all_ops: Sequence[object],
+        rounded_vn,
+        *,
+        lane_count: int,
+    ) -> bool:
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            phi_output = getattr(op, "getOutput", lambda: None)()
+            if phi_output is None:
+                continue
+            has_init = False
+            input_count = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+            for index in range(input_count):
+                if self._same_varnode_value(self._follow_passthrough_varnode(op.getInput(index)), rounded_vn):
+                    has_init = True
+                    break
+            if not has_init:
+                continue
+            if self._index_phi_has_step(all_ops, phi_output, -int(lane_count)):
+                return True
+        return False
+
+    def _index_phi_has_step(
+        self,
+        all_ops: Sequence[object],
+        phi_output,
+        step: int,
+    ) -> bool:
+        for op in all_ops:
+            mnemonic = getattr(op, "getMnemonic", lambda: None)()
+            if mnemonic not in {"INT_ADD", "INT_SUB"}:
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            constant = self._signed_varnode_constant_value(right)
+            if self._same_varnode_value(left, phi_output) and constant is not None:
+                actual = int(constant) if mnemonic == "INT_ADD" else -int(constant)
+                if actual == int(step):
+                    return True
+            constant = self._signed_varnode_constant_value(left)
+            if mnemonic == "INT_ADD" and self._same_varnode_value(right, phi_output) and constant is not None:
+                if int(constant) == int(step):
+                    return True
+        return False
+
+    def _has_vector_loop_bound_to_rounded_count(
+        self,
+        all_ops: Sequence[object],
+        pointer_phi,
+        pointer_param: dict,
+        rounded_vn,
+        *,
+        element_size: int,
+        base_offset: int,
+        vector_stride: int,
+    ) -> bool:
+        """Prove a vector cursor stops at ``base + rounded_count * elem``.
+
+        Clang/LLVM often emits a pointer-induction vector loop instead of a
+        separate countdown induction.  This keeps the recognition object-centric:
+        the proof is over Ghidra varnodes and P-code def-use links, not textual
+        decompiler output.
+        """
+
+        compare_ops = {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_LESSEQUAL",
+            "INT_SLESS",
+            "INT_SLESSEQUAL",
+        }
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() not in compare_ops:
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            if self._vector_cursor_matches_end_bound(
+                left,
+                right,
+                pointer_phi,
+                pointer_param,
+                rounded_vn,
+                element_size=element_size,
+                base_offset=base_offset,
+                vector_stride=vector_stride,
+            ):
+                return True
+            if self._vector_cursor_matches_end_bound(
+                right,
+                left,
+                pointer_phi,
+                pointer_param,
+                rounded_vn,
+                element_size=element_size,
+                base_offset=base_offset,
+                vector_stride=vector_stride,
+            ):
+                return True
+        return False
+
+    def _vector_cursor_matches_end_bound(
+        self,
+        cursor_vn,
+        end_vn,
+        pointer_phi,
+        pointer_param: dict,
+        rounded_vn,
+        *,
+        element_size: int,
+        base_offset: int,
+        vector_stride: int,
+    ) -> bool:
+        cursor_offset = self._byte_offset_from_pointer_like(cursor_vn, pointer_phi)
+        if cursor_offset is None:
+            return False
+        if int(cursor_offset) not in {0, int(vector_stride)}:
+            return False
+        return self._varnode_is_base_plus_scaled_counter(
+            end_vn,
+            pointer_param,
+            rounded_vn,
+            element_size=element_size,
+            byte_offset=int(base_offset) + int(cursor_offset),
+        )
+
+    def _has_scalar_tail_from_rounded_count(
+        self,
+        all_ops: Sequence[object],
+        pointer_param: dict,
+        count_param: dict,
+        rounded_vn,
+        *,
+        element_size: int,
+    ) -> bool:
+        tail_starts = self._tail_start_varnodes_from_rounded_count(
+            all_ops,
+            pointer_param,
+            rounded_vn,
+            element_size=element_size,
+        )
+        if not tail_starts:
+            return False
+
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            phi_output = getattr(op, "getOutput", lambda: None)()
+            if phi_output is None:
+                continue
+            input_count = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+            if not any(
+                any(
+                    self._same_varnode_value(self._follow_passthrough_varnode(op.getInput(index)), tail_start)
+                    for tail_start in tail_starts
+                )
+                for index in range(input_count)
+            ):
+                continue
+            if not self._phi_has_pointer_step(all_ops, phi_output, step_bytes=int(element_size)):
+                continue
+            if not self._tail_load_contributes_additively_to_return(
+                all_ops,
+                phi_output,
+                element_size=element_size,
+            ):
+                continue
+            if not (
+                self._has_scalar_tail_bound_to_count(
+                    all_ops,
+                    phi_output,
+                    pointer_param,
+                    count_param,
+                    element_size=element_size,
+                )
+                or self._has_scalar_tail_countdown_from_count_minus_rounded(
+                    all_ops,
+                    rounded_vn,
+                    count_param,
+                )
+            ):
+                continue
+            return True
+        return False
+
+    def _tail_load_contributes_additively_to_return(
+        self,
+        all_ops: Sequence[object],
+        tail_phi,
+        *,
+        element_size: int,
+    ) -> bool:
+        for load_op in all_ops:
+            if getattr(load_op, "getMnemonic", lambda: None)() != "LOAD":
+                continue
+            if int(getattr(load_op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            address = self._follow_passthrough_varnode(load_op.getInput(1))
+            if not self._same_varnode_value(address, tail_phi):
+                continue
+            output = getattr(load_op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            load_size = max(1, int(getattr(output, "getSize", lambda: element_size)() or element_size))
+            if load_size != int(element_size):
+                continue
+            if self._load_lanes_flow_additively_to_return(
+                output,
+                load_size=load_size,
+                element_size=element_size,
+            ):
+                return True
+        return False
+
+    def _tail_start_varnodes_from_rounded_count(
+        self,
+        all_ops: Sequence[object],
+        pointer_param: dict,
+        rounded_vn,
+        *,
+        element_size: int,
+    ) -> Tuple[object, ...]:
+        starts: List[object] = []
+        for op in all_ops:
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            if self._varnode_is_base_plus_scaled_counter(
+                output,
+                pointer_param,
+                rounded_vn,
+                element_size=element_size,
+                byte_offset=0,
+            ):
+                starts.append(output)
+        return tuple(starts)
+
+    def _has_scalar_tail_bound_to_count(
+        self,
+        all_ops: Sequence[object],
+        tail_phi,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        element_size: int,
+    ) -> bool:
+        compare_ops = {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_LESSEQUAL",
+            "INT_SLESS",
+            "INT_SLESSEQUAL",
+        }
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() not in compare_ops:
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            if self._scalar_tail_cursor_matches_count_bound(
+                left,
+                right,
+                tail_phi,
+                pointer_param,
+                count_param,
+                element_size=element_size,
+            ):
+                return True
+            if self._scalar_tail_cursor_matches_count_bound(
+                right,
+                left,
+                tail_phi,
+                pointer_param,
+                count_param,
+                element_size=element_size,
+            ):
+                return True
+        return False
+
+    def _has_scalar_tail_countdown_from_count_minus_rounded(
+        self,
+        all_ops: Sequence[object],
+        rounded_vn,
+        count_param: dict,
+    ) -> bool:
+        """Recognize tail loops controlled by ``remaining = count - rounded``."""
+
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            phi_output = getattr(op, "getOutput", lambda: None)()
+            if phi_output is None:
+                continue
+            input_count = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+            has_count_minus_rounded_init = any(
+                self._varnode_is_count_minus_rounded(
+                    self._follow_passthrough_varnode(op.getInput(index)),
+                    count_param,
+                    rounded_vn,
+                )
+                for index in range(input_count)
+            )
+            if not has_count_minus_rounded_init:
+                continue
+            if self._index_phi_has_step(all_ops, phi_output, -1):
+                return True
+        return False
+
+    def _varnode_is_count_minus_rounded(
+        self,
+        candidate_vn,
+        count_param: dict,
+        rounded_vn,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_SUB":
+            return False
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        left = self._follow_passthrough_varnode(def_op.getInput(0))
+        right = self._follow_passthrough_varnode(def_op.getInput(1))
+        return (
+            self._varnode_matches_parameter(left, count_param.get("name", ""))
+            and self._same_varnode_value(right, rounded_vn)
+        )
+
+    def _scalar_tail_cursor_matches_count_bound(
+        self,
+        cursor_vn,
+        end_vn,
+        tail_phi,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        element_size: int,
+    ) -> bool:
+        cursor_offset = self._byte_offset_from_pointer_like(cursor_vn, tail_phi)
+        if cursor_offset is None:
+            return False
+        if int(cursor_offset) not in {0, int(element_size)}:
+            return False
+        return self._varnode_is_base_plus_scaled_parameter(
+            end_vn,
+            pointer_param,
+            count_param,
+            element_size=element_size,
+            byte_offset=int(cursor_offset),
+        )
+
+    def _byte_offset_from_pointer_like(self, candidate_vn, base_vn) -> Optional[int]:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        if self._same_varnode_value(candidate_vn, base_vn):
+            return 0
+        offset = self._byte_offset_from_pointer(candidate_vn, base_vn)
+        if offset is not None:
+            return int(offset)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic not in {"INT_ADD", "PTRSUB"} or int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return None
+        left = self._follow_passthrough_varnode(def_op.getInput(0))
+        right = self._follow_passthrough_varnode(def_op.getInput(1))
+        if self._same_varnode_value(left, base_vn):
+            return self._signed_varnode_constant_value(right)
+        if mnemonic == "INT_ADD" and self._same_varnode_value(right, base_vn):
+            return self._signed_varnode_constant_value(left)
+        return None
+
+    def _varnode_is_base_plus_scaled_parameter(
+        self,
+        candidate_vn,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        element_size: int,
+        byte_offset: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "PTRADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+            base = self._follow_passthrough_varnode(def_op.getInput(0))
+            index = self._follow_passthrough_varnode(def_op.getInput(1))
+            elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+            if (
+                elem == int(element_size)
+                and self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                and self._varnode_matches_parameter(index, count_param.get("name", ""))
+                and int(byte_offset) == 0
+            ):
+                return True
+        scaled_count = self._scaled_parameter_varnode(candidate_vn, count_param, element_size=element_size)
+        if scaled_count is not None and self._varnode_matches_parameter(scaled_count, pointer_param.get("name", "")):
+            return int(byte_offset) == 0
+        if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            left_const = self._signed_varnode_constant_value(left)
+            right_const = self._signed_varnode_constant_value(right)
+            if right_const == int(byte_offset):
+                return self._varnode_is_base_plus_scaled_parameter(
+                    left,
+                    pointer_param,
+                    count_param,
+                    element_size=element_size,
+                    byte_offset=0,
+                )
+            if mnemonic == "INT_ADD" and left_const == int(byte_offset):
+                return self._varnode_is_base_plus_scaled_parameter(
+                    right,
+                    pointer_param,
+                    count_param,
+                    element_size=element_size,
+                    byte_offset=0,
+                )
+            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
+                return self._varnode_is_scaled_parameter_plus_constant(
+                    right,
+                    count_param,
+                    element_size=element_size,
+                    byte_offset=byte_offset,
+                )
+            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param.get("name", "")):
+                return self._varnode_is_scaled_parameter_plus_constant(
+                    left,
+                    count_param,
+                    element_size=element_size,
+                    byte_offset=byte_offset,
+                )
+        return False
+
+    def _varnode_is_base_plus_scaled_counter(
+        self,
+        candidate_vn,
+        pointer_param: dict,
+        counter_vn,
+        *,
+        element_size: int,
+        byte_offset: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "PTRADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+            base = self._follow_passthrough_varnode(def_op.getInput(0))
+            index = self._follow_passthrough_varnode(def_op.getInput(1))
+            elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+            if (
+                elem == int(element_size)
+                and self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                and self._same_varnode_value(index, counter_vn)
+                and int(byte_offset) == 0
+            ):
+                return True
+        if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            left_const = self._signed_varnode_constant_value(left)
+            right_const = self._signed_varnode_constant_value(right)
+            if right_const == int(byte_offset):
+                return self._varnode_is_base_plus_scaled_counter(
+                    left,
+                    pointer_param,
+                    counter_vn,
+                    element_size=element_size,
+                    byte_offset=0,
+                )
+            if mnemonic == "INT_ADD" and left_const == int(byte_offset):
+                return self._varnode_is_base_plus_scaled_counter(
+                    right,
+                    pointer_param,
+                    counter_vn,
+                    element_size=element_size,
+                    byte_offset=0,
+                )
+            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
+                return self._varnode_is_scaled_counter_plus_constant(
+                    right,
+                    counter_vn,
+                    element_size=element_size,
+                    byte_offset=byte_offset,
+                )
+            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param.get("name", "")):
+                return self._varnode_is_scaled_counter_plus_constant(
+                    left,
+                    counter_vn,
+                    element_size=element_size,
+                    byte_offset=byte_offset,
+                )
+        return False
+
+    def _varnode_is_scaled_parameter_plus_constant(
+        self,
+        candidate_vn,
+        count_param: dict,
+        *,
+        element_size: int,
+        byte_offset: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        if int(byte_offset) == 0 and self._scaled_parameter_varnode(candidate_vn, count_param, element_size=element_size) is not None:
+            return True
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_ADD":
+            return False
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        left = self._follow_passthrough_varnode(def_op.getInput(0))
+        right = self._follow_passthrough_varnode(def_op.getInput(1))
+        left_const = self._signed_varnode_constant_value(left)
+        right_const = self._signed_varnode_constant_value(right)
+        if left_const == int(byte_offset):
+            return self._scaled_parameter_varnode(right, count_param, element_size=element_size) is not None
+        if right_const == int(byte_offset):
+            return self._scaled_parameter_varnode(left, count_param, element_size=element_size) is not None
+        return False
+
+    def _varnode_is_scaled_counter_plus_constant(
+        self,
+        candidate_vn,
+        counter_vn,
+        *,
+        element_size: int,
+        byte_offset: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        if int(byte_offset) == 0 and self._varnode_is_scaled_counter(candidate_vn, counter_vn, element_size=element_size):
+            return True
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_ADD":
+            return False
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        left = self._follow_passthrough_varnode(def_op.getInput(0))
+        right = self._follow_passthrough_varnode(def_op.getInput(1))
+        left_const = self._signed_varnode_constant_value(left)
+        right_const = self._signed_varnode_constant_value(right)
+        if left_const == int(byte_offset):
+            return self._varnode_is_scaled_counter(right, counter_vn, element_size=element_size)
+        if right_const == int(byte_offset):
+            return self._varnode_is_scaled_counter(left, counter_vn, element_size=element_size)
+        return False
+
+    def _scaled_parameter_varnode(
+        self,
+        candidate_vn,
+        count_param: dict,
+        *,
+        element_size: int,
+    ):
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._varnode_matches_parameter(left, count_param.get("name", "")) and self._varnode_unsigned_constant_value(right) == int(element_size):
+                return left
+            if self._varnode_matches_parameter(right, count_param.get("name", "")) and self._varnode_unsigned_constant_value(left) == int(element_size):
+                return right
+        if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            shifted = self._follow_passthrough_varnode(def_op.getInput(0))
+            shift_bits = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+            if (
+                shift_bits is not None
+                and (1 << int(shift_bits)) == int(element_size)
+                and self._varnode_matches_parameter(shifted, count_param.get("name", ""))
+            ):
+                return shifted
+        return None
+
+    def _varnode_is_scaled_counter(
+        self,
+        candidate_vn,
+        counter_vn,
+        *,
+        element_size: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            return (
+                self._same_varnode_value(left, counter_vn)
+                and self._varnode_unsigned_constant_value(right) == int(element_size)
+            ) or (
+                self._same_varnode_value(right, counter_vn)
+                and self._varnode_unsigned_constant_value(left) == int(element_size)
+            )
+        if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            shifted = self._follow_passthrough_varnode(def_op.getInput(0))
+            shift_bits = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+            return (
+                shift_bits is not None
+                and (1 << int(shift_bits)) == int(element_size)
+                and self._same_varnode_value(shifted, counter_vn)
+            )
+        return False
 
     def _analysis_mentions_parameter_in_conditions(
         self,
@@ -3980,6 +5621,9 @@ class StructuralRecurrenceSummarizer:
         extracted: List[ReadonlyReductionTermRef] = []
         for sign, term in self._flatten_add_terms(expr):
             if term.expr_type == ExpressionType.CONSTANT:
+                value = self._raw_constant_value(term)
+                if value is None or int(value) != 0:
+                    return None
                 continue
             if sign != 1:
                 return None
@@ -4212,13 +5856,23 @@ class StructuralRecurrenceSummarizer:
                 if any(
                     signature["stride"] != first["stride"]
                     or signature["element_size"] != first["element_size"]
-                    or signature.get("start_offset", 0) != first.get("start_offset", 0)
                     or signature.get("start_index", 0) != first.get("start_index", 0)
                     or signature.get("index_step", 1) != first.get("index_step", 1)
                     or signature.get("index_scale", signature["stride"]) != first.get("index_scale", first["stride"])
                     for signature in load_progressions[1:]
                 ):
                     continue
+                lane_loads = tuple(
+                    sorted(
+                        {
+                            (
+                                int(signature.get("start_offset", 0) or 0),
+                                int(signature["element_size"]),
+                            )
+                            for signature in load_progressions
+                        }
+                    )
+                )
                 seed_terms = self._extract_readonly_accumulator_seed_terms(
                     init_varnode,
                     pointer_param,
@@ -4233,6 +5887,7 @@ class StructuralRecurrenceSummarizer:
                     "start_index": int(first.get("start_index", 0) or 0),
                     "index_step": int(first.get("index_step", 1) or 1),
                     "index_scale": int(first.get("index_scale", first["stride"]) or first["stride"]),
+                    "lane_loads": lane_loads,
                     "seed_terms": tuple(seed_terms),
                 }
         return None
@@ -4329,6 +5984,33 @@ class StructuralRecurrenceSummarizer:
             )
             if left or right:
                 return left + right
+        if mnemonic in {"SUBPIECE", "INT_RIGHT", "INT_ZEXT", "INT_SEXT", "CAST", "COPY"}:
+            return self._collect_load_progressions_from_varnode(
+                def_op.getInput(0),
+                pointer_param,
+                pointer_phis,
+                index_phis,
+                depth + 1,
+            )
+        if mnemonic == "INT_AND" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._varnode_constant_value(left) is not None:
+                return self._collect_load_progressions_from_varnode(
+                    right,
+                    pointer_param,
+                    pointer_phis,
+                    index_phis,
+                    depth + 1,
+                )
+            if self._varnode_constant_value(right) is not None:
+                return self._collect_load_progressions_from_varnode(
+                    left,
+                    pointer_param,
+                    pointer_phis,
+                    index_phis,
+                    depth + 1,
+                )
         return []
 
     def _match_load_progression(
@@ -4361,6 +6043,19 @@ class StructuralRecurrenceSummarizer:
             base_input = self._follow_passthrough_varnode(address_def.getInput(0))
             index_input = self._follow_passthrough_varnode(address_def.getInput(1))
             elem_size = self._varnode_constant_value(self._follow_passthrough_varnode(address_def.getInput(2)))
+            constant_index = self._varnode_constant_value(index_input)
+            if elem_size is not None and elem_size > 0 and constant_index is not None:
+                for pointer_info in pointer_phis:
+                    if self._same_varnode_value(base_input, pointer_info["phi_output"]):
+                        return {
+                            "stride": int(pointer_info["stride"]),
+                            "element_size": load_size,
+                            "start_offset": int(pointer_info.get("start_offset", 0) or 0)
+                            + int(elem_size) * int(constant_index),
+                            "start_index": int(pointer_info.get("start_index", 0) or 0),
+                            "index_step": int(pointer_info.get("index_step", 1) or 1),
+                            "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
+                        }
             index_info = self._matched_index_progression(index_input, index_phis)
             if (
                 elem_size is not None
@@ -4697,6 +6392,24 @@ class StructuralRecurrenceSummarizer:
         varnode,
         param_name: str,
     ) -> bool:
+        varnode = self._follow_passthrough_varnode(varnode)
+        high = getattr(varnode, "getHigh", lambda: None)()
+        high_name = getattr(high, "getName", lambda: None)
+        if callable(high_name):
+            try:
+                if high_name() == param_name:
+                    return True
+            except Exception:
+                pass
+        symbol_getter = getattr(high, "getSymbol", lambda: None)
+        if callable(symbol_getter):
+            try:
+                symbol = symbol_getter()
+                symbol_name = getattr(symbol, "getName", lambda: None)
+                if callable(symbol_name) and symbol_name() == param_name:
+                    return True
+            except Exception:
+                pass
         expr = self._trace_varnode_expression(varnode)
         return self._parameter_name_from_expr(expr) == param_name
 
@@ -4712,6 +6425,28 @@ class StructuralRecurrenceSummarizer:
             pass
         expr = self._trace_varnode_expression(varnode)
         return self._raw_constant_value(expr)
+
+    def _varnode_unsigned_constant_value(self, varnode) -> Optional[int]:
+        value = self._varnode_constant_value(varnode)
+        if value is None:
+            return None
+        return int(value)
+
+    def _signed_varnode_constant_value(self, varnode) -> Optional[int]:
+        value = self._varnode_constant_value(varnode)
+        if value is None:
+            return None
+        try:
+            bit_width = max(1, int(getattr(varnode, "getSize", lambda: 0)() or 0)) * 8
+        except Exception:
+            bit_width = 0
+        if bit_width <= 0:
+            return int(value)
+        modulus = 1 << bit_width
+        signed = int(value) % modulus
+        if signed >= (1 << (bit_width - 1)):
+            signed -= modulus
+        return signed
 
     def _choose_return_reaching_accumulator(
         self,

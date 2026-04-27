@@ -46,6 +46,14 @@ def _binary(op: str, left: Expression, right: Expression) -> Expression:
     return Expression.binary_op(op, left, right)
 
 
+def _sized_param(name: str, size: int) -> Expression:
+    return Expression(ExpressionType.PARAMETER, name=name, size=size)
+
+
+def _sized_const(value: int, size: int) -> Expression:
+    return Expression(ExpressionType.CONSTANT, value=value, size=size)
+
+
 def _masked_param(name: str) -> Expression:
     return _binary("INT_AND", _param(name), _const(0xFFFFFFFF))
 
@@ -96,6 +104,38 @@ def test_rewrite_analysis_returns_normalizes_condition_expressions():
     assert any(rule.startswith("condition[0]:") for rule, _, _ in results[0].history)
     assert condition_expr.operator == "INT_SLESS"
     assert condition_expr.operands[0].operator == "INT_SREM"
+
+
+def test_summary_condition_equivalence_keeps_expression_width_semantic(monkeypatch):
+    cond32 = Condition(_binary("INT_SLESS", _sized_param("param_1", 4), _sized_const(0, 4)))
+    cond64 = Condition(_binary("INT_SLESS", _sized_param("param_1", 8), _sized_const(0, 8)))
+    ret32 = ReturnInfo(address="0x1001", value=_const(1), conditions=[cond32])
+    ret64 = ReturnInfo(address="0x2001", value=_const(1), conditions=[cond64])
+    case32 = ReturnCase(
+        index=0,
+        conditions=[cond32],
+        value_expr=ret32.value,
+        return_info=ret32,
+        summary_conditions=[cond32],
+    )
+    case64 = ReturnCase(
+        index=0,
+        conditions=[cond64],
+        value_expr=ret64.value,
+        return_info=ret64,
+        summary_conditions=[cond64],
+    )
+    strategy = PairwiseStrategy(FormulaBuilder(), Mock(), debug=False)
+    implication_calls = []
+
+    def _not_equivalent_by_smt(left, right):
+        implication_calls.append((left, right))
+        return False
+
+    monkeypatch.setattr(strategy, "_condition_implies", _not_equivalent_by_smt)
+
+    assert strategy._cases_have_equivalent_summary_conditions(case32, case64) is False
+    assert implication_calls
 
 
 def test_rewrite_analysis_returns_preserves_effect_summary_metadata():

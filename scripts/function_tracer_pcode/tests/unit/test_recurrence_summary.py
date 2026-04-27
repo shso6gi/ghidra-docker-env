@@ -70,7 +70,8 @@ def test_counted_loop_summary_canonicalizes_zero_contribution_prefix():
 
     assert value is not None
     assert isinstance(value.runtime_ref.loop_summary, LoopSummaryRef)
-    assert value.runtime_ref.semantic_key() is None
+    assert loop_summary_method_b_key(value.runtime_ref.loop_summary) is not None
+    assert value.runtime_ref.semantic_key() is not None
 
     canonical = summarizer._canonicalize_zero_prefix_counted_loop_value(
         value,
@@ -474,12 +475,19 @@ class _FakeVarnode:
         self._expr = expr
         self._def = None
         self._high = high or _FakeHighVar(name)
+        self._descendants = []
 
     def getDef(self):
         return self._def
 
     def setDef(self, op):
         self._def = op
+
+    def addDescendant(self, op):
+        self._descendants.append(op)
+
+    def getDescendants(self):
+        return iter(self._descendants)
 
     def getHigh(self):
         return self._high
@@ -534,6 +542,10 @@ class _FakePcodeOp:
         self._parent = None
         if output is not None:
             output.setDef(self)
+        for input_varnode in self._inputs:
+            add_descendant = getattr(input_varnode, "addDescendant", None)
+            if callable(add_descendant):
+                add_descendant(self)
 
     def getMnemonic(self):
         return self._mnemonic
@@ -732,7 +744,9 @@ def test_extract_index_step_accepts_subtractive_phi_updates():
     next_vn = _FakeVarnode("loop_aux_next")
     _FakePcodeOp("INT_SUB", [phi_output, one_vn], next_vn)
 
-    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    tracer = _FakeTracer("unused", Expression.unknown("untraced"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
 
     assert summarizer._extract_index_step(next_vn, phi_output) == -1
 
@@ -3283,7 +3297,8 @@ def test_readonly_reduction_summary_preserves_nonzero_start_offset_object_centri
     assert runtime_ref.loop_summary.term_descriptor.stride == 4
     assert runtime_ref.loop_summary.seed_terms == ()
     assert runtime_ref.loop_summary.witnesses == runtime_ref.semantic_witnesses
-    assert runtime_ref.semantic_key() is None
+    assert loop_summary_method_b_key(runtime_ref.loop_summary) is not None
+    assert runtime_ref.semantic_key() is not None
     assert runtime_ref.semantic_witnesses[:2] == (
         ReadonlyReductionWitness(
             exact_count=1,
@@ -3484,6 +3499,711 @@ def test_readonly_reduction_summary_records_non_unit_step_prefix_seed_terms():
         loop_var_unit=loop_summary.loop_var_unit,
     )
     assert loop_summary_method_b_key(loop_summary) == loop_summary_method_b_key(full_summary)
+
+
+def test_readonly_reduction_detects_vector_pointer_loop_with_ptradd_tail():
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    ptr_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    vector_body_value = _mem("param_1", 0)
+    for byte_offset in range(4, 32, 4):
+        vector_body_value = Expression.binary_op(
+            "INT_ADD",
+            vector_body_value,
+            _mem("param_1", byte_offset),
+        )
+    analysis = create_mock_analysis(
+        "vector_prefix_sum",
+        return_type="int",
+        parameters=params,
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=vector_body_value,
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_expr, Expression.constant(0, size=8)),
+                    _cond("INT_SLESS", Expression.constant(0, size=4), count_expr),
+                    _cond("INT_SLESSEQUAL", Expression.constant(8, size=4), count_expr),
+                ],
+            )
+        ],
+    )
+
+    ptr_vn = _FakeVarnode("param_1", size=8, expr=ptr_expr)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    mask_vn = _FakeVarnode("mask", size=4, expr=Expression.constant(0xFFFFFFF8, size=4))
+    rounded_vn = _FakeVarnode("rounded", size=4)
+    round_op = _FakePcodeOp("INT_AND", [count_vn, mask_vn], rounded_vn)
+
+    four_vn = _FakeVarnode("four", size=4, expr=Expression.constant(4, size=4))
+    eight_vn = _FakeVarnode("eight", size=4, expr=Expression.constant(8, size=4))
+    base_bias_vn = _FakeVarnode("base_bias", size=4, expr=Expression.constant(4, size=4))
+    vector_init = _FakeVarnode("vector_init", size=8)
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    vector_next = _FakeVarnode("vector_next", size=8)
+    vector_end_base = _FakeVarnode("vector_end_base", size=8)
+    vector_end = _FakeVarnode("vector_end", size=8)
+    vector_cond = _FakeVarnode("vector_cond", size=1)
+
+    init_op = _FakePcodeOp("PTRADD", [ptr_vn, base_bias_vn, four_vn], vector_init)
+    next_op = _FakePcodeOp("PTRADD", [vector_phi, eight_vn, four_vn], vector_next)
+    vector_phi_op = _FakePcodeOp("MULTIEQUAL", [vector_init, vector_next], vector_phi)
+    end_base_op = _FakePcodeOp("PTRADD", [ptr_vn, rounded_vn, four_vn], vector_end_base)
+    end_op = _FakePcodeOp("INT_ADD", [vector_end_base, _FakeVarnode("sixteen", size=8, expr=Expression.constant(16, size=8))], vector_end)
+    vector_cmp_op = _FakePcodeOp("INT_NOTEQUAL", [vector_phi, vector_end], vector_cond)
+
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    load_ops = []
+    sum_ops = []
+    running_sum = _FakeVarnode("sum_zero", size=4, expr=Expression.constant(0, size=4))
+    for lane, index_value in enumerate(range(-4, 4)):
+        index_vn = _FakeVarnode(f"lane_index_{lane}", size=4, expr=Expression.constant(index_value, size=4))
+        addr_vn = _FakeVarnode(f"lane_addr_{lane}", size=8)
+        value_vn = _FakeVarnode(f"lane_value_{lane}", size=4)
+        next_sum = _FakeVarnode(f"sum_after_lane_{lane}", size=4)
+        addr_op = _FakePcodeOp("PTRADD", [vector_phi, index_vn, four_vn], addr_vn)
+        load_op = _FakePcodeOp("LOAD", [ram_space, addr_vn], value_vn)
+        add_op = _FakePcodeOp("INT_ADD", [running_sum, value_vn], next_sum)
+        load_ops.extend([addr_op, load_op])
+        sum_ops.append(add_op)
+        running_sum = next_sum
+
+    tail_start = _FakeVarnode("tail_start", size=8)
+    tail_next = _FakeVarnode("tail_next", size=8)
+    tail_phi = _FakeVarnode("tail_phi", size=8, high=_FakeHighVar("tail_phi"))
+    tail_load = _FakeVarnode("tail_load", size=4)
+    tail_sum = _FakeVarnode("tail_sum", size=4)
+    remaining_init = _FakeVarnode("remaining_init", size=8)
+    remaining_phi = _FakeVarnode("remaining_phi", size=8, high=_FakeHighVar("remaining"))
+    remaining_next = _FakeVarnode("remaining_next", size=8)
+    remaining_cond = _FakeVarnode("remaining_cond", size=1)
+    tail_start_op = _FakePcodeOp("PTRADD", [ptr_vn, rounded_vn, four_vn], tail_start)
+    tail_next_op = _FakePcodeOp("PTRADD", [tail_phi, _FakeVarnode("one", size=4, expr=Expression.constant(1, size=4)), four_vn], tail_next)
+    tail_phi_op = _FakePcodeOp("MULTIEQUAL", [tail_start, tail_next], tail_phi)
+    tail_load_op = _FakePcodeOp("LOAD", [ram_space, tail_phi], tail_load)
+    tail_add_op = _FakePcodeOp("INT_ADD", [running_sum, tail_load], tail_sum)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), tail_sum], None)
+    remaining_init_op = _FakePcodeOp("INT_SUB", [count_vn, rounded_vn], remaining_init)
+    remaining_phi_op = _FakePcodeOp("MULTIEQUAL", [remaining_init, remaining_next], remaining_phi)
+    remaining_next_op = _FakePcodeOp(
+        "INT_ADD",
+        [remaining_phi, _FakeVarnode("minus_one", size=8, expr=Expression.constant(-1, size=8))],
+        remaining_next,
+    )
+    remaining_cmp_op = _FakePcodeOp(
+        "INT_NOTEQUAL",
+        [remaining_next, _FakeVarnode("zero64", size=8, expr=Expression.constant(0, size=8))],
+        remaining_cond,
+    )
+
+    high_function = _FakeHighFunction(
+        [
+            round_op,
+            init_op,
+            next_op,
+            vector_phi_op,
+            end_base_op,
+            end_op,
+            vector_cmp_op,
+            *load_ops,
+            *sum_ops,
+            tail_start_op,
+            tail_next_op,
+            tail_phi_op,
+            tail_load_op,
+            tail_add_op,
+            return_op,
+            remaining_init_op,
+            remaining_phi_op,
+            remaining_next_op,
+            remaining_cmp_op,
+        ]
+    )
+    tracer = _FakeTracer("unused", _const(0))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    shape = summarizer._detect_readonly_sum_loop_shape(high_function, analysis, params[0], params[1])
+
+    assert shape is not None
+    assert shape["stride"] == 4
+    assert shape["element_size"] == 4
+    assert shape["start_index"] == 0
+    assert shape["index_step"] == 1
+
+
+def test_vector_prefix_lanes_must_flow_additively_to_return():
+    ptr_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    ptr_vn = _FakeVarnode("param_1", size=8, expr=ptr_expr)
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    ops = []
+    for lane, index_value in enumerate(range(4)):
+        index_vn = _FakeVarnode(f"lane_index_{lane}", size=8, expr=Expression.constant(index_value, size=8))
+        addr_vn = _FakeVarnode(f"lane_addr_{lane}", size=8)
+        value_vn = _FakeVarnode(f"lane_value_{lane}", size=4)
+        product_vn = _FakeVarnode(f"product_{lane}", size=4)
+        addr_op = _FakePcodeOp("PTRADD", [vector_phi, index_vn, four_vn], addr_vn)
+        load_op = _FakePcodeOp("LOAD", [ram_space, addr_vn], value_vn)
+        mul_op = _FakePcodeOp("INT_MULT", [value_vn, _FakeVarnode("two", size=4, expr=Expression.constant(2, size=4))], product_vn)
+        ops.extend([addr_op, load_op, mul_op])
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), product_vn], None)
+    ops.append(return_op)
+
+    tracer = _FakeTracer("unused", Expression.unknown("untraced"))
+    tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
+    summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=16,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_must_contribute_with_coefficient_one():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    running_sum = _FakeVarnode("sum_zero", size=4, expr=Expression.constant(0, size=4))
+    ops = []
+    for lane, index_value in enumerate(range(4)):
+        index_vn = _FakeVarnode(f"lane_index_{lane}", size=8, expr=Expression.constant(index_value, size=8))
+        addr_vn = _FakeVarnode(f"lane_addr_{lane}", size=8)
+        value_vn = _FakeVarnode(f"lane_value_{lane}", size=4)
+        addend_vn = _FakeVarnode(f"lane_addend_{lane}", size=4)
+        next_sum = _FakeVarnode(f"sum_after_lane_{lane}", size=4)
+        addr_op = _FakePcodeOp("PTRADD", [vector_phi, index_vn, four_vn], addr_vn)
+        load_op = _FakePcodeOp("LOAD", [ram_space, addr_vn], value_vn)
+        if lane == 0:
+            duplicate_op = _FakePcodeOp("INT_ADD", [value_vn, value_vn], addend_vn)
+            ops.append(duplicate_op)
+        else:
+            addend_vn = value_vn
+        add_op = _FakePcodeOp("INT_ADD", [running_sum, addend_vn], next_sum)
+        ops.extend([addr_op, load_op, add_op])
+        running_sum = next_sum
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), running_sum], None)
+    ops.append(return_op)
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=16,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_reject_duplicate_loads_from_same_offset():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    one_vn = _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0_a = _FakeVarnode("lane0_a", size=4)
+    lane0_b = _FakeVarnode("lane0_b", size=4)
+    lane1_addr = _FakeVarnode("lane1_addr", size=8)
+    lane1 = _FakeVarnode("lane1", size=4)
+    sum0 = _FakeVarnode("sum0", size=4)
+    sum1 = _FakeVarnode("sum1", size=4)
+    sum2 = _FakeVarnode("sum2", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0_a),
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0_b),
+        _FakePcodeOp("PTRADD", [vector_phi, one_vn, four_vn], lane1_addr),
+        _FakePcodeOp("LOAD", [ram_space, lane1_addr], lane1),
+        _FakePcodeOp("INT_ADD", [_FakeVarnode("zero", size=4, expr=Expression.constant(0, size=4)), lane0_a], sum0),
+        _FakePcodeOp("INT_ADD", [sum0, lane0_b], sum1),
+        _FakePcodeOp("INT_ADD", [sum1, lane1], sum2),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), sum2], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=8,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_return_term_proof_rejects_duplicated_lane():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    analysis = create_mock_analysis(
+        "vector_prefix_sum",
+        return_type="int",
+        parameters=[
+            pointer_param,
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 0)),
+                    _mem("param_1", 4),
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._vector_prefix_lanes_have_unit_terms_in_positive_return(
+        analysis,
+        pointer_param,
+        [],
+        vector_stride=8,
+        element_size=4,
+    ) is False
+
+
+def test_vector_prefix_return_term_proof_requires_all_overlapping_returns():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    analysis = create_mock_analysis(
+        "vector_prefix_sum",
+        return_type="int",
+        parameters=[
+            pointer_param,
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.unknown("unproved_vector_body"),
+                conditions=[],
+            ),
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._vector_prefix_lanes_have_unit_terms_in_positive_return(
+        analysis,
+        pointer_param,
+        [],
+        vector_stride=8,
+        element_size=4,
+    ) is False
+
+
+def test_vector_prefix_return_term_proof_rejects_extra_in_base_terms():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    analysis = create_mock_analysis(
+        "vector_prefix_sum",
+        return_type="int",
+        parameters=[
+            pointer_param,
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+                    _mem("param_1", 8),
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._vector_prefix_lanes_have_unit_terms_in_positive_return(
+        analysis,
+        pointer_param,
+        [],
+        vector_stride=8,
+        element_size=4,
+    ) is False
+
+
+def test_vector_prefix_return_term_proof_rejects_nonzero_constant_bias():
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    analysis = create_mock_analysis(
+        "vector_prefix_sum",
+        return_type="int",
+        parameters=[
+            pointer_param,
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.binary_op(
+                    "INT_ADD",
+                    Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+                    Expression.constant(5, size=4),
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._vector_prefix_lanes_have_unit_terms_in_positive_return(
+        analysis,
+        pointer_param,
+        [],
+        vector_stride=8,
+        element_size=4,
+    ) is False
+
+
+def test_vector_prefix_lanes_reject_multiequal_selection_as_sum():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    one_vn = _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    lane1_addr = _FakeVarnode("lane1_addr", size=8)
+    lane1 = _FakeVarnode("lane1", size=4)
+    selected = _FakeVarnode("selected", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0),
+        _FakePcodeOp("PTRADD", [vector_phi, one_vn, four_vn], lane1_addr),
+        _FakePcodeOp("LOAD", [ram_space, lane1_addr], lane1),
+        _FakePcodeOp("MULTIEQUAL", [lane0, lane1], selected),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), selected], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=8,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_reject_conditional_accumulator_updates():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    one_vn = _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8))
+    zero_vn = _FakeVarnode("zero", size=4, expr=Expression.constant(0, size=4))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    lane1_addr = _FakeVarnode("lane1_addr", size=8)
+    lane1 = _FakeVarnode("lane1", size=4)
+    acc_phi = _FakeVarnode("acc_phi", size=4)
+    acc_lane0 = _FakeVarnode("acc_lane0", size=4)
+    acc_lane1 = _FakeVarnode("acc_lane1", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0),
+        _FakePcodeOp("PTRADD", [vector_phi, one_vn, four_vn], lane1_addr),
+        _FakePcodeOp("LOAD", [ram_space, lane1_addr], lane1),
+        _FakePcodeOp("INT_ADD", [acc_phi, lane0], acc_lane0),
+        _FakePcodeOp("INT_ADD", [acc_phi, lane1], acc_lane1),
+        _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_lane0, acc_lane1], acc_phi),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), acc_phi], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=8,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_reject_single_conditional_accumulator_update():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    acc_phi = _FakeVarnode("acc_phi", size=4)
+    acc_lane0 = _FakeVarnode("acc_lane0", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0),
+        _FakePcodeOp("INT_ADD", [acc_phi, lane0], acc_lane0),
+        _FakePcodeOp("MULTIEQUAL", [acc_phi, acc_lane0], acc_phi),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), acc_phi], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=4,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_reject_copied_pass_through_accumulator_update():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    acc_phi = _FakeVarnode("acc_phi", size=4)
+    acc_copy = _FakeVarnode("acc_copy", size=4)
+    acc_lane0 = _FakeVarnode("acc_lane0", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0),
+        _FakePcodeOp("COPY", [acc_phi], acc_copy),
+        _FakePcodeOp("INT_ADD", [acc_phi, lane0], acc_lane0),
+        _FakePcodeOp("MULTIEQUAL", [acc_copy, acc_lane0], acc_phi),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), acc_phi], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=4,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_reject_same_high_pass_through_accumulator_update():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    acc_high = _FakeHighVar("accumulator")
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_pass = _FakeVarnode("acc_pass", size=4, high=acc_high)
+    acc_lane0 = _FakeVarnode("acc_lane0", size=4)
+    ops = [
+        _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0),
+        _FakePcodeOp("INT_ADD", [acc_phi, lane0], acc_lane0),
+        _FakePcodeOp("MULTIEQUAL", [acc_pass, acc_lane0], acc_phi),
+        _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), acc_phi], None),
+    ]
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert not summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        ops,
+        vector_phi,
+        base_offset=0,
+        vector_stride=4,
+        element_size=4,
+    )
+
+
+def test_vector_prefix_lanes_allow_same_high_cfg_entry_seed():
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    acc_high = _FakeHighVar("accumulator")
+    acc_seed = _FakeVarnode("acc_seed", size=4, expr=Expression.constant(0, size=4), high=acc_high)
+    acc_phi = _FakeVarnode("acc_phi", size=4, high=acc_high)
+    acc_lane0 = _FakeVarnode("acc_lane0", size=4)
+    load_op = _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0)
+    add_op = _FakePcodeOp("INT_ADD", [acc_phi, lane0], acc_lane0)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [acc_seed, acc_lane0], acc_phi)
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target", size=8), acc_phi], None)
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1, [phi_op, return_op])
+    latch = _FakeCfgBlock(2, [load_op, add_op])
+    preheader.add_edge(header)
+    header.add_edge(latch)
+    latch.add_edge(header)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._vector_prefix_lanes_contribute_additively_to_return(
+        [load_op, add_op, phi_op, return_op],
+        vector_phi,
+        base_offset=0,
+        vector_stride=4,
+        element_size=4,
+    )
+
+
+def test_round_down_mask_requires_high_bits_preserved_for_counter_width():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._power_of_two_rounding_from_mask(0xFFFFFFF8, count_width_bits=32) == 8
+    assert summarizer._power_of_two_rounding_from_mask(0xF8, count_width_bits=32) is None
+    assert summarizer._power_of_two_rounding_from_mask(0xFFFFFFFFFFFFFFF8, count_width_bits=64) == 8
+
+
+def test_round_down_candidate_uses_counter_semantic_width_through_zext():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    zext_vn = _FakeVarnode("count_zext", size=8, expr=Expression.unary_op("INT_ZEXT", count_expr))
+    zext_op = _FakePcodeOp("INT_ZEXT", [count_vn], zext_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    round_op = _FakePcodeOp("INT_AND", [zext_vn, mask_vn], rounded_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._readonly_round_down_candidates(
+        [zext_op, round_op],
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+    ) == [(rounded_vn, 8)]
+
+
+def test_readonly_vector_lane_summary_enters_scalar_iteration_space_only_with_witnesses():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    base_ref = LocationBaseRef.parameter("param_1", index=0)
+    witnesses = tuple(
+        ReadonlyReductionWitness(
+            exact_count=count,
+            terms=tuple(
+                ReadonlyReductionTermRef(byte_offset=index * 4, access_size=4)
+                for index in range(count)
+            ),
+        )
+        for count in (1, 2, 3)
+    )
+    scalar_summary = summarizer._build_readonly_loop_summary_ref(
+        summary_count_expr=count_expr,
+        pointer_base_ref=base_ref,
+        loop_shape={
+            "stride": 4,
+            "element_size": 4,
+            "start_offset": 0,
+            "start_index": 0,
+            "index_step": 1,
+            "index_scale": 4,
+        },
+        result_size=4,
+        semantic_witnesses=witnesses,
+    )
+    vector_summary = summarizer._build_readonly_loop_summary_ref(
+        summary_count_expr=count_expr,
+        pointer_base_ref=base_ref,
+        loop_shape={
+            "stride": 16,
+            "element_size": 8,
+            "start_offset": 0,
+            "start_index": 0,
+            "index_step": 1,
+            "index_scale": 16,
+            "lane_loads": ((0, 8), (8, 8)),
+        },
+        result_size=4,
+        semantic_witnesses=witnesses,
+    )
+    unproven_vector_summary = summarizer._build_readonly_loop_summary_ref(
+        summary_count_expr=count_expr,
+        pointer_base_ref=base_ref,
+        loop_shape={
+            "stride": 16,
+            "element_size": 8,
+            "start_offset": 0,
+            "start_index": 0,
+            "index_step": 1,
+            "index_scale": 16,
+            "lane_loads": ((0, 8), (8, 8)),
+        },
+        result_size=4,
+        semantic_witnesses=(),
+    )
+
+    assert scalar_summary is not None
+    assert vector_summary is not None
+    assert unproven_vector_summary is not None
+    assert vector_summary.loop_var_unit == "scalar_element_index"
+    assert loop_summary_method_b_key(vector_summary) == loop_summary_method_b_key(scalar_summary)
+    assert unproven_vector_summary.loop_var_unit == "element_index"
+    assert loop_summary_method_b_key(unproven_vector_summary) != loop_summary_method_b_key(scalar_summary)
+
+
+def test_readonly_reduction_result_size_uses_positive_region_return():
+    ptr_expr = Expression.parameter("param_1", index=0, data_type="long *", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive = [
+        _cond("INT_NOTEQUAL", ptr_expr, Expression.constant(0, size=8)),
+        _cond("INT_SLESS", Expression.constant(0, size=4), count_expr),
+    ]
+    positive_value = Expression.unknown("wide_positive")
+    positive_value.size = 8
+    analysis = create_mock_analysis(
+        "wide_sum",
+        return_type="long",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "long *", "size": 8},
+            {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(-1, size=4),
+                conditions=[_cond("INT_EQUAL", ptr_expr, Expression.constant(0, size=8))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=positive_value,
+                conditions=positive,
+            ),
+        ],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._readonly_reduction_result_size(analysis, positive_conditions=positive) == 8
+
+
+def test_readonly_reduction_summary_passes_positive_region_to_loop_shape(monkeypatch):
+    ptr_expr = Expression.parameter("param_1", index=0, data_type="long *", size=8)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "long *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4}
+    positive_value = Expression.unknown("wide_positive")
+    positive_value.size = 8
+    analysis = create_mock_analysis(
+        "wide_sum",
+        return_type="long",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(-1, size=4),
+                conditions=[_cond("INT_EQUAL", ptr_expr, Expression.constant(0, size=8))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=positive_value,
+                conditions=[
+                    _cond("INT_NOTEQUAL", ptr_expr, Expression.constant(0, size=8)),
+                    _cond("INT_SLESS", Expression.constant(0, size=4), count_expr),
+                ],
+            ),
+        ],
+    )
+    captured = {}
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+
+    def capture_loop_shape(_high_function, _analysis, _pointer_param, _count_param, *, positive_conditions=()):
+        captured["positive_conditions"] = tuple(positive_conditions)
+        return None
+
+    monkeypatch.setattr(summarizer, "_detect_readonly_sum_loop_shape", capture_loop_shape)
+
+    assert summarizer._try_summarize_readonly_pointer_reduction(
+        _FakeFunction("wide_sum"),
+        _FakeHighFunction([]),
+        analysis,
+    ) is None
+    assert captured["positive_conditions"]
+    assert summarizer._readonly_reduction_result_size(
+        analysis,
+        positive_conditions=captured["positive_conditions"],
+    ) == 8
 
 
 def test_structural_recurrence_summarizer_infers_pointer_parameter_object_centrically():

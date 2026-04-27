@@ -192,6 +192,30 @@ class LocationBaseRef:
             int(self.storage_size or 0),
         )
 
+    def semantic_key(self) -> Tuple[Any, ...]:
+        """Program-independent identity for comparing function-local locations.
+
+        ``stable_key`` intentionally distinguishes the same parameter position in
+        different Ghidra functions.  Loop equivalence, however, compares two
+        functions under an explicit parameter correspondence, so a parameter
+        base is identified by argument position rather than by the owning
+        program/function object.  Storage-backed locations remain concrete.
+        """
+
+        if self.is_parameter():
+            if self.parameter_index is not None:
+                return ("parameter", int(self.parameter_index))
+            return ("parameter_name", self.parameter_name or None)
+        if self.is_stack_frame():
+            return ("stack_frame",)
+        return (
+            "storage",
+            self.storage_space_id,
+            self.storage_space,
+            int(self.storage_offset or 0),
+            int(self.storage_size or 0),
+        )
+
     def display_name(self) -> str:
         if self.display_hint:
             return self.display_hint
@@ -587,6 +611,147 @@ def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
     return None
 
 
+def _loop_object_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    """Semantic key for proof-oriented loop comparison.
+
+    This intentionally differs from ``_loop_object_key`` for objects whose
+    stable identity contains Ghidra ownership metadata.  The key is still fully
+    object-centric: it walks expression/runtime objects and never depends on
+    rendered strings.
+    """
+
+    if value is None:
+        return ("none",)
+    if isinstance(value, bool):
+        return ("bool", bool(value))
+    if isinstance(value, int):
+        return ("int", int(value))
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, tuple):
+        item_keys = tuple(_loop_object_semantic_key(item) for item in value)
+        if any(item_key is None for item_key in item_keys):
+            return None
+        return ("tuple", item_keys)
+    if isinstance(value, list):
+        item_keys = tuple(_loop_object_semantic_key(item) for item in value)
+        if any(item_key is None for item_key in item_keys):
+            return None
+        return ("list", item_keys)
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            key_key = _loop_object_semantic_key(key)
+            item_key = _loop_object_semantic_key(item)
+            if key_key is None or item_key is None:
+                return None
+            items.append((key_key, item_key))
+        items.sort()
+        return ("dict", tuple(items))
+
+    expr_key = _loop_expression_semantic_key(value)
+    if expr_key is not None:
+        return ("expression", expr_key)
+
+    semantic_key = getattr(value, "semantic_key", None)
+    if callable(semantic_key):
+        try:
+            key = semantic_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+        if key is not None:
+            return ("semantic", key)
+
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            key = stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+        if key is None:
+            return None
+        return ("stable", key)
+    return None
+
+
+def _loop_expression_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    expr_type = getattr(value, "expr_type", None)
+    expr_type_name = getattr(expr_type, "name", None)
+    if expr_type_name is None:
+        return None
+
+    size = int(getattr(value, "size", 0) or 0)
+    if expr_type_name == "CONSTANT":
+        try:
+            return ("const", int(getattr(value, "value")), size)
+        except (TypeError, ValueError):
+            return None
+    if expr_type_name == "PARAMETER":
+        index = getattr(value, "value", None)
+        try:
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index), size)
+        except (TypeError, ValueError):
+            pass
+        return ("parameter_name", getattr(value, "name", None) or "", size)
+    if expr_type_name == "VARIABLE":
+        storage = getattr(value, "storage_info", None)
+        storage_key = _loop_object_semantic_key(storage) if storage is not None else None
+        if storage is not None and storage_key is None:
+            return None
+        return ("variable", getattr(value, "name", None) or "", size, storage_key)
+    if expr_type_name in {"UNARY_OP", "BINARY_OP", "INTRINSIC", "CALL"}:
+        operand_keys = tuple(
+            _loop_object_semantic_key(operand)
+            for operand in (getattr(value, "operands", None) or ())
+        )
+        if any(operand_key is None for operand_key in operand_keys):
+            return None
+        return (
+            expr_type_name.lower(),
+            getattr(value, "operator", None) or getattr(value, "name", None) or "",
+            None if getattr(value, "opcode", None) is None else int(getattr(value, "opcode")),
+            size,
+            operand_keys,
+        )
+    if expr_type_name == "MEMORY":
+        operands = getattr(value, "operands", None) or ()
+        if not operands:
+            return None
+        address_key = _loop_object_semantic_key(operands[0])
+        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None))
+        if address_key is None:
+            return None
+        return ("memory", size, address_key, runtime_key)
+    if expr_type_name == "PHI":
+        branches = []
+        for condition, branch_value in getattr(value, "value", None) or ():
+            if condition is None:
+                condition_key = ("none",)
+            else:
+                condition_expr = getattr(condition, "expression", None)
+                condition_key = (
+                    "condition",
+                    _loop_object_semantic_key(condition_expr),
+                    bool(getattr(condition, "negated", False)),
+                )
+                if condition_key[1] is None:
+                    return None
+            value_key = _loop_object_semantic_key(branch_value)
+            if value_key is None:
+                return None
+            branches.append((condition_key, value_key))
+        return ("phi", size, tuple(branches))
+    if expr_type_name == "UNKNOWN":
+        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None))
+        if runtime_key is not None:
+            return ("unknown", size, runtime_key)
+        return None
+    return None
+
+
 def _loop_object_to_dict(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -650,6 +815,43 @@ class LoopBodyEffectRef:
             for path_conditions in self.path_condition_sets
         )
         target_key = _loop_object_key(self.target_ref)
+        if (
+            address_space_key is None
+            or location_key is None
+            or value_key is None
+            or target_key is None
+            or any(guard_key is None for guard_key in guard_keys)
+            or any(any(condition_key is None for condition_key in path_key) for path_key in path_keys)
+        ):
+            return None
+        return (
+            "loop_body_effect",
+            self.kind,
+            self.source,
+            self.scope,
+            address_space_key,
+            location_key,
+            value_key,
+            guard_keys,
+            path_keys,
+            bool(self.guard_paths_incomplete),
+            target_key,
+            None if self.order_key is None else int(self.order_key),
+            bool(self.keyable),
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        if not self.keyable or self.guard_paths_incomplete:
+            return None
+        address_space_key = _loop_object_semantic_key(self.address_space)
+        location_key = _loop_object_semantic_key(self.location)
+        value_key = _loop_object_semantic_key(self.value_expr)
+        guard_keys = tuple(_loop_object_semantic_key(guard) for guard in self.guard_constraints)
+        path_keys = tuple(
+            tuple(_loop_object_semantic_key(condition) for condition in path_conditions)
+            for path_conditions in self.path_condition_sets
+        )
+        target_key = _loop_object_semantic_key(self.target_ref)
         if (
             address_space_key is None
             or location_key is None
@@ -739,6 +941,23 @@ class LoopSideEffectProfileRef:
             effect_keys,
         )
 
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        effect_keys = tuple(effect.semantic_key() for effect in self.effect_descriptors)
+        if any(effect_key is None for effect_key in effect_keys):
+            return None
+        return (
+            "loop_side_effect_profile",
+            self.profile,
+            bool(self.memory_reads),
+            bool(self.memory_writes),
+            bool(self.calls),
+            bool(self.escapes),
+            bool(self.conditional_guards),
+            int(self.effect_count),
+            int(self.guard_count),
+            effect_keys,
+        )
+
     def requires_effect_proof(self) -> bool:
         return bool(
             self.memory_writes
@@ -785,6 +1004,7 @@ class LoopTermDescriptorRef:
     element_size: int = 0
     result_size: int = 0
     residue_cases: Tuple[Tuple[int, int, int, int], ...] = ()
+    lane_terms: Tuple[Tuple[int, int], ...] = ()
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -805,6 +1025,29 @@ class LoopTermDescriptorRef:
                 )
                 for modulus, residue, coeff, bias in self.residue_cases
             ),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
+        )
+
+    def semantic_key(self) -> Tuple[Any, ...]:
+        return (
+            "loop_term_descriptor",
+            self.kind,
+            self.reduction_kind,
+            self.location_base_ref.semantic_key() if self.location_base_ref is not None else None,
+            int(self.start_offset),
+            int(self.stride),
+            int(self.element_size),
+            max(1, int(self.result_size or 0)),
+            tuple(
+                (
+                    int(modulus),
+                    int(residue),
+                    int(coeff),
+                    int(bias),
+                )
+                for modulus, residue, coeff, bias in self.residue_cases
+            ),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -824,6 +1067,13 @@ class LoopTermDescriptorRef:
                     "bias": int(bias),
                 }
                 for modulus, residue, coeff, bias in self.residue_cases
+            ],
+            "lane_terms": [
+                {
+                    "byte_offset": int(offset),
+                    "access_size": max(1, int(size or 0)),
+                }
+                for offset, size in self.lane_terms
             ],
         }
         if self.location_base_ref is not None:
@@ -845,6 +1095,25 @@ class LoopCaseRef:
         path_keys = tuple(_loop_object_key(condition) for condition in self.path_conditions)
         body_effect_key = _loop_object_key(self.body_effect)
         term_key = _loop_object_key(self.term_expr)
+        if (
+            any(path_key is None for path_key in path_keys)
+            or body_effect_key is None
+            or term_key is None
+        ):
+            return None
+        return (
+            "loop_case",
+            self.case_kind,
+            path_keys,
+            body_effect_key,
+            term_key,
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        path_keys = tuple(_loop_object_semantic_key(condition) for condition in self.path_conditions)
+        body_effect_key = _loop_object_semantic_key(self.body_effect)
+        term_key = _loop_object_semantic_key(self.term_expr)
         if (
             any(path_key is None for path_key in path_keys)
             or body_effect_key is None
@@ -938,7 +1207,9 @@ class LoopSummaryRef:
         return bool(self.cases)
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
-        return None
+        if self.requires_effect_proof() or self.requires_path_proof():
+            return None
+        return loop_summary_method_b_key(self)
 
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         if self.requires_effect_proof() or self.requires_path_proof():
@@ -946,7 +1217,7 @@ class LoopSummaryRef:
         return self.stable_key()
 
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
-        return None
+        return self.semantic_key()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1011,7 +1282,7 @@ def compare_loop_summaries(
     right_method_b_key = loop_summary_method_b_key(right)
     if left_method_b_key is not None and right_method_b_key is not None:
         if left_method_b_key == right_method_b_key:
-            return LoopSummaryComparisonResult("equivalent", "loop summaries match by seed compensation")
+            return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic seed compensation")
     left_profile = getattr(left, "side_effect_profile", None)
     right_profile = getattr(right, "side_effect_profile", None)
     if left_profile is not None and right_profile is not None:
@@ -1052,6 +1323,11 @@ def compare_loop_summaries(
             return LoopSummaryComparisonResult("incompatible", "loop cases are unkeyable")
         if left_case_keys != right_case_keys:
             return LoopSummaryComparisonResult("incompatible", "loop cases differ")
+    left_semantic_key = left.pairwise_semantic_key()
+    right_semantic_key = right.pairwise_semantic_key()
+    if left_semantic_key is not None and right_semantic_key is not None:
+        if left_semantic_key == right_semantic_key:
+            return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic key")
     return LoopSummaryComparisonResult("unknown", "loop summary comparator is not implemented")
 
 
@@ -1085,9 +1361,15 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         and getattr(term_descriptor, "location_base_ref", None) is None
     ):
         return None
-    term_key = term_descriptor.stable_key()
-    limit_key = _loop_object_key(getattr(summary, "limit_expr", None))
-    side_effect_key = summary.side_effect_profile.stable_key()
+    term_key = _loop_summary_term_descriptor_semantic_key(
+        term_descriptor,
+        loop_var_unit=getattr(summary, "loop_var_unit", None),
+    )
+    loop_var_unit_key = getattr(summary, "loop_var_unit", None)
+    if term_key is not None and len(term_key) > 0 and term_key[0] == "scalar_memory_term_sequence":
+        loop_var_unit_key = "scalar_element_index"
+    limit_key = _loop_summary_limit_semantic_key(getattr(summary, "limit_expr", None))
+    side_effect_key = summary.side_effect_profile.semantic_key()
     if limit_key is None or side_effect_key is None:
         return None
 
@@ -1098,19 +1380,19 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         expected_term = _loop_summary_term_at_index(summary, previous_index)
         if expected_term is None:
             break
-        expected_key = _loop_object_key(expected_term)
-        actual_key = _loop_object_key(remaining_seed_terms[-1])
+        expected_key = _loop_object_semantic_key(expected_term)
+        actual_key = _loop_object_semantic_key(remaining_seed_terms[-1])
         if expected_key is None or actual_key is None or expected_key != actual_key:
             break
         remaining_seed_terms.pop()
         canonical_start = previous_index
 
-    seed_keys = tuple(_loop_object_key(term) for term in remaining_seed_terms)
+    seed_keys = tuple(_loop_object_semantic_key(term) for term in remaining_seed_terms)
     if any(seed_key is None for seed_key in seed_keys):
         return None
     return (
         "loop_summary_method_b",
-        getattr(summary, "loop_var_unit", None),
+        loop_var_unit_key,
         int(canonical_start),
         limit_key,
         int(step_value),
@@ -1134,12 +1416,123 @@ def _loop_summary_int_constant(value: Any) -> Optional[int]:
     return None
 
 
+def _loop_summary_limit_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    expr_type = getattr(value, "expr_type", None)
+    if getattr(expr_type, "name", None) == "PARAMETER":
+        index = getattr(value, "value", None)
+        try:
+            if index is not None and int(index) >= 0:
+                return ("loop_limit_parameter", int(index))
+        except (TypeError, ValueError):
+            pass
+        return ("loop_limit_parameter_name", getattr(value, "name", None) or "")
+    return _loop_object_semantic_key(value)
+
+
+def _loop_summary_term_descriptor_semantic_key(
+    term_descriptor: LoopTermDescriptorRef,
+    *,
+    loop_var_unit: Optional[str] = None,
+) -> Optional[Tuple[Any, ...]]:
+    scalar_key = _loop_summary_scalar_memory_term_key(
+        term_descriptor,
+        loop_var_unit=loop_var_unit,
+    )
+    if scalar_key is not None:
+        return scalar_key
+    return term_descriptor.semantic_key()
+
+
+def _loop_summary_scalar_memory_term_key(
+    term_descriptor: LoopTermDescriptorRef,
+    *,
+    loop_var_unit: Optional[str] = None,
+) -> Optional[Tuple[Any, ...]]:
+    if getattr(term_descriptor, "kind", None) != "memory_load":
+        return None
+    location_base_ref = getattr(term_descriptor, "location_base_ref", None)
+    if location_base_ref is None:
+        return None
+    reduction_kind = getattr(term_descriptor, "reduction_kind", "sum")
+    result_size = max(1, int(getattr(term_descriptor, "result_size", 0) or 0))
+    start_offset = int(getattr(term_descriptor, "start_offset", 0) or 0)
+    lane_terms = tuple(getattr(term_descriptor, "lane_terms", ()) or ())
+    if not lane_terms:
+        element_size = int(getattr(term_descriptor, "element_size", 0) or 0)
+        stride = int(getattr(term_descriptor, "stride", 0) or 0)
+        if element_size <= 0 or stride <= 0 or element_size != result_size:
+            return None
+        return (
+            "scalar_memory_term_sequence",
+            reduction_kind,
+            location_base_ref.semantic_key(),
+            start_offset,
+            stride,
+            element_size,
+            result_size,
+        )
+    if loop_var_unit != "scalar_element_index":
+        return None
+
+    normalized_lanes = sorted(
+        (int(offset), max(1, int(size or 0)))
+        for offset, size in lane_terms
+    )
+    access_sizes = {size for _, size in normalized_lanes}
+    if len(access_sizes) != 1:
+        return None
+    access_size = next(iter(access_sizes))
+    if access_size != result_size:
+        return None
+    offsets = [offset for offset, _ in normalized_lanes]
+    if len(set(offsets)) != len(offsets):
+        return None
+    if len(offsets) == 1:
+        scalar_stride = access_size
+    else:
+        deltas = [right - left for left, right in zip(offsets, offsets[1:])]
+        if any(delta <= 0 for delta in deltas):
+            return None
+        scalar_stride = deltas[0]
+        if any(delta != scalar_stride for delta in deltas):
+            return None
+    if scalar_stride != access_size:
+        return None
+    descriptor_stride = int(getattr(term_descriptor, "stride", 0) or 0)
+    if descriptor_stride != scalar_stride * len(offsets):
+        return None
+    expected_offsets = [offsets[0] + index * scalar_stride for index in range(len(offsets))]
+    if offsets != expected_offsets:
+        return None
+    return (
+        "scalar_memory_term_sequence",
+        reduction_kind,
+        location_base_ref.semantic_key(),
+        start_offset + offsets[0],
+        scalar_stride,
+        access_size,
+        result_size,
+    )
+
+
 def _loop_summary_term_at_index(summary: LoopSummaryRef, index: int) -> Optional[Any]:
     term_descriptor = getattr(summary, "term_descriptor", None)
     if term_descriptor is None:
         return None
     if getattr(term_descriptor, "kind", None) != "memory_load":
         return None
+    scalar_key = _loop_summary_scalar_memory_term_key(
+        term_descriptor,
+        loop_var_unit=getattr(summary, "loop_var_unit", None),
+    )
+    if scalar_key is not None:
+        start_offset = int(scalar_key[3])
+        stride = int(scalar_key[4])
+        access_size = int(scalar_key[5])
+        return ReadonlyReductionTermRef(
+            byte_offset=start_offset + int(index) * stride,
+            access_size=access_size,
+        )
     element_size = int(getattr(term_descriptor, "element_size", 0) or 0)
     stride = int(getattr(term_descriptor, "stride", 0) or 0)
     if element_size <= 0 or stride <= 0:
@@ -1243,15 +1636,27 @@ class ReadonlyReductionRef:
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         if self.loop_summary is not None:
-            return None
+            loop_key = self.loop_summary.semantic_key()
+            if loop_key is None:
+                return None
+            pointer_identity = self.pointer_base_ref.semantic_key()
+            count_identity = (
+                ("parameter", int(self.count_parameter_index))
+                if self.count_parameter_index is not None
+                else ("parameter_name", self.count_parameter_name)
+            )
+            return (
+                "readonly_reduction_loop_semantic",
+                self.reduction_kind,
+                pointer_identity,
+                count_identity,
+                max(1, int(self.result_size or 0)),
+                loop_key,
+            )
         witness_prefix = self._semantic_witness_prefix(required_prefix=3, cap=3)
         if witness_prefix is None:
             return None
-        pointer_identity = (
-            ("parameter", int(self.pointer_base_ref.parameter_index))
-            if self.pointer_base_ref.is_parameter() and self.pointer_base_ref.parameter_index is not None
-            else self.pointer_base_ref.stable_key()
-        )
+        pointer_identity = self.pointer_base_ref.semantic_key()
         count_identity = (
             ("parameter", int(self.count_parameter_index))
             if self.count_parameter_index is not None
@@ -1354,7 +1759,25 @@ class CountedLoopSummaryRef:
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         if self.loop_summary is not None:
-            return None
+            loop_key = self.loop_summary.semantic_key()
+            if loop_key is None:
+                return None
+            return (
+                "counted_loop_summary_loop_semantic",
+                int(self.induction_step),
+                max(1, int(self.result_size or 0)),
+                bool(self.signed_loop),
+                tuple(
+                    (
+                        int(modulus),
+                        int(residue),
+                        int(coeff),
+                        int(bias),
+                    )
+                    for modulus, residue, coeff, bias in self.residue_cases
+                ),
+                loop_key,
+            )
         return (
             "counted_loop_summary_semantic",
             int(self.induction_step),

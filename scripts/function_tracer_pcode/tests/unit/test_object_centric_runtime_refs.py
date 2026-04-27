@@ -41,18 +41,18 @@ def test_coerce_call_target_ref_rejects_raw_strings():
     assert coerce_call_target_ref("callee") is None
 
 
-def test_loop_summary_comparator_interface_is_explicitly_unknown():
+def test_loop_summary_comparator_accepts_pure_object_centric_semantic_key():
     summary = LoopSummaryRef(
         start_expr=0,
         limit_expr="n",
         step_expr=1,
-        term_descriptor=LoopTermDescriptorRef(kind="memory_load", stride=4, element_size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
     )
 
     result = compare_loop_summaries(summary, summary)
 
-    assert result.status == "unknown"
-    assert result.is_equivalent() is None
+    assert result.status == "equivalent"
+    assert result.is_equivalent() is True
 
 
 def test_loop_summary_comparator_rejects_different_side_effect_profiles():
@@ -258,6 +258,34 @@ def test_loop_summary_method_b_key_normalizes_seed_compensated_suffix():
     result = compare_loop_summaries(full, suffix)
     assert result.status == "equivalent"
     assert result.is_equivalent() is True
+
+
+def test_loop_summary_method_b_key_compensates_vector_lane_scalar_prefix_seed():
+    full = _readonly_loop_summary(start=0)
+    suffix = LoopSummaryRef(
+        start_expr=Expression.constant(2, size=4),
+        limit_expr=full.limit_expr,
+        step_expr=full.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=16,
+            element_size=8,
+            result_size=4,
+            lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+        ),
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ),
+        side_effect_profile=full.side_effect_profile,
+        loop_var_unit="scalar_element_index",
+    )
+
+    assert loop_summary_method_b_key(full) == loop_summary_method_b_key(suffix)
+    assert compare_loop_summaries(full, suffix).status == "equivalent"
 
 
 def test_loop_summary_method_b_key_requires_seed_to_cover_omitted_prefix():
@@ -854,6 +882,247 @@ def test_location_base_parameter_identity_is_scoped_by_function_when_available()
 
     assert caller != callee
     assert caller.stable_key() != callee.stable_key()
+    assert caller.semantic_key() == callee.semantic_key()
+
+
+def test_loop_summary_method_b_key_uses_parameter_semantics_not_owner_identity():
+    left_base = LocationBaseRef.parameter(
+        "base",
+        index=0,
+        owner_program_id=100,
+        owner_entry_offset=0x401000,
+    )
+    right_base = LocationBaseRef.parameter(
+        "base",
+        index=0,
+        owner_program_id=200,
+        owner_entry_offset=0x501000,
+    )
+    left = _readonly_loop_summary(start=0)
+    right = _readonly_loop_summary(start=0)
+    left = LoopSummaryRef(
+        start_expr=left.start_expr,
+        limit_expr=left.limit_expr,
+        step_expr=left.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=left_base,
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=left.side_effect_profile,
+        loop_var_unit=left.loop_var_unit,
+    )
+    right = LoopSummaryRef(
+        start_expr=right.start_expr,
+        limit_expr=right.limit_expr,
+        step_expr=right.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=right_base,
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=right.side_effect_profile,
+        loop_var_unit=right.loop_var_unit,
+    )
+
+    assert left.stable_key() != right.stable_key()
+    assert loop_summary_method_b_key(left) == loop_summary_method_b_key(right)
+    assert compare_loop_summaries(left, right).status == "equivalent"
+
+
+def test_method_b_smt_identity_uses_loop_semantics_across_owner_scoped_binaries():
+    left_base = LocationBaseRef.parameter(
+        "base",
+        index=0,
+        owner_program_id=100,
+        owner_entry_offset=0x401000,
+    )
+    right_base = LocationBaseRef.parameter(
+        "base",
+        index=0,
+        owner_program_id=200,
+        owner_entry_offset=0x501000,
+    )
+    left_summary = _readonly_loop_summary(start=0)
+    right_summary = _readonly_loop_summary(start=0)
+    left_summary = LoopSummaryRef(
+        start_expr=left_summary.start_expr,
+        limit_expr=left_summary.limit_expr,
+        step_expr=left_summary.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=left_base,
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=left_summary.side_effect_profile,
+        loop_var_unit=left_summary.loop_var_unit,
+    )
+    right_summary = LoopSummaryRef(
+        start_expr=right_summary.start_expr,
+        limit_expr=right_summary.limit_expr,
+        step_expr=right_summary.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=right_base,
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=right_summary.side_effect_profile,
+        loop_var_unit=right_summary.loop_var_unit,
+    )
+    left_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("base", index=0, data_type="int *", size=8),
+            Expression.parameter("count", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=left_base,
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            loop_summary=left_summary,
+        ),
+    )
+    right_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("base", index=0, data_type="int *", size=8),
+            Expression.parameter("count", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=right_base,
+            count_parameter_name="count",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            loop_summary=right_summary,
+        ),
+    )
+
+    assert left_expr.runtime_ref.stable_key() != right_expr.runtime_ref.stable_key()
+    assert left_expr.runtime_ref.semantic_key() == right_expr.runtime_ref.semantic_key()
+    assert _runtime_ref_smt_identity(left_expr, left_expr.runtime_ref) == _runtime_ref_smt_identity(
+        right_expr,
+        right_expr.runtime_ref,
+    )
+
+
+def test_loop_summary_method_b_key_keeps_vector_width_shape_distinct():
+    scalar = _readonly_loop_summary(start=0)
+    vector_like = LoopSummaryRef(
+        start_expr=scalar.start_expr,
+        limit_expr=scalar.limit_expr,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=16,
+            element_size=8,
+            result_size=4,
+        ),
+        side_effect_profile=scalar.side_effect_profile,
+        loop_var_unit=scalar.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(scalar) != loop_summary_method_b_key(vector_like)
+    assert compare_loop_summaries(scalar, vector_like).status == "unknown"
+
+
+def test_loop_summary_method_b_key_does_not_scalarize_vector_lanes_without_iteration_proof():
+    scalar = _readonly_loop_summary(start=0)
+    vector_lanes = LoopSummaryRef(
+        start_expr=scalar.start_expr,
+        limit_expr=scalar.limit_expr,
+        step_expr=scalar.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=16,
+            element_size=8,
+            result_size=4,
+            lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+        ),
+        side_effect_profile=scalar.side_effect_profile,
+        loop_var_unit=scalar.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(scalar) != loop_summary_method_b_key(vector_lanes)
+    assert compare_loop_summaries(scalar, vector_lanes).status == "unknown"
+
+
+def test_loop_summary_method_b_key_scalarizes_vector_lanes_only_with_scalar_iteration_proof():
+    scalar = _readonly_loop_summary(start=0)
+    scalar_proven = LoopSummaryRef(
+        start_expr=scalar.start_expr,
+        limit_expr=scalar.limit_expr,
+        step_expr=scalar.step_expr,
+        term_descriptor=scalar.term_descriptor,
+        side_effect_profile=scalar.side_effect_profile,
+        loop_var_unit="scalar_element_index",
+    )
+    vector_lanes = LoopSummaryRef(
+        start_expr=scalar.start_expr,
+        limit_expr=scalar.limit_expr,
+        step_expr=scalar.step_expr,
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=0),
+            start_offset=0,
+            stride=16,
+            element_size=8,
+            result_size=4,
+            lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+        ),
+        side_effect_profile=scalar.side_effect_profile,
+        loop_var_unit="scalar_element_index",
+    )
+
+    assert loop_summary_method_b_key(scalar_proven) == loop_summary_method_b_key(vector_lanes)
+
+
+def test_loop_summary_method_b_key_leaves_limit_width_to_smt_parameter_binding():
+    int_count = _readonly_loop_summary(start=0)
+    long_count = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=8),
+        limit_expr=Expression.parameter("count64", index=1, data_type="ulong", size=8),
+        step_expr=Expression.constant(1, size=8),
+        term_descriptor=int_count.term_descriptor,
+        side_effect_profile=int_count.side_effect_profile,
+        loop_var_unit=int_count.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(int_count) == loop_summary_method_b_key(long_count)
+    assert compare_loop_summaries(int_count, long_count).status == "equivalent"
 
 
 def test_storage_info_register_identity_uses_numeric_base_metadata():

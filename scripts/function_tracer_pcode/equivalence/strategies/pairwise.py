@@ -1010,7 +1010,6 @@ class PairwiseStrategy(CheckStrategy):
             return False
         if not left_normalized and not right_normalized:
             return True
-
         matched_right: set[int] = set()
         for left_condition in left_normalized:
             candidate_index: Optional[int] = None
