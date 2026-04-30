@@ -40,6 +40,8 @@ from scripts.function_tracer_pcode.model import (
     ReturnInfo,
     ReadonlyReductionRef,
     ReadonlyReductionWitness,
+    STATE_TRANSITION_LOOP_COUNT_OPCODE,
+    StateTransitionLoopSummaryRef,
     UnknownValueRef,
     loop_summary_method_b_key,
 )
@@ -98,6 +100,22 @@ def _const(value: int, size: int = 4) -> Expression:
 
 def _cond(operator: str, left: Expression, right: Expression, negated: bool = False) -> Condition:
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
+
+
+def _expression_operators(expr: Expression | None) -> set[str]:
+    operators = set()
+    if expr is None:
+        return operators
+    operator = getattr(expr, "operator", None)
+    if operator:
+        operators.add(operator)
+    for operand in getattr(expr, "operands", None) or ():
+        operators.update(_expression_operators(operand))
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+        for condition, value in getattr(expr, "value", None) or ():
+            operators.update(_expression_operators(getattr(condition, "expression", None)))
+            operators.update(_expression_operators(value))
+    return operators
 
 
 def test_counted_loop_summary_canonicalizes_zero_contribution_prefix():
@@ -1085,6 +1103,567 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     assert all(case.body_effect.kind == "accumulator_update" for case in loop_summary.cases)
     assert all(case.term_expr is not None for case in loop_summary.cases)
     assert all(case.stable_key() is not None for case in loop_summary.cases)
+
+
+def _build_branch_while_state_cfg(*, swap_transition_inputs: bool = False):
+    param = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+    three_expr = _const(3)
+
+    preheader = _FakeCfgBlock(0)
+    header = _FakeCfgBlock(1)
+    body = _FakeCfgBlock(2)
+    even_block = _FakeCfgBlock(3)
+    odd_block = _FakeCfgBlock(4)
+    latch = _FakeCfgBlock(5)
+    exit_block = _FakeCfgBlock(6)
+
+    preheader.add_edge(header)
+    header.add_edge(body, truth=True)
+    header.add_edge(exit_block, truth=False)
+    body.add_edge(odd_block, truth=True)
+    body.add_edge(even_block, truth=False)
+    even_block.add_edge(latch)
+    odd_block.add_edge(latch)
+    latch.add_edge(header)
+
+    param_vn = _FakeVarnode("param", expr=param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+    three_vn = _FakeVarnode("three", expr=three_expr)
+
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_merge_vn = _FakeVarnode("state_merge")
+    state_even_vn = _FakeVarnode("state_even")
+    state_odd_vn = _FakeVarnode("state_odd")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_next_vn = _FakeVarnode("acc_next")
+    guard_vn = _FakeVarnode("guard", size=1)
+    parity_vn = _FakeVarnode("parity")
+    parity_cond_vn = _FakeVarnode("parity_cond", size=1)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [param_vn, state_merge_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_phi_vn], guard_vn)
+    header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("header_target"), guard_vn], None)
+    header._ops[:] = [state_phi_op, acc_phi_op, guard_op, header_branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    parity_op = _FakePcodeOp("INT_AND", [state_phi_vn, one_vn], parity_vn)
+    parity_cmp = _FakePcodeOp("INT_NOTEQUAL", [parity_vn, zero_vn], parity_cond_vn)
+    body_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), parity_cond_vn], None)
+    body._ops[:] = [parity_op, parity_cmp, body_branch]
+    for op in body._ops:
+        op.setParent(body)
+
+    state_even_op = _FakePcodeOp("INT_SRIGHT", [state_phi_vn, one_vn], state_even_vn)
+    even_block._ops[:] = [state_even_op]
+    state_even_op.setParent(even_block)
+
+    state_odd_op = _FakePcodeOp("INT_SUB", [state_phi_vn, three_vn], state_odd_vn)
+    odd_block._ops[:] = [state_odd_op]
+    state_odd_op.setParent(odd_block)
+
+    merge_inputs = [state_even_vn, state_odd_vn]
+    if swap_transition_inputs:
+        merge_inputs = [state_odd_vn, state_even_vn]
+        latch._ins[:] = [odd_block, even_block]
+    state_merge_op = _FakePcodeOp("MULTIEQUAL", merge_inputs, state_merge_vn)
+    acc_next_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, one_vn], acc_next_vn)
+    latch._ops[:] = [state_merge_op, acc_next_op]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_phi_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+
+    return _FakeCfgHighFunction([preheader, header, body, even_block, odd_block, latch, exit_block])
+
+
+def _build_branch_while_state_latch_guarded_cfg(*, shift_mnemonic: str = "INT_SRIGHT"):
+    param = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+    three_expr = _const(3)
+
+    precheck = _FakeCfgBlock(0)
+    zero_exit = _FakeCfgBlock(1)
+    entry = _FakeCfgBlock(2)
+    header = _FakeCfgBlock(3)
+    odd_block = _FakeCfgBlock(4)
+    latch = _FakeCfgBlock(5)
+    exit_block = _FakeCfgBlock(6)
+
+    precheck.add_edge(entry, truth=True)
+    precheck.add_edge(zero_exit, truth=False)
+    entry.add_edge(header)
+    header.add_edge(odd_block, truth=True)
+    header.add_edge(latch, truth=False)
+    odd_block.add_edge(latch)
+    latch.add_edge(header, truth=True)
+    latch.add_edge(exit_block, truth=False)
+
+    param_vn = _FakeVarnode("param", expr=param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+    three_vn = _FakeVarnode("three", expr=three_expr)
+
+    entry_guard_vn = _FakeVarnode("entry_guard", size=1)
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_even_vn = _FakeVarnode("state_even")
+    state_odd_vn = _FakeVarnode("state_odd")
+    state_merge_vn = _FakeVarnode("state_merge")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_next_vn = _FakeVarnode("acc_next")
+    parity_vn = _FakeVarnode("parity")
+    parity_cond_vn = _FakeVarnode("parity_cond", size=1)
+    latch_guard_vn = _FakeVarnode("latch_guard", size=1)
+
+    entry_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, param_vn], entry_guard_vn)
+    precheck_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("entry_target"), entry_guard_vn], None)
+    precheck._ops[:] = [entry_guard_op, precheck_branch]
+    for op in precheck._ops:
+        op.setParent(precheck)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [param_vn, state_merge_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    state_even_op = _FakePcodeOp(shift_mnemonic, [state_phi_vn, one_vn], state_even_vn)
+    parity_op = _FakePcodeOp("INT_AND", [state_phi_vn, one_vn], parity_vn)
+    parity_cmp = _FakePcodeOp("INT_NOTEQUAL", [parity_vn, zero_vn], parity_cond_vn)
+    header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), parity_cond_vn], None)
+    header._ops[:] = [state_phi_op, acc_phi_op, state_even_op, parity_op, parity_cmp, header_branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    state_odd_op = _FakePcodeOp("INT_SUB", [state_phi_vn, three_vn], state_odd_vn)
+    odd_block._ops[:] = [state_odd_op]
+    state_odd_op.setParent(odd_block)
+
+    state_merge_op = _FakePcodeOp("MULTIEQUAL", [state_even_vn, state_odd_vn], state_merge_vn)
+    acc_next_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, one_vn], acc_next_vn)
+    latch_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_merge_vn], latch_guard_vn)
+    latch_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("latch_target"), latch_guard_vn], None)
+    latch._ops[:] = [state_merge_op, acc_next_op, latch_guard_op, latch_branch]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_next_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+
+    return _FakeCfgHighFunction([precheck, zero_exit, entry, header, odd_block, latch, exit_block])
+
+
+def _build_branch_while_state_multi_latch_cfg(*, shift_mnemonic: str = "INT_SRIGHT"):
+    param = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+    three_expr = _const(3)
+
+    precheck = _FakeCfgBlock(0)
+    zero_exit = _FakeCfgBlock(1)
+    header = _FakeCfgBlock(2)
+    even_latch = _FakeCfgBlock(3)
+    odd_latch = _FakeCfgBlock(4)
+    exit_block = _FakeCfgBlock(5)
+
+    precheck.add_edge(header, truth=True)
+    precheck.add_edge(zero_exit, truth=False)
+    header.add_edge(even_latch, truth=True)
+    header.add_edge(odd_latch, truth=False)
+    even_latch.add_edge(exit_block, truth=True)
+    even_latch.add_edge(header, truth=False)
+    odd_latch.add_edge(header, truth=True)
+    odd_latch.add_edge(exit_block, truth=False)
+
+    param_vn = _FakeVarnode("param", expr=param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+    three_vn = _FakeVarnode("three", expr=three_expr)
+
+    entry_guard_vn = _FakeVarnode("entry_guard", size=1)
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_even_vn = _FakeVarnode("state_even")
+    state_odd_vn = _FakeVarnode("state_odd")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_even_vn = _FakeVarnode("acc_even")
+    acc_odd_vn = _FakeVarnode("acc_odd")
+    parity_vn = _FakeVarnode("parity")
+    parity_cond_vn = _FakeVarnode("parity_cond", size=1)
+    even_exit_guard_vn = _FakeVarnode("even_exit_guard", size=1)
+    odd_continue_guard_vn = _FakeVarnode("odd_continue_guard", size=1)
+
+    entry_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, param_vn], entry_guard_vn)
+    precheck_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("entry_target"), entry_guard_vn], None)
+    precheck._ops[:] = [entry_guard_op, precheck_branch]
+    for op in precheck._ops:
+        op.setParent(precheck)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [param_vn, state_even_vn, state_odd_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_even_vn, acc_odd_vn], acc_phi_vn)
+    parity_op = _FakePcodeOp("INT_AND", [state_phi_vn, one_vn], parity_vn)
+    parity_cmp = _FakePcodeOp("INT_EQUAL", [parity_vn, zero_vn], parity_cond_vn)
+    header_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("body_target"), parity_cond_vn], None)
+    header._ops[:] = [state_phi_op, acc_phi_op, parity_op, parity_cmp, header_branch]
+    for op in header._ops:
+        op.setParent(header)
+
+    state_even_op = _FakePcodeOp(shift_mnemonic, [state_phi_vn, one_vn], state_even_vn)
+    acc_even_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, one_vn], acc_even_vn)
+    even_exit_guard_op = _FakePcodeOp("INT_SLESS", [state_even_vn, one_vn], even_exit_guard_vn)
+    even_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("even_latch_target"), even_exit_guard_vn], None)
+    even_latch._ops[:] = [state_even_op, acc_even_op, even_exit_guard_op, even_branch]
+    for op in even_latch._ops:
+        op.setParent(even_latch)
+
+    state_odd_op = _FakePcodeOp("INT_SUB", [state_phi_vn, three_vn], state_odd_vn)
+    acc_odd_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, one_vn], acc_odd_vn)
+    odd_continue_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, state_odd_vn], odd_continue_guard_vn)
+    odd_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("odd_latch_target"), odd_continue_guard_vn], None)
+    odd_latch._ops[:] = [state_odd_op, acc_odd_op, odd_continue_guard_op, odd_branch]
+    for op in odd_latch._ops:
+        op.setParent(odd_latch)
+
+    return_op = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_phi_vn], None)
+    exit_block._ops[:] = [return_op]
+    return_op.setParent(exit_block)
+
+    return _FakeCfgHighFunction([precheck, zero_exit, header, even_latch, odd_latch, exit_block])
+
+
+def test_state_transition_loop_summary_recovers_branch_driven_trip_count():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[]),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", Expression.unknown("phi_circular"), _const(1)),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    assert len(summarized_returns) == 2
+    assert all(expression_has_unresolved_value(ret.value) is False for ret in summarized_returns)
+
+    loop_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert loop_case.value.opcode == STATE_TRANSITION_LOOP_COUNT_OPCODE
+    assert isinstance(loop_case.value.runtime_ref, StateTransitionLoopSummaryRef)
+    loop_smt = expression_to_smt(loop_case.value)
+    assert "rt_state_transition_loop_count_" in loop_smt
+    assert "rtunk_" not in loop_smt
+
+
+def test_state_transition_loop_summary_recovers_latch_guarded_state_loop():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[]),
+            ReturnInfo(address="0x1004", value=_const(1), conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))]),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_latch_guarded_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    loop_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert loop_case.conditions[0].to_string() == "(0 < param_1)"
+    assert loop_case.value.runtime_ref.semantic_key() is not None
+
+
+def test_state_transition_loop_summary_key_is_object_centric_across_branch_order():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("phi_circular"), conditions=[])],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    left_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_cfg(swap_transition_inputs=False),
+        analysis,
+    )
+    right_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_cfg(swap_transition_inputs=True),
+        analysis,
+    )
+
+    left_intrinsic = next(ret.value for ret in left_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    right_intrinsic = next(ret.value for ret in right_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert left_intrinsic.runtime_ref.semantic_key() == right_intrinsic.runtime_ref.semantic_key()
+
+
+def test_state_transition_loop_summary_key_matches_header_and_latch_guards():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("phi_circular"), conditions=[])],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    header_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_cfg(),
+        analysis,
+    )
+    latch_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_latch_guarded_cfg(),
+        analysis,
+    )
+
+    header_intrinsic = next(ret.value for ret in header_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    latch_intrinsic = next(ret.value for ret in latch_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert header_intrinsic.runtime_ref.semantic_key() == latch_intrinsic.runtime_ref.semantic_key()
+
+
+def test_state_transition_loop_summary_key_unifies_unsigned_shift_under_positive_guard():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("phi_circular"), conditions=[])],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    signed_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_latch_guarded_cfg(shift_mnemonic="INT_SRIGHT"),
+        analysis,
+    )
+    unsigned_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_latch_guarded_cfg(shift_mnemonic="INT_RIGHT"),
+        analysis,
+    )
+
+    signed_intrinsic = next(ret.value for ret in signed_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    unsigned_intrinsic = next(ret.value for ret in unsigned_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert signed_intrinsic.runtime_ref.semantic_key() == unsigned_intrinsic.runtime_ref.semantic_key()
+
+
+def test_state_transition_loop_summary_cases_drop_post_state_guard():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("phi_circular"), conditions=[])],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_latch_guarded_cfg(),
+        analysis,
+    )
+
+    intrinsic = next(ret.value for ret in returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    cases = intrinsic.runtime_ref.transition_cases
+    assert len(cases) == 2
+    for condition_expr, _negated, _value in cases:
+        assert condition_expr is not None
+        condition_operators = _expression_operators(condition_expr)
+        assert "INT_AND" in condition_operators
+        assert "INT_SLESS" not in condition_operators
+
+
+def test_state_transition_loop_summary_completes_default_case_as_complement():
+    state = Expression.variable("__loop_state", size=4)
+    parity = Expression.binary_op("INT_EQUAL", Expression.binary_op("INT_AND", state, _const(1)), _const(0))
+    shift = Expression.binary_op("INT_SRIGHT", state, _const(1))
+    subtract = Expression.binary_op("INT_SUB", state, _const(3))
+    guard = Expression.binary_op("INT_SLESS", _const(0), state)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    parity, _ = summarizer._normalize_state_transition_condition_term(parity, False)
+
+    default_cases = summarizer._complete_default_state_transition_cases(
+        ((parity, False, shift, False), (None, False, subtract, True))
+    )
+    default_cases = tuple(
+        (condition, negated, value)
+        for condition, negated, value, _is_source_default in default_cases
+    )
+    explicit_ref = StateTransitionLoopSummaryRef(
+        state_guard=guard,
+        transition_expr=None,
+        transition_cases=((parity, False, shift), (parity, True, subtract)),
+        accumulator_init=_const(0),
+        accumulator_delta=_const(1),
+        state_size=4,
+        result_size=4,
+    )
+    default_ref = StateTransitionLoopSummaryRef(
+        state_guard=guard,
+        transition_expr=None,
+        transition_cases=default_cases,
+        accumulator_init=_const(0),
+        accumulator_delta=_const(1),
+        state_size=4,
+        result_size=4,
+    )
+
+    assert default_ref.semantic_key() == explicit_ref.semantic_key()
+
+
+def test_state_transition_loop_summary_does_not_rewrite_shifted_negative_candidate():
+    state = Expression.variable("__loop_state", size=4)
+    signed_guard = Expression.binary_op("INT_SLESS", _const(0), state)
+    unsigned_guard = Expression.binary_op("INT_LESS", _const(0), state)
+    unsigned_prechecked_guard = Expression.binary_op("INT_LESSEQUAL", _const(1), state)
+    unsigned_negated_exit_guard = Expression.unary_op(
+        "BOOL_NEGATE",
+        Expression.binary_op("INT_LESS", state, _const(1)),
+    )
+    unsigned_negated_exit_guard.size = 1
+    one = _const(1)
+    three = _const(3)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    direct_shift = Expression.binary_op("INT_RIGHT", state, one)
+    canonical_direct = summarizer._canonicalize_state_transition_value(
+        direct_shift,
+        state_placeholder=state,
+        state_guard=signed_guard,
+    )
+    assert canonical_direct.operator == "INT_SRIGHT"
+
+    unsigned_guard_shift = summarizer._canonicalize_state_transition_value(
+        direct_shift,
+        state_placeholder=state,
+        state_guard=unsigned_guard,
+    )
+    assert unsigned_guard_shift.operator == "INT_RIGHT"
+
+    normalized_unsigned_precheck = summarizer._normalize_state_transition_state_guard(
+        unsigned_prechecked_guard,
+        state,
+    )
+    assert not summarizer._state_guard_proves_signed_positive_placeholder(normalized_unsigned_precheck, state)
+    unsigned_precheck_shift = summarizer._canonicalize_state_transition_value(
+        direct_shift,
+        state_placeholder=state,
+        state_guard=normalized_unsigned_precheck,
+    )
+    assert unsigned_precheck_shift.operator == "INT_RIGHT"
+
+    normalized_unsigned_exit = summarizer._normalize_state_transition_state_guard(
+        unsigned_negated_exit_guard,
+        state,
+    )
+    assert not summarizer._state_guard_proves_signed_positive_placeholder(normalized_unsigned_exit, state)
+    unsigned_exit_shift = summarizer._canonicalize_state_transition_value(
+        direct_shift,
+        state_placeholder=state,
+        state_guard=normalized_unsigned_exit,
+    )
+    assert unsigned_exit_shift.operator == "INT_RIGHT"
+
+    shifted_subtract = Expression.binary_op("INT_RIGHT", Expression.binary_op("INT_SUB", state, three), one)
+    canonical_shifted_subtract = summarizer._canonicalize_state_transition_value(
+        shifted_subtract,
+        state_placeholder=state,
+        state_guard=signed_guard,
+    )
+    assert canonical_shifted_subtract.operator == "INT_RIGHT"
+
+
+def test_state_transition_loop_summary_rejects_non_state_transition_condition():
+    state = Expression.variable("__loop_state", size=4)
+    selector = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    guard = Expression.binary_op("INT_SLESS", _const(0), state)
+    selector_condition = Condition(Expression.binary_op("INT_SLESS", _const(0), selector), False)
+    transition_expr = Expression.phi((
+        (selector_condition, Expression.binary_op("INT_SUB", state, _const(1))),
+        (None, Expression.binary_op("INT_SUB", state, _const(2))),
+    ))
+    transition_expr.size = 4
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._state_transition_summary_cases(
+        transition_expr=transition_expr,
+        state_guard=guard,
+        state_placeholder=state,
+    ) is None
+
+
+def test_state_transition_loop_summary_drops_non_state_condition_when_values_match():
+    state = Expression.variable("__loop_state", size=4)
+    selector = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    guard = Expression.binary_op("INT_SLESS", _const(0), state)
+    selector_condition = Condition(Expression.binary_op("INT_SLESS", _const(0), selector), False)
+    same_value = Expression.binary_op("INT_SUB", state, _const(1))
+    transition_expr = Expression.phi((
+        (selector_condition, same_value),
+        (None, same_value),
+    ))
+    transition_expr.size = 4
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    cases = summarizer._state_transition_summary_cases(
+        transition_expr=transition_expr,
+        state_guard=guard,
+        state_placeholder=state,
+    )
+
+    assert cases is not None
+    assert len(cases) == 1
+    condition_expr, negated, value = cases[0]
+    assert condition_expr is None
+    assert negated is False
+    assert value.structural_key() == same_value.structural_key()
+
+
+def test_state_transition_loop_summary_recovers_multi_latch_rotated_loop():
+    analysis = create_mock_analysis(
+        "branch_while_state",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[ReturnInfo(address="0x1000", value=Expression.unknown("phi_circular"), conditions=[])],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    header_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_cfg(),
+        analysis,
+    )
+    multi_latch_returns, _ = summarizer.try_summarize_function(
+        _FakeFunction("branch_while_state"),
+        _build_branch_while_state_multi_latch_cfg(),
+        analysis,
+    )
+
+    header_intrinsic = next(ret.value for ret in header_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    multi_latch_intrinsic = next(ret.value for ret in multi_latch_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
+    assert multi_latch_intrinsic.runtime_ref.semantic_key() == header_intrinsic.runtime_ref.semantic_key()
 
 
 def test_path_enumeration_no_path_is_not_unconditional_success():

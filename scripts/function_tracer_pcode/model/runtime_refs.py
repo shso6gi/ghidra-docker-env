@@ -2647,6 +2647,135 @@ class CountedLoopSummaryRef:
 
 
 @dataclass(frozen=True)
+class StateTransitionLoopSummaryRef:
+    """Object-centric summary for loops whose trip count is driven by state transitions.
+
+    The summary describes the transition system, not a source-level loop name.
+    Two summaries can share an SMT function only when their guard/update surface
+    and side-effect profile are structurally/semantically identical.
+    """
+
+    state_guard: Any
+    transition_expr: Any
+    result_size: int
+    state_size: int
+    accumulator_init: Any = None
+    accumulator_delta: Any = None
+    transition_cases: Any = None
+    side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
+    source: str = "state_transition_loop_summary"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "result_size", max(1, int(self.result_size or 0)))
+        object.__setattr__(self, "state_size", max(1, int(self.state_size or 0)))
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        guard_key = _loop_object_key(self.state_guard)
+        transition_key = _loop_object_key(
+            self.transition_cases if self.transition_cases is not None else self.transition_expr
+        )
+        init_key = _loop_object_key(self.accumulator_init)
+        delta_key = _loop_object_key(self.accumulator_delta)
+        side_effect_key = self.side_effect_profile.stable_key()
+        if (
+            guard_key is None
+            or transition_key is None
+            or init_key is None
+            or delta_key is None
+            or side_effect_key is None
+        ):
+            return None
+        return (
+            "state_transition_loop_summary",
+            guard_key,
+            transition_key,
+            init_key,
+            delta_key,
+            side_effect_key,
+            int(self.state_size),
+            int(self.result_size),
+            self.source,
+        )
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        guard_key = _loop_object_semantic_key(self.state_guard)
+        transition_key = _loop_object_semantic_key(
+            self.transition_cases if self.transition_cases is not None else self.transition_expr
+        )
+        init_key = _loop_object_semantic_key(self.accumulator_init)
+        delta_key = _loop_object_semantic_key(self.accumulator_delta)
+        side_effect_key = self._scalar_side_effect_semantic_key()
+        if (
+            guard_key is None
+            or transition_key is None
+            or init_key is None
+            or delta_key is None
+            or side_effect_key is None
+        ):
+            return None
+        return (
+            "state_transition_loop_summary",
+            guard_key,
+            transition_key,
+            init_key,
+            delta_key,
+            side_effect_key,
+            int(self.state_size),
+            int(self.result_size),
+            self.source,
+        )
+
+    def _scalar_side_effect_semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        """Semantic effect key for state-transition summaries.
+
+        Branch guards are part of ``state_guard`` and ``transition_cases`` for this
+        summary kind, so CFG-local guard counts must not split otherwise identical
+        transition systems.  Non-scalar effects still participate in the key.
+        """
+
+        effect_keys = tuple(
+            _loop_object_semantic_key(effect)
+            for effect in getattr(self.side_effect_profile, "effect_descriptors", ()) or ()
+        )
+        context_keys = tuple(
+            _loop_object_semantic_key(effect)
+            for effect in getattr(self.side_effect_profile, "context_descriptors", ()) or ()
+        )
+        if any(effect_key is None for effect_key in effect_keys + context_keys):
+            return None
+        return (
+            "state_transition_scalar_effect_profile",
+            bool(getattr(self.side_effect_profile, "memory_reads", False)),
+            bool(getattr(self.side_effect_profile, "memory_writes", False)),
+            bool(getattr(self.side_effect_profile, "calls", False)),
+            bool(getattr(self.side_effect_profile, "escapes", False)),
+            bool(getattr(self.side_effect_profile, "context_memory_writes", False)),
+            bool(getattr(self.side_effect_profile, "context_calls", False)),
+            bool(getattr(self.side_effect_profile, "context_escapes", False)),
+            effect_keys,
+            context_keys,
+        )
+
+    def display_name(self) -> str:
+        return f"state_transition_loop(state={int(self.state_size)},result={int(self.result_size)})"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "state_transition_loop_summary",
+            "state_guard": _loop_object_to_dict(self.state_guard),
+            "transition_expr": _loop_object_to_dict(self.transition_expr),
+            "transition_cases": _loop_object_to_dict(self.transition_cases),
+            "accumulator_init": _loop_object_to_dict(self.accumulator_init),
+            "accumulator_delta": _loop_object_to_dict(self.accumulator_delta),
+            "side_effect_profile": self.side_effect_profile.to_dict(),
+            "state_size": int(self.state_size),
+            "result_size": int(self.result_size),
+            "source": self.source,
+            "display_name": self.display_name(),
+        }
+
+
+@dataclass(frozen=True)
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
 

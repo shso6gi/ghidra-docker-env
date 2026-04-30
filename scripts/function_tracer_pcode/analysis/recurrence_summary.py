@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from ..model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
+    STATE_TRANSITION_LOOP_COUNT_OPCODE,
     Condition,
     CountedLoopSummaryRef,
     Expression,
@@ -28,6 +29,7 @@ from ..model import (
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
     ReturnInfo,
+    StateTransitionLoopSummaryRef,
 )
 from ..model.render_smt import (
     collect_intrinsic_smt_declarations,
@@ -63,6 +65,9 @@ def _runtime_expression_signature(expr: Optional[Expression]):
 
 def _runtime_conditions_signature(conditions: Sequence[Condition]):
     return ConditionNormalizer.conditions_signature(conditions)
+
+
+_UNSUPPORTED_STATE_TRANSITION_CONDITION = object()
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,26 @@ class CountedLoopUpdateCase:
     conditions: Tuple[Condition, ...]
     update_expr: Expression
     delta_expr: Expression
+
+
+@dataclass(frozen=True)
+class StateTransitionLoopModel:
+    header_block: object
+    body_block: object
+    exit_block: object
+    state_phi_op: object
+    state_phi_output: object
+    state_init_expr: Expression
+    state_placeholder: Expression
+    state_guard_expr: Expression
+    state_transition_expr: Expression
+    accumulator_phi_op: object
+    accumulator_phi_output: object
+    accumulator_init_expr: Expression
+    accumulator_delta_expr: Expression
+    accumulator_placeholder: Expression
+    continue_on_true: bool
+    loop_blocks: Tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -175,6 +200,9 @@ class StructuralRecurrenceSummarizer:
         if self._has_counted_scalar_loop_candidate(high_function):
             return True
 
+        if self._has_state_transition_loop_candidate(high_function):
+            return True
+
         if self._has_branch_accumulator_candidate(analysis):
             return True
 
@@ -194,6 +222,10 @@ class StructuralRecurrenceSummarizer:
             return summary
 
         summary = self._try_summarize_counted_scalar_loop(function, high_function, analysis)
+        if summary is not None:
+            return summary
+
+        summary = self._try_summarize_state_transition_loop(function, high_function, analysis)
         if summary is not None:
             return summary
 
@@ -3378,6 +3410,1331 @@ class StructuralRecurrenceSummarizer:
         if not self._infer_pointer_parameter_name(analysis):
             return False
         return True
+
+    def _has_state_transition_loop_candidate(self, high_function) -> bool:
+        return self._find_state_transition_loop_model(high_function, analysis=None) is not None
+
+    def _try_summarize_state_transition_loop(
+        self,
+        function,
+        high_function,
+        analysis,
+    ) -> Optional[Tuple[List[ReturnInfo], str]]:
+        model = self._find_state_transition_loop_model(high_function, analysis=analysis)
+        if model is None:
+            self._debug("Declined state-transition loop summary: no validated transition model")
+            return None
+
+        side_effect_profile = self._build_state_transition_loop_side_effect_profile(
+            loop_blocks=model.loop_blocks,
+        )
+        if (
+            side_effect_profile.memory_reads
+            or side_effect_profile.memory_writes
+            or side_effect_profile.calls
+            or side_effect_profile.escapes
+        ):
+            self._debug("Declined state-transition loop summary: loop has side effects outside scalar state")
+            return None
+
+        if self._raw_constant_value(model.accumulator_init_expr) != 0:
+            self._debug("Declined state-transition loop summary: accumulator seed is not zero")
+            return None
+        if self._raw_constant_value(model.accumulator_delta_expr) != 1:
+            self._debug("Declined state-transition loop summary: accumulator delta is not one")
+            return None
+
+        result_size = max(1, int(getattr(model.accumulator_phi_output, "getSize", lambda: 4)() or 4))
+        state_size = max(1, int(getattr(model.state_phi_output, "getSize", lambda: 4)() or 4))
+        transition_cases = self._state_transition_summary_cases(
+            transition_expr=model.state_transition_expr,
+            state_guard=model.state_guard_expr,
+            state_placeholder=model.state_placeholder,
+        )
+        if transition_cases is None:
+            self._debug("Declined state-transition loop summary: transition relation has unsupported conditions")
+            return None
+        summary_ref = StateTransitionLoopSummaryRef(
+            state_guard=model.state_guard_expr,
+            transition_expr=model.state_transition_expr,
+            accumulator_init=model.accumulator_init_expr,
+            accumulator_delta=model.accumulator_delta_expr,
+            transition_cases=transition_cases,
+            side_effect_profile=side_effect_profile,
+            state_size=state_size,
+            result_size=result_size,
+        )
+        loop_count = Expression.intrinsic(
+            "STATE_TRANSITION_LOOP_COUNT",
+            [model.state_init_expr],
+            size=result_size,
+            runtime_ref=summary_ref,
+            opcode=STATE_TRANSITION_LOOP_COUNT_OPCODE,
+        )
+        entry_guard_expr = self._substitute_exact_expression(
+            model.state_guard_expr,
+            model.state_placeholder,
+            model.state_init_expr,
+        )
+        if entry_guard_expr is None or self._expression_is_unresolved(entry_guard_expr):
+            self._debug("Declined state-transition loop summary: entry guard is unresolved")
+            return None
+        entry_guard_expr = self._canonicalize_expression(entry_guard_expr)
+
+        address = str(getattr(function, "getEntryPoint", lambda: "state_transition_loop")())
+        pcode_ref = self._make_pcode_op_ref(self._find_cbranch_op(model.header_block))
+        site_metadata = {}
+        if pcode_ref is not None:
+            site_metadata = {
+                "pcode_identity": repr(pcode_ref.stable_key()),
+                "pcode_time": pcode_ref.seq_time,
+                "pcode_order": pcode_ref.seq_order,
+            }
+        returns = [
+            ReturnInfo(
+                address=address,
+                value=Expression.constant(0, result_size),
+                conditions=[Condition(entry_guard_expr, True)],
+                branch_index=0,
+                **site_metadata,
+            ),
+            ReturnInfo(
+                address=address,
+                value=loop_count,
+                conditions=[Condition(entry_guard_expr, False)],
+                branch_index=10_200,
+                **site_metadata,
+            ),
+        ]
+        self._debug("Recovered state-transition loop summary")
+        return returns, "state_transition_loop_summary"
+
+    def _find_state_transition_loop_model(
+        self,
+        high_function,
+        *,
+        analysis=None,
+    ) -> Optional[StateTransitionLoopModel]:
+        if high_function is None:
+            return None
+        candidates: List[StateTransitionLoopModel] = []
+        for header_block in self._iter_basic_blocks(high_function):
+            cbranch_op = self._find_cbranch_op(header_block)
+            phi_ops = [
+                op for op in self._iter_block_ops(header_block)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+                and getattr(op, "getOutput", lambda: None)() is not None
+            ]
+            if not phi_ops:
+                continue
+            if cbranch_op is not None and self._safe_pcode_input_count(cbranch_op) >= 2:
+                block_info = self._pick_body_and_exit_blocks(header_block)
+                if block_info is not None:
+                    body_block, exit_block, body_on_true = block_info
+                    for state_phi in phi_ops:
+                        state_model = self._try_build_state_transition_model_for_phi(
+                            header_block=header_block,
+                            body_block=body_block,
+                            exit_block=exit_block,
+                            continue_on_true=body_on_true,
+                            cbranch_op=cbranch_op,
+                            phi_ops=phi_ops,
+                            state_phi=state_phi,
+                            analysis=analysis,
+                        )
+                        if state_model is not None:
+                            candidates.append(state_model)
+            for state_phi in phi_ops:
+                state_model = self._try_build_latch_guarded_state_transition_model_for_phi(
+                    header_block=header_block,
+                    phi_ops=phi_ops,
+                    state_phi=state_phi,
+                    analysis=analysis,
+                )
+                if state_model is not None:
+                    candidates.append(state_model)
+        if not candidates:
+            return None
+        candidates.sort(key=self._state_transition_model_priority, reverse=True)
+        return candidates[0]
+
+    def _try_build_latch_guarded_state_transition_model_for_phi(
+        self,
+        *,
+        header_block,
+        phi_ops: Sequence[object],
+        state_phi,
+        analysis=None,
+    ) -> Optional[StateTransitionLoopModel]:
+        state_output = getattr(state_phi, "getOutput", lambda: None)()
+        if state_output is None:
+            return None
+        phi_indices = self._state_loop_phi_indices(header_block, state_phi)
+        if phi_indices is None:
+            return None
+        init_index, backedge_indices = phi_indices
+        if not backedge_indices:
+            return None
+        in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
+        header_key = self._block_key(header_block)
+        state_placeholder = Expression.variable(
+            "__loop_state",
+            size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
+        )
+        latch_infos = []
+        state_guard_exprs = []
+        exit_blocks = []
+        for backedge_index in backedge_indices:
+            backedge_index = int(backedge_index)
+            if backedge_index >= in_size:
+                return None
+            latch_block = header_block.getIn(backedge_index)
+            latch_cbranch = self._find_cbranch_op(latch_block)
+            if latch_cbranch is None or self._safe_pcode_input_count(latch_cbranch) < 2:
+                return None
+            successors = self._collect_block_successors(latch_block)
+            if len(successors) != 2:
+                return None
+            header_successors = [successor for successor in successors if self._block_key(successor) == header_key]
+            exit_successors = [successor for successor in successors if self._block_key(successor) != header_key]
+            if len(header_successors) != 1 or len(exit_successors) != 1:
+                return None
+            exit_block = exit_successors[0]
+            true_out = getattr(latch_block, "getTrueOut", lambda: None)()
+            false_out = getattr(latch_block, "getFalseOut", lambda: None)()
+            if true_out is not None and self._block_key(true_out) == header_key:
+                continue_on_true = True
+            elif false_out is not None and self._block_key(false_out) == header_key:
+                continue_on_true = False
+            else:
+                return None
+
+            backedge_state = state_phi.getInput(backedge_index)
+            state_guard = self._build_pcode_expression(
+                latch_cbranch.getInput(1),
+                placeholders={
+                    state_output: state_placeholder,
+                    backedge_state: state_placeholder,
+                },
+            )
+            if state_guard is None or self._expression_is_unresolved(state_guard):
+                return None
+            if not continue_on_true:
+                state_guard = Expression.unary_op("BOOL_NEGATE", state_guard)
+                state_guard.size = 1
+            state_guard = self._normalize_state_transition_state_guard(
+                state_guard,
+                state_placeholder,
+            )
+            if not self._expression_mentions_placeholder(state_guard, state_placeholder):
+                return None
+            latch_infos.append((latch_block, continue_on_true))
+            state_guard_exprs.append(state_guard)
+            exit_blocks.append(exit_block)
+
+        if not state_guard_exprs:
+            return None
+        state_guard = state_guard_exprs[0]
+        guard_signature = _runtime_expression_signature(state_guard)
+        if any(_runtime_expression_signature(candidate) != guard_signature for candidate in state_guard_exprs[1:]):
+            if not all(self._state_guard_proves_signed_positive_placeholder(candidate, state_placeholder) for candidate in state_guard_exprs):
+                return None
+            state_guard = self._positive_state_guard_expression(state_placeholder)
+        continue_on_true = bool(latch_infos[0][1])
+        exit_block = exit_blocks[0]
+
+        state_init = self._build_pcode_expression(
+            state_phi.getInput(init_index),
+            placeholders={state_output: state_placeholder},
+        )
+        if state_init is None or self._expression_is_unresolved(state_init):
+            return None
+        state_init = self._canonicalize_expression(state_init)
+
+        state_transition = self._build_state_transition_expression(
+            header_block=header_block,
+            body_block=header_block,
+            exit_block=exit_block,
+            phi_op=state_phi,
+            placeholder=state_placeholder,
+            backedge_indices=backedge_indices,
+        )
+        if state_transition is None or self._expression_is_unresolved(state_transition):
+            return None
+        state_transition = self._canonicalize_expression(state_transition)
+        if not self._expression_mentions_placeholder(state_transition, state_placeholder):
+            return None
+
+        loop_blocks = self._collect_state_transition_loop_blocks(
+            header_block=header_block,
+            body_block=header_block,
+            exit_block=exit_block,
+            backedge_indices=backedge_indices,
+        )
+        if not loop_blocks:
+            return None
+        accumulator_model = self._find_state_loop_accumulator(
+            phi_ops=self._collect_state_transition_loop_phi_ops(loop_blocks, phi_ops),
+            state_phi=state_phi,
+            state_output=state_output,
+            state_placeholder=state_placeholder,
+            init_index=init_index,
+            backedge_indices=backedge_indices,
+            analysis=analysis,
+        )
+        if accumulator_model is None:
+            return None
+        accumulator_phi, accumulator_output, accumulator_init, accumulator_delta, accumulator_placeholder = accumulator_model
+
+        return StateTransitionLoopModel(
+            header_block=header_block,
+            body_block=header_block,
+            exit_block=exit_block,
+            state_phi_op=state_phi,
+            state_phi_output=state_output,
+            state_init_expr=state_init,
+            state_placeholder=state_placeholder,
+            state_guard_expr=state_guard,
+            state_transition_expr=state_transition,
+            accumulator_phi_op=accumulator_phi,
+            accumulator_phi_output=accumulator_output,
+            accumulator_init_expr=accumulator_init,
+            accumulator_delta_expr=accumulator_delta,
+            accumulator_placeholder=accumulator_placeholder,
+            continue_on_true=continue_on_true,
+            loop_blocks=loop_blocks,
+        )
+
+    def _try_build_state_transition_model_for_phi(
+        self,
+        *,
+        header_block,
+        body_block,
+        exit_block,
+        continue_on_true: bool,
+        cbranch_op,
+        phi_ops: Sequence[object],
+        state_phi,
+        analysis=None,
+    ) -> Optional[StateTransitionLoopModel]:
+        state_output = getattr(state_phi, "getOutput", lambda: None)()
+        if state_output is None:
+            return None
+        input_count = self._safe_pcode_input_count(state_phi)
+        if input_count < 2:
+            return None
+        phi_indices = self._state_loop_phi_indices(header_block, state_phi)
+        if phi_indices is None:
+            return None
+        init_index, backedge_indices = phi_indices
+        state_placeholder = Expression.variable(
+            "__loop_state",
+            size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
+        )
+        state_guard = self._build_pcode_expression(
+            cbranch_op.getInput(1),
+            placeholders={state_output: state_placeholder},
+        )
+        if state_guard is None or self._expression_is_unresolved(state_guard):
+            return None
+        if not continue_on_true:
+            state_guard = Expression.unary_op("BOOL_NEGATE", state_guard)
+            state_guard.size = 1
+        state_guard = self._canonicalize_expression(state_guard)
+        if not self._expression_mentions_placeholder(state_guard, state_placeholder):
+            return None
+
+        state_init = self._build_pcode_expression(
+            state_phi.getInput(init_index),
+            placeholders={state_output: state_placeholder},
+        )
+        if state_init is None or self._expression_is_unresolved(state_init):
+            return None
+        state_init = self._canonicalize_expression(state_init)
+
+        state_transition = self._build_state_transition_expression(
+            header_block=header_block,
+            body_block=body_block,
+            exit_block=exit_block,
+            phi_op=state_phi,
+            placeholder=state_placeholder,
+            backedge_indices=backedge_indices,
+        )
+        if state_transition is None or self._expression_is_unresolved(state_transition):
+            return None
+        state_transition = self._canonicalize_expression(state_transition)
+        if not self._expression_mentions_placeholder(state_transition, state_placeholder):
+            return None
+
+        loop_blocks = self._collect_state_transition_loop_blocks(
+            header_block=header_block,
+            body_block=body_block,
+            exit_block=exit_block,
+            backedge_indices=backedge_indices,
+        )
+        if not loop_blocks:
+            return None
+        accumulator_model = self._find_state_loop_accumulator(
+            phi_ops=self._collect_state_transition_loop_phi_ops(loop_blocks, phi_ops),
+            state_phi=state_phi,
+            state_output=state_output,
+            state_placeholder=state_placeholder,
+            init_index=init_index,
+            backedge_indices=backedge_indices,
+            analysis=analysis,
+        )
+        if accumulator_model is None:
+            return None
+        accumulator_phi, accumulator_output, accumulator_init, accumulator_delta, accumulator_placeholder = accumulator_model
+
+        return StateTransitionLoopModel(
+            header_block=header_block,
+            body_block=body_block,
+            exit_block=exit_block,
+            state_phi_op=state_phi,
+            state_phi_output=state_output,
+            state_init_expr=state_init,
+            state_placeholder=state_placeholder,
+            state_guard_expr=state_guard,
+            state_transition_expr=state_transition,
+            accumulator_phi_op=accumulator_phi,
+            accumulator_phi_output=accumulator_output,
+            accumulator_init_expr=accumulator_init,
+            accumulator_delta_expr=accumulator_delta,
+            accumulator_placeholder=accumulator_placeholder,
+            continue_on_true=continue_on_true,
+            loop_blocks=loop_blocks,
+        )
+
+    def _state_loop_phi_indices(self, header_block, phi_op) -> Optional[Tuple[int, Tuple[int, ...]]]:
+        input_count = self._safe_pcode_input_count(phi_op)
+        if input_count < 2:
+            return None
+        init_indices: List[int] = []
+        backedge_indices: List[int] = []
+        in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
+        for index in range(input_count):
+            predecessor = header_block.getIn(index) if index < in_size else None
+            if predecessor is not None and self._can_reach_block(header_block, predecessor):
+                backedge_indices.append(index)
+            else:
+                init_indices.append(index)
+        if len(init_indices) != 1 or not backedge_indices:
+            return None
+        return init_indices[0], tuple(backedge_indices)
+
+    def _build_state_transition_expression(
+        self,
+        *,
+        header_block,
+        body_block,
+        exit_block,
+        phi_op,
+        placeholder: Expression,
+        backedge_indices: Sequence[int],
+    ) -> Optional[Expression]:
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
+        branches = []
+        parent_block = getattr(phi_op, "getParent", lambda: None)()
+        for backedge_index in backedge_indices:
+            input_varnode = phi_op.getInput(backedge_index)
+            input_def = getattr(input_varnode, "getDef", lambda: None)()
+            if input_def is not None and getattr(input_def, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+                nested_parent = getattr(input_def, "getParent", lambda: None)()
+                nested_in_size = int(getattr(nested_parent, "getInSize", lambda: 0)() or 0) if nested_parent is not None else 0
+                nested_input_count = self._safe_pcode_input_count(input_def)
+                for nested_index in range(nested_input_count):
+                    value = self._build_pcode_expression(
+                        input_def.getInput(nested_index),
+                        placeholders={phi_output: placeholder},
+                    )
+                    if value is None or self._expression_is_unresolved(value):
+                        return None
+                    target_block = nested_parent.getIn(nested_index) if nested_parent is not None and nested_index < nested_in_size else nested_parent
+                    path_conditions = self._state_transition_predecessor_path_conditions(
+                        body_block=body_block,
+                        predecessor_block=target_block,
+                        join_block=nested_parent,
+                        header_block=header_block,
+                        exit_block=exit_block,
+                        placeholders={phi_output: placeholder},
+                    )
+                    if path_conditions is None:
+                        return None
+                    for condition in path_conditions:
+                        branches.append((condition, value))
+                continue
+
+            value = self._build_pcode_expression(
+                input_varnode,
+                placeholders={phi_output: placeholder},
+            )
+            if value is None or self._expression_is_unresolved(value):
+                return None
+            target_block = None
+            if parent_block is not None and backedge_index < int(getattr(parent_block, "getInSize", lambda: 0)() or 0):
+                target_block = parent_block.getIn(backedge_index)
+            path_conditions = self._state_transition_path_conditions(
+                body_block=body_block,
+                target_block=target_block,
+                header_block=header_block,
+                exit_block=exit_block,
+                placeholders={phi_output: placeholder},
+            )
+            if path_conditions is None:
+                return None
+            for condition in path_conditions:
+                branches.append((condition, value))
+        if not branches:
+            return None
+        if len(branches) == 1 and branches[0][0] is None:
+            return branches[0][1]
+        phi = Expression.phi(branches)
+        phi.size = max(1, int(getattr(phi_output, "getSize", lambda: 4)() or 4))
+        return phi
+
+    def _state_transition_predecessor_path_conditions(
+        self,
+        *,
+        body_block,
+        predecessor_block,
+        join_block,
+        header_block,
+        exit_block,
+        placeholders: Dict[object, Expression],
+    ) -> Optional[Tuple[Optional[Condition], ...]]:
+        if predecessor_block is None:
+            return self._state_transition_path_conditions(
+                body_block=body_block,
+                target_block=join_block,
+                header_block=header_block,
+                exit_block=exit_block,
+                placeholders=placeholders,
+            )
+        paths, incomplete = self._enumerate_paths_with_conditions_result(
+            start_block=body_block,
+            target_block=predecessor_block,
+            header_block=header_block,
+            placeholders=placeholders,
+            stop_block=exit_block,
+            limit=16,
+        )
+        if incomplete or not paths:
+            return None
+        result = []
+        edge_condition = None
+        if join_block is not None and self._block_key(predecessor_block) != self._block_key(join_block):
+            edge_condition = self._build_block_edge_condition(
+                predecessor_block,
+                join_block,
+                placeholders=placeholders,
+            )
+        for path in paths:
+            path_conditions = list(path or [])
+            if edge_condition is not None:
+                path_conditions.append(edge_condition)
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(path_conditions)
+            if ConditionSimplifier.object_centric_is_contradiction(simplified):
+                continue
+            result.append(self._combine_conditions_for_state_transition(simplified))
+        if not result:
+            return None
+        return tuple(result)
+
+    def _state_transition_path_conditions(
+        self,
+        *,
+        body_block,
+        target_block,
+        header_block,
+        exit_block,
+        placeholders: Dict[object, Expression],
+    ) -> Optional[Tuple[Optional[Condition], ...]]:
+        paths, incomplete = self._enumerate_paths_with_conditions_result(
+            start_block=body_block,
+            target_block=target_block,
+            header_block=header_block,
+            placeholders=placeholders,
+            stop_block=exit_block,
+            limit=16,
+        )
+        if incomplete or not paths:
+            return None
+        result = []
+        for path in paths:
+            simplified = ConditionSimplifier.simplify_conditions_object_centric(list(path or []))
+            if ConditionSimplifier.object_centric_is_contradiction(simplified):
+                continue
+            result.append(self._combine_conditions_for_state_transition(simplified))
+        if not result:
+            return None
+        return tuple(result)
+
+    def _combine_conditions_for_state_transition(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Condition]:
+        conditions = tuple(sorted(
+            conditions or (),
+            key=lambda condition: (
+                _runtime_expression_signature(getattr(condition, "expression", None)),
+                bool(getattr(condition, "negated", False)),
+            ),
+        ))
+        if not conditions:
+            return None
+        expr = None
+        for condition in conditions:
+            cond_expr = getattr(condition, "expression", None)
+            if cond_expr is None:
+                return None
+            if getattr(condition, "negated", False):
+                cond_expr = Expression.unary_op("BOOL_NEGATE", cond_expr)
+                cond_expr.size = 1
+            expr = cond_expr if expr is None else Expression.binary_op("BOOL_AND", expr, cond_expr)
+            expr.size = 1
+        return Condition(self._canonicalize_expression(expr), False)
+
+    def _state_transition_summary_cases(
+        self,
+        *,
+        transition_expr: Expression,
+        state_guard: Expression,
+        state_placeholder: Expression,
+    ) -> Optional[Tuple[Tuple[Optional[Expression], bool, Expression], ...]]:
+        cases = []
+        raw_cases = (
+            tuple(getattr(transition_expr, "value", ()) or ())
+            if getattr(transition_expr, "expr_type", None) == ExpressionType.PHI
+            else ((None, transition_expr),)
+        )
+        canonical_values = []
+        for _condition, value in raw_cases:
+            canonical_value = self._canonicalize_state_transition_value(
+                value,
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+            if canonical_value is None:
+                return None
+            canonical_values.append(canonical_value)
+        if len(canonical_values) > 1:
+            first_value_key = _runtime_expression_signature(canonical_values[0])
+            if all(_runtime_expression_signature(value) == first_value_key for value in canonical_values[1:]):
+                return ((None, False, canonical_values[0]),)
+        for (condition, value), canonical_value in zip(raw_cases, canonical_values):
+            is_source_default = condition is None
+            canonical_condition = self._canonicalize_state_transition_condition(
+                condition,
+                branch_value=value,
+                canonical_branch_value=canonical_value,
+                state_guard=state_guard,
+                state_placeholder=state_placeholder,
+            )
+            if canonical_condition is _UNSUPPORTED_STATE_TRANSITION_CONDITION:
+                return None
+            if canonical_condition is None and not is_source_default and len(raw_cases) > 1:
+                return None
+            cases.append((
+                getattr(canonical_condition, "expression", None) if canonical_condition is not None else None,
+                bool(getattr(canonical_condition, "negated", False)) if canonical_condition is not None else False,
+                canonical_value,
+                is_source_default,
+            ))
+        cases = list(self._complete_default_state_transition_cases(cases))
+        cases.sort(
+            key=lambda item: (
+                _runtime_expression_signature(item[0]) if item[0] is not None else ("none",),
+                bool(item[1]),
+                _runtime_expression_signature(item[2]),
+            )
+        )
+        return tuple((condition, negated, value) for condition, negated, value, _is_source_default in cases)
+
+    def _canonicalize_state_transition_condition(
+        self,
+        condition: Optional[Condition],
+        *,
+        branch_value: Expression,
+        canonical_branch_value: Optional[Expression] = None,
+        state_guard: Expression,
+        state_placeholder: Expression,
+    ) -> Optional[Condition]:
+        if condition is None:
+            return None
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return None
+        if getattr(condition, "negated", False):
+            expr = Expression.unary_op("BOOL_NEGATE", expr)
+            expr.size = 1
+        expr = self._canonicalize_expression(expr)
+        branch_value = self._canonicalize_expression(branch_value)
+        canonical_branch_value = (
+            self._canonicalize_expression(canonical_branch_value)
+            if canonical_branch_value is not None
+            else self._canonicalize_state_transition_value(
+                branch_value,
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+        )
+        post_guard = self._substitute_exact_expression(
+            state_guard,
+            state_placeholder,
+            canonical_branch_value,
+        )
+        post_guard = self._canonicalize_expression(post_guard)
+        post_guard_sig = _runtime_expression_signature(post_guard)
+        kept = []
+        for conjunct in self._flatten_bool_and_expression(expr):
+            conjunct = self._canonicalize_expression(conjunct)
+            canonical_conjunct = self._canonicalize_state_transition_value(
+                conjunct,
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+            if _runtime_expression_signature(canonical_conjunct) == post_guard_sig:
+                continue
+            if (
+                not self._expressions_have_same_structural_key(canonical_branch_value, state_placeholder)
+                and (
+                    self._expression_contains_subexpression(conjunct, branch_value)
+                    or self._expression_contains_subexpression(canonical_conjunct, canonical_branch_value)
+                )
+            ):
+                continue
+            if not self._expression_mentions_placeholder(canonical_conjunct, state_placeholder):
+                return _UNSUPPORTED_STATE_TRANSITION_CONDITION
+            kept.append(canonical_conjunct)
+        if not kept:
+            return None
+        kept.sort(key=_runtime_expression_signature)
+        combined = kept[0]
+        for conjunct in kept[1:]:
+            combined = Expression.binary_op("BOOL_AND", combined, conjunct)
+            combined.size = 1
+        combined = self._canonicalize_expression(combined)
+        normalized_expr, normalized_negated = self._normalize_state_transition_condition_term(combined, False)
+        return Condition(normalized_expr, normalized_negated)
+
+    def _complete_default_state_transition_cases(
+        self,
+        cases: Sequence[Tuple[Optional[Expression], bool, Expression, bool]],
+    ) -> Tuple[Tuple[Optional[Expression], bool, Expression, bool], ...]:
+        if len(cases) <= 1:
+            return tuple(cases)
+        default_indices = [
+            index
+            for index, (expr, _negated, _value, is_source_default) in enumerate(cases)
+            if expr is None and is_source_default
+        ]
+        if len(default_indices) != 1:
+            return tuple(cases)
+        explicit_terms = [
+            (expr, negated)
+            for expr, negated, _value, _is_source_default in cases
+            if expr is not None
+        ]
+        if not explicit_terms:
+            return tuple(cases)
+        complement = self._combine_state_transition_condition_complements(explicit_terms)
+        if complement is None:
+            return tuple(cases)
+        complement_expr, complement_negated = complement
+        completed = list(cases)
+        index = default_indices[0]
+        _expr, _negated, value, is_source_default = completed[index]
+        completed[index] = (complement_expr, complement_negated, value, is_source_default)
+        return tuple(completed)
+
+    def _combine_state_transition_condition_complements(
+        self,
+        terms: Sequence[Tuple[Expression, bool]],
+    ) -> Optional[Tuple[Expression, bool]]:
+        complement_expr = None
+        for expr, negated in terms:
+            normalized_expr, normalized_negated = self._normalize_state_transition_condition_term(expr, negated)
+            term_expr, term_negated = self._normalize_state_transition_condition_term(
+                normalized_expr,
+                not normalized_negated,
+            )
+            if complement_expr is None:
+                complement_expr = self._condition_term_to_expression(term_expr, term_negated)
+            else:
+                rhs = self._condition_term_to_expression(term_expr, term_negated)
+                complement_expr = Expression.binary_op("BOOL_AND", complement_expr, rhs)
+                complement_expr.size = 1
+        if complement_expr is None:
+            return None
+        complement_expr = self._canonicalize_expression(complement_expr)
+        return self._normalize_state_transition_condition_term(complement_expr, False)
+
+    def _condition_term_to_expression(self, expr: Expression, negated: bool) -> Expression:
+        expr = self._canonicalize_expression(expr)
+        if not negated:
+            return expr
+        result = Expression.unary_op("BOOL_NEGATE", expr)
+        result.size = 1
+        return self._canonicalize_expression(result)
+
+    def _normalize_state_transition_condition_term(
+        self,
+        expr: Expression,
+        negated: bool,
+    ) -> Tuple[Expression, bool]:
+        expr = self._canonicalize_expression(expr)
+        changed = True
+        while changed:
+            changed = False
+            if (
+                expr.expr_type == ExpressionType.UNARY_OP
+                and expr.operator == "BOOL_NEGATE"
+                and len(expr.operands) == 1
+            ):
+                expr = self._canonicalize_expression(expr.operands[0])
+                negated = not negated
+                changed = True
+        if (
+            expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == "INT_NOTEQUAL"
+            and len(expr.operands) == 2
+        ):
+            expr = Expression.binary_op("INT_EQUAL", expr.operands[0], expr.operands[1])
+            expr.size = 1
+            expr = self._canonicalize_expression(expr)
+            negated = not negated
+        return expr, bool(negated)
+
+    def _flatten_bool_and_expression(self, expr: Optional[Expression]) -> Tuple[Expression, ...]:
+        if expr is None:
+            return ()
+        expr = self._canonicalize_expression(expr)
+        if (
+            expr.expr_type == ExpressionType.BINARY_OP
+            and expr.operator == "BOOL_AND"
+            and len(expr.operands) == 2
+        ):
+            return self._flatten_bool_and_expression(expr.operands[0]) + self._flatten_bool_and_expression(expr.operands[1])
+        return (expr,)
+
+    def _expression_contains_subexpression(
+        self,
+        expr: Optional[Expression],
+        needle: Optional[Expression],
+    ) -> bool:
+        if expr is None or needle is None:
+            return False
+        try:
+            needle_key = needle.structural_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return False
+        for node in self._iter_expression_nodes(expr):
+            try:
+                if node.structural_key() == needle_key:
+                    return True
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                continue
+        return False
+
+    def _expressions_have_same_structural_key(
+        self,
+        left: Optional[Expression],
+        right: Optional[Expression],
+    ) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return left.structural_key() == right.structural_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return False
+
+    def _canonicalize_state_transition_value(
+        self,
+        expr: Optional[Expression],
+        *,
+        state_placeholder: Expression,
+        state_guard: Expression,
+    ) -> Optional[Expression]:
+        expr = self._canonicalize_expression(expr)
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left = self._canonicalize_state_transition_value(
+                expr.operands[0],
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+            right = self._canonicalize_state_transition_value(
+                expr.operands[1],
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+            operator = expr.operator
+            if (
+                operator == "INT_RIGHT"
+                and self._expressions_have_same_structural_key(left, state_placeholder)
+                and self._state_guard_proves_signed_positive_placeholder(state_guard, state_placeholder)
+            ):
+                operator = "INT_SRIGHT"
+            rebuilt = Expression.binary_op(operator, left, right)
+            rebuilt.size = expr.size
+            return self._canonicalize_expression(rebuilt)
+        if expr.expr_type == ExpressionType.UNARY_OP and len(expr.operands) == 1:
+            operand = self._canonicalize_state_transition_value(
+                expr.operands[0],
+                state_placeholder=state_placeholder,
+                state_guard=state_guard,
+            )
+            rebuilt = Expression.unary_op(expr.operator, operand)
+            rebuilt.size = expr.size
+            return self._canonicalize_expression(rebuilt)
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branches = []
+            for condition, value in expr.value:
+                canonical_condition = self._canonicalize_state_transition_condition(
+                    condition,
+                    branch_value=value,
+                    canonical_branch_value=None,
+                    state_guard=state_guard,
+                    state_placeholder=state_placeholder,
+                )
+                if canonical_condition is _UNSUPPORTED_STATE_TRANSITION_CONDITION:
+                    return None
+                branches.append(
+                    (
+                        canonical_condition,
+                        self._canonicalize_state_transition_value(
+                            value,
+                            state_placeholder=state_placeholder,
+                            state_guard=state_guard,
+                        ),
+                    )
+                )
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return self._canonicalize_expression(rebuilt)
+        return expr
+
+    def _collect_state_transition_loop_phi_ops(
+        self,
+        loop_blocks: Sequence[object],
+        preferred_phi_ops: Sequence[object],
+    ) -> Tuple[object, ...]:
+        result = []
+        seen = set()
+
+        def add(phi_op) -> None:
+            key = id(phi_op)
+            if key not in seen:
+                seen.add(key)
+                result.append(phi_op)
+
+        for phi_op in preferred_phi_ops or ():
+            add(phi_op)
+        for block in loop_blocks or ():
+            for op in self._iter_block_ops(block):
+                if (
+                    getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+                    and getattr(op, "getOutput", lambda: None)() is not None
+                ):
+                    add(op)
+        return tuple(result)
+
+    def _state_guard_proves_signed_positive_placeholder(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+    ) -> bool:
+        guard = self._canonicalize_expression(state_guard)
+        if guard is None or guard.expr_type != ExpressionType.BINARY_OP or len(guard.operands) != 2:
+            return False
+        left, right = guard.operands
+        placeholder_key = state_placeholder.structural_key()
+
+        def is_placeholder(value: Expression) -> bool:
+            try:
+                return value.structural_key() == placeholder_key
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                return False
+
+        if guard.operator == "INT_SLESS":
+            return self._raw_constant_value(left) == 0 and is_placeholder(right)
+        if guard.operator == "INT_SLESSEQUAL":
+            return self._raw_constant_value(left) == 1 and is_placeholder(right)
+        return False
+
+    def _normalize_state_transition_state_guard(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+    ) -> Optional[Expression]:
+        guard = self._canonicalize_expression(state_guard)
+        if guard is None:
+            return None
+        placeholder_key = state_placeholder.structural_key()
+
+        def is_placeholder(value: Optional[Expression]) -> bool:
+            if value is None:
+                return False
+            try:
+                return value.structural_key() == placeholder_key
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                return False
+
+        if (
+            guard.expr_type == ExpressionType.UNARY_OP
+            and guard.operator == "BOOL_NEGATE"
+            and len(guard.operands) == 1
+        ):
+            inner = self._canonicalize_expression(guard.operands[0])
+            if (
+                inner.expr_type == ExpressionType.BINARY_OP
+                and inner.operator == "INT_SLESS"
+                and len(inner.operands) == 2
+                and is_placeholder(inner.operands[0])
+                and self._raw_constant_value(inner.operands[1]) == 1
+            ):
+                return self._positive_state_guard_expression(state_placeholder)
+        if (
+            guard.expr_type == ExpressionType.BINARY_OP
+            and guard.operator == "INT_SLESSEQUAL"
+            and len(guard.operands) == 2
+            and self._raw_constant_value(guard.operands[0]) == 1
+            and is_placeholder(guard.operands[1])
+        ):
+            return self._positive_state_guard_expression(state_placeholder)
+        return guard
+
+    def _positive_state_guard_expression(self, state_placeholder: Expression) -> Expression:
+        zero = Expression.constant(0, max(1, int(getattr(state_placeholder, "size", 0) or 4)))
+        guard = Expression.binary_op("INT_SLESS", zero, state_placeholder)
+        guard.size = 1
+        return self._canonicalize_expression(guard)
+
+    def _find_state_loop_accumulator(
+        self,
+        *,
+        phi_ops: Sequence[object],
+        state_phi,
+        state_output,
+        state_placeholder: Expression,
+        init_index: int,
+        backedge_indices: Sequence[int],
+        analysis=None,
+    ) -> Optional[Tuple[object, object, Expression, Expression, Expression]]:
+        candidates = []
+        for phi_op in phi_ops:
+            if phi_op is state_phi:
+                continue
+            phi_parent = getattr(phi_op, "getParent", lambda: None)()
+            phi_indices = self._state_loop_phi_indices(phi_parent, phi_op) if phi_parent is not None else None
+            if phi_indices is None:
+                phi_init_index = init_index
+                phi_backedge_indices = tuple(backedge_indices)
+            else:
+                phi_init_index, phi_backedge_indices = phi_indices
+            if self._safe_pcode_input_count(phi_op) <= max(phi_backedge_indices or (0,)):
+                continue
+            phi_output = getattr(phi_op, "getOutput", lambda: None)()
+            if phi_output is None:
+                continue
+            accumulator_placeholder = Expression.variable(
+                "__loop_acc",
+                size=max(1, int(getattr(phi_output, "getSize", lambda: 4)() or 4)),
+            )
+            init_expr = self._build_pcode_expression(
+                phi_op.getInput(phi_init_index),
+                placeholders={state_output: state_placeholder, phi_output: accumulator_placeholder},
+            )
+            if init_expr is None or self._expression_is_unresolved(init_expr):
+                continue
+            delta_expr = self._state_loop_accumulator_delta(
+                phi_op=phi_op,
+                phi_output=phi_output,
+                accumulator_placeholder=accumulator_placeholder,
+                state_output=state_output,
+                state_placeholder=state_placeholder,
+                backedge_indices=phi_backedge_indices,
+                parameters=list(getattr(analysis, "parameters", []) or []),
+            )
+            if delta_expr is None or self._expression_is_unresolved(delta_expr):
+                continue
+            candidates.append(
+                (
+                    self._state_loop_accumulator_priority(phi_output, init_expr, delta_expr),
+                    phi_op,
+                    phi_output,
+                    self._canonicalize_expression(init_expr),
+                    self._canonicalize_expression(delta_expr),
+                    accumulator_placeholder,
+                )
+            )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _priority, phi_op, phi_output, init_expr, delta_expr, placeholder = candidates[0]
+        return phi_op, phi_output, init_expr, delta_expr, placeholder
+
+    def _state_loop_accumulator_delta(
+        self,
+        *,
+        phi_op,
+        phi_output,
+        accumulator_placeholder: Expression,
+        state_output,
+        state_placeholder: Expression,
+        backedge_indices: Sequence[int],
+        parameters: Sequence[dict],
+    ) -> Optional[Expression]:
+        delta_keys = []
+        delta_exprs = []
+        for index in backedge_indices:
+            update_expr = self._build_pcode_expression(
+                phi_op.getInput(index),
+                placeholders={
+                    state_output: state_placeholder,
+                    phi_output: accumulator_placeholder,
+                },
+            )
+            if update_expr is None or self._expression_is_unresolved(update_expr):
+                return None
+            deltas = self._extract_delta_from_possible_phi(
+                update_expr,
+                accumulator_placeholder,
+                parameters,
+            )
+            if not deltas:
+                return None
+            for delta in deltas:
+                delta = self._canonicalize_expression(delta)
+                delta_key = _runtime_expression_signature(delta)
+                delta_keys.append(delta_key)
+                delta_exprs.append(delta)
+        if not delta_exprs:
+            return None
+        first_key = delta_keys[0]
+        if any(key != first_key for key in delta_keys[1:]):
+            return None
+        return delta_exprs[0]
+
+    def _extract_delta_from_possible_phi(
+        self,
+        expr: Expression,
+        accumulator_placeholder: Expression,
+        parameters: Sequence[dict],
+    ) -> Tuple[Expression, ...]:
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            deltas = []
+            for _condition, branch_value in expr.value:
+                if branch_value is None:
+                    return ()
+                branch_deltas = self._extract_delta_from_possible_phi(
+                    branch_value,
+                    accumulator_placeholder,
+                    parameters,
+                )
+                if not branch_deltas:
+                    return ()
+                deltas.extend(branch_deltas)
+            return tuple(deltas)
+        delta = self._extract_additive_delta(expr, accumulator_placeholder, parameters)
+        if delta is None:
+            return ()
+        return (delta,)
+
+    def _state_loop_accumulator_priority(
+        self,
+        phi_output,
+        init_expr: Expression,
+        delta_expr: Expression,
+    ) -> Tuple[int, int, int, int]:
+        return (
+            1 if self._varnode_reaches_return(phi_output) else 0,
+            1 if self._raw_constant_value(init_expr) == 0 else 0,
+            1 if self._raw_constant_value(delta_expr) == 1 else 0,
+            max(1, int(getattr(phi_output, "getSize", lambda: 0)() or 0)),
+        )
+
+    def _state_transition_model_priority(
+        self,
+        model: StateTransitionLoopModel,
+    ) -> Tuple[int, int, int]:
+        return (
+            1 if self._varnode_reaches_return(model.accumulator_phi_output) else 0,
+            len(model.loop_blocks),
+            max(1, int(getattr(model.state_phi_output, "getSize", lambda: 0)() or 0)),
+        )
+
+    def _collect_state_transition_loop_blocks(
+        self,
+        *,
+        header_block,
+        body_block,
+        exit_block,
+        backedge_indices: Sequence[int],
+    ) -> Tuple[object, ...]:
+        header_key = self._block_key(header_block)
+        exit_key = self._block_key(exit_block)
+        blocks_by_key: Dict[object, object] = {}
+
+        def add(block) -> None:
+            key = self._block_key(block)
+            if key is not None and key != exit_key and key not in blocks_by_key:
+                blocks_by_key[key] = block
+
+        add(header_block)
+        add(body_block)
+        in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
+        stack = []
+        for index in backedge_indices:
+            if index < in_size:
+                predecessor = header_block.getIn(index)
+                add(predecessor)
+                stack.append(predecessor)
+        while stack:
+            current = stack.pop()
+            current_key = self._block_key(current)
+            if current_key == header_key:
+                continue
+            for predecessor in self._collect_block_predecessors(current):
+                predecessor_key = self._block_key(predecessor)
+                if predecessor_key in {None, exit_key}:
+                    continue
+                if not self._can_reach_block(body_block, predecessor) and predecessor_key != header_key:
+                    continue
+                if predecessor_key not in blocks_by_key:
+                    blocks_by_key[predecessor_key] = predecessor
+                    stack.append(predecessor)
+        return tuple(blocks_by_key.values())
+
+    def _build_state_transition_loop_side_effect_profile(
+        self,
+        *,
+        loop_blocks: Sequence[object],
+    ) -> LoopSideEffectProfileRef:
+        memory_reads = False
+        memory_writes = False
+        calls = False
+        escapes = False
+        conditional_guards = False
+        for block in loop_blocks or ():
+            for op in self._iter_block_ops(block):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic == "LOAD":
+                    memory_reads = True
+                elif mnemonic == "STORE":
+                    memory_writes = True
+                elif mnemonic in {"CALL", "CALLIND"}:
+                    calls = True
+                    escapes = True
+                elif mnemonic == "BRANCHIND":
+                    escapes = True
+                elif mnemonic == "CBRANCH":
+                    conditional_guards = True
+        return LoopSideEffectProfileRef(
+            profile=self._loop_effect_profile_name(
+                memory_reads=memory_reads,
+                memory_writes=memory_writes,
+                calls=calls,
+                escapes=escapes,
+                conditional_guards=conditional_guards,
+            ),
+            memory_reads=memory_reads,
+            memory_writes=memory_writes,
+            calls=calls,
+            escapes=escapes,
+            conditional_guards=conditional_guards,
+            effect_count=0,
+            guard_count=1 if conditional_guards else 0,
+        )
+
+    def _expression_mentions_placeholder(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+    ) -> bool:
+        placeholder_key = placeholder.structural_key()
+        for node in self._iter_expression_nodes(expr):
+            try:
+                if node.structural_key() == placeholder_key:
+                    return True
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                continue
+        return False
+
+    def _canonicalize_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
+            left = self._canonicalize_expression(expr.operands[0])
+            right = self._canonicalize_expression(expr.operands[1])
+            operator = expr.operator
+            if operator in {
+                "INT_ADD",
+                "INT_MULT",
+                "INT_AND",
+                "INT_OR",
+                "INT_XOR",
+                "BOOL_AND",
+                "BOOL_OR",
+                "BOOL_XOR",
+                "INT_EQUAL",
+                "INT_NOTEQUAL",
+            } and _runtime_expression_signature(right) < _runtime_expression_signature(left):
+                left, right = right, left
+            if left is expr.operands[0] and right is expr.operands[1]:
+                return expr
+            rebuilt = Expression.binary_op(operator, left, right)
+            rebuilt.size = expr.size
+            return rebuilt
+        if expr.expr_type == ExpressionType.UNARY_OP and len(expr.operands) == 1:
+            operand = self._canonicalize_expression(expr.operands[0])
+            if expr.operator == "BOOL_NEGATE" and operand.expr_type == ExpressionType.UNARY_OP and operand.operator == "BOOL_NEGATE" and operand.operands:
+                return self._canonicalize_expression(operand.operands[0])
+            if expr.operator == "BOOL_NEGATE" and operand.expr_type == ExpressionType.BINARY_OP and len(operand.operands) == 2:
+                if operand.operator == "INT_NOTEQUAL":
+                    rebuilt = Expression.binary_op("INT_EQUAL", operand.operands[0], operand.operands[1])
+                    rebuilt.size = operand.size or expr.size
+                    return self._canonicalize_expression(rebuilt)
+                if operand.operator == "INT_EQUAL":
+                    rebuilt = Expression.binary_op("INT_NOTEQUAL", operand.operands[0], operand.operands[1])
+                    rebuilt.size = operand.size or expr.size
+                    return self._canonicalize_expression(rebuilt)
+            if operand is expr.operands[0]:
+                return expr
+            rebuilt = Expression.unary_op(expr.operator, operand)
+            rebuilt.size = expr.size
+            return rebuilt
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branches = []
+            changed = False
+            for condition, value in expr.value:
+                new_condition = condition
+                if condition is not None:
+                    new_condition_expr = self._canonicalize_expression(condition.expression)
+                    if new_condition_expr is not condition.expression:
+                        new_condition = Condition(new_condition_expr, condition.negated)
+                        changed = True
+                new_value = self._canonicalize_expression(value)
+                if new_value is not value:
+                    changed = True
+                branches.append((new_condition, new_value))
+            branches.sort(
+                key=lambda item: (
+                    _runtime_expression_signature(item[0].expression) if item[0] is not None else ("none",),
+                    bool(getattr(item[0], "negated", False)) if item[0] is not None else False,
+                    _runtime_expression_signature(item[1]),
+                )
+            )
+            if tuple(branches) != tuple(expr.value):
+                changed = True
+            if not changed:
+                return expr
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            return rebuilt
+        return expr
 
     def _debug(self, message: str) -> None:
         if self.debug:
