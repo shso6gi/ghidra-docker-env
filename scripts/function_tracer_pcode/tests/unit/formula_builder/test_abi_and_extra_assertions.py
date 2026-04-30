@@ -232,8 +232,8 @@ class TestABIConstraints:
         result = builder.build_equivalence_formula_extended(analysis1, analysis2)
         formula = result.formula
 
-        assert "Parameter semantic-width constraints" in formula
-        assert "constrain to signed 32-bit semantic value" in formula
+        assert "Parameter semantic-width constraints" not in formula
+        assert "constrain to signed 32-bit semantic value" not in formula
         assert "semantic lower 32 bits must match" in formula
         assert "((_ extract 31 0) x_1)" in formula
         assert "((_ extract 31 0) x_2)" in formula

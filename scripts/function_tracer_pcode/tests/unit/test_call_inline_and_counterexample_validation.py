@@ -7,7 +7,12 @@ from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import bui
 from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    _build_model_validation_query,
+    _normalize_condition_smt,
+    _parse_smt_expr,
+    _smt_expr_to_string,
     solve_query_twostage,
+    validate_counterexample_globally,
     validate_counterexample_across_cases,
 )
 from scripts.function_tracer_pcode.model import (
@@ -5287,3 +5292,144 @@ def test_counterexample_validation_rejects_ambiguous_sat_model():
 
     assert not is_decisive
     assert any("ambiguous" in message for message in strategy.messages)
+
+
+def test_model_validation_query_normalizes_width_mismatch_compare():
+    class _FakeCase:
+        def get_conditions_smt(self, _param_replace_fn):
+            return ["(bvslt x_1 (_ bv0 64))"]
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return "(_ bv7 32)"
+
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    query = _build_model_validation_query(
+        base_ctx,
+        _FakeCase(),
+        _FakeCase(),
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        model_assertions=[],
+        equality=False,
+    )
+
+    assert "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in query
+    assert "(assert (bvslt x_1 (_ bv0 64)))" not in query
+
+
+def test_validate_counterexample_globally_handles_width_mismatch_compare_with_normalization():
+    class _Solver:
+        def __init__(self):
+            self.queries = []
+
+        def run_sequential(self, query):
+            self.queries.append(query)
+            if "(assert (= (_ bv7 32) (_ bv0 32)))" in query:
+                return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+            if "(assert (bvslt x_1 (_ bv0 64)))" in query:
+                return ParallelResult(
+                    results=[
+                        SolverResult(
+                            "fake",
+                            SolverStatus.ERROR,
+                            error_message="parse error: unknown width mismatch",
+                        )
+                    ]
+                )
+            if "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in query:
+                return ParallelResult(
+                    results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 0xFFFFFFFF})]
+                )
+            return ParallelResult(
+                results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 0xFFFFFFFF})]
+            )
+
+    class _Strategy:
+        def __init__(self):
+            self.solver_runner = _Solver()
+            self.per_query_timeout = 5
+            self.messages = []
+
+        def _debug_print(self, message: str):
+            self.messages.append(message)
+
+    class _FakeCase:
+        def __init__(self, condition=None, value="(_ bv7 32)"):
+            self.condition = condition
+            self.value = value
+
+        def get_conditions_smt(self, _param_replace_fn):
+            return [] if self.condition is None else [self.condition]
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return self.value
+
+    strategy = _Strategy()
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+    case1 = _FakeCase(condition="(bvslt x_1 (_ bv0 64))", value="(_ bv7 32)")
+    case2 = _FakeCase(condition=None, value="(_ bv0 32)")
+
+    is_decisive = validate_counterexample_globally(
+        strategy,
+        base_ctx,
+        [case1],
+        [case2],
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        counterexample_raw={"x_1": 0xFFFFFFFF, "x_2": 0},
+    )
+
+    assert is_decisive
+    assert not any("Validation query (0,0):feasible returned UNKNOWN" in message for message in strategy.messages)
+    assert not any("Counterexample validation for pair (0,0) was inconclusive" in message for message in strategy.messages)
+    assert not any("(assert (bvslt x_1 (_ bv0 64)))" in q for q in strategy.solver_runner.queries)
+
+
+def test_parse_smt_expr_handles_indexed_identifier_syntax():
+    condition = "(bvslt ((_ sign_extend 32) x_1) ((_ extract 7 0) y_2))"
+    ast = _parse_smt_expr(condition)
+    assert ast == [
+        "bvslt",
+        [["_", "sign_extend", "32"], "x_1"],
+        [["_", "extract", "7", "0"], "y_2"],
+    ]
+    assert _smt_expr_to_string(ast) == condition
+
+
+def test_normalize_condition_smt_roundtrips_indexed_syntax():
+    condition = "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"
+    normalized = _normalize_condition_smt(condition, {"x_1": 32, "y_2": 64})
+    assert normalized == "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"

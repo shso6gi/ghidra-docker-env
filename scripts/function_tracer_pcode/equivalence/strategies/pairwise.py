@@ -7,6 +7,7 @@ import time
 
 from ...model import (
     COUNTED_LOOP_SUM_OPCODE,
+    READONLY_SUM_OPCODE,
     Condition,
     CountedLoopSummaryRef,
     Expression,
@@ -68,6 +69,18 @@ class _RuntimeShortcutDecision:
     equivalent: bool
     requires_guard_equivalence: bool
     reason: str = "unknown"
+
+
+@dataclass(frozen=True)
+class _ExactReadonlyReductionProof:
+    """Object proof that an exact load-sum denotes one reduction count."""
+
+    exact_terms: tuple[ReadonlyReductionTermRef, ...]
+    constant_bias: int
+    result_size: int
+    count_value: int
+    expected_terms: tuple[ReadonlyReductionTermRef, ...]
+    evidence: str
 
 
 class PairwiseStrategy(CheckStrategy):
@@ -449,44 +462,80 @@ class PairwiseStrategy(CheckStrategy):
         exact_case: ReturnCase,
         summary_case: ReturnCase,
     ) -> bool:
+        return self._prove_exact_load_sum_matches_readonly_reduction(exact_case, summary_case) is not None
+
+    def _prove_exact_load_sum_matches_readonly_reduction(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+    ) -> Optional[_ExactReadonlyReductionProof]:
+        summary_expr = summary_case.value_expr
+        if getattr(summary_expr, "expr_type", None) != ExpressionType.INTRINSIC:
+            return None
+        if (getattr(summary_expr, "name", None) or "") != "READONLY_SUM":
+            return None
+        summary_opcode = getattr(summary_expr, "opcode", None)
+        if summary_opcode is not None and summary_opcode != READONLY_SUM_OPCODE:
+            return None
         summary_ref = getattr(summary_case.value_expr, "runtime_ref", None)
         accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
         if accumulator_proof is None or getattr(summary_ref, "loop_summary", None) is None:
-            return False
+            return None
+        result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+        if max(1, int(getattr(summary_ref, "result_size", 0) or 0)) != result_size:
+            return None
+        if self._normalize_constant_bias(
+            int(getattr(summary_ref, "constant_bias", 0) or 0),
+            result_size,
+        ) != self._normalize_constant_bias(
+            int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+            result_size,
+        ):
+            return None
         extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
             exact_case.value_expr,
             exact_case.parameters,
             getattr(accumulator_proof, "pointer_base_ref", None),
         )
         if extracted is None:
-            return False
+            return None
         extracted_terms, extracted_bias = extracted
-        result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
         exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
         if exact_bits != result_size * 8:
-            return False
+            return None
         if self._normalize_constant_bias(extracted_bias, result_size) != self._normalize_constant_bias(
             int(getattr(accumulator_proof, "constant_bias", 0) or 0),
             result_size,
         ):
-            return False
+            return None
         extracted_key = tuple(term.stable_key() for term in extracted_terms)
         exact_witnesses = tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
         for witness in exact_witnesses:
             if extracted_key != tuple(term.stable_key() for term in getattr(witness, "terms", ()) or ()):
                 continue
-            if self._combined_conditions_imply_reduction_count(
+            if self._cases_admit_reduction_count(
                 exact_case,
                 summary_case,
                 accumulator_proof,
                 int(getattr(witness, "exact_count", 0) or 0),
             ):
-                return True
+                count_value = int(getattr(witness, "exact_count", 0) or 0)
+                return _ExactReadonlyReductionProof(
+                    exact_terms=tuple(extracted_terms),
+                    constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
+                    result_size=result_size,
+                    count_value=count_value,
+                    expected_terms=tuple(getattr(witness, "terms", ()) or ()),
+                    evidence="exact_return_witness",
+                )
         return self._exact_terms_match_reduction_proof_under_case_conditions(
             exact_case,
             summary_case,
             accumulator_proof,
             extracted_key,
+            exact_terms=tuple(extracted_terms),
+            constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
+            result_size=result_size,
         )
 
     def _exact_terms_match_reduction_proof_under_case_conditions(
@@ -495,37 +544,54 @@ class PairwiseStrategy(CheckStrategy):
         summary_case: ReturnCase,
         accumulator_proof,
         extracted_key: tuple,
-    ) -> bool:
-        max_count = max(
-            int(getattr(accumulator_proof, "start_index", 0) or 0),
-            len(tuple(getattr(accumulator_proof, "seed_terms", ()) or ())),
-            *(
-                int(getattr(witness, "exact_count", 0) or 0)
-                for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ())
-            ),
-            *(
-                int(getattr(witness, "exact_count", 0) or 0)
-                for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
-            ),
-            1,
-        )
+        *,
+        exact_terms: tuple[ReadonlyReductionTermRef, ...],
+        constant_bias: int,
+        result_size: int,
+    ) -> Optional[_ExactReadonlyReductionProof]:
+        max_count = self._exact_reduction_count_search_bound(accumulator_proof, len(exact_terms))
         for count_value in range(1, max_count + 1):
             expected_terms_fn = getattr(accumulator_proof, "full_terms_for_count_value", None)
             if not callable(expected_terms_fn):
-                return False
+                return None
             expected_terms = expected_terms_fn(count_value)
             if expected_terms is None:
                 continue
             if extracted_key != tuple(term.stable_key() for term in expected_terms):
                 continue
-            if self._combined_conditions_imply_reduction_count(
+            if self._cases_admit_reduction_count(
                 exact_case,
                 summary_case,
                 accumulator_proof,
                 count_value,
             ):
-                return True
-        return False
+                return _ExactReadonlyReductionProof(
+                    exact_terms=tuple(exact_terms),
+                    constant_bias=int(constant_bias),
+                    result_size=int(result_size),
+                    count_value=int(count_value),
+                    expected_terms=tuple(expected_terms),
+                    evidence="materialized_full_terms",
+                )
+        return None
+
+    def _exact_reduction_count_search_bound(self, accumulator_proof, exact_term_count: int) -> int:
+        witness_counts = [
+            int(getattr(witness, "exact_count", 0) or 0)
+            for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ())
+        ] + [
+            int(getattr(witness, "exact_count", 0) or 0)
+            for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ())
+        ]
+        start_index = max(0, int(getattr(accumulator_proof, "start_index", 0) or 0))
+        index_step = max(1, int(getattr(accumulator_proof, "index_step", 1) or 1))
+        seed_count = max(
+            len(tuple(getattr(accumulator_proof, "seed_terms", ()) or ())),
+            max(0, int(getattr(accumulator_proof, "seed_term_count", 0) or 0)),
+        )
+        term_budget = max(1, int(exact_term_count or 0) + seed_count + 1)
+        materialization_bound = start_index + term_budget * index_step + 1
+        return max(1, materialization_bound, *witness_counts)
 
     def _intrinsic_runtime_values_equivalent(
         self,
@@ -601,6 +667,13 @@ class PairwiseStrategy(CheckStrategy):
             )
             if exact_decision.equivalent:
                 return exact_decision
+            semantic_decision = self._runtime_refs_semantic_shortcut_decision(left_ref, right_ref)
+            if semantic_decision.equivalent:
+                return _RuntimeShortcutDecision(
+                    True,
+                    True,
+                    reason=semantic_decision.reason,
+                )
             return _RuntimeShortcutDecision(
                 False,
                 True,
@@ -1186,10 +1259,321 @@ class PairwiseStrategy(CheckStrategy):
         )
         conditions = self._combined_summary_conditions(exact_case, summary_case)
         implication_conditions = list(conditions or []) + [equality.negate()]
-        solver_result = ConditionSMTOracle.conjunction_is_unsat(implication_conditions)
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            implication_conditions,
+            list(getattr(exact_case, "parameters", None) or [])
+            + list(getattr(summary_case, "parameters", None) or []),
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
         if solver_result is not None:
             return solver_result
-        return ConditionSimplifier.object_centric_is_contradiction(implication_conditions)
+        return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
+
+    def _cases_admit_reduction_count(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> bool:
+        if self._combined_conditions_imply_reduction_count(
+            exact_case,
+            summary_case,
+            accumulator_proof,
+            exact_count,
+        ):
+            return True
+        return self._case_implies_reduction_count(exact_case, accumulator_proof, exact_count) and (
+            self._case_allows_reduction_count(summary_case, accumulator_proof, exact_count)
+        )
+
+    def _case_implies_reduction_count(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> bool:
+        if self._case_has_direct_reduction_count_equality(
+            case,
+            accumulator_proof,
+            exact_count,
+        ):
+            return True
+        equality = self._reduction_count_equality_condition(case, accumulator_proof, exact_count)
+        if equality is None:
+            return False
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            list(getattr(case, "conditions", None) or []) + [equality.negate()],
+            list(getattr(case, "parameters", None) or []),
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+        if solver_result is not None:
+            return solver_result
+        if ConditionSimplifier.object_centric_is_contradiction(identity_conditions):
+            return True
+        return False
+
+    def _case_allows_reduction_count(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> bool:
+        equality = self._reduction_count_equality_condition(case, accumulator_proof, exact_count)
+        if equality is None:
+            return False
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            list(getattr(case, "conditions", None) or []) + [equality],
+            list(getattr(case, "parameters", None) or []),
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+        if solver_result is not None:
+            return not solver_result
+        return not ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
+
+    def _reduction_count_equality_condition(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> Optional[Condition]:
+        if exact_count <= 0:
+            return None
+        count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
+        count_index = getattr(accumulator_proof, "count_parameter_index", None)
+        if not count_name and count_index is None:
+            return None
+        count_size = max(1, int(getattr(getattr(accumulator_proof, "limit_expr", None), "size", 0) or 0))
+        matched_parameter = None
+        for parameter in getattr(case, "parameters", None) or []:
+            if count_index is not None and parameter.get("index") is not None:
+                try:
+                    if int(parameter.get("index")) == int(count_index):
+                        matched_parameter = parameter
+                        break
+                except (TypeError, ValueError):
+                    pass
+            if matched_parameter is None and count_name and parameter.get("name") == count_name:
+                matched_parameter = parameter
+        if matched_parameter is not None:
+            count_size = max(count_size, int(matched_parameter.get("size", 0) or count_size))
+        count_expr = Expression.parameter(
+            count_name or "count",
+            index=int(count_index) if count_index is not None else -1,
+            size=count_size,
+        )
+        return Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                count_expr,
+                Expression.constant(int(exact_count), size=count_size),
+            ),
+            False,
+        )
+
+    def _case_has_direct_reduction_count_equality(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+        exact_count: int,
+    ) -> bool:
+        for condition in list(getattr(case, "conditions", None) or []):
+            expr = getattr(condition, "expression", None)
+            if (
+                expr is None
+                or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP
+                or len(getattr(expr, "operands", None) or []) != 2
+            ):
+                continue
+            operator = getattr(expr, "operator", None)
+            condition_true = not bool(getattr(condition, "negated", False))
+            if operator == "INT_EQUAL" and not condition_true:
+                continue
+            if operator == "INT_NOTEQUAL" and condition_true:
+                continue
+            if operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+                continue
+            left, right = expr.operands
+            if self._expression_is_full_reduction_count_view(left, case, accumulator_proof):
+                const_value = self._exact_reduction_count_constant(right)
+            elif self._expression_is_full_reduction_count_view(right, case, accumulator_proof):
+                const_value = self._exact_reduction_count_constant(left)
+            else:
+                continue
+            if const_value == int(exact_count):
+                return True
+        return False
+
+    def _expression_is_full_reduction_count_view(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> bool:
+        if expr is None:
+            return False
+        if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+            expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+            proof_bits = self._reduction_count_bit_width(accumulator_proof)
+            if expr_bits != proof_bits:
+                return False
+            expr_name = getattr(expr, "name", None)
+            expr_index = getattr(expr, "value", None)
+            proof_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
+            proof_index = getattr(accumulator_proof, "count_parameter_index", None)
+            if proof_index is not None:
+                if expr_index is not None:
+                    try:
+                        return int(expr_index) == int(proof_index)
+                    except (TypeError, ValueError):
+                        return False
+                if expr_name:
+                    for parameter in getattr(case, "parameters", None) or []:
+                        if parameter.get("name") != expr_name:
+                            continue
+                        param_index = parameter.get("index")
+                        if param_index is None:
+                            return False
+                        try:
+                            return int(param_index) == int(proof_index)
+                        except (TypeError, ValueError):
+                            return False
+                return False
+            return bool(proof_name and expr_name == proof_name)
+        if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and len(getattr(expr, "operands", None) or []) == 1:
+            operator = getattr(expr, "operator", None)
+            if operator in {"CAST", "COPY"}:
+                operand = expr.operands[0]
+                expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+                operand_bits = max(1, int(expression_smt_bit_width(operand) or 0))
+                proof_bits = self._reduction_count_bit_width(accumulator_proof)
+                if expr_bits != operand_bits or expr_bits != proof_bits:
+                    return False
+                return self._expression_is_full_reduction_count_view(operand, case, accumulator_proof)
+            return False
+        return False
+
+    def _reduction_count_bit_width(self, accumulator_proof) -> int:
+        limit_expr = getattr(accumulator_proof, "limit_expr", None)
+        return max(1, int(expression_smt_bit_width(limit_expr) or 0))
+
+    def _exact_reduction_count_constant(self, expr: Optional[Expression]) -> Optional[int]:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
+            return None
+        try:
+            return int(getattr(expr, "value", None))
+        except (TypeError, ValueError):
+            return None
+
+    def _conditions_with_object_identity_parameter_symbols(
+        self,
+        conditions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]] = (),
+    ) -> List[Condition]:
+        symbol_by_identity: Dict[tuple, str] = {}
+
+        def parameter_symbol(expr: Expression) -> str:
+            key = self._parameter_object_identity_key(expr, parameters)
+            symbol = symbol_by_identity.get(key)
+            if symbol is None:
+                symbol = f"__phase3_param_{len(symbol_by_identity)}"
+                symbol_by_identity[key] = symbol
+            return symbol
+
+        def clone_value(value):
+            if isinstance(value, Expression):
+                return clone_expr(value)
+            if isinstance(value, Condition):
+                return Condition(clone_expr(value.expression), value.negated)
+            if isinstance(value, tuple):
+                return tuple(clone_value(item) for item in value)
+            if isinstance(value, list):
+                return [clone_value(item) for item in value]
+            return value
+
+        def clone_expr(expr: Expression) -> Expression:
+            expr_type = getattr(expr, "expr_type", None)
+            expr_kind = getattr(expr_type, "__class__", None)
+            if expr_type is not None and expr_kind is not None and expr_type == expr_kind.PARAMETER:
+                return expr.clone_with(name=parameter_symbol(expr))
+            cloned_operands = [clone_expr(operand) for operand in (getattr(expr, "operands", None) or [])]
+            cloned_value = clone_value(getattr(expr, "value", None))
+            return expr.clone_with(operands=cloned_operands, value=cloned_value)
+
+        return [
+            Condition(clone_expr(condition.expression), bool(getattr(condition, "negated", False)))
+            for condition in conditions or []
+            if condition is not None and getattr(condition, "expression", None) is not None
+        ]
+
+    def _parameter_object_identity_key(
+        self,
+        expr: Expression,
+        parameters: Sequence[Dict[str, Any]] = (),
+    ) -> tuple:
+        size_bits = max(1, int(expression_smt_bit_width(expr) or getattr(expr, "get_bit_width", lambda: 0)() or 0))
+        try:
+            index = int(getattr(expr, "value", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            return ("parameter_index", index, size_bits)
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            storage_key = storage_key_fn()
+            if storage_key is not None:
+                return ("parameter_storage", storage_key, size_bits)
+        descriptor = self._parameter_descriptor_for_identity(expr, parameters)
+        if descriptor is not None:
+            try:
+                descriptor_index = int(descriptor.get("index"))
+            except (TypeError, ValueError):
+                descriptor_index = -1
+            if descriptor_index >= 0:
+                return ("parameter_index", descriptor_index, size_bits)
+            descriptor_storage = descriptor.get("storage_info", descriptor.get("storage"))
+            descriptor_storage_key_fn = getattr(descriptor_storage, "storage_identity_key", None)
+            if callable(descriptor_storage_key_fn):
+                descriptor_storage_key = descriptor_storage_key_fn()
+                if descriptor_storage_key is not None:
+                    return ("parameter_storage", descriptor_storage_key, size_bits)
+        return ("parameter_name", str(getattr(expr, "name", "") or ""), size_bits)
+
+    def _parameter_descriptor_for_identity(
+        self,
+        expr: Expression,
+        parameters: Sequence[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        name = str(getattr(expr, "name", "") or "")
+        if not name:
+            return None
+        matches = [
+            parameter
+            for parameter in parameters or ()
+            if str(parameter.get("name") or "") == name
+        ]
+        if not matches:
+            return None
+        unique_keys = {self._parameter_descriptor_identity_key(parameter) for parameter in matches}
+        if len(unique_keys) != 1:
+            return None
+        return matches[0]
+
+    def _parameter_descriptor_identity_key(self, parameter: Dict[str, Any]) -> tuple:
+        try:
+            index = int(parameter.get("index"))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            return ("index", index, int(parameter.get("size", 0) or 0))
+        storage = parameter.get("storage_info", parameter.get("storage"))
+        storage_key_fn = getattr(storage, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            storage_key = storage_key_fn()
+            if storage_key is not None:
+                return ("storage", storage_key, int(parameter.get("size", 0) or 0))
+        return ("name", str(parameter.get("name") or ""), int(parameter.get("size", 0) or 0))
 
     def _extract_readonly_reduction_terms_from_expression(
         self,

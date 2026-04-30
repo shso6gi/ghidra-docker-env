@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Query execution helpers for PairwiseStrategy."""
-
 import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -433,21 +432,237 @@ def _build_model_validation_query(
         "(set-logic QF_BV)",
         "",
     ]
+    symbol_bit_widths = dict(_iter_declared_symbols(base_ctx))
     lines.extend(base_ctx["header_lines"])
     lines.extend(model_assertions)
-    lines.extend(_build_case_assertions(case1, param_replace_fn1))
-    lines.extend(_build_case_assertions(case2, param_replace_fn2))
+    lines.extend(_build_case_assertions(case1, param_replace_fn1, symbol_bit_widths))
+    lines.extend(_build_case_assertions(case2, param_replace_fn2, symbol_bit_widths))
     if equality:
         lines.extend(_build_value_equality_assertions(value1_smt, value2_smt, return_size1, return_size2))
     lines.append("(check-sat)")
     return "\n".join(lines)
 
 
-def _build_case_assertions(case, param_replace_fn) -> List[str]:
+def _build_case_assertions(
+    case,
+    param_replace_fn,
+    symbol_bit_widths: Optional[Dict[str, int]] = None,
+) -> List[str]:
     lines: List[str] = []
     for cond_str in case.get_conditions_smt(param_replace_fn):
-        lines.append(f"(assert {cond_str})")
+        normalized_cond_str = _normalize_condition_smt(cond_str, symbol_bit_widths or {})
+        lines.append(f"(assert {normalized_cond_str})")
     return lines
+
+
+def _normalize_condition_smt(cond_smt: str, symbol_bit_widths: Dict[str, int]) -> str:
+    try:
+        ast = _parse_smt_expr(cond_smt)
+    except ValueError:
+        return cond_smt
+
+    try:
+        normalized = _normalize_smt_ast(ast, symbol_bit_widths)
+        return _smt_expr_to_string(normalized)
+    except Exception:
+        return cond_smt
+
+
+def _parse_smt_expr(smt_expr: str):
+    tokens = _tokenize_smt_expr(smt_expr)
+    ast, index = _parse_smt_tokens(tokens, 0)
+    if index != len(tokens):
+        raise ValueError(f"unconsumed SMT tokens for expression: {smt_expr}")
+    return ast
+
+
+def _tokenize_smt_expr(smt_expr: str) -> List[str]:
+    tokens: List[str] = []
+    i = 0
+    length = len(smt_expr)
+    while i < length:
+        ch = smt_expr[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch in ("(", ")"):
+            tokens.append(ch)
+            i += 1
+            continue
+        start = i
+        while i < length and not smt_expr[i].isspace() and smt_expr[i] not in ("(", ")"):
+            i += 1
+        tokens.append(smt_expr[start:i])
+    return tokens
+
+
+def _parse_smt_tokens(tokens: List[str], start: int):
+    if start >= len(tokens):
+        raise ValueError("unexpected end of SMT tokens")
+
+    token = tokens[start]
+    if token == "(":
+        index = start + 1
+        items: List = []
+        while index < len(tokens):
+            if tokens[index] == ")":
+                return items, index + 1
+            child, index = _parse_smt_tokens(tokens, index)
+            items.append(child)
+        if index >= len(tokens):
+            raise ValueError("unexpected end of SMT tokens")
+        raise ValueError("unterminated SMT expression")
+    if token == ")":
+        raise ValueError("unexpected close paren")
+    return token, start + 1
+
+
+def _normalize_smt_ast(ast, symbol_bit_widths: Dict[str, int]):
+    if not isinstance(ast, list):
+        return ast
+    if not ast:
+        return ast
+
+    op = ast[0]
+    args = [_normalize_smt_ast(arg, symbol_bit_widths) for arg in ast[1:]]
+    if isinstance(op, str) and op in _SIGNED_COMPARISON_OPS | _UNSIGNED_COMPARISON_OPS:
+        return _normalize_comparison_expression(op, args, symbol_bit_widths, signed=True if op in _SIGNED_COMPARISON_OPS else False)
+    return [op, *args]
+
+
+_SIGNED_COMPARISON_OPS = {
+    "bvslt",
+    "bvsle",
+    "bvsgt",
+    "bvsge",
+}
+
+_UNSIGNED_COMPARISON_OPS = {
+    "bvult",
+    "bvule",
+    "bvugt",
+    "bvuge",
+}
+
+
+def _normalize_comparison_expression(op: str, args, symbol_bit_widths: Dict[str, int], *, signed: bool):
+    if len(args) < 2:
+        return [op, *args]
+
+    widths = [_infer_smt_bit_width(arg, symbol_bit_widths) for arg in args[:2]]
+    if any(width is None for width in widths[:2]):
+        return [op, *args]
+    target_width = max(widths[:2])
+    if target_width <= 0 or widths[0] == target_width and widths[1] == target_width:
+        return [op, *args]
+
+    normalized_args = list(args)
+    if widths[0] < target_width:
+        normalized_args[0] = _extend_smt_node(args[0], target_width - widths[0], signed=signed)
+    if widths[1] < target_width:
+        normalized_args[1] = _extend_smt_node(args[1], target_width - widths[1], signed=signed)
+    return [op, *normalized_args]
+
+
+def _extend_smt_node(node, extend_bits: int, *, signed: bool):
+    if extend_bits <= 0:
+        return node
+    ext_op = "sign_extend" if signed else "zero_extend"
+    return [["_", ext_op, str(extend_bits)], node]
+
+
+def _infer_smt_bit_width(node, symbol_bit_widths: Dict[str, int]):
+    if isinstance(node, str):
+        width = symbol_bit_widths.get(node)
+        if width is not None:
+            return width
+        return None
+
+    if not isinstance(node, list) or not node:
+        return None
+
+    op = node[0]
+    if isinstance(op, list):
+        return _infer_smt_indexed_operator_width(op, node[1:], symbol_bit_widths)
+
+    if op == "_":
+        if len(node) >= 3 and node[1] == "extract":
+            hi = _try_parse_int(node[2])
+            lo = _try_parse_int(node[3])
+            if hi is not None and lo is not None:
+                return hi - lo + 1
+        if len(node) >= 4 and node[1] in {"zero_extend", "sign_extend"}:
+            inner = _infer_smt_bit_width(node[3], symbol_bit_widths)
+            extend_bits = _try_parse_int(node[2])
+            if inner is not None and extend_bits is not None:
+                return inner + extend_bits
+        if len(node) >= 3 and node[1].startswith("bv"):
+            width = _try_parse_int(node[2])
+            if width is not None:
+                return width
+        return None
+    if op in {"concat"} and len(node) >= 3:
+        left = _infer_smt_bit_width(node[1], symbol_bit_widths)
+        right = _infer_smt_bit_width(node[2], symbol_bit_widths)
+        if left is not None and right is not None:
+            return left + right
+    if op in {"ite", "=", "distinct"}:
+        if len(node) >= 3:
+            first = _infer_smt_bit_width(node[1], symbol_bit_widths)
+            second = _infer_smt_bit_width(node[2], symbol_bit_widths)
+            if first is not None and second is not None:
+                return max(first, second)
+    if op in {"not", "bvnot", "bvneg"}:
+        return _infer_smt_bit_width(node[1], symbol_bit_widths)
+    if op in {"bvand", "bvor", "bvxor", "bvnand", "bvnor", "bvxnor", "bvadd", "bvsub", "bvmul", "bvudiv", "bvsdiv", "bvurem", "bvsrem", "bvshl", "bvlshr", "bvashr"}:
+        if len(node) >= 3:
+            left = _infer_smt_bit_width(node[1], symbol_bit_widths)
+            right = _infer_smt_bit_width(node[2], symbol_bit_widths)
+            if left is not None and right is not None:
+                return max(left, right)
+    return None
+
+
+def _infer_smt_indexed_operator_width(
+    op: List[Any],
+    args: List,
+    symbol_bit_widths: Dict[str, int],
+) -> Optional[int]:
+    if not op or op[0] != "_" or not isinstance(op[1], str):
+        return None
+
+    if op[1] == "extract" and len(op) >= 4:
+        hi = _try_parse_int(op[2])
+        lo = _try_parse_int(op[3])
+        if hi is not None and lo is not None:
+            return hi - lo + 1
+
+    if op[1] in {"zero_extend", "sign_extend"} and len(op) >= 3 and args:
+        inner = _infer_smt_bit_width(args[0], symbol_bit_widths)
+        extend_bits = _try_parse_int(op[2])
+        if inner is not None and extend_bits is not None:
+            return inner + extend_bits
+
+    if op[1].startswith("bv") and len(op) >= 3:
+        width = _try_parse_int(op[2])
+        if width is not None:
+            return width
+    return None
+
+
+def _try_parse_int(text: str) -> Optional[int]:
+    try:
+        return int(text, 10)
+    except (TypeError, ValueError):
+        return None
+
+
+def _smt_expr_to_string(node) -> str:
+    if not isinstance(node, list):
+        return str(node)
+    if len(node) == 0:
+        return "()"
+    return f"({' '.join(_smt_expr_to_string(item) for item in node)})"
 
 
 def _build_value_equality_assertions(

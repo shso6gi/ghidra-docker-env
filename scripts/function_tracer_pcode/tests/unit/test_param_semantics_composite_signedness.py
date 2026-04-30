@@ -77,15 +77,325 @@ def _analysis_with_guard(condition: Condition) -> FunctionReturnAnalysis:
     )
 
 
+def _analysis_with_same_width_signedness_conflict() -> FunctionReturnAnalysis:
+    count = _param("count", 4)
+    return FunctionReturnAnalysis(
+        function_name="signed_count_tail_like",
+        entry_point="0x2000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "uint",
+                "size": 4,
+                "index": 0,
+                "is_signed": False,
+                "storage": {"kind": "register", "size": 4, "size_bits": 32},
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                conditions=[Condition(_binary("INT_SLESS", _const(0, 4), count, 1))],
+                value=_const(1, 4),
+            ),
+            ReturnInfo(
+                address="0x2001",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 4), count, 1))],
+                value=_const(2, 4),
+            ),
+        ],
+    )
+
+
+def _analysis_with_storage_backed_narrowing() -> FunctionReturnAnalysis:
+    count = _param("count", 8)
+    return FunctionReturnAnalysis(
+        function_name="mips64_signed_count_tail_like",
+        entry_point="0x3000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 0,
+                "is_signed": False,
+                "storage": {
+                    "kind": "register",
+                    "size": 4,
+                    "size_bits": 32,
+                    "base_register_size_bits": 64,
+                },
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3000",
+                conditions=[Condition(_binary("INT_SLESS", _const(0, 8), count, 1))],
+                value=_const(1, 4),
+            ),
+            ReturnInfo(
+                address="0x3001",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 8), count, 1))],
+                value=_const(2, 4),
+            ),
+        ],
+    )
+
+
+def _analysis_with_narrowed_direct_unsigned_and_composite_signed() -> FunctionReturnAnalysis:
+    count = _param("count", 8)
+    flags = _param("flags", 8)
+    return FunctionReturnAnalysis(
+        function_name="narrowed_direct_unsigned_with_composite_signed_like",
+        entry_point="0x3200",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 0,
+                "is_signed": False,
+                "storage": {
+                    "kind": "register",
+                    "size": 4,
+                    "size_bits": 32,
+                    "base_register_size_bits": 64,
+                },
+            },
+            {
+                "name": "flags",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 1,
+                "is_signed": False,
+            },
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3200",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 8), count, 1))],
+                value=_const(1, 4),
+            ),
+            ReturnInfo(
+                address="0x3201",
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_SLESS",
+                            _const(-1, 8),
+                            _binary("INT_OR", count, flags, 8),
+                            1,
+                        )
+                    )
+                ],
+                value=_const(2, 4),
+            ),
+        ],
+    )
+
+
+def _analysis_with_same_width_composite_signed_test() -> FunctionReturnAnalysis:
+    return FunctionReturnAnalysis(
+        function_name="same_width_or_guard_like",
+        entry_point="0x3500",
+        parameters=[
+            {"name": "param_1", "data_type": "uint", "size": 4, "index": 0, "is_signed": False},
+            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3500",
+                conditions=[_or_guard_condition("param_1", "param_2", size=4)],
+                value=_binary("INT_OR", _param("param_1", 4), _param("param_2", 4), 4),
+            )
+        ],
+    )
+
+
+def _analysis_with_zext_wrapped_signed_compare() -> FunctionReturnAnalysis:
+    count = _param("count", 4)
+    wrapped = Expression.unary_op("INT_ZEXT", count)
+    wrapped.size = 8
+    return FunctionReturnAnalysis(
+        function_name="zext_wrapped_signed_compare_like",
+        entry_point="0x3550",
+        parameters=[
+            {"name": "count", "data_type": "uint", "size": 4, "index": 0, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3550",
+                conditions=[Condition(_binary("INT_SLESS", _const(0, 8), wrapped, 1))],
+                value=_const(1, 4),
+            )
+        ],
+    )
+
+
+def _analysis_with_storage_narrowing_and_zext_wrapped_signed_compare() -> FunctionReturnAnalysis:
+    count = _param("count", 8)
+    low_count = _binary("SUBPIECE", count, _const(0, 4), 4)
+    wrapped = Expression.unary_op("INT_ZEXT", low_count)
+    wrapped.size = 8
+    return FunctionReturnAnalysis(
+        function_name="storage_narrowing_zext_wrapped_signed_compare_like",
+        entry_point="0x3570",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 0,
+                "is_signed": False,
+                "storage": {
+                    "kind": "register",
+                    "size": 4,
+                    "size_bits": 32,
+                    "base_register_size_bits": 64,
+                },
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3570",
+                conditions=[Condition(_binary("INT_SLESS", _const(0, 8), wrapped, 1))],
+                value=_const(1, 4),
+            )
+        ],
+    )
+
+
+def _analysis_with_storage_narrowing_and_pure_composite_signed_compare() -> FunctionReturnAnalysis:
+    count = _param("count", 8)
+    flags = _param("flags", 8)
+    return FunctionReturnAnalysis(
+        function_name="storage_narrowing_pure_composite_signed_compare_like",
+        entry_point="0x3580",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 0,
+                "is_signed": False,
+                "storage": {
+                    "kind": "register",
+                    "size": 4,
+                    "size_bits": 32,
+                    "base_register_size_bits": 64,
+                },
+            },
+            {
+                "name": "flags",
+                "data_type": "ulong",
+                "size": 8,
+                "index": 1,
+                "is_signed": False,
+            },
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3580",
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_SLESS",
+                            _const(-1, 8),
+                            _binary("INT_OR", count, flags, 8),
+                            1,
+                        )
+                    )
+                ],
+                value=_const(1, 4),
+            )
+        ],
+    )
+
+
+def _analysis_with_mixed_direct_unsigned_and_composite_signed_test() -> FunctionReturnAnalysis:
+    count = _param("count", 4)
+    flags = _param("flags", 4)
+    return FunctionReturnAnalysis(
+        function_name="mixed_signedness_evidence_like",
+        entry_point="0x3600",
+        parameters=[
+            {"name": "count", "data_type": "uint", "size": 4, "index": 0, "is_signed": False},
+            {"name": "flags", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3600",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 4), count, 1))],
+                value=_const(1, 4),
+            ),
+            ReturnInfo(
+                address="0x3601",
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_SLESS",
+                            _const(-1, 4),
+                            _binary("INT_OR", count, flags, 4),
+                            1,
+                        )
+                    )
+                ],
+                value=_const(2, 4),
+            ),
+        ],
+    )
+
+
+def _analysis_with_direct_tie_and_composite_signed_tiebreak() -> FunctionReturnAnalysis:
+    count = _param("count", 4)
+    flags = _param("flags", 4)
+    return FunctionReturnAnalysis(
+        function_name="direct_tie_with_composite_tiebreak_like",
+        entry_point="0x3700",
+        parameters=[
+            {"name": "count", "data_type": "uint", "size": 4, "index": 0, "is_signed": False},
+            {"name": "flags", "data_type": "uint", "size": 4, "index": 1, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x3700",
+                conditions=[Condition(_binary("INT_SLESS", _const(3, 4), count, 1))],
+                value=_const(1, 4),
+            ),
+            ReturnInfo(
+                address="0x3701",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 4), count, 1))],
+                value=_const(2, 4),
+            ),
+            ReturnInfo(
+                address="0x3702",
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_SLESS",
+                            _const(-1, 4),
+                            _binary("INT_OR", count, flags, 4),
+                            1,
+                        )
+                    )
+                ],
+                value=_const(3, 4),
+            ),
+        ],
+    )
+
+
 def test_infer_parameter_semantics_propagates_signedness_through_bitwise_or_compare():
     analysis = _analysis_with_guard(_or_guard_condition("param_1", "param_2"))
 
     hints = infer_parameter_semantics(analysis)
 
     assert hints[0].narrow_bits == 32
-    assert hints[0].signedness == "signed"
+    assert hints[0].signedness == "unknown"
+    assert hints[0].signedness_source == "width_only"
     assert hints[1].narrow_bits == 32
-    assert hints[1].signedness == "signed"
+    assert hints[1].signedness == "unknown"
+    assert hints[1].signedness_source == "width_only"
 
 
 def test_infer_parameter_semantics_stays_conservative_for_arithmetic_composites():
@@ -94,9 +404,81 @@ def test_infer_parameter_semantics_stays_conservative_for_arithmetic_composites(
     hints = infer_parameter_semantics(analysis)
 
     assert hints[0].narrow_bits == 32
-    assert hints[0].signedness == "unsigned"
+    assert hints[0].signedness == "unknown"
+    assert hints[0].signedness_source == "width_only"
     assert hints[1].narrow_bits == 32
-    assert hints[1].signedness == "unsigned"
+    assert hints[1].signedness == "unknown"
+    assert hints[1].signedness_source == "width_only"
+
+
+def test_infer_parameter_semantics_does_not_resolve_weighted_direct_signedness_conflict():
+    hints = infer_parameter_semantics(_analysis_with_same_width_signedness_conflict())
+
+    assert hints == {}
+
+
+def test_infer_parameter_semantics_uses_storage_backed_narrow_width():
+    hints = infer_parameter_semantics(_analysis_with_storage_backed_narrowing())
+
+    assert hints[0].narrow_bits == 32
+    assert hints[0].signedness == "unknown"
+    assert hints[0].signedness_source == "width_only"
+
+
+def test_infer_parameter_semantics_prefers_direct_signedness_for_narrowed_params():
+    hints = infer_parameter_semantics(_analysis_with_narrowed_direct_unsigned_and_composite_signed())
+
+    assert hints[0].narrow_bits == 32
+    assert hints[0].signedness == "unsigned"
+    assert hints[0].signedness_source == "explicit"
+
+
+def test_infer_parameter_semantics_does_not_promote_same_width_composite_signed_test():
+    hints = infer_parameter_semantics(_analysis_with_same_width_composite_signed_test())
+
+    assert hints == {}
+
+
+def test_infer_parameter_semantics_does_not_treat_zext_wrapped_compare_as_direct_signedness():
+    hints = infer_parameter_semantics(_analysis_with_zext_wrapped_signed_compare())
+
+    assert hints == {}
+
+
+def test_infer_parameter_semantics_keeps_zext_wrapped_narrowing_as_width_only():
+    hints = infer_parameter_semantics(
+        _analysis_with_storage_narrowing_and_zext_wrapped_signed_compare()
+    )
+
+    assert hints[0].narrow_bits == 32
+    assert hints[0].signedness == "unknown"
+    assert hints[0].signedness_source == "width_only"
+
+
+def test_infer_parameter_semantics_keeps_pure_composite_narrowing_as_width_only():
+    hints = infer_parameter_semantics(
+        _analysis_with_storage_narrowing_and_pure_composite_signed_compare()
+    )
+
+    assert hints[0].narrow_bits == 32
+    assert hints[0].signedness == "unknown"
+    assert hints[0].signedness_source == "width_only"
+
+
+def test_infer_parameter_semantics_requires_direct_evidence_for_winning_signedness():
+    hints = infer_parameter_semantics(
+        _analysis_with_mixed_direct_unsigned_and_composite_signed_test()
+    )
+
+    assert hints == {}
+
+
+def test_infer_parameter_semantics_does_not_let_composite_break_direct_ties():
+    hints = infer_parameter_semantics(
+        _analysis_with_direct_tie_and_composite_signed_tiebreak()
+    )
+
+    assert hints == {}
 
 
 def test_formula_builder_emits_signed_semantic_constraints_for_or_guard():
@@ -105,10 +487,20 @@ def test_formula_builder_emits_signed_semantic_constraints_for_or_guard():
 
     formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
 
-    assert "; param_1_1: constrain to signed 32-bit semantic value" in formula
-    assert "; param_2_1: constrain to signed 32-bit semantic value" in formula
+    assert "; param_1_1: constrain to signed 32-bit semantic value" not in formula
+    assert "; param_2_1: constrain to signed 32-bit semantic value" not in formula
     assert "; param_1_1: constrain to unsigned 32-bit semantic value" not in formula
     assert "; param_2_1: constrain to unsigned 32-bit semantic value" not in formula
+
+
+def test_formula_builder_does_not_emit_signedness_constraints_for_width_only_hint():
+    builder = FormulaBuilder(debug=False)
+    analysis = _analysis_with_storage_backed_narrowing()
+
+    formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+
+    assert "; count_1: constrain to signed 32-bit semantic value" not in formula
+    assert "; count_1: constrain to unsigned 32-bit semantic value" not in formula
 
 
 def test_mips64_spurious_detection_uses_signed_or_guard_evidence():
@@ -151,7 +543,7 @@ def test_mips64_spurious_detection_uses_signed_or_guard_evidence():
         is_mips64_2=False,
     )
 
-    assert constraints == {"param_1_1": ("signed", 32)}
+    assert constraints == {}
 
 
 def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_both_types_are_long():
@@ -185,4 +577,4 @@ def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_bot
     override_map = handler.detect_param_type_mismatch(mips_analysis, hinted_peer)
 
     assert 0 in override_map
-    assert override_map[0].type_name == "int"
+    assert override_map[0].type_name == "unsigned int"

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.typing.fixer import TypeFixer
 from scripts.function_tracer_pcode.equivalence.phases.handler import PhaseHandler, PhaseResult, PhaseID
+from scripts.function_tracer_pcode.model import SignatureHypothesis
 from scripts.function_tracer_pcode.smt import SolverStatus
 
 # ★ conftest から MockProgram、create_mock_analysis、create_mock_result をインポート
@@ -14,7 +15,7 @@ from conftest import MockProgram, create_mock_analysis, create_mock_result
 
 
 class TestSelectiveReanalysis:
-    """片側だけ変更された phase でも再デコンパイルせず解析ビューを再利用することを検証"""
+    """changed side だけ fresh reanalysis し、unchanged side を再利用することを検証"""
     
     @pytest.fixture
     def checker(self):
@@ -31,10 +32,10 @@ class TestSelectiveReanalysis:
         """x86バイナリのモック（conftest.MockProgram を使用）"""
         return MockProgram(name="test_binary.exe", architecture="x86:LE:64:default")
     
-    def test_binary1_only_changed_should_not_reanalyze_binary2(
+    def test_binary1_only_changed_should_reanalyze_only_binary1(
         self, checker, mock_program_x86, monkeypatch
     ):
-        """binary1 だけ変更されたときに binary2 が再解析されないことを検証"""
+        """binary1 だけ変更されたときに binary1 だけ再解析されることを検証"""
         
         # ★ conftest.create_mock_analysis を使用（return_type を反映）
         analysis1_initial = create_mock_analysis("func1", return_type="ulong")
@@ -124,11 +125,11 @@ class TestSelectiveReanalysis:
                         retry_with_type_fix=True
                     )
         
-        # 検証: 新設計では phase 後も再デコンパイルしない
-        assert analyze_call_count["binary1"] == 1, \
-            f"binary1 should be analyzed only once, but was {analyze_call_count['binary1']}"
+        # 検証: changed 側だけ fresh reanalysis され、unchanged 側は再利用される
+        assert analyze_call_count["binary1"] == 2, \
+            f"binary1 should be reanalyzed once after the initial analysis, but was {analyze_call_count['binary1']}"
         assert analyze_call_count["binary2"] == 1, \
-            f"binary2 should be analyzed only once, but was {analyze_call_count['binary2']}"
+            f"binary2 should be reused without reanalysis, but was {analyze_call_count['binary2']}"
     
     def test_both_binaries_changed_should_reanalyze_both(
         self, checker, mock_program_x86, monkeypatch
@@ -226,11 +227,11 @@ class TestSelectiveReanalysis:
                         retry_with_type_fix=True
                     )
         
-        # 検証: changed_binary1/2 が立っても再デコンパイルは走らない
-        assert analyze_call_count["binary1"] == 1, \
-            f"binary1 should be analyzed only once, but was {analyze_call_count['binary1']}"
-        assert analyze_call_count["binary2"] == 1, \
-            f"binary2 should be analyzed only once, but was {analyze_call_count['binary2']}"
+        # 検証: 両側変更時は両側とも fresh reanalysis される
+        assert analyze_call_count["binary1"] == 2, \
+            f"binary1 should be reanalyzed once after the initial analysis, but was {analyze_call_count['binary1']}"
+        assert analyze_call_count["binary2"] == 2, \
+            f"binary2 should be reanalyzed once after the initial analysis, but was {analyze_call_count['binary2']}"
     
     def test_phase_result_applied_false_should_skip_recheck(
         self, checker, mock_program_x86
@@ -314,7 +315,7 @@ class TestSelectiveReanalysis:
         
 
 class TestSelectiveReanalysisIntegration:
-    """Real PhaseHandler を使用した overlay 再利用の統合テスト"""
+    """Real PhaseHandler を使用した selective reanalysis + hypothesis replay の統合テスト"""
     
     @pytest.fixture
     def checker(self):
@@ -340,7 +341,13 @@ class TestSelectiveReanalysisIntegration:
         analysis1_initial = create_mock_analysis("func1", return_type="ulong", signedness="signed")
         analysis2_initial = create_mock_analysis("func2", return_type="int")
         
-        analysis1_after_fix = create_mock_analysis("func1", return_type="long", signedness="signed")
+        analysis1_after_fix = create_mock_analysis("func1", return_type="long", signedness="signed").with_signature_hypothesis(
+            SignatureHypothesis(
+                return_type_override="long",
+                phase="P1_SIGNEDNESS",
+                reason="integration_test_replay",
+            )
+        )
         
         # ReturnAnalyzer のモック
         analyze_call_count = {"binary1": 0, "binary2": 0}
@@ -356,6 +363,7 @@ class TestSelectiveReanalysisIntegration:
         
         # _run_stage_plan() を patch して、渡された analysis をキャプチャ
         captured_analyses = []
+        refresh_call_count = {"binary1": 0, "binary2": 0}
         
         def mock_run_stage_plan(
             analysis1, analysis2,
@@ -377,6 +385,13 @@ class TestSelectiveReanalysisIntegration:
                 is_equivalent=None,
                 solver_status=SolverStatus.UNKNOWN
             )
+
+        def mock_refresh_structural_recurrence_summary(self, analysis, timeout=60):
+            if getattr(analysis, "signature_hypotheses", None):
+                refresh_call_count["binary1"] += 1
+            else:
+                refresh_call_count["binary2"] += 1
+            return analysis
         
         def mock_apply_analysis_fix_binary1(
             analysis,
@@ -396,47 +411,51 @@ class TestSelectiveReanalysisIntegration:
             'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.analyze_function_by_name',
             mock_analyze_function_by_name
         ):
-            with patch.object(checker, '_run_stage_plan', side_effect=mock_run_stage_plan):
-                with patch('scripts.function_tracer_pcode.equivalence.checker.TypeFixer') as MockTypeFixer:
-                    # TypeFixer インスタンスを作成
-                    mock_type_fixer1 = Mock()
-                    mock_type_fixer2 = Mock()
-                    
-                    mock_type_fixer1.apply_analysis_signature_fix.side_effect = mock_apply_analysis_fix_binary1
-                    mock_type_fixer2.apply_analysis_signature_fix.side_effect = mock_apply_analysis_fix_binary2
-                    
-                    # TypeFixer() の呼び出しで適切なインスタンスを返す
-                    def type_fixer_factory(program, config, debug=False):
-                        if program == mock_program_x86:
-                            # 最初の呼び出し（binary1）と2回目の呼び出し（binary2）を区別
-                            if not hasattr(type_fixer_factory, 'call_count'):
-                                type_fixer_factory.call_count = 0
-                            type_fixer_factory.call_count += 1
-                            
-                            if type_fixer_factory.call_count == 1:
-                                return mock_type_fixer1
-                            else:
-                                return mock_type_fixer2
-                        return Mock()
-                    
-                    MockTypeFixer.side_effect = type_fixer_factory
-                    
-                    # 実行
-                    result = checker.check_from_binaries(
-                        program1=mock_program_x86,
-                        program2=mock_program_x86,
-                        function_name1="func1",
-                        function_name2="func2",
-                        decompile_timeout=60,
-                        save_formula=False,
-                        retry_with_type_fix=True
-                    )
+            with patch(
+                'scripts.function_tracer_pcode.analysis.analyzer.ReturnAnalyzer.refresh_structural_recurrence_summary',
+                mock_refresh_structural_recurrence_summary
+            ):
+                with patch.object(checker, '_run_stage_plan', side_effect=mock_run_stage_plan):
+                    with patch('scripts.function_tracer_pcode.equivalence.checker.TypeFixer') as MockTypeFixer:
+                        # TypeFixer インスタンスを作成
+                        mock_type_fixer1 = Mock()
+                        mock_type_fixer2 = Mock()
+
+                        mock_type_fixer1.apply_analysis_signature_fix.side_effect = mock_apply_analysis_fix_binary1
+                        mock_type_fixer2.apply_analysis_signature_fix.side_effect = mock_apply_analysis_fix_binary2
+
+                        # TypeFixer() の呼び出しで適切なインスタンスを返す
+                        def type_fixer_factory(program, config, debug=False):
+                            if program == mock_program_x86:
+                                # 最初の呼び出し（binary1）と2回目の呼び出し（binary2）を区別
+                                if not hasattr(type_fixer_factory, 'call_count'):
+                                    type_fixer_factory.call_count = 0
+                                type_fixer_factory.call_count += 1
+
+                                if type_fixer_factory.call_count == 1:
+                                    return mock_type_fixer1
+                                else:
+                                    return mock_type_fixer2
+                            return Mock()
+
+                        MockTypeFixer.side_effect = type_fixer_factory
+
+                        # 実行
+                        result = checker.check_from_binaries(
+                            program1=mock_program_x86,
+                            program2=mock_program_x86,
+                            function_name1="func1",
+                            function_name2="func2",
+                            decompile_timeout=60,
+                            save_formula=False,
+                            retry_with_type_fix=True
+                        )
         
-        # 検証1: 初回解析のみ行い、その後は overlay を使い回す
-        assert analyze_call_count["binary1"] == 1, \
-            f"binary1 should be analyzed only once, but was {analyze_call_count['binary1']}"
+        # 検証1: changed 側だけ fresh reanalysis される
+        assert analyze_call_count["binary1"] == 2, \
+            f"binary1 should be reanalyzed once after the initial analysis, but was {analyze_call_count['binary1']}"
         assert analyze_call_count["binary2"] == 1, \
-            f"binary2 should be analyzed only once, but was {analyze_call_count['binary2']}"
+            f"binary2 should be reused without reanalysis, but was {analyze_call_count['binary2']}"
         
         # 検証2: _run_stage_plan() が 2回呼ばれている（P0, P1）
         assert len(captured_analyses) == 2, \
@@ -448,13 +467,18 @@ class TestSelectiveReanalysisIntegration:
         assert analysis1_p0 is analysis1_initial, "Phase 0: analysis1 should be initial"
         assert analysis2_p0 is analysis2_initial, "Phase 0: analysis2 should be initial"
         
-        # 検証4: Phase 1 (retry_count=1) - binary2 はそのまま再利用、binary1 は overlay 後の解析
+        # 検証4: Phase 1 (retry_count=1) - binary1 は fresh analysis + hypothesis replay、binary2 は再利用
         analysis1_p1, analysis2_p1, retry_count_p1 = captured_analyses[1]
         assert retry_count_p1 == 1, "Second call should be Phase 1"
-        assert analysis1_p1 is analysis1_after_fix, "Phase 1: analysis1 should be overlay-updated"
+        assert analysis1_p1.return_type == analysis1_after_fix.return_type
+        assert analysis1_p1.signature_hypotheses == analysis1_after_fix.signature_hypotheses
         assert analysis2_p1 is analysis2_initial, \
             "Phase 1: analysis2 should be REUSED (same object as Phase 0)"
+
+        # 検証5: replay 後の changed 側だけ structural summary refresh が呼ばれる
+        assert refresh_call_count["binary1"] == 1
+        assert refresh_call_count["binary2"] == 0
         
-        # 検証5: TypeFixer が binary1 のみ呼ばれた
+        # 検証6: TypeFixer が binary1 のみ呼ばれた
         assert mock_type_fixer1.apply_analysis_signature_fix.called, \
             "TypeFixer for binary1 should be called"

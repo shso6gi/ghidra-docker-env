@@ -39,6 +39,15 @@ COMPARISON_OPS = frozenset(
 
 SIGNED_BINARY_OPS = frozenset({"INT_SDIV", "INT_SREM"})
 UNSIGNED_BINARY_OPS = frozenset({"INT_DIV", "INT_REM"})
+SIGNED_COMPARE_REWRITE_MAP = {
+    "INT_LESS": "INT_SLESS",
+    "INT_LESSEQUAL": "INT_SLESSEQUAL",
+}
+UNSIGNED_COMPARE_REWRITE_MAP = {
+    "INT_SLESS": "INT_LESS",
+    "INT_SLESSEQUAL": "INT_LESSEQUAL",
+}
+SIGNEDNESS_KINDS = frozenset({"signed", "unsigned"})
 
 
 class SemanticWidthNormalizer:
@@ -251,18 +260,42 @@ class SemanticWidthNormalizer:
         left, right = expr.operands
         left_info = self._match_comparison_operand(left)
         right_info = self._match_comparison_operand(right)
+        requires_signedness = expr.operator in {
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+        }
 
-        if left_info is not None and right.expr_type == ExpressionType.CONSTANT:
-            right_narrow = self._narrow_constant(right, left_info["bits"], left_info["signedness"])
+        left_constant_signedness = self._comparison_constant_signedness(expr.operator, left_info)
+        if (
+            left_info is not None
+            and right.expr_type == ExpressionType.CONSTANT
+            and left_constant_signedness in SIGNEDNESS_KINDS
+        ):
+            right_narrow = self._narrow_constant(right, left_info["bits"], left_constant_signedness)
             if right_narrow is not None:
-                rebuilt = Expression.binary_op(expr.operator, left_info["expr"], right_narrow)
+                rebuilt = Expression.binary_op(
+                    self._normalize_comparison_operator(expr.operator, left_info, None),
+                    left_info["expr"],
+                    right_narrow,
+                )
                 rebuilt.size = expr.size
                 return rebuilt
 
-        if right_info is not None and left.expr_type == ExpressionType.CONSTANT:
-            left_narrow = self._narrow_constant(left, right_info["bits"], right_info["signedness"])
+        right_constant_signedness = self._comparison_constant_signedness(expr.operator, right_info)
+        if (
+            right_info is not None
+            and left.expr_type == ExpressionType.CONSTANT
+            and right_constant_signedness in SIGNEDNESS_KINDS
+        ):
+            left_narrow = self._narrow_constant(left, right_info["bits"], right_constant_signedness)
             if left_narrow is not None:
-                rebuilt = Expression.binary_op(expr.operator, left_narrow, right_info["expr"])
+                rebuilt = Expression.binary_op(
+                    self._normalize_comparison_operator(expr.operator, None, right_info),
+                    left_narrow,
+                    right_info["expr"],
+                )
                 rebuilt.size = expr.size
                 return rebuilt
 
@@ -270,10 +303,59 @@ class SemanticWidthNormalizer:
             return None
         if left_info["bits"] != right_info["bits"]:
             return None
+        if requires_signedness and (
+            left_info.get("signedness") not in SIGNEDNESS_KINDS
+            or right_info.get("signedness") not in SIGNEDNESS_KINDS
+        ):
+            return None
 
-        rebuilt = Expression.binary_op(expr.operator, left_info["expr"], right_info["expr"])
+        rebuilt = Expression.binary_op(
+            self._normalize_comparison_operator(expr.operator, left_info, right_info),
+            left_info["expr"],
+            right_info["expr"],
+        )
         rebuilt.size = expr.size
         return rebuilt
+
+    def _normalize_comparison_operator(
+        self,
+        operator: str,
+        left_info,
+        right_info,
+    ) -> str:
+        target_signedness = self._comparison_target_signedness(left_info, right_info)
+        if target_signedness == "signed":
+            return SIGNED_COMPARE_REWRITE_MAP.get(operator, operator)
+        if target_signedness == "unsigned":
+            return UNSIGNED_COMPARE_REWRITE_MAP.get(operator, operator)
+        return operator
+
+    def _comparison_target_signedness(self, left_info, right_info) -> Optional[str]:
+        explicit_infos = [
+            info
+            for info in (left_info, right_info)
+            if info is not None and bool(info.get("explicit_signedness"))
+        ]
+        if not explicit_infos:
+            return None
+
+        signednesses = {info.get("signedness") for info in explicit_infos}
+        if len(signednesses) != 1:
+            return None
+        signedness = next(iter(signednesses))
+        if signedness not in {"signed", "unsigned"}:
+            return None
+        return signedness
+
+    def _comparison_constant_signedness(self, operator: str, info) -> Optional[str]:
+        if info is None:
+            return None
+        signedness = info.get("signedness")
+        if signedness in SIGNEDNESS_KINDS:
+            return signedness
+        if operator in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return "unsigned"
+        return None
 
     def _normalize_semantic_binary(self, expr: Expression) -> Optional[Expression]:
         if len(expr.operands) != 2:
@@ -283,7 +365,11 @@ class SemanticWidthNormalizer:
         left_info = self._match_semantic_low_expr(left)
         right_info = self._match_semantic_low_expr(right)
 
-        if left_info is not None and right.expr_type == ExpressionType.CONSTANT:
+        if (
+            left_info is not None
+            and right.expr_type == ExpressionType.CONSTANT
+            and left_info.get("signedness") in SIGNEDNESS_KINDS
+        ):
             narrowed = self._narrow_constant(
                 right,
                 left_info["bits"],
@@ -298,7 +384,11 @@ class SemanticWidthNormalizer:
                     "signedness": left_info["signedness"],
                 }
 
-        if right_info is not None and left.expr_type == ExpressionType.CONSTANT:
+        if (
+            right_info is not None
+            and left.expr_type == ExpressionType.CONSTANT
+            and right_info.get("signedness") in SIGNEDNESS_KINDS
+        ):
             narrowed = self._narrow_constant(
                 left,
                 right_info["bits"],
@@ -355,10 +445,14 @@ class SemanticWidthNormalizer:
         if expr.expr_type == ExpressionType.PARAMETER and expr.name:
             hint = self.hints_by_name.get(expr.name)
             if hint is not None and expr.get_bit_width() > hint.narrow_bits:
+                semantic_signedness = (
+                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
+                )
                 return {
                     "expr": self._low_bits_expr(expr, hint.narrow_bits),
                     "bits": hint.narrow_bits,
-                    "signedness": hint.signedness,
+                    "signedness": semantic_signedness,
+                    "explicit_signedness": hint.signedness_source == "explicit",
                 }
 
         if (
@@ -374,6 +468,7 @@ class SemanticWidthNormalizer:
                 "expr": inner["expr"],
                 "bits": inner["bits"],
                 "signedness": expected,
+                "explicit_signedness": bool(inner.get("explicit_signedness")),
             }
 
         return None
@@ -392,15 +487,32 @@ class SemanticWidthNormalizer:
                 bits = expr.get_bit_width()
                 if bits <= 32:
                     signedness = expected_signedness or "signed"
-                    return {"expr": expr, "bits": bits, "signedness": signedness}
+                    return {
+                        "expr": expr,
+                        "bits": bits,
+                        "signedness": signedness,
+                        "explicit_signedness": False,
+                    }
                 return None
             if expr.get_bit_width() == hint.narrow_bits:
-                return {"expr": expr, "bits": hint.narrow_bits, "signedness": hint.signedness}
+                semantic_signedness = (
+                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
+                )
+                return {
+                    "expr": expr,
+                    "bits": hint.narrow_bits,
+                    "signedness": semantic_signedness,
+                    "explicit_signedness": hint.signedness_source == "explicit",
+                }
             if expr.get_bit_width() > hint.narrow_bits:
+                semantic_signedness = (
+                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
+                )
                 return {
                     "expr": self._low_bits_expr(expr, hint.narrow_bits),
                     "bits": hint.narrow_bits,
-                    "signedness": hint.signedness,
+                    "signedness": semantic_signedness,
+                    "explicit_signedness": hint.signedness_source == "explicit",
                 }
 
         if (
@@ -414,10 +526,23 @@ class SemanticWidthNormalizer:
             if source.expr_type == ExpressionType.PARAMETER and source.name:
                 hint = self.hints_by_name.get(source.name)
                 if hint is not None and expr.get_bit_width() == hint.narrow_bits:
-                    return {"expr": expr, "bits": hint.narrow_bits, "signedness": hint.signedness}
+                    semantic_signedness = (
+                        hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
+                    )
+                    return {
+                        "expr": expr,
+                        "bits": hint.narrow_bits,
+                        "signedness": semantic_signedness,
+                        "explicit_signedness": hint.signedness_source == "explicit",
+                    }
             if expr.get_bit_width() <= 32:
                 signedness = expected_signedness or "signed"
-                return {"expr": expr, "bits": expr.get_bit_width(), "signedness": signedness}
+                return {
+                    "expr": expr,
+                    "bits": expr.get_bit_width(),
+                    "signedness": signedness,
+                    "explicit_signedness": False,
+                }
 
         if (
             expr.expr_type == ExpressionType.BINARY_OP
@@ -435,10 +560,14 @@ class SemanticWidthNormalizer:
             mask_value = int(const_expr.value) & ((1 << mask_bits) - 1)
             if mask_value != expected_mask:
                 return None
+            semantic_signedness = (
+                hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
+            )
             return {
                 "expr": self._low_bits_expr(param_expr, hint.narrow_bits),
                 "bits": hint.narrow_bits,
-                "signedness": hint.signedness,
+                "signedness": semantic_signedness,
+                "explicit_signedness": hint.signedness_source == "explicit",
             }
 
         return None

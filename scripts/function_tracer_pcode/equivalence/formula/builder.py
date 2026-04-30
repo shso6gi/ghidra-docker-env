@@ -781,7 +781,11 @@ class FormulaBuilder:
             if param is None:
                 continue
             param.semantic_narrow_bits = hint.narrow_bits
-            param.semantic_signedness = hint.signedness
+            param.semantic_signedness = (
+                hint.signedness
+                if hint.signedness_source == "explicit" and hint.signedness in {"signed", "unsigned"}
+                else None
+            )
     
     def _build_extra_var_constraints(
         self,

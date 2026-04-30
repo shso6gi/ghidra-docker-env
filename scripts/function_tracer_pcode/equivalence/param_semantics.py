@@ -18,7 +18,7 @@ SIGNEDNESS_PROPAGATING_BINARY_OPS = {"INT_AND", "INT_OR", "INT_XOR"}
 
 @dataclass(frozen=True)
 class ParameterSemanticHint:
-    """Semantic-width hint inferred from explicit narrowing patterns."""
+    """Semantic-width hint inferred from object-level usage evidence."""
 
     narrow_bits: int
     signedness: str
@@ -39,6 +39,11 @@ def infer_parameter_semantics(
         }
 
     evidence: Dict[str, Dict[str, Any]] = {}
+    for param_name, meta in params_by_name.items():
+        storage_bits = _get_storage_bits(meta, analysis)
+        if storage_bits is not None:
+            _record_width_evidence(evidence, param_name, storage_bits)
+
     for ret_info in analysis.returns or []:
         if ret_info.value is not None:
             _collect_from_expression(ret_info.value, evidence)
@@ -54,9 +59,6 @@ def infer_parameter_semantics(
             continue
 
         narrow_bits = _resolve_narrow_bits(param_evidence, meta["declared_bits"])
-        if narrow_bits is None or narrow_bits >= meta["declared_bits"]:
-            continue
-
         signedness, signedness_source = _resolve_signedness(
             param_evidence,
             meta["declared_signedness"],
@@ -65,8 +67,32 @@ def infer_parameter_semantics(
             continue
         assert signedness_source is not None
 
-        hints[meta["index"]] = ParameterSemanticHint(
+        if narrow_bits is not None and 0 < int(narrow_bits) < int(meta["declared_bits"]):
+            direct_signedness_state = _resolve_direct_signedness(param_evidence)
+            if direct_signedness_state == "conflict":
+                signedness = "unknown"
+                signedness_source = "width_only"
+            elif direct_signedness_state in {"signed", "unsigned"}:
+                signedness = direct_signedness_state
+                signedness_source = "explicit"
+            else:
+                signedness = "unknown"
+                signedness_source = "width_only"
+
+        if not _should_emit_hint(
+            param_evidence=param_evidence,
             narrow_bits=narrow_bits,
+            declared_bits=meta["declared_bits"],
+            signedness=signedness,
+            signedness_source=signedness_source,
+            declared_signedness=meta["declared_signedness"],
+        ):
+            continue
+
+        emitted_bits = narrow_bits or meta["declared_bits"]
+
+        hints[meta["index"]] = ParameterSemanticHint(
+            narrow_bits=emitted_bits,
             signedness=signedness,
             signedness_source=signedness_source,
         )
@@ -158,37 +184,147 @@ def _record_compare_signedness(
         return
 
     score_key = "signed_score" if expr.operator in SIGNED_COMPARE_OPS else "unsigned_score"
-    left_refs = _collect_param_references(expr.operands[0])
-    right_refs = _collect_param_references(expr.operands[1])
+    left_refs = _collect_compare_signedness_references(expr.operands[0])
+    right_refs = _collect_compare_signedness_references(expr.operands[1])
+    left_blocked_refs = _collect_blocked_compare_signedness_references(expr.operands[0])
+    right_blocked_refs = _collect_blocked_compare_signedness_references(expr.operands[1])
+    left_direct = _is_direct_param_compare_operand(expr.operands[0])
+    right_direct = _is_direct_param_compare_operand(expr.operands[1])
 
     if left_refs and _supports_signedness_inference(expr.operands[1]):
-        _record_compare_refs(left_refs, evidence, score_key)
+        _record_compare_refs(
+            left_refs,
+            evidence,
+            score_key,
+            compare_expr=expr,
+            other_operand=expr.operands[1],
+            direct_operand=left_direct,
+        )
+    elif left_blocked_refs and _supports_signedness_inference(expr.operands[1]):
+        _record_blocked_compare_signedness(evidence, left_blocked_refs)
 
     if right_refs and _supports_signedness_inference(expr.operands[0]):
-        _record_compare_refs(right_refs, evidence, score_key)
+        _record_compare_refs(
+            right_refs,
+            evidence,
+            score_key,
+            compare_expr=expr,
+            other_operand=expr.operands[0],
+            direct_operand=right_direct,
+        )
+    elif right_blocked_refs and _supports_signedness_inference(expr.operands[0]):
+        _record_blocked_compare_signedness(evidence, right_blocked_refs)
 
 
 def _record_compare_refs(
     refs: Dict[str, Optional[int]],
     evidence: Dict[str, Dict[str, Any]],
     score_key: str,
+    *,
+    compare_expr: Expression,
+    other_operand: Expression,
+    direct_operand: bool,
 ) -> None:
+    signed_bonus = _signed_boundary_bonus(compare_expr, other_operand)
     for param_name, narrow_bits in refs.items():
         if narrow_bits is not None:
             _record_width_evidence(evidence, param_name, narrow_bits)
         _record_signedness_evidence(
             evidence,
             param_name,
-            signed_score=2 if score_key == "signed_score" else 0,
+            signed_score=(2 + signed_bonus) if score_key == "signed_score" else 0,
             unsigned_score=2 if score_key == "unsigned_score" else 0,
+            direct_operand=direct_operand,
         )
+
+
+def _signed_boundary_bonus(
+    compare_expr: Expression,
+    other_operand: Expression,
+) -> int:
+    if compare_expr.operator not in SIGNED_COMPARE_OPS:
+        return 0
+    if other_operand.expr_type != ExpressionType.CONSTANT:
+        return 0
+    try:
+        const_value = int(other_operand.value)
+    except Exception:
+        return 0
+    return 2 if const_value in {0, -1} else 0
 
 
 def _supports_signedness_inference(expr: Expression) -> bool:
     if expr.expr_type == ExpressionType.CONSTANT:
         return True
-    refs = _collect_param_references(expr)
+    refs = _collect_compare_signedness_references(expr)
     return refs is not None and bool(refs)
+
+
+def _collect_compare_signedness_references(
+    expr: Expression,
+) -> Optional[Dict[str, Optional[int]]]:
+    """Collect parameter refs whose compare signedness can be attributed directly.
+
+    Unlike the general collector, this intentionally does not cross explicit
+    extension/cast nodes. Compare opcode signedness for ``SEXT/ZEXT(param)`` is
+    evidence about the widened temporary, not about the leaf parameter object.
+    """
+    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+        return {expr.name: None}
+
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        return None
+
+    if expr.expr_type != ExpressionType.BINARY_OP:
+        return None
+
+    if expr.operator == "SUBPIECE":
+        ref = _extract_subpiece_reference(expr)
+        if ref is None:
+            return None
+        param_name, narrow_bits = ref
+        return {param_name: narrow_bits}
+
+    if expr.operator == "INT_AND":
+        ref = _extract_masked_param_reference(expr)
+        if ref is not None:
+            param_name, narrow_bits = ref
+            return {param_name: narrow_bits}
+
+    if expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
+        return None
+
+    merged: Dict[str, Optional[int]] = {}
+    for operand in expr.operands:
+        if operand.expr_type == ExpressionType.CONSTANT:
+            continue
+        operand_refs = _collect_compare_signedness_references(operand)
+        if operand_refs is None:
+            return None
+        _merge_param_reference_maps(merged, operand_refs)
+
+    return merged
+
+
+def _collect_blocked_compare_signedness_references(
+    expr: Expression,
+) -> Optional[Dict[str, Optional[int]]]:
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
+        if expr.operator in TRANSPARENT_UNARY_OPS:
+            return _collect_param_references(expr.operands[0])
+        return None
+
+    if expr.expr_type != ExpressionType.BINARY_OP or expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
+        return None
+
+    merged: Dict[str, Optional[int]] = {}
+    for operand in expr.operands:
+        if operand.expr_type == ExpressionType.CONSTANT:
+            continue
+        operand_refs = _collect_blocked_compare_signedness_references(operand)
+        if operand_refs:
+            _merge_param_reference_maps(merged, operand_refs)
+    return merged or None
 
 
 def _collect_param_references(
@@ -272,6 +408,17 @@ def _extract_param_reference(
     return None
 
 
+def _is_direct_param_compare_operand(expr: Expression) -> bool:
+    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
+        return True
+    if expr.expr_type == ExpressionType.BINARY_OP:
+        if expr.operator == "SUBPIECE":
+            return _extract_subpiece_reference(expr) is not None
+        if expr.operator == "INT_AND":
+            return _extract_masked_param_reference(expr) is not None
+    return False
+
+
 def _extract_subpiece_reference(
     expr: Expression,
 ) -> Optional[Tuple[str, int]]:
@@ -336,7 +483,14 @@ def _record_width_evidence(
 ) -> None:
     entry = evidence.setdefault(
         param_name,
-        {"narrow_bits": set(), "signed_score": 0, "unsigned_score": 0},
+        {
+            "narrow_bits": set(),
+            "signed_score": 0,
+            "unsigned_score": 0,
+            "direct_signed_score": 0,
+            "direct_unsigned_score": 0,
+            "blocked_compare_signedness": False,
+        },
     )
     if int(narrow_bits) > 0:
         entry["narrow_bits"].add(int(narrow_bits))
@@ -348,13 +502,45 @@ def _record_signedness_evidence(
     *,
     signed_score: int = 0,
     unsigned_score: int = 0,
+    direct_operand: bool = False,
 ) -> None:
     entry = evidence.setdefault(
         param_name,
-        {"narrow_bits": set(), "signed_score": 0, "unsigned_score": 0},
+        {
+            "narrow_bits": set(),
+            "signed_score": 0,
+            "unsigned_score": 0,
+            "direct_signed_score": 0,
+            "direct_unsigned_score": 0,
+            "blocked_compare_signedness": False,
+        },
     )
     entry["signed_score"] += signed_score
     entry["unsigned_score"] += unsigned_score
+    if direct_operand:
+        entry["direct_signed_score"] += signed_score
+        entry["direct_unsigned_score"] += unsigned_score
+
+
+def _record_blocked_compare_signedness(
+    evidence: Dict[str, Dict[str, Any]],
+    refs: Dict[str, Optional[int]],
+) -> None:
+    for param_name, narrow_bits in refs.items():
+        entry = evidence.setdefault(
+            param_name,
+            {
+                "narrow_bits": set(),
+                "signed_score": 0,
+                "unsigned_score": 0,
+                "direct_signed_score": 0,
+                "direct_unsigned_score": 0,
+                "blocked_compare_signedness": False,
+            },
+        )
+        entry["blocked_compare_signedness"] = True
+        if narrow_bits is not None:
+            entry["narrow_bits"].add(int(narrow_bits))
 
 
 def _resolve_narrow_bits(
@@ -386,6 +572,56 @@ def _resolve_signedness(
     return None, None
 
 
+def _should_emit_hint(
+    *,
+    param_evidence: Dict[str, Any],
+    narrow_bits: Optional[int],
+    declared_bits: int,
+    signedness: str,
+    signedness_source: str,
+    declared_signedness: Optional[str],
+) -> bool:
+    if narrow_bits is not None and 0 < int(narrow_bits) < int(declared_bits):
+        return True
+
+    if signedness_source != "explicit":
+        return False
+
+    direct_signed_score = int(param_evidence.get("direct_signed_score", 0))
+    direct_unsigned_score = int(param_evidence.get("direct_unsigned_score", 0))
+    if direct_signed_score > 0 and direct_unsigned_score > 0:
+        return False
+    if direct_signed_score == direct_unsigned_score:
+        return False
+
+    direct_signedness = "signed" if direct_signed_score > direct_unsigned_score else "unsigned"
+    if signedness != direct_signedness:
+        return False
+
+    if declared_signedness not in {"signed", "unsigned"}:
+        return True
+    return signedness != declared_signedness
+
+
+def _has_direct_signedness_conflict(param_evidence: Dict[str, Any]) -> bool:
+    return (
+        int(param_evidence.get("direct_signed_score", 0)) > 0
+        and int(param_evidence.get("direct_unsigned_score", 0)) > 0
+    )
+
+
+def _resolve_direct_signedness(param_evidence: Dict[str, Any]) -> Optional[str]:
+    direct_signed_score = int(param_evidence.get("direct_signed_score", 0))
+    direct_unsigned_score = int(param_evidence.get("direct_unsigned_score", 0))
+    if direct_signed_score > 0 and direct_unsigned_score > 0:
+        return "conflict"
+    if direct_signed_score > 0:
+        return "signed"
+    if direct_unsigned_score > 0:
+        return "unsigned"
+    return None
+
+
 def _get_declared_bits(param: Dict[str, Any]) -> int:
     raw_dt = param.get("data_type_obj")
     if raw_dt is not None and hasattr(raw_dt, "getLength"):
@@ -394,6 +630,40 @@ def _get_declared_bits(param: Dict[str, Any]) -> int:
         except Exception:
             pass
     return int(param.get("size", 4)) * 8
+
+
+def _get_storage_bits(
+    param_meta: Dict[str, Any],
+    analysis: FunctionReturnAnalysis,
+) -> Optional[int]:
+    param_index = param_meta.get("index")
+    if not isinstance(param_index, int) or param_index < 0:
+        return None
+
+    parameters = list(analysis.parameters or [])
+    for fallback_index, param in enumerate(parameters):
+        index = param.get("index", fallback_index)
+        if index != param_index:
+            continue
+        storage = param.get("storage")
+        if not isinstance(storage, dict):
+            return None
+        size_bits = storage.get("size_bits")
+        if size_bits is None:
+            size_bytes = storage.get("size")
+            if size_bytes is not None:
+                try:
+                    size_bits = int(size_bytes) * 8
+                except Exception:
+                    size_bits = None
+        try:
+            resolved = int(size_bits) if size_bits is not None else None
+        except Exception:
+            resolved = None
+        if resolved is None or resolved <= 0:
+            return None
+        return resolved
+    return None
 
 
 def _get_declared_signedness(param: Dict[str, Any]) -> Optional[str]:

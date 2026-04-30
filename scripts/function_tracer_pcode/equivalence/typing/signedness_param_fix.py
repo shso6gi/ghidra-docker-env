@@ -2,11 +2,16 @@
 """引数の符号性推定・修正モジュール（Phase 1.5用）"""
 
 from typing import Any, Dict
+from ..param_semantics import infer_parameter_semantics
 from ...model import FunctionReturnAnalysis
 from ...model.signature import (
     ResolvedTypeSpec,
     get_data_type_display_name,
-    is_unsigned_data_type,
+    get_declared_type_signedness,
+    get_declared_type_size_bytes,
+    is_void_data_type,
+    is_pointer_data_type,
+    resolve_integer_type_spec,
 )
 from .fixer import TypeFixerConfig
 
@@ -28,80 +33,159 @@ class ParamSignednessFixer:
         *,
         program: Any = None,
     ) -> Dict[int, ResolvedTypeSpec]:
-        """
-        引数の型が誤ってunsignedになっているかを検出
-        
-        検出条件：
-        1. 関数の符号性推定結果が"signed"（return-chain由来）
-        2. パラメータの型がunsigned系（ulong, uint等）
-        
-        Args:
-            analysis: 関数解析結果
-        
-        Returns:
-            修正すべきparamのインデックス→型specのマップ
-        """
+        """局所的な parameter semantic hint に基づいて型仮説を解決する。"""
         override_map: Dict[int, ResolvedTypeSpec] = {}
-        
-        # 符号性推定結果がない、またはsignedでない場合はスキップ
-        if analysis.signedness_result is None:
+
+        parameters = list(analysis.parameters or [])
+        if not parameters:
             return override_map
-        
-        if not analysis.signedness_result.is_signed():
+
+        hints = infer_parameter_semantics(analysis)
+        if not hints:
             return override_map
-        
-        # パラメータがない場合はスキップ
-        if not analysis.parameters:
-            return override_map
-        
+
         self._debug_print(
-            f"Function '{analysis.function_name}' inferred as signed, "
-            f"checking {len(analysis.parameters)} parameters..."
+            f"Function '{analysis.function_name}' has semantic hints for "
+            f"{len(hints)} parameter(s); checking {len(parameters)} parameter(s)..."
         )
-        
-        for i, param in enumerate(analysis.parameters):
-            # DataTypeオブジェクトがある場合はそれを優先
+
+        for i, param in enumerate(parameters):
+            index = param.get("index", i)
+            hint = hints.get(index)
+            if hint is None:
+                continue
+
             raw_dt = param.get("data_type_obj")
             type_str = get_data_type_display_name(raw_dt, param.get("data_type", ""))
-            
             if not type_str:
                 continue
-            
-            # unsigned型かどうかをチェック
-            if not self._is_unsigned_type(raw_dt, type_str):
+
+            if is_void_data_type(raw_dt, type_str):
                 continue
-            
-            # 対応するsigned型を取得
-            signed_spec = self.config.resolve_signed_type_spec(
+            if is_pointer_data_type(raw_dt, type_str):
+                continue
+
+            resolved_spec = self._resolve_param_semantic_hint(
+                param,
+                hint_narrow_bits=hint.narrow_bits,
+                hint_signedness=hint.signedness,
+                hint_signedness_source=hint.signedness_source,
+                program=program,
+            )
+            if resolved_spec is None:
+                self._debug_print(
+                    f"  Param {index} '{param.get('name', 'unknown')}': "
+                    f"no type mapping for semantic hint {hint.signedness}:{hint.narrow_bits}"
+                )
+                continue
+
+            if not self._param_needs_override(param, resolved_spec, program=program):
+                continue
+
+            override_map[index] = resolved_spec
+            self._debug_print(
+                f"  Param {index} '{param.get('name', 'unknown')}': "
+                f"'{type_str}' -> '{resolved_spec.type_name}' "
+                f"(semantic hint {hint.signedness}:{hint.narrow_bits}, source={resolved_spec.source})"
+            )
+
+        if override_map:
+            self._debug_print(
+                f"Detected {len(override_map)} param(s) needing semantic parameter fix"
+            )
+        else:
+            self._debug_print("No semantic parameter overrides detected")
+
+        return override_map
+
+    def _resolve_param_semantic_hint(
+        self,
+        param: Dict[str, Any],
+        *,
+        hint_narrow_bits: int,
+        hint_signedness: str,
+        hint_signedness_source: str,
+        program: Any = None,
+    ) -> ResolvedTypeSpec | None:
+        if hint_narrow_bits <= 0 or hint_narrow_bits % 8 != 0:
+            return None
+
+        raw_dt = param.get("data_type_obj")
+        type_str = get_data_type_display_name(raw_dt, param.get("data_type", ""))
+        declared_size = get_declared_type_size_bytes(
+            raw_dt,
+            type_str,
+            fallback_size=param.get("size"),
+            program=program,
+        )
+        declared_signed = get_declared_type_signedness(
+            raw_dt,
+            type_str,
+            fallback_signed=bool(param.get("is_signed", True)),
+            program=program,
+        )
+
+        target_size_bytes = hint_narrow_bits // 8
+        effective_signedness = (
+            hint_signedness
+            if hint_signedness in {"signed", "unsigned"}
+            else ("signed" if declared_signed else "unsigned")
+            if declared_signed is not None
+            else None
+        )
+        if effective_signedness not in {"signed", "unsigned"}:
+            return None
+        if (
+            hint_signedness_source == "explicit"
+            and effective_signedness == "signed"
+            and declared_size is not None
+            and int(declared_size) == int(target_size_bytes)
+            and declared_signed is False
+        ):
+            counterpart = self.config.resolve_signed_type_spec(
                 type_str,
                 data_type_obj=raw_dt,
                 program=program,
-                fallback_size=param.get("size"),
+                fallback_size=declared_size,
             )
-            if signed_spec is None:
-                self._debug_print(
-                    f"  Param {i} '{param.get('name', 'unknown')}': "
-                    f"'{type_str}' is unsigned but no signed mapping found"
-                )
-                continue
-            
-            # 修正対象として登録
-            override_map[i] = signed_spec
-            self._debug_print(
-                f"  Param {i} '{param.get('name', 'unknown')}': "
-                f"'{type_str}' -> '{signed_spec.type_name}' "
-                f"(signedness mismatch detected via {signed_spec.source})"
-            )
-        
-        if override_map:
-            self._debug_print(
-                f"Detected {len(override_map)} param(s) needing signedness fix"
-            )
-        else:
-            self._debug_print("No param signedness mismatches detected")
-        
-        return override_map
-    
-    def _is_unsigned_type(self, data_type_obj, type_str: str) -> bool:
-        """型がunsigned型かどうかを判定"""
-        return is_unsigned_data_type(data_type_obj, type_str)
+            if counterpart is not None:
+                return counterpart
+
+        return resolve_integer_type_spec(
+            size_bytes=target_size_bytes,
+            signed=(effective_signedness == "signed"),
+            program=program,
+            source="param_semantic_hint",
+        )
+
+    def _param_needs_override(
+        self,
+        param: Dict[str, Any],
+        resolved_spec: ResolvedTypeSpec,
+        *,
+        program: Any = None,
+    ) -> bool:
+        raw_dt = param.get("data_type_obj")
+        type_str = get_data_type_display_name(raw_dt, param.get("data_type", ""))
+        declared_size = get_declared_type_size_bytes(
+            raw_dt,
+            type_str,
+            fallback_size=param.get("size"),
+            program=program,
+        )
+        declared_signed = get_declared_type_signedness(
+            raw_dt,
+            type_str,
+            fallback_signed=bool(param.get("is_signed", True)),
+            program=program,
+        )
+        resolved_size = resolved_spec.size_bytes
+        resolved_signed = resolved_spec.is_signed
+
+        if declared_size is not None and resolved_size is not None and int(declared_size) != int(resolved_size):
+            return True
+        if declared_signed is not None and resolved_signed is not None and bool(declared_signed) != bool(resolved_signed):
+            return True
+        if type_str and resolved_spec.type_name and type_str != resolved_spec.type_name:
+            return True
+        return False

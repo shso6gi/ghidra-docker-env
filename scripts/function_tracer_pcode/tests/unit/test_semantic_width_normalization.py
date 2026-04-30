@@ -488,3 +488,31 @@ def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs
     assert "(select mem32 param_1_2)" not in formula
     assert "(bvadd (_ bv4 64) param_1_2)" not in formula
     assert "((_ zero_extend 32) param_1_2)" in formula
+
+
+def test_normalize_analysis_rewrites_unsigned_guard_to_signed_when_hint_is_explicit():
+    count = _param("count", 4)
+    analysis = FunctionReturnAnalysis(
+        function_name="signed_count_tail_like",
+        entry_point="0x4000",
+        parameters=[
+            {"name": "count", "data_type": "uint", "size": 4, "index": 0, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x4000",
+                conditions=[Condition(_binary("INT_LESS", _const(3, 4), count, 1))],
+                value=_const(1, 4),
+            )
+        ],
+        return_type="int",
+    )
+
+    normalized = normalize_analysis_semantic_width(
+        analysis,
+        hints={0: ParameterSemanticHint(32, "signed", signedness_source="explicit")},
+    )
+    cond_smt = normalized.returns[0].conditions[0].to_smt()
+
+    assert "(bvslt (_ bv3 32) count)" in cond_smt
+    assert "(bvult (_ bv3 32) count)" not in cond_smt

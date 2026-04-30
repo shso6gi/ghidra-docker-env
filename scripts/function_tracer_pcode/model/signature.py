@@ -523,6 +523,48 @@ class ResolvedTypeSpec:
             result["data_type_path"] = self.data_type_path
         return result
 
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Optional[Dict[str, Any]],
+        *,
+        program: Any = None,
+        fallback_signed: bool = True,
+    ) -> Optional["ResolvedTypeSpec"]:
+        if not isinstance(payload, dict):
+            return None
+        type_name = payload.get("type_name")
+        if not type_name:
+            return None
+
+        size_bytes_raw = payload.get("size_bytes")
+        size_bytes = None if size_bytes_raw is None else int(size_bytes_raw)
+        is_signed_raw = payload.get("is_signed")
+        is_signed = None if is_signed_raw is None else bool(is_signed_raw)
+        resolved = resolve_type_spec(
+            str(type_name),
+            program=program,
+            fallback_size=size_bytes,
+            fallback_signed=is_signed if is_signed is not None else fallback_signed,
+        )
+        if resolved is not None:
+            return cls(
+                type_name=resolved.type_name or str(type_name),
+                data_type_obj=resolved.data_type_obj,
+                size_bytes=resolved.size_bytes if resolved.size_bytes is not None else size_bytes,
+                is_signed=resolved.is_signed if resolved.is_signed is not None else is_signed,
+                source=str(payload.get("source") or resolved.source or "serialized"),
+                data_type_path=resolved.data_type_path or payload.get("data_type_path"),
+            )
+        return cls(
+            type_name=str(type_name),
+            data_type_obj=None,
+            size_bytes=size_bytes,
+            is_signed=is_signed,
+            source=str(payload.get("source") or "serialized"),
+            data_type_path=payload.get("data_type_path"),
+        )
+
 
 def _resolved_type_spec_from_data_type(
     type_name: str,
@@ -840,6 +882,60 @@ class SignatureHypothesis:
         if self.evidence:
             result["evidence"] = dict(self.evidence)
         return result
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Optional[Dict[str, Any]],
+        *,
+        program: Any = None,
+    ) -> "SignatureHypothesis":
+        if not isinstance(payload, dict):
+            return cls()
+
+        parameter_type_overrides: Dict[int, str] = {}
+        for raw_index, override_name in dict(payload.get("parameter_type_overrides") or {}).items():
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if override_name is None:
+                continue
+            parameter_type_overrides[index] = str(override_name)
+
+        resolved_return_override = ResolvedTypeSpec.from_dict(
+            payload.get("resolved_return_override"),
+            program=program,
+        )
+        resolved_parameter_overrides: Dict[int, ResolvedTypeSpec] = {}
+        for raw_index, spec_payload in dict(payload.get("resolved_parameter_overrides") or {}).items():
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            resolved = ResolvedTypeSpec.from_dict(spec_payload, program=program)
+            if resolved is not None:
+                resolved_parameter_overrides[index] = resolved
+
+        return cls(
+            return_type_override=payload.get("return_type_override"),
+            parameter_type_overrides=parameter_type_overrides,
+            return_type_override_obj=(
+                resolved_return_override.data_type_obj
+                if resolved_return_override is not None
+                else None
+            ),
+            parameter_type_override_objs={
+                index: spec.data_type_obj
+                for index, spec in resolved_parameter_overrides.items()
+                if spec.data_type_obj is not None
+            },
+            resolved_return_override=resolved_return_override,
+            resolved_parameter_overrides=resolved_parameter_overrides,
+            phase=str(payload.get("phase") or ""),
+            reason=str(payload.get("reason") or ""),
+            evidence=dict(payload.get("evidence") or {}),
+        )
 
     def describe(self) -> str:
         parts: List[str] = []

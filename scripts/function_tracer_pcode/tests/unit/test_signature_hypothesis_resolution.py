@@ -2,8 +2,16 @@
 """型仮説 overlay の datatype 解決と結果可視化の回帰テスト"""
 
 from scripts.function_tracer_pcode.model import (
+    Condition,
     FunctionReturnAnalysis,
     FunctionSignature,
+    LocationBaseRef,
+    LoopSideEffectProfileRef,
+    LoopSummaryRef,
+    LoopTermDescriptorRef,
+    ReadonlyReductionRef,
+    ReadonlyReductionWitness,
+    ReductionAccumulatorProof,
     SignednessResult,
     resolve_signed_counterpart_spec,
     resolve_type_spec,
@@ -278,9 +286,22 @@ def test_param_signedness_fix_prefers_datatype_counterpart():
                 "storage": {"kind": "register", "size": 4, "size_bits": 32},
             }
         ],
-        returns=[],
+        returns=[
+            ReturnInfo(
+                address="0x401000",
+                conditions=[
+                    Condition(
+                        Expression.binary_op(
+                            "INT_SLESS",
+                            Expression.constant(0, size=4),
+                            Expression.parameter("arg0", index=0, data_type="uint32_t", data_type_obj=unsigned_dt, size=4),
+                        )
+                    )
+                ],
+                value=Expression.constant(1, size=4),
+            )
+        ],
         return_type="int",
-        signedness_result=SignednessResult(signedness="signed"),
     )
 
     fixer = ParamSignednessFixer(TypeFixerConfig(), debug=False)
@@ -290,6 +311,245 @@ def test_param_signedness_fix_prefers_datatype_counterpart():
     assert override_map[0].type_name == "int32_t"
     assert override_map[0].data_type_obj is signed_dt
     assert override_map[0].source == "ghidra_opposite_signedness"
+
+
+def test_param_signedness_fix_uses_semantic_width_hint_for_narrower_integer_type():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint64_t", 8, False, "/typedef/uint64_t")
+    program = MockProgram(MockDataTypeManager({"uint64_t": unsigned_dt, "int32_t": signed_dt}))
+
+    count_param = Expression.parameter("count", index=0, data_type="uint64_t", data_type_obj=unsigned_dt, size=8)
+    analysis = FunctionReturnAnalysis(
+        function_name="demo",
+        entry_point="0x401000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "uint64_t",
+                "data_type_obj": unsigned_dt,
+                "size": 8,
+                "is_signed": False,
+                "index": 0,
+                "storage": {
+                    "kind": "register",
+                    "size": 4,
+                    "size_bits": 32,
+                    "base_register_size_bits": 64,
+                },
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401000",
+                conditions=[Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, size=8), count_param))],
+                value=Expression.constant(1, size=4),
+            )
+        ],
+        return_type="int",
+    )
+
+    fixer = ParamSignednessFixer(TypeFixerConfig(), debug=False)
+    override_map = fixer.detect_param_signedness_mismatch(analysis, program=program)
+
+    assert 0 in override_map
+    assert override_map[0].type_name == "int32_t"
+    assert override_map[0].size_bytes == 4
+    assert override_map[0].is_signed is True
+    assert override_map[0].source == "param_semantic_hint"
+
+
+def test_phase1_5_param_signedness_fix_requires_local_semantic_evidence():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint32_t", 4, False, "/typedef/uint32_t", opposite=signed_dt)
+    signed_dt.setOppositeSignednessDataType(unsigned_dt)
+    program = MockProgram(MockDataTypeManager({"uint32_t": unsigned_dt, "int32_t": signed_dt}))
+
+    analysis_left = FunctionReturnAnalysis(
+        function_name="demo_left",
+        entry_point="0x401000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "uint32_t",
+                "data_type_obj": unsigned_dt,
+                "size": 4,
+                "is_signed": False,
+                "index": 0,
+                "storage": {"kind": "register", "size": 4, "size_bits": 32},
+            }
+        ],
+        returns=[],
+        return_type="int",
+        signedness_result=SignednessResult(signedness="unsigned"),
+    )
+    analysis_right = FunctionReturnAnalysis(
+        function_name="demo_right",
+        entry_point="0x402000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "int32_t",
+                "data_type_obj": signed_dt,
+                "size": 4,
+                "is_signed": True,
+                "index": 0,
+                "storage": {"kind": "register", "size": 4, "size_bits": 32},
+            }
+        ],
+        returns=[],
+        return_type="int",
+        signedness_result=SignednessResult(signedness="signed"),
+    )
+
+    handler = PhaseHandler(TypeFixerConfig(), debug=False)
+    type_fixer = TypeFixer(program)
+    ctx = PhaseContext(
+        program1=program,
+        program2=program,
+        function_name1="demo_left",
+        function_name2="demo_right",
+        binary1_name="bin1",
+        binary2_name="bin2",
+        decompile_timeout=60,
+        save_formula=False,
+        type_fix_result=TypeFixResult(),
+        original_signature1=None,
+        original_signature2=None,
+        analysis1=analysis_left,
+        analysis2=analysis_right,
+    )
+    applied, changed1, changed2 = handler.run_phase1_5_param_signedness_fix(
+        ctx,
+        type_fixer,
+        type_fixer,
+        lambda *_args, **_kwargs: [],
+    )
+
+    assert applied is False
+    assert changed1 is False
+    assert changed2 is False
+    assert ctx.analysis1.parameters[0]["data_type"] == "uint32_t"
+
+
+def test_signature_hypothesis_rewrites_condition_and_runtime_ref_signedness():
+    signed_dt = MockDataType("int32_t", 4, True, "/typedef/int32_t")
+    unsigned_dt = MockDataType("uint32_t", 4, False, "/typedef/uint32_t", opposite=signed_dt)
+    signed_dt.setOppositeSignednessDataType(unsigned_dt)
+    program = MockProgram(MockDataTypeManager({"uint32_t": unsigned_dt, "int32_t": signed_dt}))
+    count_param = Expression.parameter("count", index=0, data_type="uint32_t", data_type_obj=unsigned_dt, size=4)
+    guard = Condition(Expression.binary_op("INT_LESS", Expression.constant(3, size=4), count_param))
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=1),
+        count_parameter_name="count",
+        count_parameter_index=0,
+        limit_expr=count_param,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        index_step=1,
+        index_scale=4,
+        signed_counter=False,
+        seed_term_count=3,
+    ).with_runtime_evidence(
+        limit_expr=count_param,
+        result_size=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(exact_count=4, terms=()),
+        ),
+        exact_return_witnesses=(),
+        guard_constraints=(guard,),
+        signed_counter=False,
+    )
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(3, size=4),
+        limit_expr=count_param,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base", index=1),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        seed_term_count=3,
+        guard_constraints=(guard,),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
+        loop_var_unit="element_index",
+    )
+    runtime_ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=1),
+        count_parameter_name="count",
+        count_parameter_index=0,
+        stride=4,
+        element_size=4,
+        result_size=4,
+        signed_counter=False,
+        loop_summary=loop_summary,
+        accumulator_proof=proof,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="demo",
+        entry_point="0x401000",
+        parameters=[
+            {
+                "name": "count",
+                "data_type": "uint32_t",
+                "data_type_obj": unsigned_dt,
+                "size": 4,
+                "is_signed": False,
+                "index": 0,
+                "storage": {"kind": "register", "size": 4, "size_bits": 32},
+            },
+            {
+                "name": "base",
+                "data_type": "int *",
+                "size": 8,
+                "is_signed": False,
+                "index": 1,
+                "storage": {"kind": "register", "size": 8, "size_bits": 64},
+            },
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401010",
+                conditions=[guard],
+                value=Expression.intrinsic(
+                    "READONLY_SUM",
+                    [Expression.parameter("base", index=1, data_type="int *", size=8), count_param],
+                    size=4,
+                    runtime_ref=runtime_ref,
+                ),
+            )
+        ],
+        return_type="int",
+    )
+
+    fixer = TypeFixer(TypeFixerConfig(), debug=False)
+    updated_analysis, _, param_changed = fixer.apply_analysis_signature_fix(
+        analysis,
+        fix_return_type=False,
+        fix_param_types=False,
+        override_param_type_names={0: "int32_t"},
+        override_param_type_specs={0: resolve_type_spec("int32_t", data_type_obj=signed_dt, program=program)},
+        phase_name="P1_SIGNEDNESS",
+        reason="signedness-based parameter hypothesis",
+    )
+
+    assert param_changed is True
+    assert updated_analysis is not None
+    assert updated_analysis.parameters[0]["is_signed"] is True
+    assert updated_analysis.returns[0].conditions[0].expression.operator == "INT_SLESS"
+    updated_runtime_ref = updated_analysis.returns[0].value.runtime_ref
+    assert updated_runtime_ref.signed_counter is True
+    assert updated_runtime_ref.loop_summary.guard_constraints[0].expression.operator == "INT_SLESS"
+    assert updated_runtime_ref.accumulator_proof.signed_counter is True
+    assert updated_runtime_ref.accumulator_proof.guard_constraints[0].expression.operator == "INT_SLESS"
 
 
 def test_equivalence_result_surfaces_effective_signatures_and_hypotheses():

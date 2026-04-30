@@ -1073,10 +1073,6 @@ class ReturnAnalyzer:
         if "control_region_return_recovery" not in analysis.analysis_notes:
             analysis.returns = self._exclusivize_return_regions(analysis.returns)
         analysis.returns = self._merge_equivalent_return_infos(analysis.returns)
-        analysis.returns = self._restore_readonly_reduction_summary_conditions(
-            analysis.returns,
-            analysis.parameters,
-        )
 
     def _strip_stack_protector_only_conditions(
         self,
@@ -1131,123 +1127,6 @@ class ReturnAnalyzer:
         if not changed:
             return return_infos
         return stripped_infos
-
-    def _restore_readonly_reduction_summary_conditions(
-        self,
-        return_infos: List[ReturnInfo],
-        parameters: Sequence[Dict],
-    ) -> List[ReturnInfo]:
-        if not return_infos:
-            return return_infos
-
-        repaired: List[ReturnInfo] = []
-        changed = False
-        for info in return_infos:
-            runtime_ref = getattr(getattr(info, "value", None), "runtime_ref", None)
-            if not isinstance(runtime_ref, ReadonlyReductionRef):
-                repaired.append(info)
-                continue
-
-            canonical_conditions = self._readonly_reduction_positive_conditions_from_ref(
-                runtime_ref,
-                parameters,
-            )
-            if not canonical_conditions:
-                repaired.append(info)
-                continue
-            simplified = ConditionSimplifier.simplify_conditions_object_centric(canonical_conditions)
-            if (
-                ConditionSimplifier.object_centric_conditions_signature(info.conditions or [])
-                != ConditionSimplifier.object_centric_conditions_signature(simplified)
-            ):
-                changed = True
-                repaired.append(
-                    ReturnInfo(
-                        address=info.address,
-                        value=info.value,
-                        conditions=list(simplified),
-                        branch_index=info.branch_index,
-                        pcode_identity=info.pcode_identity,
-                        pcode_order=info.pcode_order,
-                        pcode_time=info.pcode_time,
-                    )
-                )
-                continue
-            repaired.append(info)
-
-        if changed and self.debug:
-            self._debug_print("Restored canonical positive-region guards for READONLY_SUM summaries")
-        return repaired
-
-    def _readonly_reduction_positive_conditions_from_ref(
-        self,
-        runtime_ref: ReadonlyReductionRef,
-        parameters: Sequence[Dict],
-    ) -> List[Condition]:
-        pointer_expr = self._readonly_reduction_parameter_expression(
-            parameters,
-            index=runtime_ref.pointer_base_ref.parameter_index,
-            name=runtime_ref.pointer_base_ref.parameter_name,
-            default_size=8,
-        )
-        count_expr = self._readonly_reduction_parameter_expression(
-            parameters,
-            index=runtime_ref.count_parameter_index,
-            name=runtime_ref.count_parameter_name,
-            default_size=4,
-        )
-        if pointer_expr is None or count_expr is None:
-            return []
-        return [
-            Condition(
-                Expression.binary_op(
-                    "INT_NOTEQUAL",
-                    pointer_expr,
-                    Expression.constant(0, pointer_expr.size or 8),
-                ),
-                False,
-            ),
-            Condition(
-                Expression.binary_op(
-                    "INT_SLESS",
-                    Expression.constant(0, count_expr.size or 4),
-                    count_expr,
-                ),
-                False,
-            ),
-        ]
-
-    def _readonly_reduction_parameter_expression(
-        self,
-        parameters: Sequence[Dict],
-        *,
-        index: Optional[int],
-        name: Optional[str],
-        default_size: int,
-    ) -> Optional[Expression]:
-        for param in parameters or []:
-            param_index = param.get("index")
-            if index is not None and param_index is not None and int(param_index) == int(index):
-                return Expression.parameter(
-                    str(param.get("name") or name or "param"),
-                    index=int(param_index),
-                    data_type=param.get("data_type"),
-                    data_type_obj=param.get("data_type_obj"),
-                    size=int(param.get("size", default_size) or default_size),
-                    storage_info=param.get("storage_info"),
-                )
-            if name and param.get("name") == name:
-                return Expression.parameter(
-                    name,
-                    index=int(param.get("index", 0) or 0),
-                    data_type=param.get("data_type"),
-                    data_type_obj=param.get("data_type_obj"),
-                    size=int(param.get("size", default_size) or default_size),
-                    storage_info=param.get("storage_info"),
-                )
-        if name is None:
-            return None
-        return Expression.parameter(name, index=int(index or 0), size=default_size)
 
     def _synchronize_parameters_with_referenced_parameter_expressions(
         self,
@@ -8987,6 +8866,51 @@ class ReturnAnalyzer:
             self._debug_print(self._last_function_lookup_error)
             return None
         return self.analyze_function(function, timeout)
+
+    def refresh_structural_recurrence_summary(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+        timeout: int = 60,
+    ) -> Optional[FunctionReturnAnalysis]:
+        """既存解析ビューに対して structural recurrence summary を再構築する。"""
+        if analysis is None or not analysis.returns:
+            return analysis
+
+        function = self._find_function_by_name(analysis.function_name)
+        if function is None:
+            return analysis
+
+        decompiler = self._get_decompiler()
+        results = decompiler.decompileFunction(function, timeout, None)
+        if not results.decompileCompleted():
+            self._debug_print(
+                f"Structural summary refresh decompilation failed for '{analysis.function_name}'"
+            )
+            return analysis
+
+        high_function = results.getHighFunction()
+        if high_function is None:
+            self._debug_print(
+                f"Structural summary refresh HighFunction is None for '{analysis.function_name}'"
+            )
+            return analysis
+
+        tracer = self._make_tracer(high_function)
+        summary = self._apply_structural_recurrence_summary(
+            function,
+            high_function,
+            analysis,
+            tracer,
+        )
+        if summary is None:
+            return analysis
+
+        analysis.returns = summary[0]
+        if summary[1] not in analysis.analysis_notes:
+            analysis.analysis_notes.append(summary[1])
+        self._normalize_return_partition(analysis)
+        self._mark_incomplete_control_flow(analysis)
+        return analysis
 
     def get_last_function_lookup_error(self) -> Optional[str]:
         return self._last_function_lookup_error

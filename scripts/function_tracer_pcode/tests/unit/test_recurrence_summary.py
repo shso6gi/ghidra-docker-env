@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from dataclasses import replace
 from typing import Optional
 
 from scripts.function_tracer_pcode.analysis.recurrence_summary import (
@@ -7,6 +8,7 @@ from scripts.function_tracer_pcode.analysis.recurrence_summary import (
     CountedLoopGuard,
     CountedLoopInduction,
     CountedLoopUpdateCase,
+    ReadonlyRoundedCountCandidate,
     ResidueLoopCase,
     StructuralRecurrenceSummarizer,
 )
@@ -26,10 +28,13 @@ from scripts.function_tracer_pcode.model import (
     CountedLoopSummaryRef,
     Expression,
     ExpressionType,
+    FunctionReturnAnalysis,
+    LoopTermDescriptorRef,
     LoopBodyEffectRef,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LocationBaseRef,
+    PcodeOpRef,
     ReductionAccumulatorProof,
     ReadonlyReductionTermRef,
     ReturnInfo,
@@ -61,6 +66,9 @@ def _readonly_accumulator_proof(
     seed_terms=(),
     lane_terms=(),
     witnesses=(),
+    return_op_refs=(),
+    return_value_op_refs=(),
+    return_region_value_proven: bool = True,
 ) -> ReductionAccumulatorProof:
     return ReductionAccumulatorProof(
         reduction_kind="memory_sum",
@@ -78,6 +86,9 @@ def _readonly_accumulator_proof(
         seed_terms=tuple(seed_terms or ()),
         lane_terms=tuple(lane_terms or ()),
         loop_body_witnesses=tuple(witnesses or ()),
+        return_op_refs=tuple(return_op_refs or ()),
+        return_value_op_refs=tuple(return_value_op_refs or ()),
+        return_region_value_proven=bool(return_region_value_proven),
     )
 
 
@@ -324,6 +335,23 @@ def test_expression_equivalence_query_coerces_mixed_width_values():
 
     assert query is not None
     assert "(assert (not (= ((_ zero_extend 96) (_ bv0 32)) ((_ zero_extend 96) (_ bv0 32)))))" in query
+
+
+def test_expression_equivalence_query_declares_memory_arrays_for_readonly_witness_proof():
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    left = Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4))
+    right = Expression.binary_op("INT_ADD", _mem("param_1", 4), _mem("param_1", 0))
+
+    query = summarizer._build_expression_equivalence_query(
+        left,
+        right,
+        [],
+        [{"name": "param_1", "index": 0, "size": 8, "data_type": "int *"}],
+    )
+
+    assert query is not None
+    assert "(set-logic QF_AUFBV)" in query
+    assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in query
 
 
 def test_zero_base_canonicalization_handles_wide_zero_expression():
@@ -3539,7 +3567,7 @@ def test_readonly_reduction_summary_records_non_unit_step_prefix_seed_terms():
     assert loop_summary_method_b_key(loop_summary) == loop_summary_method_b_key(full_summary)
 
 
-def test_readonly_reduction_detects_vector_pointer_loop_with_ptradd_tail():
+def test_readonly_reduction_detects_vector_pointer_loop_with_ptradd_tail(monkeypatch):
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
         {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
@@ -3663,8 +3691,27 @@ def test_readonly_reduction_detects_vector_pointer_loop_with_ptradd_tail():
     tracer = _FakeTracer("unused", _const(0))
     tracer.trace_varnode = lambda varnode, *args, **kwargs: getattr(varnode, "_expr", None)
     summarizer = StructuralRecurrenceSummarizer(tracer, debug=False)
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_unit_term_positive_return_refs",
+        lambda *_args, **_kwargs: (PcodeOpRef(address_offset=0x1000, seq_time=10, mnemonic="RETURN"),),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lane_return_refs",
+        lambda *_args, **_kwargs: (
+            (PcodeOpRef(address_offset=0x1000, seq_time=10, mnemonic="RETURN"),),
+            (PcodeOpRef(address_offset=0x1000, seq_time=9, mnemonic="INT_ADD"),),
+        ),
+    )
 
-    proof = summarizer._detect_readonly_sum_accumulator_proof(high_function, analysis, params[0], params[1])
+    proof = summarizer._detect_readonly_sum_accumulator_proof(
+        high_function,
+        analysis,
+        params[0],
+        params[1],
+        counter_signed=True,
+    )
 
     assert proof is not None
     assert proof.stride == 4
@@ -3830,6 +3877,361 @@ def test_readonly_exact_return_witness_rejects_bias_width_mismatch():
     )
 
     assert witnesses == ()
+
+
+def test_readonly_exact_return_witness_canonicalizes_proven_vectorized_prefix_completion(monkeypatch):
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    value = Expression.binary_op(
+        "INT_ADD",
+        _mem("param_1", 12),
+        Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 0),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 4),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 8),
+                    _mem("param_1", 16),
+                ),
+            ),
+        ),
+    )
+    ret = ReturnInfo(
+        address="0x2000",
+        value=value,
+        conditions=[_cond("INT_EQUAL", count_expr, _const(5))],
+    )
+    analysis = create_mock_analysis(
+        "readonly_vector_prefix_completion",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[ret],
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", Expression.unknown("unknown")), debug=False)
+
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_return_terms_and_bias",
+        lambda *_args, **_kwargs: (
+            (
+                ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=16, access_size=4),
+            ),
+            0,
+        ),
+    )
+
+    witnesses = summarizer._extract_readonly_reduction_exact_witnesses(
+        analysis,
+        pointer_param,
+        count_param,
+        [ret],
+        proof,
+    )
+
+    assert len(witnesses) == 1
+    assert witnesses[0].exact_count == 5
+    assert tuple(term.byte_offset for term in witnesses[0].terms) == (0, 4, 8, 12, 16)
+
+
+def test_readonly_exact_return_witness_accepts_self_consistent_scalar_prefix_when_proof_geometry_differs():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=16,
+        element_size=8,
+        result_size=4,
+        start_offset=12,
+        start_index=3,
+        index_scale=16,
+    )
+    ret = ReturnInfo(
+        address="0x2004",
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 0),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 4),
+                _mem("param_1", 8),
+            ),
+        ),
+        conditions=[_cond("INT_EQUAL", count_expr, _const(3))],
+    )
+    analysis = create_mock_analysis(
+        "readonly_scalar_prefix_geometry_mismatch",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[ret],
+    )
+
+    witnesses = summarizer._extract_readonly_reduction_exact_witnesses(
+        analysis,
+        pointer_param,
+        count_param,
+        [ret],
+        proof,
+    )
+
+    assert len(witnesses) == 1
+    assert witnesses[0].exact_count == 3
+    assert tuple(term.byte_offset for term in witnesses[0].terms) == (0, 4, 8)
+
+
+def test_reduction_accumulator_proof_normalizes_scalar_prefix_from_exact_witnesses():
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=16,
+        element_size=8,
+        result_size=4,
+        start_offset=12,
+        start_index=3,
+        index_scale=16,
+    )
+    exact_witnesses = tuple(
+        ReadonlyReductionWitness(
+            exact_count=count_value,
+            terms=tuple(
+                ReadonlyReductionTermRef(byte_offset=index * 4, access_size=4)
+                for index in range(count_value)
+            ),
+        )
+        for count_value in (1, 2, 3, 5, 6)
+    )
+
+    normalized = proof.with_runtime_evidence(
+        limit_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=exact_witnesses,
+        guard_constraints=(),
+        signed_counter=True,
+    )
+
+    assert normalized.stride == 4
+    assert normalized.element_size == 4
+    assert normalized.index_scale == 4
+    assert normalized.start_offset == 0
+    assert normalized.start_index == 0
+
+
+def test_readonly_reduction_candidate_normalizes_until_true_fixpoint(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    broad_ret = ReturnInfo(
+        address="0x1400",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        value=Expression.unknown("phi_circular"),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_fixpoint_normalization_like",
+        entry_point="0x1400",
+        parameters=[pointer_param, count_param],
+        returns=[broad_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=16,
+        start_index=4,
+    )
+
+    def fake_with_runtime_evidence(
+        self,
+        *,
+        limit_expr,
+        result_size,
+        loop_body_witnesses,
+        exact_return_witnesses,
+        guard_constraints,
+        signed_counter,
+    ):
+        next_start = max(0, int(self.start_index) - 1)
+        return replace(
+            self,
+            limit_expr=limit_expr,
+            result_size=result_size,
+            loop_body_witnesses=tuple(loop_body_witnesses),
+            exact_return_witnesses=tuple(exact_return_witnesses),
+            guard_constraints=tuple(guard_constraints),
+            signed_counter=bool(signed_counter),
+            start_index=next_start,
+            start_offset=next_start * 4,
+        )
+
+    monkeypatch.setattr(ReductionAccumulatorProof, "with_runtime_evidence", fake_with_runtime_evidence)
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda _analysis, _pointer_param, _count_param, loop_start_index=0, signed_counter=True: [
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(int(loop_start_index)), count_expr),
+        ],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [broad_ret],
+    )
+
+    normalized = summarizer._normalize_readonly_reduction_candidate(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        positive_conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(4), count_expr),
+        ],
+        counter_signed=True,
+        accumulator_proof=proof,
+        overlapping_positive_returns=[broad_ret],
+    )
+
+    assert normalized is not None
+    normalized_proof, normalized_conditions, normalized_returns, *_rest = normalized
+    assert normalized_proof.start_index == 0
+    assert [condition.to_string() for condition in normalized_conditions] == [
+        "(param_1 != 0)",
+        "(0 < param_2)",
+    ]
+    assert normalized_returns == [broad_ret]
+
+
+def test_readonly_reduction_candidate_declines_non_convergent_normalization(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    broad_ret = ReturnInfo(
+        address="0x1410",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        value=Expression.unknown("phi_circular"),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_fixpoint_cycle_like",
+        entry_point="0x1410",
+        parameters=[pointer_param, count_param],
+        returns=[broad_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=8,
+        start_index=2,
+    )
+
+    def fake_with_runtime_evidence(
+        self,
+        *,
+        limit_expr,
+        result_size,
+        loop_body_witnesses,
+        exact_return_witnesses,
+        guard_constraints,
+        signed_counter,
+    ):
+        next_start = 1 if int(self.start_index) == 2 else 2
+        return replace(
+            self,
+            limit_expr=limit_expr,
+            result_size=result_size,
+            loop_body_witnesses=tuple(loop_body_witnesses),
+            exact_return_witnesses=tuple(exact_return_witnesses),
+            guard_constraints=tuple(guard_constraints),
+            signed_counter=bool(signed_counter),
+            start_index=next_start,
+            start_offset=next_start * 4,
+        )
+
+    monkeypatch.setattr(ReductionAccumulatorProof, "with_runtime_evidence", fake_with_runtime_evidence)
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda _analysis, _pointer_param, _count_param, loop_start_index=0, signed_counter=True: [
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(int(loop_start_index)), count_expr),
+        ],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [broad_ret],
+    )
+
+    assert summarizer._normalize_readonly_reduction_candidate(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        positive_conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(2), count_expr),
+        ],
+        counter_signed=True,
+        accumulator_proof=proof,
+        overlapping_positive_returns=[broad_ret],
+    ) is None
 
 
 def test_readonly_addend_proof_rejects_signed_extension_behind_copy():
@@ -4377,7 +4779,556 @@ def test_round_down_candidate_uses_counter_semantic_width_through_zext():
     assert summarizer._readonly_round_down_candidates(
         [zext_op, round_op],
         {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
-    ) == [(rounded_vn, 8)]
+    ) == [ReadonlyRoundedCountCandidate(rounded_vn, 8, 0)]
+
+
+def test_round_down_candidate_tracks_peeled_prefix_through_count_minus_constant():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    zext_vn = _FakeVarnode("count_zext", size=8, expr=Expression.unary_op("INT_ZEXT", count_expr))
+    zext_op = _FakePcodeOp("INT_ZEXT", [count_vn], zext_vn)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    peeled_vn = _FakeVarnode(
+        "peeled_count",
+        size=8,
+        expr=Expression.binary_op(
+            "INT_SUB",
+            Expression.unary_op("INT_ZEXT", count_expr),
+            Expression.constant(3, size=8),
+        ),
+    )
+    sub_op = _FakePcodeOp("INT_SUB", [zext_vn, three_vn], peeled_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    round_op = _FakePcodeOp("INT_AND", [peeled_vn, mask_vn], rounded_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._readonly_round_down_candidates(
+        [zext_op, sub_op, round_op],
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+    ) == [ReadonlyRoundedCountCandidate(rounded_vn, 8, 3)]
+
+
+def test_tail_start_from_peeled_rounded_count_accepts_object_offset():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    tail_start_vn = _FakeVarnode("tail_start", size=8)
+    tail_start_op = _FakePcodeOp("PTRADD", [pointer_vn, rounded_vn, four_vn], tail_start_vn)
+    twelve_vn = _FakeVarnode("twelve", size=8, expr=Expression.constant(12, size=8))
+    peeled_tail_start_vn = _FakeVarnode("peeled_tail_start", size=8)
+    add_op = _FakePcodeOp("INT_ADD", [tail_start_vn, twelve_vn], peeled_tail_start_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._tail_start_varnodes_from_rounded_count(
+        [tail_start_op, add_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        rounded_vn,
+        element_size=4,
+        start_offset=12,
+    ) == (peeled_tail_start_vn,)
+
+
+def test_tail_start_from_peeled_rounded_count_accepts_low_bit_or_index():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    peeled_vn = _FakeVarnode("peeled", size=8)
+    peeled_op = _FakePcodeOp("INT_SUB", [count_vn, three_vn], peeled_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFFFFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    rounded_op = _FakePcodeOp("INT_AND", [peeled_vn, mask_vn], rounded_vn)
+    rounded_or_three = _FakeVarnode("rounded_or_three", size=8)
+    or_op = _FakePcodeOp("INT_OR", [rounded_vn, three_vn], rounded_or_three)
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    tail_start_vn = _FakeVarnode("tail_start", size=8)
+    tail_start_op = _FakePcodeOp("PTRADD", [pointer_vn, rounded_or_three, four_vn], tail_start_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._tail_start_varnodes_from_rounded_count(
+        [peeled_op, rounded_op, or_op, tail_start_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        rounded_vn,
+        element_size=4,
+        start_offset=12,
+    ) == (tail_start_vn,)
+
+
+def test_tail_start_from_peeled_rounded_count_accepts_scaled_low_bit_or_offset():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    peeled_vn = _FakeVarnode("peeled", size=8)
+    peeled_op = _FakePcodeOp("INT_SUB", [count_vn, three_vn], peeled_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFFFFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    rounded_op = _FakePcodeOp("INT_AND", [peeled_vn, mask_vn], rounded_vn)
+    rounded_or_three = _FakeVarnode("rounded_or_three", size=8)
+    or_op = _FakePcodeOp("INT_OR", [rounded_vn, three_vn], rounded_or_three)
+    two_vn = _FakeVarnode("two", size=8, expr=Expression.constant(2, size=8))
+    scaled_vn = _FakeVarnode("scaled", size=8)
+    scale_op = _FakePcodeOp("INT_LEFT", [rounded_or_three, two_vn], scaled_vn)
+    tail_start_vn = _FakeVarnode("tail_start", size=8)
+    tail_start_op = _FakePcodeOp("INT_ADD", [pointer_vn, scaled_vn], tail_start_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._tail_start_varnodes_from_rounded_count(
+        [peeled_op, rounded_op, or_op, scale_op, tail_start_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        rounded_vn,
+        element_size=4,
+        start_offset=12,
+    ) == (tail_start_vn,)
+
+
+def test_tail_start_from_peeled_rounded_count_accepts_tail_index_phi():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    peeled_vn = _FakeVarnode("peeled", size=8)
+    peeled_op = _FakePcodeOp("INT_SUB", [count_vn, three_vn], peeled_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFFFFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    rounded_op = _FakePcodeOp("INT_AND", [peeled_vn, mask_vn], rounded_vn)
+    rounded_or_three = _FakeVarnode("rounded_or_three", size=8)
+    or_op = _FakePcodeOp("INT_OR", [rounded_vn, three_vn], rounded_or_three)
+    tail_index_phi = _FakeVarnode("tail_index_phi", size=8)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [three_vn, rounded_or_three], tail_index_phi)
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    tail_start_vn = _FakeVarnode("tail_start", size=8)
+    tail_start_op = _FakePcodeOp("PTRADD", [pointer_vn, tail_index_phi, four_vn], tail_start_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._tail_start_varnodes_from_rounded_count(
+        [peeled_op, rounded_op, or_op, phi_op, tail_start_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        rounded_vn,
+        element_size=4,
+        start_offset=12,
+    ) == (tail_start_vn,)
+
+
+def test_rounded_count_source_accepts_large_peel_offsets():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=8, expr=count_expr)
+    large_peeled = 257
+    peeled_sub_vn = _FakeVarnode("peeled", size=8)
+    peeled_sub_op = _FakePcodeOp(
+        "INT_SUB",
+        [count_vn, _FakeVarnode("large_const", size=8, expr=Expression.constant(large_peeled, size=8))],
+        peeled_sub_vn,
+    )
+    large_added = -257
+    peeled_add_vn = _FakeVarnode("peeled_add", size=8)
+    peeled_add_op = _FakePcodeOp(
+        "INT_ADD",
+        [count_vn, _FakeVarnode("large_neg", size=8, expr=Expression.constant(large_added, size=8))],
+        peeled_add_vn,
+    )
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._rounded_count_source(
+        peeled_sub_vn,
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+    ) == (count_vn, large_peeled)
+    assert summarizer._rounded_count_source(
+        peeled_add_vn,
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+    ) == (count_vn, abs(large_added))
+
+
+def test_count_minus_rounded_accepts_tail_index_phi():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    peeled_vn = _FakeVarnode("peeled", size=8)
+    peeled_op = _FakePcodeOp("INT_SUB", [count_vn, three_vn], peeled_vn)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(0xFFFFFFFFFFFFFFF8, size=8))
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    rounded_op = _FakePcodeOp("INT_AND", [peeled_vn, mask_vn], rounded_vn)
+    rounded_or_three = _FakeVarnode("rounded_or_three", size=8)
+    or_op = _FakePcodeOp("INT_OR", [rounded_vn, three_vn], rounded_or_three)
+    tail_index_phi = _FakeVarnode("tail_index_phi", size=8)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [three_vn, rounded_or_three], tail_index_phi)
+    remaining_vn = _FakeVarnode("remaining", size=8)
+    remaining_op = _FakePcodeOp("INT_SUB", [count_vn, tail_index_phi], remaining_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._varnode_is_count_minus_rounded(
+        remaining_vn,
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4},
+        rounded_vn,
+        start_index=3,
+    )
+
+
+def test_varnode_is_base_plus_scaled_counter_rejects_unlinked_tail_start_constant():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    tail_start_vn = _FakeVarnode("tail_start", size=8)
+    _FakePcodeOp("PTRADD", [pointer_vn, three_vn, four_vn], tail_start_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._varnode_is_base_plus_scaled_counter(
+        tail_start_vn,
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        rounded_vn,
+        element_size=4,
+        byte_offset=12,
+    ) is False
+
+
+def test_counter_low_bits_clear_allows_large_or_delta_without_heuristic_cap():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=8, expr=count_expr)
+    clear_bit = 1 << 8
+    mask_value = (1 << 64) - 1 - clear_bit
+    and_op = _FakePcodeOp(
+        "INT_AND",
+        [count_vn, _FakeVarnode("mask", size=8, expr=Expression.constant(mask_value, size=8))],
+        _FakeVarnode("rounded", size=8),
+    )
+    rounded_vn = and_op.getOutput()
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._counter_low_bits_clear_for_or_delta(rounded_vn, 256) is True
+
+
+def test_counter_low_bits_clear_rejects_high_bit_or_delta_with_zext_counter():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    count_vn = _FakeVarnode("param_2", size=4, expr=count_expr)
+    zext_vn = _FakeVarnode("param_2_zext", size=8, expr=Expression.unary_op("INT_ZEXT", count_expr))
+    zext_op = _FakePcodeOp("INT_ZEXT", [count_vn], zext_vn)
+    clear_bit = 1 << 40
+    mask_value = (1 << 64) - 1 - (clear_bit)
+    mask_vn = _FakeVarnode("mask", size=8, expr=Expression.constant(mask_value, size=8))
+    and_vn = _FakeVarnode("rounded", size=8)
+    _FakePcodeOp("INT_AND", [zext_vn, mask_vn], and_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._counter_low_bits_clear_for_or_delta(and_vn, clear_bit) is False
+
+
+def test_vectorized_readonly_prefix_proof_records_seed_term_count(monkeypatch):
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = create_mock_analysis(
+        "sum_vectorized_seed_term_count",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                pcode_time=10,
+                value=_const(0),
+                conditions=[
+                    _cond(
+                        "INT_SLESS",
+                        Expression.constant(0, size=4),
+                        Expression.parameter("param_2", index=1, data_type="uint", size=4),
+                    )
+                ],
+            )
+        ],
+    )
+
+    large_start_index = 128_000
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_round_down_candidates",
+        lambda *_args, **_kwargs: [ReadonlyRoundedCountCandidate(rounded_vn, 8, large_start_index)],
+    )
+    vector_phi = _FakeVarnode("vector_phi", size=8)
+    monkeypatch.setattr(
+        summarizer,
+        "_match_vector_prefix_pointer",
+        lambda *_args, **_kwargs: (vector_phi, 0, 0),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_cover_block",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_have_unit_terms_in_positive_return",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_contribute_additively_to_return",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_unit_term_positive_return_refs",
+        lambda *_args, **_kwargs: (PcodeOpRef(address_offset=0x1000, seq_time=10, mnemonic="RETURN"),),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lane_return_refs",
+        lambda *_args, **_kwargs: (
+            (PcodeOpRef(address_offset=0x1000, seq_time=10, mnemonic="RETURN"),),
+            (PcodeOpRef(address_offset=0x1000, seq_time=9, mnemonic="INT_ADD"),),
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_vector_countdown_loop",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_vector_loop_bound_to_rounded_count",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_scalar_tail_from_rounded_count",
+        lambda *_args, **_kwargs: True,
+    )
+
+    proof = summarizer._detect_vectorized_readonly_prefix_sum_accumulator_proof(
+        [],
+        pointer_param,
+        count_param,
+        LocationBaseRef.parameter("param_1", index=0),
+        Expression.parameter("param_2", index=1, data_type="uint", size=4),
+        analysis,
+        counter_signed=False,
+    )
+
+    assert proof is not None
+    assert proof.seed_terms == ()
+    assert proof.seed_term_count == large_start_index
+    assert proof.start_index == large_start_index
+    assert proof.start_offset == large_start_index * 4
+    assert proof.return_region_value_proven is True
+    assert proof.return_value_op_refs
+    assert proof.source == "vectorized_readonly_prefix_sum"
+    assert proof.seed_terms_for_count_value(3) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+    )
+    assert proof.seed_terms_for_count_value(large_start_index + 1) == ()
+
+
+def test_vectorized_readonly_prefix_proof_accepts_def_use_return_site_proof_without_exact_witness(monkeypatch):
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    analysis = create_mock_analysis(
+        "sum_vectorized_def_use_region_proof",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                pcode_time=20,
+                value=Expression.unknown("phi_circular"),
+                conditions=[
+                    _cond(
+                        "INT_NOTEQUAL",
+                        Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                        Expression.constant(0, size=8),
+                    ),
+                    _cond(
+                        "INT_SLESS",
+                        Expression.constant(0, size=4),
+                        Expression.parameter("param_2", index=1, data_type="int", size=4),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rounded_vn = _FakeVarnode("rounded", size=8)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_round_down_candidates",
+        lambda *_args, **_kwargs: [ReadonlyRoundedCountCandidate(rounded_vn, 8, 3)],
+    )
+    vector_phi = _FakeVarnode("vector_phi", size=8)
+    monkeypatch.setattr(
+        summarizer,
+        "_match_vector_prefix_pointer",
+        lambda *_args, **_kwargs: (vector_phi, 0, 0),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_cover_block",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_have_unit_terms_in_positive_return",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lanes_contribute_additively_to_return",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_unit_term_positive_return_refs",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_vector_prefix_lane_return_refs",
+        lambda *_args, **_kwargs: (
+            (PcodeOpRef(address_offset=0x2000, seq_time=20, mnemonic="RETURN"),),
+            (PcodeOpRef(address_offset=0x2000, seq_time=19, mnemonic="INT_ADD"),),
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_vector_countdown_loop",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_vector_loop_bound_to_rounded_count",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_has_scalar_tail_from_rounded_count",
+        lambda *_args, **_kwargs: True,
+    )
+
+    proof = summarizer._detect_vectorized_readonly_prefix_sum_accumulator_proof(
+        [],
+        pointer_param,
+        count_param,
+        LocationBaseRef.parameter("param_1", index=0),
+        Expression.parameter("param_2", index=1, data_type="int", size=4),
+        analysis,
+        counter_signed=True,
+    )
+
+    assert proof is not None
+    assert proof.return_region_value_proven is True
+    assert proof.return_op_refs == (PcodeOpRef(address_offset=0x2000, seq_time=20, mnemonic="RETURN"),)
+    assert proof.return_value_op_refs == (PcodeOpRef(address_offset=0x2000, seq_time=19, mnemonic="INT_ADD"),)
+    assert proof.start_index == 3
+    assert proof.start_offset == 12
+    assert proof.source == "vectorized_readonly_prefix_sum"
+
+
+def test_pointer_progression_phi_tracks_peeled_pointer_seed_offset():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    init_vn = _FakeVarnode("init", size=8)
+    init_op = _FakePcodeOp("PTRADD", [pointer_vn, three_vn, four_vn], init_vn)
+    phi_vn = _FakeVarnode("ptr_phi", size=8, high=_FakeHighVar("ptr_phi"))
+    next_vn = _FakeVarnode("next", size=8)
+    next_op = _FakePcodeOp("PTRADD", [phi_vn, _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8)), four_vn], next_vn)
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert init_op.getOutput() is init_vn
+    assert next_op.getOutput() is next_vn
+    assert summarizer._match_pointer_progression_phi(
+        phi_op,
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+    ) == {
+        "phi_op": phi_op,
+        "phi_output": phi_vn,
+        "stride": 4,
+        "start_offset": 12,
+        "start_index": 3,
+        "index_step": 1,
+        "index_scale": 4,
+    }
+
+
+def test_pointer_progression_phi_tracks_peeled_pointer_seed_offset_with_same_high():
+    pointer_high = _FakeHighVar("param_1")
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr, high=pointer_high)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    init_vn = _FakeVarnode("init", size=8, high=pointer_high)
+    init_op = _FakePcodeOp("PTRADD", [pointer_vn, three_vn, four_vn], init_vn)
+    phi_vn = _FakeVarnode("ptr_phi", size=8, high=_FakeHighVar("ptr_phi"))
+    next_vn = _FakeVarnode("next", size=8)
+    next_op = _FakePcodeOp(
+        "PTRADD",
+        [phi_vn, _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8)), four_vn],
+        next_vn,
+    )
+    phi_op = _FakePcodeOp("MULTIEQUAL", [init_vn, next_vn], phi_vn)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert init_op.getOutput() is init_vn
+    assert next_op.getOutput() is next_vn
+    assert summarizer._match_pointer_progression_phi(
+        phi_op,
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+    ) == {
+        "phi_op": phi_op,
+        "phi_output": phi_vn,
+        "stride": 4,
+        "start_offset": 12,
+        "start_index": 3,
+        "index_step": 1,
+        "index_scale": 4,
+    }
+
+
+def test_vector_prefix_pointer_requires_peeled_seed_offset_object_link():
+    pointer_expr = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    pointer_vn = _FakeVarnode("param_1", size=8, expr=pointer_expr)
+    three_vn = _FakeVarnode("three", size=8, expr=Expression.constant(3, size=8))
+    four_vn = _FakeVarnode("four", size=8, expr=Expression.constant(4, size=8))
+    seed_vn = _FakeVarnode("seed", size=8)
+    seed_op = _FakePcodeOp("PTRADD", [pointer_vn, three_vn, four_vn], seed_vn)
+    vector_phi = _FakeVarnode("vector_phi", size=8, high=_FakeHighVar("vector_phi"))
+    vector_next = _FakeVarnode("vector_next", size=8)
+    vector_step_op = _FakePcodeOp("PTRADD", [vector_phi, _FakeVarnode("eight", size=8, expr=Expression.constant(8, size=8)), four_vn], vector_next)
+    vector_phi_op = _FakePcodeOp("MULTIEQUAL", [seed_vn, vector_next], vector_phi)
+    ram_space = _FakeVarnode("ram", size=8, expr=Expression.constant(0, size=8))
+    lane0 = _FakeVarnode("lane0", size=4)
+    lane1_addr = _FakeVarnode("lane1_addr", size=8)
+    lane1_addr_op = _FakePcodeOp("PTRADD", [vector_phi, _FakeVarnode("one", size=8, expr=Expression.constant(1, size=8)), four_vn], lane1_addr)
+    lane1 = _FakeVarnode("lane1", size=4)
+    load0_op = _FakePcodeOp("LOAD", [ram_space, vector_phi], lane0)
+    load1_op = _FakePcodeOp("LOAD", [ram_space, lane1_addr], lane1)
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._match_vector_prefix_pointer(
+        [seed_op, vector_step_op, vector_phi_op, lane1_addr_op, load0_op, load1_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        vector_stride=32,
+        element_size=4,
+        expected_start_offset=16,
+    ) is None
+    assert summarizer._match_vector_prefix_pointer(
+        [seed_op, vector_step_op, vector_phi_op, lane1_addr_op, load0_op, load1_op],
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        vector_stride=32,
+        element_size=4,
+        expected_start_offset=12,
+    ) == (vector_phi, 0, 12)
 
 
 def test_readonly_vector_lane_summary_enters_scalar_iteration_space_only_with_witnesses():
@@ -4522,7 +5473,16 @@ def test_readonly_reduction_summary_passes_positive_region_to_accumulator_proof(
         lambda _analysis, _high_function: (pointer_param, count_param),
     )
 
-    def capture_accumulator_proof(_high_function, _analysis, _pointer_param, _count_param, *, positive_conditions=()):
+    def capture_accumulator_proof(
+        _high_function,
+        _analysis,
+        _pointer_param,
+        _count_param,
+        *,
+        counter_signed,
+        positive_conditions=(),
+    ):
+        captured["counter_signed"] = counter_signed
         captured["positive_conditions"] = tuple(positive_conditions)
         return None
 
@@ -4538,6 +5498,75 @@ def test_readonly_reduction_summary_passes_positive_region_to_accumulator_proof(
         analysis,
         positive_conditions=captured["positive_conditions"],
     ) == 8
+
+
+def test_readonly_sum_detection_prefers_vectorized_before_scalar_phi_match(monkeypatch):
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = create_mock_analysis(
+        "sum_vectorized_primacy",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_const(0),
+                conditions=[
+                    _cond(
+                        "INT_SLESS",
+                        Expression.constant(0, size=4),
+                        Expression.parameter("param_2", index=1, data_type="uint", size=4),
+                    ),
+                ],
+            ),
+        ],
+    )
+    high_function = _FakeHighFunction([])
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    invocation = {"vectorized": 0, "scalar": 0}
+
+    expected = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="uint", size=4),
+        stride=4,
+        element_size=4,
+    )
+
+    def capture_vectorized(*_args, **_kwargs):
+        invocation["vectorized"] += 1
+        return expected
+
+    def capture_scalar(*_args, **_kwargs):
+        invocation["scalar"] += 1
+        return expected
+
+    monkeypatch.setattr(
+        summarizer,
+        "_analysis_mentions_parameter_in_conditions",
+        lambda _analysis, _param_name: True,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_vectorized_readonly_prefix_sum_accumulator_proof",
+        capture_vectorized,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_match_accumulator_phi",
+        capture_scalar,
+    )
+
+    actual = summarizer._detect_readonly_sum_accumulator_proof(
+        high_function,
+        analysis,
+        pointer_param,
+        count_param,
+        counter_signed=True,
+    )
+
+    assert actual == expected
+    assert invocation["vectorized"] == 1
+    assert invocation["scalar"] == 0
 
 
 def test_structural_recurrence_summarizer_infers_pointer_parameter_object_centrically():
@@ -5006,7 +6035,7 @@ def test_structural_recurrence_summarizer_merges_exact_and_synthesized_semantic_
     assert [w.exact_count for w in positive_case.value.runtime_ref.semantic_witnesses] == [1, 2, 3, 4]
 
 
-def test_return_analyzer_restores_canonical_readonly_summary_guards():
+def test_return_analyzer_normalization_does_not_widen_readonly_summary_domain():
     analyzer = ReturnAnalyzer(program=None, debug=False)
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
@@ -5047,9 +6076,1985 @@ def test_return_analyzer_restores_canonical_readonly_summary_guards():
         ],
     )
 
-    repaired = analyzer._restore_readonly_reduction_summary_conditions([corrupted], params)
+    analysis = create_mock_analysis(
+        "readonly_partition_preserved_basic",
+        return_type="int",
+        parameters=params,
+        returns=[corrupted],
+    )
 
-    assert [cond.to_string() for cond in repaired[0].conditions] == ["(param_1 != 0)", "(0 < param_2)"]
+    analyzer._normalize_return_partition(analysis)
+
+    normalized_conditions = [cond.to_string() for cond in analysis.returns[0].conditions]
+
+    assert normalized_conditions == ["(0 < param_2)"]
+    assert "(3 < param_2)" not in normalized_conditions
+
+
+def test_return_analyzer_normalization_keeps_existing_readonly_lower_bound():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_ref = LocationBaseRef.parameter("param_1", index=0)
+    count_expr = _param("param_2", size=4)
+    accumulator_proof = _readonly_accumulator_proof(
+        base_ref=base_ref,
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_index=3,
+    )
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("param_1", index=0, data_type="int *", size=8),
+            Expression.parameter("param_2", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=base_ref,
+            count_parameter_name="param_2",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            accumulator_proof=accumulator_proof,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    corrupted = ReturnInfo(
+        address="0x1010",
+        value=reduction_expr,
+        conditions=[
+            _cond(
+                "INT_NOTEQUAL",
+                Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                    Expression.constant(8, size=8),
+                ),
+            ),
+            _cond("INT_SLESS", _const(0), _param("param_2")),
+        ],
+    )
+
+    analysis = create_mock_analysis(
+        "readonly_partition_preserved_with_start_index",
+        return_type="int",
+        parameters=params,
+        returns=[corrupted],
+    )
+
+    analyzer._normalize_return_partition(analysis)
+
+    normalized_conditions = [cond.to_string() for cond in analysis.returns[0].conditions]
+
+    assert normalized_conditions == ["(0 < param_2)"]
+    assert "(3 < param_2)" not in normalized_conditions
+
+
+def test_structural_recurrence_positive_guard_uses_unsigned_compare_for_unsigned_count():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+
+    conditions = summarizer._readonly_reduction_positive_conditions(
+        analysis=None,
+        pointer_param=pointer_param,
+        count_param=count_param,
+        loop_start_index=3,
+    )
+
+    assert len(conditions) == 2
+    assert conditions[1].expression.operator == "INT_LESS"
+    assert conditions[1].to_string() == "(3 < param_2)"
+    assert (
+        summarizer._readonly_reduction_count_compare_op(
+            count_param,
+            inclusive=True,
+        )
+        == "INT_LESSEQUAL"
+    )
+
+
+def test_structural_recurrence_prefers_local_signed_counter_evidence_over_declared_unsigned():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_signed_counter_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_2"))],
+                value=_const(1),
+            )
+        ],
+    )
+    count_param = analysis.parameters[1]
+
+    assert summarizer._readonly_reduction_counter_is_signed(analysis.returns, count_param) is True
+    assert (
+        summarizer._readonly_reduction_count_compare_op(
+            count_param,
+            signed_counter=True,
+            inclusive=True,
+        )
+        == "INT_SLESSEQUAL"
+    )
+
+
+def test_structural_recurrence_leaves_counter_signedness_ambiguous_when_guards_conflict():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_ambiguous_counter_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                    _cond("INT_LESS", _const(3), _param("param_2")),
+                ],
+                value=_const(1),
+            )
+        ],
+    )
+
+    assert (
+        summarizer._readonly_reduction_counter_is_signed(
+            analysis.returns,
+            analysis.parameters[1],
+        )
+        is None
+    )
+
+
+def test_structural_recurrence_counter_signedness_uses_only_relevant_returns():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    unrelated_signed = ReturnInfo(
+        address="0x1000",
+        conditions=[_cond("INT_SLESS", _const(0), _param("param_2"))],
+        value=_const(1),
+    )
+    relevant_unsigned = ReturnInfo(
+        address="0x1001",
+        conditions=[_cond("INT_LESS", _const(3), _param("param_2"))],
+        value=_const(2),
+    )
+
+    assert (
+        summarizer._readonly_reduction_counter_is_signed(
+            [unrelated_signed, relevant_unsigned],
+            count_param,
+        )
+        is None
+    )
+    assert (
+        summarizer._readonly_reduction_counter_is_signed(
+            [relevant_unsigned],
+            count_param,
+        )
+        is False
+    )
+
+
+def test_structural_recurrence_region_returns_require_per_return_signedness_evidence():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_region_filter_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            count_param,
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_LESS", _const(0), _param("param_2")),
+                ],
+                value=_const(1),
+            ),
+            ReturnInfo(
+                address="0x1001",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                ],
+                value=_const(2),
+            ),
+        ],
+    )
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        _cond("INT_LESS", _const(0), _param("param_2")),
+    ]
+
+    relevant = summarizer._readonly_reduction_region_returns_with_signedness(
+        analysis,
+        count_param,
+        positive_conditions,
+        expected_signed=False,
+    )
+
+    assert [ret.address for ret in relevant] == ["0x1000"]
+
+
+def test_structural_recurrence_declines_summary_when_counter_signedness_is_ambiguous(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_ambiguous_counter_like",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+            {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False},
+        ],
+        returns=[ReturnInfo(address="0x1000", conditions=[], value=_const(1))],
+    )
+    pointer_param = analysis.parameters[0]
+    count_param = analysis.parameters[1]
+
+    class _FakeFunction:
+        def getName(self):
+            return "readonly_ambiguous_counter_like"
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_counter_is_signed",
+        lambda _analysis, _count_param: None,
+    )
+
+    assert (
+        summarizer._try_summarize_readonly_pointer_reduction(
+            _FakeFunction(),
+            object(),
+            analysis,
+        )
+        is None
+    )
+
+
+def test_structural_recurrence_summary_uses_effective_declared_signedness_to_break_viable_tie(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    count_expr = Expression.parameter("param_2", index=1, data_type="uint", size=4)
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        _cond("INT_LESS", _const(0), count_expr),
+    ]
+    positive_ret = ReturnInfo(address="0x1001", conditions=list(positive_conditions), value=_mem("param_1", 0))
+    null_ret = ReturnInfo(
+        address="0x1000",
+        conditions=[_cond("INT_EQUAL", _param("param_1", size=8), _const(0, size=8))],
+        value=_const(0),
+    )
+    analysis = create_mock_analysis(
+        "readonly_signedness_tie_break",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[null_ret, positive_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda *_args, **_kwargs: list(positive_conditions),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_region_returns_with_signedness",
+        lambda *_args, **_kwargs: [positive_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [positive_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+
+    summary = summarizer._try_summarize_readonly_pointer_reduction(
+        _FakeFunction("readonly_signedness_tie_break"),
+        object(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, _note = summary
+    readonly_ret = next(ret for ret in summarized_returns if getattr(ret.value, "opcode", None) == READONLY_SUM_OPCODE)
+    assert readonly_ret.value.runtime_ref.signed_counter is False
+
+
+def test_structural_recurrence_declines_when_viable_signedness_tie_has_no_local_declaration_winner(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": None}
+    count_expr = Expression.parameter("param_2", index=1, data_type="uint", size=4)
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        _cond("INT_LESS", _const(0), count_expr),
+    ]
+    positive_ret = ReturnInfo(address="0x1001", conditions=list(positive_conditions), value=_mem("param_1", 0))
+    analysis = create_mock_analysis(
+        "readonly_signedness_tie_decline",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[positive_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda *_args, **_kwargs: list(positive_conditions),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_region_returns_with_signedness",
+        lambda *_args, **_kwargs: [positive_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [positive_ret],
+    )
+
+    assert (
+        summarizer._try_summarize_readonly_pointer_reduction(
+            _FakeFunction("readonly_signedness_tie_decline"),
+            object(),
+            analysis,
+        )
+        is None
+    )
+
+
+def test_structural_recurrence_absorbs_exact_positive_return_when_exact_witness_matches_summary(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), count_expr),
+    ]
+    exact_ret = ReturnInfo(
+        address="0x1000",
+        value=_mem("param_1", 0),
+        conditions=list(positive_conditions) + [_cond("INT_EQUAL", count_expr, _const(1))],
+    )
+    broad_ret = ReturnInfo(
+        address="0x1004",
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 0),
+            _mem("param_1", 4),
+        ),
+        conditions=list(positive_conditions),
+    )
+    analysis = create_mock_analysis(
+        "readonly_absorb_exact_positive_return",
+        return_type="int",
+        parameters=[pointer_param, count_param],
+        returns=[exact_ret, broad_ret],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        result_size=4,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_positive_conditions",
+        lambda *_args, **_kwargs: list(positive_conditions),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_region_returns",
+        lambda _analysis, _conditions: [exact_ret, broad_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_replaceable_positive_returns",
+        lambda *_args, **_kwargs: [exact_ret, broad_ret],
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+
+    class _FakeFunction:
+        def getName(self):
+            return "readonly_absorb_exact_positive_return"
+
+    summarized = summarizer._try_summarize_readonly_pointer_reduction(
+        _FakeFunction(),
+        object(),
+        analysis,
+    )
+
+    assert summarized is not None
+    summarized_returns, _note = summarized
+    readonly_ret = next(
+        ret for ret in summarized_returns
+        if getattr(ret.value, "opcode", None) == READONLY_SUM_OPCODE
+    )
+    assert "(param_2 == 1)" not in [cond.to_string() for cond in readonly_ret.conditions]
+    assert exact_ret not in summarized_returns
+
+
+def test_structural_recurrence_summary_ignores_unrelated_early_return_signedness(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_unsigned_positive_region_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_EQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_SLESS", _const(0), _param("param_2")),
+                ],
+                value=_const(0),
+            ),
+            ReturnInfo(
+                address="0x1001",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_LESS", _const(0), _param("param_2")),
+                ],
+                value=_const(1),
+            ),
+        ],
+    )
+    expected_proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=_param("param_2"),
+        stride=4,
+        element_size=4,
+    )
+
+    class _FakeFunction:
+        def getName(self):
+            return "readonly_unsigned_positive_region_like"
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: expected_proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_build_readonly_reduction_semantic_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_extract_readonly_reduction_exact_witnesses",
+        lambda *_args, **_kwargs: (),
+    )
+
+    summarized = summarizer._try_summarize_readonly_pointer_reduction(
+        _FakeFunction(),
+        object(),
+        analysis,
+    )
+
+    assert summarized is not None
+    summarized_returns, _label = summarized
+    summary_return = next(
+        ret for ret in summarized_returns
+        if getattr(getattr(ret.value, "runtime_ref", None), "count_parameter_name", None) == "param_2"
+    )
+    assert summary_return.value.runtime_ref.signed_counter is False
+
+
+def test_structural_recurrence_declines_summary_when_positive_region_returns_cannot_all_be_replaced(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_partial_positive_region_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_LESS", _const(0), _param("param_2")),
+                ],
+                value=_const(1),
+            ),
+            ReturnInfo(
+                address="0x1001",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_LESS", _const(0), _param("param_2")),
+                    _cond("INT_NOTEQUAL", _param("param_3", size=4), _const(0)),
+                ],
+                value=_const(2),
+            ),
+        ],
+    )
+    expected_proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=_param("param_2"),
+        stride=4,
+        element_size=4,
+    )
+
+    class _FakeFunction:
+        def getName(self):
+            return "readonly_partial_positive_region_like"
+
+    monkeypatch.setattr(
+        summarizer,
+        "_infer_readonly_pointer_reduction_parameters",
+        lambda _analysis, _high_function: (pointer_param, count_param),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_detect_readonly_sum_accumulator_proof",
+        lambda *_args, **_kwargs: expected_proof,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_reduction_region_returns_with_signedness",
+        lambda analysis, count_param, conditions, expected_signed: [
+            ret for ret in (analysis.returns or []) if getattr(ret, "address", None) == "0x1000"
+        ],
+    )
+
+    assert (
+        summarizer._try_summarize_readonly_pointer_reduction(
+            _FakeFunction(),
+            object(),
+            analysis,
+        )
+        is None
+    )
+
+
+def test_structural_recurrence_omitted_positive_return_requires_exact_readonly_witness(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_partial_positive_region_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_LESS", _const(0), _param("param_2")),
+                ],
+                value=_const(1),
+            ),
+            ReturnInfo(
+                address="0x1001",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_EQUAL", _param("param_2"), _const(1)),
+                ],
+                value=_const(999),
+            ),
+        ],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=_param("param_2"),
+        stride=4,
+        element_size=4,
+    )
+
+    omitted = analysis.returns[1]
+
+    assert (
+        summarizer._readonly_positive_return_matches_accumulator_proof(
+            analysis,
+            pointer_param,
+            count_param,
+            omitted,
+            proof,
+        )
+        is False
+    )
+
+
+def test_structural_recurrence_does_not_replace_overlap_only_positive_return():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_overlap_only_positive_region_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                conditions=[
+                    _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+                    _cond("INT_SLESS", _const(-10), _param("param_2")),
+                ],
+                value=_const(1),
+            ),
+        ],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=_param("param_2"),
+        stride=4,
+        element_size=4,
+    )
+    positive_conditions = summarizer._readonly_reduction_positive_conditions(
+        analysis,
+        pointer_param,
+        count_param,
+        signed_counter=True,
+    )
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_declines_broad_positive_return_with_only_single_count_anchor():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    broad_return = ReturnInfo(
+        address="0x1008",
+        pcode_time=17,
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_positive_region_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_region_value_proven=False,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_replaces_broad_anchor_when_return_region_value_is_proven():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    broad_return = ReturnInfo(
+        address="0x1008",
+        pcode_time=17,
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_region_proven_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_op_refs=(PcodeOpRef(address_offset=0x1008, seq_time=17, mnemonic="RETURN"),),
+        return_region_value_proven=True,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert broad_return in replaceable
+
+
+def test_structural_recurrence_broadens_counter_only_region_when_return_value_proof_exists():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    broad_return = ReturnInfo(
+        address="0x1018",
+        pcode_time=41,
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(10), count_expr),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    exact_one = ReturnInfo(
+        address="0x1011",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(1)),
+        ],
+        value=_mem("param_1", 0),
+    )
+    exact_two = ReturnInfo(
+        address="0x1012",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(2)),
+        ],
+        value=Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+    )
+    exact_three = ReturnInfo(
+        address="0x1013",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(3)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 8),
+            Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+        ),
+    )
+    exact_four = ReturnInfo(
+        address="0x1014",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_counter_only_region_proven_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return, exact_one, exact_two, exact_three, exact_four],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_op_refs=(PcodeOpRef(address_offset=0x1018, seq_time=41, mnemonic="RETURN"),),
+        return_region_value_proven=True,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), count_expr),
+    ]
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(3), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert broad_return in replaceable
+
+
+def test_structural_recurrence_accepts_proven_return_value_site_before_final_return():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    broad_return = ReturnInfo(
+        address="0x1008",
+        pcode_time=23,
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_region_value_site_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_op_refs=(PcodeOpRef(address_offset=0x1010, seq_time=29, mnemonic="RETURN"),),
+        return_value_op_refs=(PcodeOpRef(address_offset=0x1008, seq_time=23, mnemonic="MULTIEQUAL"),),
+        return_region_value_proven=True,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert broad_return in replaceable
+
+
+def test_structural_recurrence_accepts_adjacent_copy_value_site():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="0x1008",
+        pcode_time=24,
+        pcode_order=1,
+        conditions=[],
+        value=_const(0),
+    )
+    ref = PcodeOpRef(address_offset=0x1008, seq_time=23, seq_order=0, mnemonic="COPY")
+
+    assert summarizer._return_info_matches_pcode_op_ref(ret, ref) is True
+
+
+def test_structural_recurrence_matches_address_space_qualified_pcode_identity():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="ram:00001000",
+        pcode_identity="ram:00001000:t23:o1",
+        conditions=[],
+        value=_const(0),
+    )
+    ref = PcodeOpRef(address_offset=0x1000, seq_time=23, seq_order=1, mnemonic="RETURN")
+
+    assert summarizer._return_info_matches_pcode_op_ref(ret, ref) is True
+
+
+def test_structural_recurrence_builds_ref_from_address_space_qualified_identity():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="unknown",
+        pcode_identity="ram:00001000:t23:o1",
+        conditions=[],
+        value=_const(0),
+    )
+
+    ref = summarizer._pcode_op_ref_from_return_info(ret)
+
+    assert ref == PcodeOpRef(address_offset=0x1000, seq_time=23, seq_order=1, mnemonic=None)
+
+
+def test_structural_recurrence_matches_adjacent_copy_with_qualified_identity():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="ram:00001000",
+        pcode_identity="ram:00001000:t24:o1",
+        conditions=[],
+        value=_const(0),
+    )
+    ref = PcodeOpRef(address_offset=0x1000, seq_time=23, seq_order=0, mnemonic="COPY")
+
+    assert summarizer._return_info_matches_pcode_op_ref(ret, ref) is True
+
+
+def test_structural_recurrence_rejects_address_only_region_value_site():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="0x1008",
+        conditions=[],
+        value=_const(0),
+    )
+    ref = PcodeOpRef(address_offset=0x1008, mnemonic="RETURN")
+
+    assert summarizer._return_info_matches_pcode_op_ref(ret, ref) is False
+
+
+def test_structural_recurrence_rejects_region_value_boolean_without_site_refs():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    ret = ReturnInfo(
+        address="0x1008",
+        pcode_time=17,
+        conditions=[],
+        value=_const(0),
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=4,
+        element_size=4,
+        return_region_value_proven=True,
+    )
+
+    assert summarizer._readonly_return_region_value_is_proven(ret, [], proof) is False
+
+
+def test_structural_recurrence_declines_region_value_proof_for_unmatched_return_site():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    broad_return = ReturnInfo(
+        address="0x1008",
+        pcode_time=19,
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_region_wrong_return_site_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=Expression.parameter("param_2", index=1, data_type="int", size=4),
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_op_refs=(PcodeOpRef(address_offset=0x1010, seq_time=17, mnemonic="RETURN"),),
+        return_region_value_proven=True,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3), Expression.parameter("param_2", index=1, data_type="int", size=4)),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_declines_loop_anchor_residual_when_only_single_count_is_covered():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "long", "size": 8, "is_signed": False}
+    count_expr = Expression.parameter("param_2", index=1, data_type="long", size=8)
+    extra_counter_guard = _cond(
+        "INT_NOTEQUAL",
+        count_expr,
+        _const(4, size=8),
+    )
+    broad_return = ReturnInfo(
+        address="0x1010",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0, size=8), count_expr),
+            _cond("INT_SLESS", _const(3, size=8), count_expr),
+            extra_counter_guard,
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    exact_count_four_return = ReturnInfo(
+        address="0x1014",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(4, size=8)),
+        ],
+        value=broad_return.value,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_mask_guard_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return, exact_count_four_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_region_value_proven=False,
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0, size=8), count_expr),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3, size=8), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_declines_counter_only_residual_without_exact_coverage():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    broad_return = ReturnInfo(
+        address="0x1014",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), count_expr),
+            _cond("INT_NOTEQUAL", count_expr, _const(4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op("INT_ADD", _mem("param_1", 4), _mem("param_1", 8)),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_uncovered_residual_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(3), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_declines_multi_return_shared_counter_residual_hole():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    value = Expression.binary_op(
+        "INT_ADD",
+        _mem("param_1", 12),
+        Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 0),
+            Expression.binary_op("INT_ADD", _mem("param_1", 4), _mem("param_1", 8)),
+        ),
+    )
+    shared_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(3), count_expr),
+        _cond("INT_NOTEQUAL", count_expr, _const(4)),
+    ]
+    returns = [
+        ReturnInfo(address="0x1020", conditions=list(shared_conditions), value=value),
+        ReturnInfo(address="0x1024", conditions=list(shared_conditions), value=value),
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_multi_return_shared_residual_hole_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=returns,
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(3), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_residual_coverage_proves_all_excluded_regions():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    value = Expression.binary_op(
+        "INT_ADD",
+        _mem("param_1", 12),
+        Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 0),
+            Expression.binary_op("INT_ADD", _mem("param_1", 4), _mem("param_1", 8)),
+        ),
+    )
+    broad_return = ReturnInfo(
+        address="0x1030",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(3), count_expr),
+            _cond("INT_NOTEQUAL", count_expr, _const(4)),
+            _cond("INT_NOTEQUAL", count_expr, _const(1000)),
+        ],
+        value=value,
+    )
+    exact_count_four_return = ReturnInfo(
+        address="0x1034",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(4)),
+        ],
+        value=value,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_residual_sampling_miss_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return, exact_count_four_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(3), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_structural_recurrence_declines_loop_anchor_when_prefix_region_is_uncovered():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    broad_return = ReturnInfo(
+        address="0x1018",
+        conditions=[
+            _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+            _cond("INT_NOTEQUAL", count_expr, _const(3)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 0),
+                Expression.binary_op(
+                    "INT_ADD",
+                    _mem("param_1", 4),
+                    _mem("param_1", 8),
+                ),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_loop_anchor_uncovered_prefix_like",
+        entry_point="0x1000",
+        parameters=[pointer_param, count_param],
+        returns=[broad_return],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    broad_positive_conditions = [
+        _cond("INT_NOTEQUAL", Expression.parameter("param_1", index=0, data_type="int *", size=8), _const(0, size=8)),
+        _cond("INT_SLESS", _const(0), count_expr),
+    ]
+    positive_conditions = broad_positive_conditions[:-1] + [
+        _cond("INT_SLESS", _const(3), count_expr),
+    ]
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == []
+
+
+def test_readonly_positive_prefix_coverage_accepts_anchor_backed_prefix_returns(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = _param("param_2")
+    broad_ret = ReturnInfo(
+        address="0x1300",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        value=Expression.unknown("phi_circular"),
+    )
+    exact_one = ReturnInfo(
+        address="0x1301",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(1)),
+        ],
+        value=_mem("param_1", 0),
+    )
+    exact_two = ReturnInfo(
+        address="0x1302",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(2)),
+        ],
+        value=Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+    )
+    exact_three = ReturnInfo(
+        address="0x1303",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(3)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 8),
+            Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_anchor_backed_prefix_coverage_like",
+        entry_point="0x1300",
+        parameters=[pointer_param, count_param],
+        returns=[broad_ret, exact_one, exact_two, exact_three],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_matches_accumulator_proof",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_accumulator_anchor_count",
+        lambda _analysis, _pointer_param, _count_param, ret, _proof: {
+            "0x1301": 1,
+            "0x1302": 2,
+            "0x1303": 3,
+        }.get(ret.address),
+    )
+
+    assert summarizer._readonly_positive_prefix_is_exactly_covered(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_ret,
+        proof,
+    ) is True
+
+
+def test_readonly_positive_prefix_coverage_accepts_materialized_count_specific_returns(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = _param("param_2")
+    broad_ret = ReturnInfo(
+        address="0x1310",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        value=Expression.unknown("phi_circular"),
+    )
+    exact_one = ReturnInfo(
+        address="0x1311",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(1)),
+        ],
+        value=_mem("param_1", 0),
+    )
+    exact_two = ReturnInfo(
+        address="0x1312",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(2)),
+        ],
+        value=Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+    )
+    exact_three = ReturnInfo(
+        address="0x1313",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(3)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 8),
+            Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_materialized_prefix_coverage_like",
+        entry_point="0x1310",
+        parameters=[pointer_param, count_param],
+        returns=[broad_ret, exact_one, exact_two, exact_three],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_region_value_proven=False,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_matches_accumulator_proof",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_accumulator_anchor_count",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert summarizer._readonly_positive_prefix_is_exactly_covered(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_ret,
+        proof,
+    ) is True
+
+
+def test_structural_recurrence_accepts_materialized_exact_positive_return_without_exact_witness(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    count_expr = _param("param_2")
+    broad_ret = ReturnInfo(
+        address="0x1320",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), count_expr),
+        ],
+        value=Expression.unknown("phi_circular"),
+    )
+    exact_one = ReturnInfo(
+        address="0x1321",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(1)),
+        ],
+        value=_mem("param_1", 0),
+    )
+    exact_two = ReturnInfo(
+        address="0x1322",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(2)),
+        ],
+        value=Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+    )
+    exact_three = ReturnInfo(
+        address="0x1323",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(3)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 8),
+            Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+        ),
+    )
+    exact_four = ReturnInfo(
+        address="0x1324",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", count_expr, _const(4)),
+        ],
+        value=Expression.binary_op(
+            "INT_ADD",
+            _mem("param_1", 12),
+            Expression.binary_op(
+                "INT_ADD",
+                _mem("param_1", 8),
+                Expression.binary_op("INT_ADD", _mem("param_1", 0), _mem("param_1", 4)),
+            ),
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_materialized_exact_positive_like",
+        entry_point="0x1320",
+        parameters=[pointer_param, count_param],
+        returns=[broad_ret, exact_one, exact_two, exact_three, exact_four],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+        return_region_value_proven=False,
+    )
+    broad_positive_conditions = summarizer._readonly_reduction_positive_conditions(
+        analysis,
+        pointer_param,
+        count_param,
+        loop_start_index=0,
+        signed_counter=True,
+    )
+    positive_conditions = summarizer._readonly_reduction_positive_conditions(
+        analysis,
+        pointer_param,
+        count_param,
+        loop_start_index=3,
+        signed_counter=True,
+    )
+
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_matches_accumulator_proof",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_accumulator_anchor_count",
+        lambda *_args, **_kwargs: None,
+    )
+
+    replaceable = summarizer._readonly_reduction_replaceable_positive_returns(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_positive_conditions,
+        positive_conditions,
+        expected_signed=True,
+        accumulator_proof=proof,
+    )
+
+    assert replaceable == [broad_ret, exact_four]
+
+
+def test_structural_recurrence_declines_partial_exact_count_carve_out():
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    positive_conditions = summarizer._readonly_reduction_positive_conditions(
+        FunctionReturnAnalysis(
+            function_name="dummy",
+            entry_point="0x0",
+            parameters=[pointer_param, count_param],
+            returns=[],
+        ),
+        pointer_param,
+        count_param,
+        signed_counter=True,
+    )
+    partial_exact_return = ReturnInfo(
+        address="0x1100",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", _param("param_2"), _const(1)),
+            _cond("INT_NOTEQUAL", _param("flag"), _const(0)),
+        ],
+        value=_const(7),
+    )
+
+    assert summarizer._readonly_exact_count_region_is_fully_covered_by_return(
+        partial_exact_return,
+        positive_conditions,
+        count_param,
+        1,
+    ) is False
+
+
+def test_structural_recurrence_prefix_coverage_requires_matching_non_count_guards(monkeypatch):
+    summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
+    pointer_param = {"name": "param_1", "index": 0, "data_type": "int *", "size": 8, "is_signed": False}
+    count_param = {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True}
+    analysis = FunctionReturnAnalysis(
+        function_name="readonly_prefix_guard_mismatch_like",
+        entry_point="0x1200",
+        parameters=[pointer_param, count_param],
+        returns=[],
+    )
+    proof = _readonly_accumulator_proof(
+        base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_expr=_param("param_2"),
+        stride=4,
+        element_size=4,
+        start_index=3,
+    )
+    broad_ret = ReturnInfo(
+        address="0x1200",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_SLESS", _const(0), _param("param_2")),
+            _cond("INT_NOTEQUAL", _param("flag"), _const(0)),
+        ],
+        value=_const(1),
+    )
+    wrong_witness = ReturnInfo(
+        address="0x1201",
+        conditions=[
+            _cond("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+            _cond("INT_EQUAL", _param("param_2"), _const(1)),
+            _cond("INT_EQUAL", _param("flag"), _const(0)),
+        ],
+        value=_const(2),
+    )
+    analysis.returns = [broad_ret, wrong_witness]
+    monkeypatch.setattr(
+        summarizer,
+        "_readonly_positive_return_matches_accumulator_proof",
+        lambda *_args, **_kwargs: True,
+    )
+
+    assert summarizer._readonly_positive_prefix_is_exactly_covered(
+        analysis,
+        pointer_param,
+        count_param,
+        broad_ret,
+        proof,
+    ) is False
+
+
+def test_return_analyzer_normalization_does_not_promote_vectorized_readonly_start():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    params = [
+        {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
+        {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+    ]
+    base_ref = LocationBaseRef.parameter("param_1", index=0)
+    count_expr = _param("param_2", size=4)
+    accumulator_proof = _readonly_accumulator_proof(
+        base_ref=base_ref,
+        count_expr=count_expr,
+        stride=4,
+        element_size=4,
+        start_index=3,
+    )
+    loop_summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=count_expr,
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="readonly_memory"),
+    )
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [
+            Expression.parameter("param_1", index=0, data_type="int *", size=8),
+            Expression.parameter("param_2", index=1, data_type="int", size=4),
+        ],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="readonly_sum",
+            pointer_base_ref=base_ref,
+            count_parameter_name="param_2",
+            count_parameter_index=1,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            loop_summary=loop_summary,
+            accumulator_proof=accumulator_proof,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+    corrupted = ReturnInfo(
+        address="0x1020",
+        value=reduction_expr,
+        conditions=[
+            _cond(
+                "INT_NOTEQUAL",
+                Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                Expression.binary_op(
+                    "INT_ADD",
+                    Expression.parameter("param_1", index=0, data_type="int *", size=8),
+                    Expression.constant(8, size=8),
+                ),
+            ),
+            _cond("INT_SLESS", _const(0), _param("param_2")),
+        ],
+    )
+
+    analysis = create_mock_analysis(
+        "readonly_partition_preserved_vectorized_start_index",
+        return_type="int",
+        parameters=params,
+        returns=[corrupted],
+    )
+
+    analyzer._normalize_return_partition(analysis)
+
+    normalized_conditions = [cond.to_string() for cond in analysis.returns[0].conditions]
+
+    assert normalized_conditions == ["(0 < param_2)"]
+    assert "(3 < param_2)" not in normalized_conditions
 
 
 def test_exact_counter_value_from_interval_conditions_recovers_singleton_count():

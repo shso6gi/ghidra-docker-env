@@ -211,6 +211,237 @@ class ComparisonSurface:
             "evidence": dict(self.evidence),
         }
 
+
+_SIGNED_COMPARE_TO_UNSIGNED = {
+    "INT_SLESS": "INT_LESS",
+    "INT_SLESSEQUAL": "INT_LESSEQUAL",
+}
+_UNSIGNED_COMPARE_TO_SIGNED = {
+    "INT_LESS": "INT_SLESS",
+    "INT_LESSEQUAL": "INT_SLESSEQUAL",
+}
+_SIGNEDNESS_TRANSPARENT_UNARY_OPS = {"INT_SEXT", "INT_ZEXT", "CAST", "COPY"}
+
+
+def _build_param_override_by_index(
+    original_parameters: List[Dict[str, Any]],
+    updated_parameters: List[Dict[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    overrides: Dict[int, Dict[str, Any]] = {}
+    for fallback_index, updated_param in enumerate(updated_parameters or []):
+        updated_index = int(updated_param.get("index", fallback_index))
+        if fallback_index >= len(original_parameters or []):
+            continue
+        original_param = original_parameters[fallback_index]
+        original_signed = bool(original_param.get("is_signed", True))
+        updated_signed = bool(updated_param.get("is_signed", True))
+        if original_signed == updated_signed:
+            continue
+        overrides[updated_index] = updated_param
+    return overrides
+
+
+def _rewrite_conditions_for_param_signedness(
+    conditions: List["Condition"],
+    param_overrides: Dict[int, Dict[str, Any]],
+) -> Tuple[List["Condition"], bool]:
+    if not conditions or not param_overrides:
+        return list(conditions or []), False
+
+    from .condition import Condition
+
+    rewritten_conditions: List[Condition] = []
+    changed = False
+    for condition in conditions or []:
+        if condition is None or getattr(condition, "expression", None) is None:
+            rewritten_conditions.append(condition)
+            continue
+        rewritten_expr, expr_changed = _rewrite_expression_for_param_signedness(
+            condition.expression,
+            param_overrides,
+        )
+        rewritten_conditions.append(Condition(rewritten_expr, bool(getattr(condition, "negated", False))))
+        changed = changed or expr_changed
+    return rewritten_conditions, changed
+
+
+def _find_parameter_override_for_expression(
+    expr: Optional["Expression"],
+    param_overrides: Dict[int, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if expr is None or not param_overrides:
+        return None
+    expr_type = getattr(expr, "expr_type", None)
+    if expr_type is not None and getattr(expr_type, "name", None) == "PARAMETER":
+        try:
+            param_index = int(getattr(expr, "value", -1))
+        except (TypeError, ValueError):
+            param_index = -1
+        if param_index in param_overrides:
+            return param_overrides[param_index]
+        return None
+    if expr_type is not None and getattr(expr_type, "name", None) == "UNARY_OP":
+        if getattr(expr, "operator", None) in _SIGNEDNESS_TRANSPARENT_UNARY_OPS and getattr(expr, "operands", None):
+            return _find_parameter_override_for_expression(expr.operands[0], param_overrides)
+    return None
+
+
+def _rewrite_runtime_ref_for_param_signedness(
+    runtime_ref: Any,
+    param_overrides: Dict[int, Dict[str, Any]],
+) -> Tuple[Any, bool]:
+    if runtime_ref is None or not param_overrides:
+        return runtime_ref, False
+
+    changed = False
+    kwargs: Dict[str, Any] = {}
+
+    count_index = getattr(runtime_ref, "count_parameter_index", None)
+    try:
+        count_index_value = int(count_index) if count_index is not None else None
+    except (TypeError, ValueError):
+        count_index_value = None
+    if count_index_value is not None and count_index_value in param_overrides:
+        desired_signed = bool(param_overrides[count_index_value].get("is_signed", True))
+        if getattr(runtime_ref, "signed_counter", None) != desired_signed:
+            kwargs["signed_counter"] = desired_signed
+            changed = True
+        if getattr(runtime_ref, "signed_loop", None) != desired_signed and hasattr(runtime_ref, "signed_loop"):
+            kwargs["signed_loop"] = desired_signed
+            changed = True
+
+    for attr_name in ("start_expr", "limit_expr", "step_expr"):
+        if not hasattr(runtime_ref, attr_name):
+            continue
+        original_expr = getattr(runtime_ref, attr_name, None)
+        rewritten_expr, expr_changed = _rewrite_expression_for_param_signedness(
+            original_expr,
+            param_overrides,
+        )
+        if expr_changed:
+            kwargs[attr_name] = rewritten_expr
+            changed = True
+
+    if hasattr(runtime_ref, "guard_constraints"):
+        rewritten_guards, guard_changed = _rewrite_conditions_for_param_signedness(
+            list(getattr(runtime_ref, "guard_constraints", ()) or ()),
+            param_overrides,
+        )
+        if guard_changed:
+            kwargs["guard_constraints"] = tuple(rewritten_guards)
+            changed = True
+
+    for attr_name in ("loop_summary", "accumulator_proof"):
+        if not hasattr(runtime_ref, attr_name):
+            continue
+        nested_ref = getattr(runtime_ref, attr_name, None)
+        rewritten_ref, nested_changed = _rewrite_runtime_ref_for_param_signedness(
+            nested_ref,
+            param_overrides,
+        )
+        if nested_changed:
+            kwargs[attr_name] = rewritten_ref
+            changed = True
+
+    if not changed:
+        return runtime_ref, False
+    return replace(runtime_ref, **kwargs), True
+
+
+def _rewrite_expression_for_param_signedness(
+    expr: Optional["Expression"],
+    param_overrides: Dict[int, Dict[str, Any]],
+) -> Tuple[Optional["Expression"], bool]:
+    if expr is None or not param_overrides:
+        return expr, False
+
+    from .condition import Condition
+
+    changed = False
+    rebuilt = expr
+    expr_type = getattr(expr, "expr_type", None)
+
+    if expr_type is not None and getattr(expr_type, "name", None) == "PHI" and getattr(expr, "value", None):
+        rewritten_branches = []
+        branch_changed = False
+        for cond, value in expr.value:
+            rewritten_cond = cond
+            if cond is not None and getattr(cond, "expression", None) is not None:
+                cond_expr, cond_changed = _rewrite_expression_for_param_signedness(
+                    cond.expression,
+                    param_overrides,
+                )
+                rewritten_cond = Condition(cond_expr, bool(getattr(cond, "negated", False)))
+                branch_changed = branch_changed or cond_changed
+            rewritten_value, value_changed = _rewrite_expression_for_param_signedness(
+                value,
+                param_overrides,
+            )
+            branch_changed = branch_changed or value_changed
+            rewritten_branches.append((rewritten_cond, rewritten_value))
+        if branch_changed:
+            rebuilt = expr.clone_with(value=rewritten_branches)
+            changed = True
+    elif getattr(expr, "operands", None):
+        rewritten_operands = []
+        operand_changed = False
+        for operand in expr.operands:
+            rewritten_operand, child_changed = _rewrite_expression_for_param_signedness(
+                operand,
+                param_overrides,
+            )
+            rewritten_operands.append(rewritten_operand)
+            operand_changed = operand_changed or child_changed
+        if operand_changed:
+            rebuilt = expr.clone_with(operands=rewritten_operands)
+            changed = True
+
+    rewritten_runtime_ref, runtime_ref_changed = _rewrite_runtime_ref_for_param_signedness(
+        getattr(rebuilt, "runtime_ref", None),
+        param_overrides,
+    )
+    if runtime_ref_changed:
+        rebuilt = rebuilt.clone_with(runtime_ref=rewritten_runtime_ref)
+        changed = True
+
+    if expr_type is not None and getattr(expr_type, "name", None) == "PARAMETER":
+        override_param = _find_parameter_override_for_expression(rebuilt, param_overrides)
+        if override_param is not None:
+            updated_data_type = override_param.get("data_type")
+            updated_data_type_obj = override_param.get("data_type_obj")
+            updated_size = int(override_param.get("size", getattr(rebuilt, "size", 0)) or getattr(rebuilt, "size", 0) or 0)
+            if (
+                updated_data_type != getattr(rebuilt, "data_type", None)
+                or updated_data_type_obj is not getattr(rebuilt, "data_type_obj", None)
+                or (updated_size > 0 and updated_size != getattr(rebuilt, "size", 0))
+            ):
+                rebuilt = rebuilt.clone_with(
+                    data_type=updated_data_type,
+                    data_type_obj=updated_data_type_obj,
+                    size=updated_size if updated_size > 0 else getattr(rebuilt, "size", 0),
+                )
+                changed = True
+
+    if (
+        getattr(rebuilt, "expr_type", None) is not None
+        and getattr(getattr(rebuilt, "expr_type", None), "name", None) == "BINARY_OP"
+        and getattr(rebuilt, "operator", None) in set(_UNSIGNED_COMPARE_TO_SIGNED) | set(_SIGNED_COMPARE_TO_UNSIGNED)
+    ):
+        from ..analysis.condition.simplifier import ConditionSimplifier
+
+        fact = ConditionSimplifier.extract_scalar_constraint(Condition(rebuilt, False))
+        override_param = None if fact is None else _find_parameter_override_for_expression(getattr(fact, "expr", None), param_overrides)
+        if override_param is not None:
+            desired_signed = bool(override_param.get("is_signed", True))
+            if desired_signed and rebuilt.operator in _UNSIGNED_COMPARE_TO_SIGNED:
+                rebuilt = rebuilt.clone_with(operator=_UNSIGNED_COMPARE_TO_SIGNED[rebuilt.operator])
+                changed = True
+            elif not desired_signed and rebuilt.operator in _SIGNED_COMPARE_TO_UNSIGNED:
+                rebuilt = rebuilt.clone_with(operator=_SIGNED_COMPARE_TO_UNSIGNED[rebuilt.operator])
+                changed = True
+
+    return rebuilt, changed
+
 @dataclass
 class FunctionReturnAnalysis:
     """関数のreturn値解析結果"""
@@ -445,11 +676,43 @@ class FunctionReturnAnalysis:
         updated_hypotheses = list(self.signature_hypotheses)
         updated_hypotheses.append(hypothesis.to_dict())
 
+        updated_returns = list(self.returns or [])
+        param_overrides = _build_param_override_by_index(
+            list(self.parameters or []),
+            list(updated_signature.parameters or []),
+        )
+        if param_overrides:
+            rewritten_returns: List[ReturnInfo] = []
+            returns_changed = False
+            for info in self.returns or []:
+                rewritten_value, value_changed = _rewrite_expression_for_param_signedness(
+                    info.value,
+                    param_overrides,
+                )
+                rewritten_conditions, cond_changed = _rewrite_conditions_for_param_signedness(
+                    list(info.conditions or []),
+                    param_overrides,
+                )
+                if value_changed or cond_changed:
+                    returns_changed = True
+                    rewritten_returns.append(
+                        replace(
+                            info,
+                            value=rewritten_value,
+                            conditions=rewritten_conditions,
+                        )
+                    )
+                else:
+                    rewritten_returns.append(info)
+            if returns_changed:
+                updated_returns = rewritten_returns
+
         return replace(
             self,
             return_type=updated_signature.return_type,
             return_type_obj=updated_signature.return_type_obj,
             parameters=updated_signature.parameters or [],
+            returns=updated_returns,
             analysis_notes=updated_notes,
             signature_hypotheses=updated_hypotheses,
         )

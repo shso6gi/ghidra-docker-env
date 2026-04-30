@@ -746,7 +746,7 @@ def test_reduction_accumulator_proof_infers_shifted_lane_terms_from_witnesses():
     assert full_prefix.loop_var_unit() == "scalar_element_index"
 
 
-def test_reduction_accumulator_proof_does_not_materialize_lanes_without_scalar_proof():
+def test_reduction_accumulator_proof_materializes_scalar_lane_terms_for_object_proof():
     count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
     proof = ReductionAccumulatorProof(
         reduction_kind="memory_sum",
@@ -765,7 +765,157 @@ def test_reduction_accumulator_proof_does_not_materialize_lanes_without_scalar_p
     )
 
     assert proof.loop_var_unit() == "element_index"
-    assert proof.loop_body_terms_for_count_value(2) is None
+    assert proof.loop_body_terms_for_count_value(2) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+    )
+
+
+def test_reduction_accumulator_proof_full_terms_materialize_seed_term_count_prefix():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=12,
+        start_index=3,
+        index_step=1,
+        index_scale=4,
+        seed_term_count=3,
+    )
+
+    assert proof.seed_terms_for_count_value(2) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+    )
+    assert proof.seed_terms_for_count_value(3) == ()
+    assert proof.full_terms_for_count_value(3) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+    )
+    assert proof.full_terms_for_count_value(4) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+    )
+
+
+def test_reduction_accumulator_proof_completes_seed_prefix_from_exact_witnesses():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=16,
+        element_size=4,
+        start_offset=12,
+        start_index=0,
+        index_step=1,
+        index_scale=16,
+        lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(exact_count=1, terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),)),
+            ReadonlyReductionWitness(
+                exact_count=2,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                ),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=3,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ),
+            ),
+        ),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+
+    assert proof.start_index == 3
+    assert proof.seed_term_count is None
+    assert proof.seed_terms == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+    )
+    assert proof.full_terms_for_count_value(4) == (
+        ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ReadonlyReductionTermRef(byte_offset=12, access_size=4),
+    )
+
+
+def test_readonly_reduction_semantic_key_scalarizes_proof_backed_vector_summary():
+    count_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    scalar_proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+    vector_proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=16,
+        element_size=8,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=16,
+        lane_terms=((0, 4), (4, 4), (8, 4), (12, 4)),
+    ).with_runtime_evidence(
+        limit_expr=count_expr,
+        result_size=4,
+        loop_body_witnesses=(),
+        exact_return_witnesses=(),
+        guard_constraints=(),
+        signed_counter=True,
+    )
+
+    scalar_ref = scalar_proof.to_readonly_reduction_ref()
+    vector_ref = vector_proof.to_readonly_reduction_ref()
+
+    assert scalar_ref is not None
+    assert vector_ref is not None
+    assert scalar_ref.semantic_key() == vector_ref.semantic_key()
 
 
 def _counted_loop_expr(loop_summary: LoopSummaryRef) -> Expression:
@@ -865,6 +1015,50 @@ def test_loop_summary_method_b_key_compensates_vector_lane_scalar_prefix_seed():
 
     assert loop_summary_method_b_key(full) == loop_summary_method_b_key(suffix)
     assert compare_loop_summaries(full, suffix).status == "equivalent"
+
+
+def test_loop_summary_method_b_key_supports_seed_term_count_prefix():
+    full = _readonly_loop_summary(start=0)
+    suffix = LoopSummaryRef(
+        start_expr=Expression.constant(3, size=4),
+        limit_expr=full.limit_expr,
+        step_expr=full.step_expr,
+        term_descriptor=full.term_descriptor,
+        seed_terms=(),
+        seed_term_count=3,
+        side_effect_profile=full.side_effect_profile,
+        loop_var_unit=full.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(full) == loop_summary_method_b_key(suffix)
+    assert compare_loop_summaries(full, suffix).status == "equivalent"
+
+
+def test_loop_summary_method_b_key_rejects_seed_term_count_mismatch():
+    full = _readonly_loop_summary(start=0)
+    suffix = _readonly_loop_summary(
+        start=4,
+        seed_terms=(
+            ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+        ),
+    )
+    mismatch = LoopSummaryRef(
+        start_expr=suffix.start_expr,
+        limit_expr=suffix.limit_expr,
+        step_expr=suffix.step_expr,
+        term_descriptor=suffix.term_descriptor,
+        seed_terms=(),
+        seed_term_count=3,
+        side_effect_profile=suffix.side_effect_profile,
+        loop_var_unit=suffix.loop_var_unit,
+    )
+
+    assert loop_summary_method_b_key(full) != loop_summary_method_b_key(mismatch)
+    result = compare_loop_summaries(full, mismatch)
+    assert result.status == "unknown"
+    assert result.is_equivalent() is None
 
 
 def test_loop_summary_method_b_key_requires_seed_to_cover_omitted_prefix():

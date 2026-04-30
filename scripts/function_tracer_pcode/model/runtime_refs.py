@@ -1185,6 +1185,7 @@ class LoopSummaryRef:
     step_expr: Any
     term_descriptor: LoopTermDescriptorRef
     seed_terms: Tuple[Any, ...] = ()
+    seed_term_count: Optional[int] = None
     witnesses: Tuple[Any, ...] = ()
     side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
     guard_constraints: Tuple[Any, ...] = ()
@@ -1204,7 +1205,16 @@ class LoopSummaryRef:
         start_key = _loop_object_key(self.start_expr)
         limit_key = _loop_object_key(self.limit_expr)
         step_key = _loop_object_key(self.step_expr)
-        seed_keys = tuple(_loop_object_key(term) for term in self.seed_terms)
+        seed_terms = tuple(self.seed_terms or ())
+        seed_term_count = getattr(self, "seed_term_count", None)
+        if seed_terms:
+            seed_keys = tuple(_loop_object_key(term) for term in seed_terms)
+        elif seed_term_count is not None:
+            if int(seed_term_count) < 0:
+                return None
+            seed_keys = (("seed_term_count", int(seed_term_count)),)
+        else:
+            seed_keys = ()
         witness_keys = tuple(_loop_object_key(witness) for witness in self.witnesses)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
         case_keys = tuple(case.stable_key() for case in self.cases)
@@ -1264,6 +1274,7 @@ class LoopSummaryRef:
             "step_expr": _loop_object_to_dict(self.step_expr),
             "term_descriptor": self.term_descriptor.to_dict(),
             "seed_terms": [_loop_object_to_dict(term) for term in self.seed_terms],
+            "seed_term_count": None if self.seed_term_count is None else int(self.seed_term_count),
             "witnesses": [_loop_object_to_dict(witness) for witness in self.witnesses],
             "side_effect_profile": self.side_effect_profile.to_dict(),
             "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
@@ -1412,6 +1423,17 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
 
     canonical_start = int(start_value)
     remaining_seed_terms = list(getattr(summary, "seed_terms", ()) or ())
+    if not remaining_seed_terms:
+        seed_term_count = getattr(summary, "seed_term_count", None)
+        if (
+            seed_term_count is not None
+            and int(seed_term_count) >= 0
+            and int(seed_term_count) == int(canonical_start)
+            and int(step_value) == 1
+        ):
+            canonical_start = int(canonical_start) - int(seed_term_count)
+            remaining_seed_terms = []
+
     while remaining_seed_terms:
         previous_index = canonical_start - int(step_value)
         expected_term = _loop_summary_term_at_index(summary, previous_index)
@@ -1658,6 +1680,7 @@ class ReductionAccumulatorProof:
     index_scale: int = 0
     signed_counter: bool = True
     seed_terms: Tuple[ReadonlyReductionTermRef, ...] = ()
+    seed_term_count: Optional[int] = None
     lane_terms: Tuple[Tuple[int, int], ...] = ()
     loop_body_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
     exact_return_witnesses: Tuple[ReadonlyReductionWitness, ...] = ()
@@ -1671,8 +1694,11 @@ class ReductionAccumulatorProof:
     accumulator_phi_ref: Optional[PcodeOpRef] = None
     update_op_ref: Optional[PcodeOpRef] = None
     load_op_refs: Tuple[PcodeOpRef, ...] = ()
+    return_op_refs: Tuple[PcodeOpRef, ...] = ()
+    return_value_op_refs: Tuple[PcodeOpRef, ...] = ()
     entry_block_ref: Optional[PcodeBlockRef] = None
     backedge_block_ref: Optional[PcodeBlockRef] = None
+    return_region_value_proven: bool = False
     source: str = "recurrence_summary"
 
     def __post_init__(self) -> None:
@@ -1684,6 +1710,8 @@ class ReductionAccumulatorProof:
             raise ValueError("ReductionAccumulatorProof requires a positive result_size")
         if int(self.index_step) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive index_step")
+        if self.seed_term_count is not None and int(self.seed_term_count) < 0:
+            raise ValueError("ReductionAccumulatorProof requires a non-negative seed_term_count")
         object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
         lane_terms = tuple(
             sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
@@ -1694,6 +1722,20 @@ class ReductionAccumulatorProof:
             if start_offset != 0 and min_offset == start_offset:
                 lane_terms = tuple((offset - start_offset, size) for offset, size in lane_terms)
             object.__setattr__(self, "lane_terms", lane_terms)
+        return_op_refs = tuple(
+            sorted(
+                (ref for ref in (self.return_op_refs or ()) if isinstance(ref, PcodeOpRef)),
+                key=lambda ref: repr(ref.stable_key()),
+            )
+        )
+        object.__setattr__(self, "return_op_refs", return_op_refs)
+        return_value_op_refs = tuple(
+            sorted(
+                (ref for ref in (self.return_value_op_refs or ()) if isinstance(ref, PcodeOpRef)),
+                key=lambda ref: repr(ref.stable_key()),
+            )
+        )
+        object.__setattr__(self, "return_value_op_refs", return_value_op_refs)
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         limit_key = _loop_object_key(self.limit_expr)
@@ -1716,7 +1758,13 @@ class ReductionAccumulatorProof:
             int(self.index_step),
             int(self.index_scale or self.stride),
             bool(self.signed_counter),
-            tuple(term.stable_key() for term in self.seed_terms),
+            tuple(term.stable_key() for term in self.seed_terms)
+            if tuple(self.seed_terms or ())
+            else (
+                (("seed_term_count", int(self.seed_term_count)),)
+                if self.seed_term_count is not None
+                else ()
+            ),
             tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
             tuple(witness.stable_key() for witness in self.loop_body_witnesses),
             tuple(witness.stable_key() for witness in self.exact_return_witnesses),
@@ -1727,13 +1775,16 @@ class ReductionAccumulatorProof:
             self.accumulator_phi_ref.stable_key() if self.accumulator_phi_ref is not None else None,
             self.update_op_ref.stable_key() if self.update_op_ref is not None else None,
             tuple(ref.stable_key() for ref in self.load_op_refs),
+            tuple(ref.stable_key() for ref in self.return_op_refs),
+            tuple(ref.stable_key() for ref in self.return_value_op_refs),
             self.entry_block_ref.stable_key() if self.entry_block_ref is not None else None,
             self.backedge_block_ref.stable_key() if self.backedge_block_ref is not None else None,
+            bool(self.return_region_value_proven),
             self.source,
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
-        loop_summary = self.to_loop_summary_ref()
+        loop_summary = self._pairwise_loop_summary_ref()
         if loop_summary is None:
             return None
         return loop_summary.semantic_key()
@@ -1755,14 +1806,8 @@ class ReductionAccumulatorProof:
         if trip_count is None:
             return None
         access_size = max(1, int(self.result_size))
-        lane_terms = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
-        )
+        lane_terms = self._scalar_lane_terms(require_witness_prefix=False)
         if lane_terms:
-            if self.loop_var_unit() != "scalar_element_index":
-                return None
-            if not all(size == access_size for _offset, size in lane_terms):
-                return None
             lane_count = len(lane_terms)
             if lane_count <= 0:
                 return None
@@ -1790,6 +1835,15 @@ class ReductionAccumulatorProof:
         seed_terms = self.seed_terms_for_count_value(count_value)
         if seed_terms is None:
             return None
+        if not tuple(self.seed_terms or ()) and self.seed_term_count is not None:
+            try:
+                if int(count_value) >= int(self.start_index):
+                    full_seed_terms = self._materialized_seed_prefix_terms()
+                    if full_seed_terms is None:
+                        return None
+                    seed_terms = full_seed_terms
+            except (TypeError, ValueError):
+                return None
         loop_terms = self.loop_body_terms_for_count_value(count_value)
         if loop_terms is None:
             return None
@@ -1798,6 +1852,31 @@ class ReductionAccumulatorProof:
     def seed_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = tuple(self.seed_terms or ())
         if not seed_terms:
+            seed_term_count = self.seed_term_count
+            if seed_term_count is not None:
+                count_value = int(count_value)
+                if count_value <= 0:
+                    return None
+                start_index = int(self.start_index)
+                if start_index <= 0:
+                    return ()
+                seed_term_count_value = int(seed_term_count)
+                if seed_term_count_value < 0 or seed_term_count_value > start_index:
+                    return None
+                index_scale = int(self.index_scale or self.stride)
+                if index_scale <= 0:
+                    return None
+                if count_value >= start_index:
+                    return ()
+                term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+                selected_count = min(int(count_value), seed_term_count_value)
+                return tuple(
+                    ReadonlyReductionTermRef(
+                        byte_offset=int(term_start_offset) + index * index_scale,
+                        access_size=max(1, int(self.result_size)),
+                    )
+                    for index in range(selected_count)
+                )
             return ()
         count_value = int(count_value)
         if count_value <= 0:
@@ -1818,12 +1897,42 @@ class ReductionAccumulatorProof:
                 selected.append(term)
         return tuple(selected)
 
+    def _materialized_seed_prefix_terms(self) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        seed_terms = tuple(self.seed_terms or ())
+        if seed_terms:
+            return seed_terms
+        seed_term_count = self.seed_term_count
+        if seed_term_count is None:
+            return ()
+        start_index = int(self.start_index)
+        if start_index <= 0:
+            return ()
+        seed_term_count_value = int(seed_term_count)
+        if seed_term_count_value < 0 or seed_term_count_value > start_index:
+            return None
+        index_scale = int(self.index_scale or self.stride)
+        if index_scale <= 0:
+            return None
+        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        return tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=int(term_start_offset) + index * index_scale,
+                access_size=max(1, int(self.result_size)),
+            )
+            for index in range(seed_term_count_value)
+        )
+
     def _readonly_lowering_failure_reason(self) -> Optional[str]:
         if self.side_effect_profile.requires_effect_proof():
             return "side_effects_not_representable"
         return None
 
-    def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+    def _build_loop_summary_ref(
+        self,
+        *,
+        loop_var_unit_override: Optional[str] = None,
+        canonicalize_scalar_iteration: bool = False,
+    ) -> Optional["LoopSummaryRef"]:
         if self._readonly_lowering_failure_reason() is not None:
             return None
         stride = int(self.stride)
@@ -1831,7 +1940,20 @@ class ReductionAccumulatorProof:
         index_scale = int(self.index_scale or stride)
         if stride <= 0 or element_size <= 0 or index_scale <= 0:
             return None
-        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        lane_terms = tuple(self.lane_terms or ())
+        if canonicalize_scalar_iteration:
+            scalar_lane_terms = self._scalar_lane_terms(require_witness_prefix=False)
+            if scalar_lane_terms:
+                access_size = max(1, int(self.result_size))
+                stride = access_size
+                element_size = access_size
+                index_scale = access_size
+                lane_terms = ()
+                term_start_offset = int(self.start_offset) - int(self.start_index) * access_size
+            else:
+                term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        else:
+            term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
         return LoopSummaryRef(
             start_expr=_loop_int_expr(int(self.start_index), self.limit_expr),
             limit_expr=self.limit_expr,
@@ -1844,19 +1966,31 @@ class ReductionAccumulatorProof:
                 stride=index_scale,
                 element_size=element_size,
                 result_size=max(1, int(self.result_size)),
-                lane_terms=tuple(self.lane_terms or ()),
+                lane_terms=lane_terms,
             ),
             seed_terms=tuple(self.seed_terms or ()),
+            seed_term_count=None
+            if self.seed_term_count is None
+            else int(self.seed_term_count),
             witnesses=tuple(self.loop_body_witnesses or ()),
             side_effect_profile=self.side_effect_profile,
             guard_constraints=tuple(self.guard_constraints or ()),
-            loop_var_unit=self.loop_var_unit(),
+            loop_var_unit=loop_var_unit_override or self.loop_var_unit(),
             source=self.source,
             constant_bias=int(self.constant_bias),
         )
 
+    def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+        return self._build_loop_summary_ref()
+
     def to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
         return self.lower_to_loop_summary_ref()
+
+    def _pairwise_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
+        return self._build_loop_summary_ref(
+            loop_var_unit_override=self._pairwise_loop_var_unit(),
+            canonicalize_scalar_iteration=True,
+        )
 
     def with_runtime_evidence(
         self,
@@ -1884,6 +2018,64 @@ class ReductionAccumulatorProof:
             exact_return_witnesses=tuple(exact_return_witnesses or ()),
             guard_constraints=tuple(guard_constraints or ()),
             signed_counter=bool(signed_counter),
+        )._normalize_scalar_prefix_from_exact_witnesses()._complete_seed_prefix_from_exact_witnesses()
+
+    def _normalize_scalar_prefix_from_exact_witnesses(self) -> "ReductionAccumulatorProof":
+        access_size = max(1, int(self.result_size))
+        current_start = max(0, int(self.start_index or 0))
+        if (
+            access_size <= 0
+            or current_start <= 0
+            or (
+                int(self.stride) == access_size
+                and int(self.element_size) == access_size
+                and int(self.index_scale or self.stride) == access_size
+                and int(self.start_offset) == 0
+                and int(self.start_index) == 0
+            )
+        ):
+            return self
+        exact_witnesses = {
+            int(witness.exact_count): tuple(witness.terms)
+            for witness in self.exact_return_witnesses or ()
+            if int(getattr(witness, "exact_count", 0) or 0) > 0
+        }
+        if not exact_witnesses:
+            return self
+        matching_counts = []
+        for count_value, terms in exact_witnesses.items():
+            expected_terms = tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=index * access_size,
+                    access_size=access_size,
+                )
+                for index in range(count_value)
+            )
+            if tuple(term.stable_key() for term in terms) == tuple(
+                term.stable_key() for term in expected_terms
+            ):
+                matching_counts.append(int(count_value))
+        if not matching_counts:
+            return self
+        matching_counts = sorted(set(matching_counts))
+        prefix_len = 0
+        while (prefix_len + 1) in matching_counts:
+            prefix_len += 1
+        if prefix_len < max(1, current_start):
+            return self
+        if int(self.start_offset) != current_start * access_size:
+            return self
+        return replace(
+            self,
+            stride=access_size,
+            element_size=access_size,
+            start_offset=0,
+            start_index=0,
+            index_step=1,
+            index_scale=access_size,
+            seed_terms=(),
+            seed_term_count=None,
+            lane_terms=(),
         )
 
     def _infer_lane_terms_from_witnesses(
@@ -1956,21 +2148,35 @@ class ReductionAccumulatorProof:
         return self.lower_to_readonly_reduction_ref()
 
     def loop_var_unit(self) -> str:
+        return "scalar_element_index" if self._scalar_lane_terms(require_witness_prefix=True) else "element_index"
+
+    def _pairwise_loop_var_unit(self) -> str:
+        return "scalar_element_index" if self._scalar_lane_terms(require_witness_prefix=False) else self.loop_var_unit()
+
+    def _scalar_lane_terms(
+        self,
+        *,
+        require_witness_prefix: bool,
+    ) -> Tuple[Tuple[int, int], ...]:
         normalized_lanes = tuple(
             sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
         )
         if not normalized_lanes:
-            return "element_index"
+            return ()
         access_size = max(1, int(self.result_size))
         offsets = [offset for offset, _size in normalized_lanes]
         expected_offsets = [index * access_size for index in range(len(offsets))]
-        if (
-            all(size == access_size for _offset, size in normalized_lanes)
-            and offsets == expected_offsets
-            and int(self.index_scale or self.stride) == access_size * len(offsets)
-            and int(self.start_index) == 0
-            and int(self.index_step) == 1
-        ):
+        if not all(size == access_size for _offset, size in normalized_lanes):
+            return ()
+        if offsets != expected_offsets:
+            return ()
+        if int(self.index_scale or self.stride) != access_size * len(offsets):
+            return ()
+        if int(self.index_step) != 1:
+            return ()
+        if require_witness_prefix:
+            if int(self.start_index) != 0:
+                return ()
             witnesses_by_count = {
                 int(witness.exact_count): tuple(witness.terms)
                 for witness in self.loop_body_witnesses or ()
@@ -1987,9 +2193,56 @@ class ReductionAccumulatorProof:
                 if terms is None or tuple(term.stable_key() for term in terms) != tuple(
                     term.stable_key() for term in expected
                 ):
-                    return "element_index"
-            return "scalar_element_index"
-        return "element_index"
+                    return ()
+        return normalized_lanes
+
+    def _complete_seed_prefix_from_exact_witnesses(self) -> "ReductionAccumulatorProof":
+        if tuple(self.seed_terms or ()) or self.seed_term_count is not None:
+            return self
+        if int(self.start_index or 0) not in {0}:
+            return self
+        scalar_lane_terms = self._scalar_lane_terms(require_witness_prefix=False)
+        if not scalar_lane_terms:
+            return self
+        access_size = max(1, int(self.result_size))
+        first_body_offset = int(self.start_offset) + int(scalar_lane_terms[0][0])
+        if first_body_offset <= 0 or first_body_offset % access_size != 0:
+            return self
+        candidate_start_index = first_body_offset // access_size
+        if candidate_start_index <= 0:
+            return self
+        exact_witnesses = {
+            int(witness.exact_count): tuple(witness.terms)
+            for witness in self.exact_return_witnesses or ()
+        }
+        for count_value in range(1, candidate_start_index + 1):
+            witness_terms = exact_witnesses.get(count_value)
+            if witness_terms is None:
+                return self
+            expected_terms = tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=index * access_size,
+                    access_size=access_size,
+                )
+                for index in range(count_value)
+            )
+            if tuple(term.stable_key() for term in witness_terms) != tuple(
+                term.stable_key() for term in expected_terms
+            ):
+                return self
+        seed_terms = tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=index * access_size,
+                access_size=access_size,
+            )
+            for index in range(candidate_start_index)
+        )
+        return replace(
+            self,
+            start_index=int(candidate_start_index),
+            seed_terms=seed_terms,
+            seed_term_count=None,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -2007,6 +2260,7 @@ class ReductionAccumulatorProof:
             "index_scale": int(self.index_scale or self.stride),
             "signed_counter": bool(self.signed_counter),
             "seed_terms": [term.to_dict() for term in self.seed_terms],
+            "seed_term_count": None if self.seed_term_count is None else int(self.seed_term_count),
             "lane_terms": [
                 {"byte_offset": int(offset), "access_size": max(1, int(size or 0))}
                 for offset, size in self.lane_terms
@@ -2020,8 +2274,11 @@ class ReductionAccumulatorProof:
             "accumulator_phi_ref": self.accumulator_phi_ref.to_dict() if self.accumulator_phi_ref is not None else None,
             "update_op_ref": self.update_op_ref.to_dict() if self.update_op_ref is not None else None,
             "load_op_refs": [ref.to_dict() for ref in self.load_op_refs],
+            "return_op_refs": [ref.to_dict() for ref in self.return_op_refs],
+            "return_value_op_refs": [ref.to_dict() for ref in self.return_value_op_refs],
             "entry_block_ref": self.entry_block_ref.to_dict() if self.entry_block_ref is not None else None,
             "backedge_block_ref": self.backedge_block_ref.to_dict() if self.backedge_block_ref is not None else None,
+            "return_region_value_proven": bool(self.return_region_value_proven),
             "source": self.source,
         }
 
@@ -2122,6 +2379,24 @@ class ReadonlyReductionRef:
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        if self.accumulator_proof is not None:
+            proof_key = self.accumulator_proof.semantic_key()
+            if proof_key is not None:
+                pointer_identity = self.pointer_base_ref.semantic_key()
+                count_identity = (
+                    ("parameter", int(self.count_parameter_index))
+                    if self.count_parameter_index is not None
+                    else ("parameter_name", self.count_parameter_name)
+                )
+                return (
+                    "readonly_reduction_proof_semantic",
+                    self.reduction_kind,
+                    pointer_identity,
+                    count_identity,
+                    max(1, int(self.result_size or 0)),
+                    _bias_key(int(self.constant_bias), self.result_size),
+                    proof_key,
+                )
         if self.loop_summary is not None:
             loop_key = self.loop_summary.semantic_key()
             if loop_key is None:
