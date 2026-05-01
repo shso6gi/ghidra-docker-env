@@ -1773,6 +1773,12 @@ def _evaluate_constant_expression(expr: Optional[Expression]) -> Optional[int]:
         if left_value is None or right_value is None:
             return None
 
+        if expr.operator == "SUBPIECE":
+            if right_value < 0:
+                return None
+            target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+            shifted = left_value >> (int(right_value) * 8)
+            return shifted & ((1 << target_bits) - 1)
         if expr.operator in {"INT_ADD", "PTRSUB", "PTRADD"}:
             return _mask_to_expr_width(expr, left_value + right_value)
         if expr.operator == "INT_SUB":
@@ -1806,6 +1812,12 @@ def _apply_unary_constant_op(expr: Expression, operand_value: int) -> Optional[i
 
 
 def _apply_binary_constant_op(expr: Expression, left_value: int, right_value: int) -> Optional[int]:
+    if expr.operator == "SUBPIECE":
+        if right_value < 0:
+            return None
+        target_bits = max(8, (expr.size or expr.operands[0].size or 8) * 8)
+        shifted = left_value >> (int(right_value) * 8)
+        return shifted & ((1 << target_bits) - 1)
     if expr.operator in {"INT_ADD", "PTRSUB", "PTRADD"}:
         return _mask_to_expr_width(expr, left_value + right_value)
     if expr.operator == "INT_SUB":

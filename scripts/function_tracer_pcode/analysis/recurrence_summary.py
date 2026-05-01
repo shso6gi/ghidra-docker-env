@@ -9283,6 +9283,99 @@ class StructuralRecurrenceSummarizer:
         except Exception:
             return False
 
+    def _phi_input_value_varnode(self, phi_op, input_index: int):
+        """Resolve the concrete value feeding a MULTIEQUAL input edge.
+
+        Ghidra can represent a PHI input with the same register/storage varnode
+        as the PHI output.  For object-level loop reasoning, the relevant value
+        is the definition that reaches the PHI along that specific incoming
+        edge.  Use the PHI parent's incoming block and pick the last p-code op
+        in that predecessor that defines the same storage object.
+        """
+
+        try:
+            raw_input = phi_op.getInput(int(input_index))
+        except Exception:
+            return None
+        parent = getattr(phi_op, "getParent", lambda: None)()
+        if parent is None:
+            return raw_input
+        incoming_block = self._phi_incoming_block(parent, int(input_index))
+        if incoming_block is None:
+            return raw_input
+
+        block_ops = list(self._iter_block_ops(incoming_block))
+        for candidate_op in reversed(block_ops):
+            output = getattr(candidate_op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            if self._same_storage_varnode(output, raw_input):
+                return output
+        return raw_input
+
+    def _phi_incoming_block(self, phi_parent, input_index: int):
+        try:
+            input_index = int(input_index)
+            if input_index < 0 or input_index >= int(phi_parent.getInSize()):
+                return None
+            incoming_block = phi_parent.getIn(input_index)
+        except Exception:
+            return None
+        if incoming_block is None:
+            return None
+        try:
+            reverse_index = int(phi_parent.getInRevIndex(input_index))
+            if reverse_index < 0 or reverse_index >= int(incoming_block.getOutSize()):
+                return None
+            if not self._same_pcode_block(incoming_block.getOut(reverse_index), phi_parent):
+                return None
+        except Exception:
+            return None
+        return incoming_block
+
+    def _same_pcode_block(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        try:
+            equals = getattr(left, "equals", None)
+            if callable(equals) and bool(equals(right)):
+                return True
+        except Exception:
+            pass
+        try:
+            equals = getattr(right, "equals", None)
+            if callable(equals) and bool(equals(left)):
+                return True
+        except Exception:
+            pass
+        left_ref = self._make_pcode_block_ref(left)
+        right_ref = self._make_pcode_block_ref(right)
+        return (
+            left_ref is not None
+            and right_ref is not None
+            and left_ref.stable_key() == right_ref.stable_key()
+        )
+
+    def _same_storage_varnode(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        try:
+            left_addr = left.getAddress()
+            right_addr = right.getAddress()
+            if left_addr is None or right_addr is None:
+                return False
+            return (
+                left_addr.getAddressSpace().getName() == right_addr.getAddressSpace().getName()
+                and int(left.getOffset()) == int(right.getOffset())
+                and int(left.getSize()) == int(right.getSize())
+            )
+        except Exception:
+            return False
+
     def _match_pointer_progression_phi(
         self,
         phi_op,
@@ -9294,14 +9387,18 @@ class StructuralRecurrenceSummarizer:
 
         input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
         for init_index in range(input_count):
-            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            init_varnode = self._follow_passthrough_varnode(
+                self._phi_input_value_varnode(phi_op, init_index)
+            )
             init_offset = self._byte_offset_from_parameter_pointer(init_varnode, pointer_param)
             if init_offset is None or int(init_offset) < 0:
                 continue
             for back_index in range(input_count):
                 if back_index == init_index:
                     continue
-                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                back_varnode = self._follow_passthrough_varnode(
+                    self._phi_input_value_varnode(phi_op, back_index)
+                )
                 step = self._extract_pointer_step(back_varnode, output)
                 if step is None or step <= 0:
                     continue
@@ -9329,14 +9426,18 @@ class StructuralRecurrenceSummarizer:
 
         input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
         for init_index in range(input_count):
-            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            init_varnode = self._follow_passthrough_varnode(
+                self._phi_input_value_varnode(phi_op, init_index)
+            )
             init_value = self._varnode_constant_value(init_varnode)
             if init_value is None:
                 continue
             for back_index in range(input_count):
                 if back_index == init_index:
                     continue
-                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                back_varnode = self._follow_passthrough_varnode(
+                    self._phi_input_value_varnode(phi_op, back_index)
+                )
                 step = self._extract_index_step(back_varnode, output)
                 if step is not None and step > 0:
                     return {
@@ -9476,11 +9577,15 @@ class StructuralRecurrenceSummarizer:
 
         input_count = int(getattr(phi_op, "getNumInputs", lambda: 0)() or 0)
         for init_index in range(input_count):
-            init_varnode = self._follow_passthrough_varnode(phi_op.getInput(init_index))
+            init_varnode = self._follow_passthrough_varnode(
+                self._phi_input_value_varnode(phi_op, init_index)
+            )
             for back_index in range(input_count):
                 if back_index == init_index:
                     continue
-                back_varnode = self._follow_passthrough_varnode(phi_op.getInput(back_index))
+                back_varnode = self._follow_passthrough_varnode(
+                    self._phi_input_value_varnode(phi_op, back_index)
+                )
                 back_def = getattr(back_varnode, "getDef", lambda: None)()
                 if back_def is None or getattr(back_def, "getMnemonic", lambda: None)() != "INT_ADD":
                     continue
@@ -9876,25 +9981,9 @@ class StructuralRecurrenceSummarizer:
         output = getattr(load_op, "getOutput", lambda: None)()
         load_size = max(1, int(getattr(output, "getSize", lambda: 4)() or 4))
         address_varnode = self._follow_passthrough_varnode(load_op.getInput(1))
-
-        for pointer_info in pointer_phis:
-            if self._same_varnode_value(address_varnode, pointer_info["phi_output"]):
-                return {
-                    "load_op_ref": self._make_pcode_op_ref(load_op),
-                    "induction_phi_ref": self._make_pcode_op_ref(pointer_info.get("phi_op")),
-                    "stride": int(pointer_info["stride"]),
-                    "element_size": load_size,
-                    "start_offset": int(pointer_info.get("start_offset", 0) or 0),
-                    "start_index": int(pointer_info.get("start_index", 0) or 0),
-                    "index_step": int(pointer_info.get("index_step", 1) or 1),
-                    "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
-                }
-
         address_def = getattr(address_varnode, "getDef", lambda: None)()
-        if address_def is None:
-            return None
-        mnemonic = getattr(address_def, "getMnemonic", lambda: None)()
-        if mnemonic == "PTRADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 3:
+        mnemonic = getattr(address_def, "getMnemonic", lambda: None)() if address_def is not None else None
+        if address_def is not None and mnemonic == "PTRADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 3:
             base_input = self._follow_passthrough_varnode(address_def.getInput(0))
             index_input = self._follow_passthrough_varnode(address_def.getInput(1))
             elem_size = self._varnode_constant_value(self._follow_passthrough_varnode(address_def.getInput(2)))
@@ -9902,16 +9991,16 @@ class StructuralRecurrenceSummarizer:
             if elem_size is not None and elem_size > 0 and constant_index is not None:
                 for pointer_info in pointer_phis:
                     if self._same_varnode_value(base_input, pointer_info["phi_output"]):
+                        signature = self._load_progression_from_pointer_phi(
+                            load_op,
+                            pointer_info,
+                            load_size=load_size,
+                            extra_byte_offset=int(elem_size) * int(constant_index),
+                        )
+                        if signature is None:
+                            return None
                         return {
-                            "load_op_ref": self._make_pcode_op_ref(load_op),
-                            "induction_phi_ref": self._make_pcode_op_ref(pointer_info.get("phi_op")),
-                            "stride": int(pointer_info["stride"]),
-                            "element_size": load_size,
-                            "start_offset": int(pointer_info.get("start_offset", 0) or 0)
-                            + int(elem_size) * int(constant_index),
-                            "start_index": int(pointer_info.get("start_index", 0) or 0),
-                            "index_step": int(pointer_info.get("index_step", 1) or 1),
-                            "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
+                            **signature,
                         }
             index_info = self._matched_index_progression(index_input, index_phis)
             if (
@@ -9930,32 +10019,22 @@ class StructuralRecurrenceSummarizer:
                     "index_step": int(index_info.get("step", 1) or 1),
                     "index_scale": int(elem_size),
                 }
-        if mnemonic == "INT_ADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 2:
+        if address_def is not None and mnemonic == "INT_ADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(address_def.getInput(0))
             right = self._follow_passthrough_varnode(address_def.getInput(1))
             for pointer_info in pointer_phis:
                 if self._same_varnode_value(left, pointer_info["phi_output"]) and self._varnode_constant_value(right) == 0:
-                    return {
-                        "load_op_ref": self._make_pcode_op_ref(load_op),
-                        "induction_phi_ref": self._make_pcode_op_ref(pointer_info.get("phi_op")),
-                        "stride": int(pointer_info["stride"]),
-                        "element_size": load_size,
-                        "start_offset": int(pointer_info.get("start_offset", 0) or 0),
-                        "start_index": int(pointer_info.get("start_index", 0) or 0),
-                        "index_step": int(pointer_info.get("index_step", 1) or 1),
-                        "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
-                    }
+                    return self._load_progression_from_pointer_phi(
+                        load_op,
+                        pointer_info,
+                        load_size=load_size,
+                    )
                 if self._same_varnode_value(right, pointer_info["phi_output"]) and self._varnode_constant_value(left) == 0:
-                    return {
-                        "load_op_ref": self._make_pcode_op_ref(load_op),
-                        "induction_phi_ref": self._make_pcode_op_ref(pointer_info.get("phi_op")),
-                        "stride": int(pointer_info["stride"]),
-                        "element_size": load_size,
-                        "start_offset": int(pointer_info.get("start_offset", 0) or 0),
-                        "start_index": int(pointer_info.get("start_index", 0) or 0),
-                        "index_step": int(pointer_info.get("index_step", 1) or 1),
-                        "index_scale": int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"]),
-                    }
+                    return self._load_progression_from_pointer_phi(
+                        load_op,
+                        pointer_info,
+                        load_size=load_size,
+                    )
             if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
                 scaled = self._scaled_index_stride_and_start(right, index_phis)
                 if scaled is not None and scaled[0] > 0:
@@ -9978,7 +10057,49 @@ class StructuralRecurrenceSummarizer:
                         "index_step": int(scaled[3]),
                         "index_scale": int(scaled[4]),
                     }
+        for pointer_info in pointer_phis:
+            if self._same_varnode_value(address_varnode, pointer_info["phi_output"]):
+                return self._load_progression_from_pointer_phi(
+                    load_op,
+                    pointer_info,
+                    load_size=load_size,
+                )
         return None
+
+    def _load_progression_from_pointer_phi(
+        self,
+        load_op,
+        pointer_info: Dict[str, object],
+        *,
+        load_size: int,
+        extra_byte_offset: int = 0,
+    ) -> Optional[Dict[str, object]]:
+        """Build a load progression from a pointer-induction PHI.
+
+        The induction PHI describes the cursor value at loop entry.  A load may
+        add a constant element offset on top of that cursor, for example a peeled
+        prefix loop whose body loads ``base[i + 1]`` while the cursor PHI starts
+        at ``base``.  Keep both the byte offset and the logical element index in
+        sync so seed compensation can prove that the materialized prefix covers
+        the omitted loop iterations.
+        """
+
+        index_scale = int(pointer_info.get("index_scale", pointer_info["stride"]) or pointer_info["stride"])
+        if index_scale <= 0:
+            return None
+        extra_byte_offset = int(extra_byte_offset or 0)
+        if extra_byte_offset < 0 or extra_byte_offset % index_scale != 0:
+            return None
+        return {
+            "load_op_ref": self._make_pcode_op_ref(load_op),
+            "induction_phi_ref": self._make_pcode_op_ref(pointer_info.get("phi_op")),
+            "stride": int(pointer_info["stride"]),
+            "element_size": max(1, int(load_size or 0)),
+            "start_offset": int(pointer_info.get("start_offset", 0) or 0) + extra_byte_offset,
+            "start_index": int(pointer_info.get("start_index", 0) or 0) + (extra_byte_offset // index_scale),
+            "index_step": int(pointer_info.get("index_step", 1) or 1),
+            "index_scale": index_scale,
+        }
 
     def _matched_index_progression(
         self,

@@ -1129,6 +1129,27 @@ def test_canonicalize_location_accepts_stack_pointer_relative_address_expression
     assert location == _loc("__locbase__stackframe", -0x1C, 4)
 
 
+def test_canonicalize_location_accepts_foldable_subpiece_constant_ptradd_index():
+    params = [_param("param_1", size=8, is_signed=False)]
+    pointer = Expression.parameter("param_1", index=0, size=8)
+    masked_one = Expression.binary_op(
+        "INT_AND",
+        Expression.constant(1, size=8),
+        Expression.constant(0xFFFFFFFF, size=8),
+    )
+    index = Expression.binary_op("SUBPIECE", masked_one, Expression.constant(0, size=4))
+    index.size = 4
+    address = Expression.intrinsic(
+        "PTRADD",
+        [pointer, Expression.unary_op("INT_ZEXT", index), Expression.constant(4, size=8)],
+        size=8,
+    )
+
+    location = canonicalize_location(address, params, size=4)
+
+    assert location == _loc("param_1", 4, 4)
+
+
 def test_substitute_condition_simplifies_stack_local_nonnull_guard():
     params = [_param("param_1", size=8, is_signed=False)]
     sp = Expression.variable(

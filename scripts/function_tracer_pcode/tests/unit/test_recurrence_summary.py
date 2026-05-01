@@ -6505,6 +6505,45 @@ def test_readonly_semantic_witnesses_use_exact_returns_as_provisional_lane_evide
     assert witnesses == exact_witnesses
 
 
+def test_readonly_accumulator_proof_materializes_missing_small_prefix_from_larger_exact_witness():
+    count_expr = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=count_expr,
+        result_size=4,
+        stride=16,
+        element_size=8,
+        start_offset=4,
+        start_index=0,
+        index_step=1,
+        index_scale=16,
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+            ReadonlyReductionWitness(
+                exact_count=3,
+                terms=(
+                    ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+                    ReadonlyReductionTermRef(byte_offset=8, access_size=4),
+                ),
+            ),
+        ),
+    )
+
+    assert proof.loop_body_terms_for_count_value(2) is None
+    assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(2) or ())) == (
+        0,
+        4,
+    )
+    assert proof.full_terms_for_count_value(5) is None
+
+
 def test_structural_recurrence_summarizer_merges_exact_and_synthesized_semantic_witnesses():
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},

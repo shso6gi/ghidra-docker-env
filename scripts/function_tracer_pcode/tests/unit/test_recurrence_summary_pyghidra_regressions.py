@@ -33,6 +33,20 @@ _LOOP_METHOD_B_ARM64_GCC_O3 = (
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O3"
 )
+_LOOP_METHOD_B_ARM64_GCC_O2 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-arm64-gcc-O2"
+)
+_LOOP_METHOD_B_ARM64_GCC_O1 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-arm64-gcc-O1"
+)
 _LOOP_METHOD_B_ARM64_CLANG_O1 = (
     Path(__file__).resolve().parents[4]
     / "targets"
@@ -68,6 +82,13 @@ _LOOP_METHOD_B_MIPS64_CLANG_O2 = (
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O2"
 )
+_LOOP_METHOD_B_MIPS64_CLANG_O3 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-mips64-clang-O3"
+)
 _LOOP_METHOD_B_MIPS64_GCC_O1 = (
     Path(__file__).resolve().parents[4]
     / "targets"
@@ -76,6 +97,7 @@ _LOOP_METHOD_B_MIPS64_GCC_O1 = (
     / "loop_method_b_test-mips64-gcc-O1"
 )
 _LOOP_METHOD_B_FUNCTION = "lmb_sum_prefix_peeled3_tail"
+_LOOP_METHOD_B_PEELED1_FUNCTION = "lmb_sum_prefix_peeled1_tail"
 
 
 @pytest.fixture(scope="session")
@@ -227,6 +249,41 @@ def test_loop_method_b_vectorized_prefix_sum_recovers_object_proof(_running_pygh
         assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(4) or ())) == (0, 4, 8, 12)
 
 
+def test_loop_method_b_mips64_gcc_peeled1_tail_recovers_seed_compensated_summary(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    binary_path = _LOOP_METHOD_B_MIPS64_GCC_O1
+    if not binary_path.is_file():
+        pytest.skip(f"loop_method_b binary not found: {binary_path}")
+
+    with _load_program(pyghidra, binary_path) as program:
+        pyghidra.analyze(program)
+        analyzer = ReturnAnalyzer(program, debug=False)
+        result = analyzer.analyze_function_by_name(_LOOP_METHOD_B_PEELED1_FUNCTION, timeout=60)
+        if result is None:
+            pytest.fail("analysis did not produce a result for peeled1 regression")
+
+        readonly_returns = [
+            ret for ret in result.returns
+            if getattr(
+                getattr(getattr(ret, "value", None), "runtime_ref", None),
+                "accumulator_proof",
+                None,
+            )
+            is not None
+        ]
+        if not readonly_returns:
+            pytest.fail("missing readonly reduction summary for peeled1 MIPS64 GCC regression")
+
+        proof = readonly_returns[0].value.runtime_ref.accumulator_proof
+        assert proof is not None
+        assert proof.start_offset == 0
+        assert proof.start_index == 0
+        assert proof.seed_term_count is None
+        assert tuple(term.byte_offset for term in proof.seed_terms) == ()
+        assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(1) or ())) == (0,)
+        assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(2) or ())) == (0, 4)
+
+
 @pytest.mark.parametrize(
     ("left_binary", "right_binary"),
     [
@@ -285,6 +342,122 @@ def test_loop_method_b_tail_pairs_are_equivalent_end_to_end(
                         right_program,
                         _LOOP_METHOD_B_FUNCTION,
                         _LOOP_METHOD_B_FUNCTION,
+                        decompile_timeout=60,
+                        retry_with_type_fix=True,
+                    )
+
+                    assert result.is_equivalent is True
+
+
+@pytest.mark.parametrize(
+    ("right_binary"),
+    [
+        _LOOP_METHOD_B_ARM64_CLANG_O2,
+        _LOOP_METHOD_B_ARM64_CLANG_O3,
+        _LOOP_METHOD_B_ARM64_GCC_O1,
+        _LOOP_METHOD_B_ARM64_GCC_O2,
+        _LOOP_METHOD_B_ARM64_GCC_O3,
+    ],
+    ids=[
+        "mips64-gcc-O1_vs_arm64-clang-O2",
+        "mips64-gcc-O1_vs_arm64-clang-O3",
+        "mips64-gcc-O1_vs_arm64-gcc-O1",
+        "mips64-gcc-O1_vs_arm64-gcc-O2",
+        "mips64-gcc-O1_vs_arm64-gcc-O3",
+    ],
+)
+def test_loop_method_b_peeled1_tail_pairs_are_equivalent_end_to_end(
+    _running_pyghidra,
+    right_binary: Path,
+):
+    pyghidra = _running_pyghidra
+    left_binary = _LOOP_METHOD_B_MIPS64_GCC_O1
+    if not left_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {left_binary}")
+    if not right_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {right_binary}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "loop-method-b-peeled1-equiv", create=True) as project:
+            left_loader = pyghidra.program_loader().project(project).source(str(left_binary))
+            with left_loader.load() as left_loaded:
+                left_program = left_loaded.getPrimaryDomainObject()
+                pyghidra.analyze(left_program)
+
+                right_loader = pyghidra.program_loader().project(project).source(str(right_binary))
+                with right_loader.load() as right_loaded:
+                    right_program = right_loaded.getPrimaryDomainObject()
+                    pyghidra.analyze(right_program)
+
+                    checker = EquivalenceChecker(
+                        debug=False,
+                        strategy="pairwise",
+                        timeout=10,
+                        pairwise_timeout=5,
+                        pairwise_timeout_hard=30,
+                    )
+                    result = checker.check_from_binaries(
+                        left_program,
+                        right_program,
+                        _LOOP_METHOD_B_PEELED1_FUNCTION,
+                        _LOOP_METHOD_B_PEELED1_FUNCTION,
+                        decompile_timeout=60,
+                        retry_with_type_fix=True,
+                    )
+
+                    assert result.is_equivalent is True
+
+
+@pytest.mark.parametrize(
+    ("left_binary"),
+    [
+        _LOOP_METHOD_B_ARM64_CLANG_O1,
+        _LOOP_METHOD_B_MIPS64_CLANG_O1,
+        _LOOP_METHOD_B_MIPS64_CLANG_O2,
+        _LOOP_METHOD_B_MIPS64_CLANG_O3,
+    ],
+    ids=[
+        "arm64-clang-O1_vs_arm64-gcc-O3",
+        "mips64-clang-O1_vs_arm64-gcc-O3",
+        "mips64-clang-O2_vs_arm64-gcc-O3",
+        "mips64-clang-O3_vs_arm64-gcc-O3",
+    ],
+)
+def test_loop_method_b_peeled1_tail_exact_prefix_pairs_match_b8_summary(
+    _running_pyghidra,
+    left_binary: Path,
+):
+    pyghidra = _running_pyghidra
+    right_binary = _LOOP_METHOD_B_ARM64_GCC_O3
+    if not left_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {left_binary}")
+    if not right_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {right_binary}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "loop-method-b-peeled1-b8-equiv", create=True) as project:
+            left_loader = pyghidra.program_loader().project(project).source(str(left_binary))
+            with left_loader.load() as left_loaded:
+                left_program = left_loaded.getPrimaryDomainObject()
+                pyghidra.analyze(left_program)
+
+                right_loader = pyghidra.program_loader().project(project).source(str(right_binary))
+                with right_loader.load() as right_loaded:
+                    right_program = right_loaded.getPrimaryDomainObject()
+                    pyghidra.analyze(right_program)
+
+                    checker = EquivalenceChecker(
+                        debug=False,
+                        strategy="pairwise",
+                        timeout=10,
+                        pairwise_timeout=5,
+                        pairwise_timeout_hard=30,
+                    )
+                    result = checker.check_from_binaries(
+                        left_program,
+                        right_program,
+                        _LOOP_METHOD_B_PEELED1_FUNCTION,
+                        _LOOP_METHOD_B_PEELED1_FUNCTION,
                         decompile_timeout=60,
                         retry_with_type_fix=True,
                     )

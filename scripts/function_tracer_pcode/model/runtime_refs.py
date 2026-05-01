@@ -1846,8 +1846,61 @@ class ReductionAccumulatorProof:
                 return None
         loop_terms = self.loop_body_terms_for_count_value(count_value)
         if loop_terms is None:
-            return None
+            return self._prefix_terms_from_exact_return_witnesses(count_value)
         return tuple(seed_terms) + tuple(loop_terms)
+
+    def _prefix_terms_from_exact_return_witnesses(
+        self,
+        count_value: int,
+    ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        """Materialize a small prefix from stronger exact-return evidence.
+
+        Some optimized shapes prove the broad READONLY_SUM contract but only
+        retain exact return witnesses for selected counts, e.g. count=1,3,4.
+        If a larger exact witness is a contiguous scalar prefix, every smaller
+        prefix is also object-centrically determined.  This deliberately refuses
+        non-prefix or non-scalar witnesses; it does not infer arbitrary loop
+        behavior from a sparse sample.
+        """
+
+        try:
+            count_value = int(count_value)
+        except (TypeError, ValueError):
+            return None
+        if count_value <= 0:
+            return None
+        access_size = max(1, int(self.result_size))
+        expected_prefix = tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=index * access_size,
+                access_size=access_size,
+            )
+            for index in range(count_value)
+        )
+        expected_prefix_key = tuple(term.stable_key() for term in expected_prefix)
+        for witness in sorted(
+            tuple(self.exact_return_witnesses or ()),
+            key=lambda item: int(getattr(item, "exact_count", 0) or 0),
+        ):
+            exact_count = int(getattr(witness, "exact_count", 0) or 0)
+            terms = tuple(getattr(witness, "terms", ()) or ())
+            if exact_count < count_value or len(terms) < exact_count:
+                continue
+            expected_witness = tuple(
+                ReadonlyReductionTermRef(
+                    byte_offset=index * access_size,
+                    access_size=access_size,
+                )
+                for index in range(exact_count)
+            )
+            if tuple(term.stable_key() for term in terms[:exact_count]) != tuple(
+                term.stable_key() for term in expected_witness
+            ):
+                continue
+            candidate = tuple(terms[:count_value])
+            if tuple(term.stable_key() for term in candidate) == expected_prefix_key:
+                return candidate
+        return None
 
     def seed_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = tuple(self.seed_terms or ())

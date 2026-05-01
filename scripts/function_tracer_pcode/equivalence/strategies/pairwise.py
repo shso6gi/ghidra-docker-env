@@ -13,6 +13,7 @@ from ...model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    ReadonlyReductionRef,
     ReadonlyReductionTermRef,
     compare_loop_summaries,
 )
@@ -660,6 +661,13 @@ class PairwiseStrategy(CheckStrategy):
                     True,
                     reason=f"loop_summary_{loop_result.status}",
                 )
+            readonly_decision = self._readonly_reduction_contract_shortcut_decision(
+                left_ref,
+                right_ref,
+                requires_guard_equivalence=True,
+            )
+            if readonly_decision.equivalent:
+                return readonly_decision
             exact_decision = self._runtime_refs_exact_shortcut_decision(
                 left_ref,
                 right_ref,
@@ -715,6 +723,64 @@ class PairwiseStrategy(CheckStrategy):
             except (AttributeError, TypeError, ValueError):
                 return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="exact_key_unavailable")
         return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="exact_key_mismatch")
+
+    def _readonly_reduction_contract_shortcut_decision(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        requires_guard_equivalence: bool,
+    ) -> _RuntimeShortcutDecision:
+        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_type_mismatch")
+        if getattr(left_ref, "loop_summary", None) is None or getattr(right_ref, "loop_summary", None) is None:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_loop")
+        if getattr(left_ref, "accumulator_proof", None) is None or getattr(right_ref, "accumulator_proof", None) is None:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_proof")
+        left_loop_summary = getattr(left_ref, "loop_summary", None)
+        right_loop_summary = getattr(right_ref, "loop_summary", None)
+        left_profile = getattr(left_loop_summary, "side_effect_profile", None)
+        right_profile = getattr(right_loop_summary, "side_effect_profile", None)
+        if left_profile is None or right_profile is None:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_effect_profile")
+        if bool(getattr(left_loop_summary, "requires_effect_proof", lambda: True)()) or bool(
+            getattr(right_loop_summary, "requires_effect_proof", lambda: True)()
+        ):
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_effects_unproven")
+        if bool(getattr(left_loop_summary, "requires_path_proof", lambda: True)()) or bool(
+            getattr(right_loop_summary, "requires_path_proof", lambda: True)()
+        ):
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_paths_unproven")
+
+        left_base_key = getattr(getattr(left_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
+        right_base_key = getattr(getattr(right_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
+        left_count_key = self._readonly_count_identity_key(left_ref)
+        right_count_key = self._readonly_count_identity_key(right_ref)
+        result_size = max(1, int(getattr(left_ref, "result_size", 0) or 0))
+        if (
+            getattr(left_ref, "reduction_kind", None) != getattr(right_ref, "reduction_kind", None)
+            or left_base_key is None
+            or right_base_key is None
+            or left_base_key != right_base_key
+            or left_count_key is None
+            or right_count_key is None
+            or left_count_key != right_count_key
+            or result_size != max(1, int(getattr(right_ref, "result_size", 0) or 0))
+            or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), result_size)
+            != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), result_size)
+        ):
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_mismatch")
+        return _RuntimeShortcutDecision(True, requires_guard_equivalence, reason="readonly_reduction_contract")
+
+    def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
+        try:
+            index = getattr(readonly_ref, "count_parameter_index", None)
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index))
+        except (TypeError, ValueError):
+            pass
+        name = str(getattr(readonly_ref, "count_parameter_name", "") or "")
+        return ("parameter_name", name) if name else None
 
     def _runtime_refs_semantic_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
