@@ -28,7 +28,7 @@ from ..model import (
     expression_key_or_identity,
     expression_key_safe,
 )
-from ..model.signature import is_pointer_data_type
+from ..model.signature import get_declared_type_size_bytes, is_pointer_data_type, is_undefined_data_type
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
 from .memory_resolver import concretize_readonly_loads
@@ -48,6 +48,7 @@ class EffectSummary:
     synthetic_expr: Optional[Expression] = None
     has_unsupported_call: bool = False
     parameter_refs: List[LocationBaseRef] = field(default_factory=list)
+    call_argument_evidence: Dict[Tuple[object, ...], "CallArgumentEvidence"] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.parameter_refs:
@@ -69,6 +70,51 @@ class EffectSummary:
             )
             for effect in (self.effects or [])
         ]
+
+
+@dataclass(frozen=True)
+class CallArgumentEvidence:
+    """Path-covered call-site argument evidence keyed by a concrete P-code op."""
+
+    pcode_op_ref: object
+    target_ref: Optional[CallTargetRef]
+    callee_param_identities: Tuple[Tuple[object, ...], ...]
+    arguments: Tuple[Expression, ...]
+    sources: Tuple[str, ...]
+    path_conditions: Tuple[Tuple[Condition, ...], ...] = ()
+    coverage_complete: bool = False
+    reason: Optional[str] = None
+
+    def stable_key(self) -> Optional[Tuple[object, ...]]:
+        stable_key = getattr(self.pcode_op_ref, "stable_key", None)
+        if not callable(stable_key):
+            return None
+        return stable_key()
+
+    def is_usable(self) -> bool:
+        return (
+            bool(self.coverage_complete)
+            and len(self.arguments) == len(self.callee_param_identities)
+        )
+
+    def target_matches(self, target_ref: Optional[CallTargetRef]) -> bool:
+        if self.target_ref is None or target_ref is None:
+            return True
+        return self.target_ref.stable_key() == target_ref.stable_key()
+
+
+@dataclass(frozen=True)
+class CallArgumentWidthEvidence:
+    """Proof metadata for call-site arguments recovered from narrower storage."""
+
+    source_bits: int
+    target_bits: int
+    source_storage_key: Optional[Tuple[object, ...]] = None
+    target_storage_key: Optional[Tuple[object, ...]] = None
+    source: str = "live_in_unmodified"
+
+    def is_partial(self) -> bool:
+        return int(self.source_bits or 0) > 0 and int(self.source_bits or 0) < int(self.target_bits or 0)
 
 
 _MAX_CALL_ARGUMENT_VARIANTS = 16
@@ -639,6 +685,7 @@ def summarize_store_effects(
     parameter_names = _collect_named_parameter_names(parameters)
     effects: List[StoreEffect] = []
     has_unsupported_call = False
+    call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
 
     for block_info in block_infos:
         path_sets = condition_tracker.get_all_valid_paths_to_block(block_info)
@@ -712,6 +759,22 @@ def summarize_store_effects(
                     condition_tracker=condition_tracker,
                     current_conditions=normalized_path_conditions,
                 )
+                argument_coverage_complete = _call_argument_recovery_is_complete(
+                    callee_parameters,
+                    args,
+                )
+                _record_call_argument_evidence(
+                    call_argument_evidence,
+                    tracer,
+                    op,
+                    target_ref,
+                    callee_parameters,
+                    args,
+                    normalized_path_conditions,
+                    coverage_complete=argument_coverage_complete,
+                    sources=_infer_call_argument_sources(args, explicit_args),
+                    reason=None if argument_coverage_complete else "argument_recovery_incomplete",
+                )
                 if debug:
                     recovered_dump = ", ".join(arg.to_string() for arg in args)
                     print(
@@ -720,6 +783,27 @@ def summarize_store_effects(
                         f"path=[{', '.join(cond.to_string() for cond in normalized_path_conditions)}] "
                         f"recovered=[{recovered_dump}]"
                     )
+                if callee_parameters and not argument_coverage_complete:
+                    has_unsupported_call = True
+                    if debug:
+                        print(
+                            "[EffectSummary] skip call effect summary: "
+                            f"target={target_label} recovered_args={len(args)} "
+                            f"callee_params={len(callee_parameters)}"
+                        )
+                    continue
+                if not _call_arguments_width_safe_for_effect_summary(
+                    direct_call_summary,
+                    callee_parameters,
+                    args,
+                ):
+                    has_unsupported_call = True
+                    if debug:
+                        print(
+                            "[EffectSummary] skip call effect summary: "
+                            f"target={target_label} partial-width argument has full-width effect use"
+                        )
+                    continue
                 path_reduced_args = [
                     _reduce_expression_under_conditions(arg, normalized_path_conditions)
                     for arg in args
@@ -827,7 +911,125 @@ def summarize_store_effects(
         effects=effects,
         synthetic_expr=synthetic_expr,
         has_unsupported_call=has_unsupported_call,
+        call_argument_evidence=dict(call_argument_evidence),
     )
+
+
+def _record_call_argument_evidence(
+    evidence: Dict[Tuple[object, ...], CallArgumentEvidence],
+    tracer,
+    op,
+    target_ref: Optional[CallTargetRef],
+    callee_parameters: Sequence[Dict],
+    args: Sequence[Expression],
+    path_conditions: Sequence[Condition],
+    *,
+    coverage_complete: bool,
+    sources: Optional[Sequence[str]] = None,
+    reason: Optional[str] = None,
+) -> None:
+    make_ref = getattr(tracer, "_make_pcode_op_ref", None)
+    if not callable(make_ref):
+        return
+    ref = make_ref(op)
+    if ref is None:
+        return
+    key = ref.stable_key()
+    args_tuple = tuple(args or ()) if coverage_complete else ()
+    param_identities = _call_evidence_callee_param_identities(callee_parameters)
+    source_tuple = tuple(sources or ()) if args_tuple else ()
+    if len(source_tuple) != len(args_tuple):
+        source_tuple = tuple("reaching_def" for _arg in args_tuple)
+    arity_complete = bool(coverage_complete) and len(args_tuple) == len(param_identities)
+    new_evidence = CallArgumentEvidence(
+        pcode_op_ref=ref,
+        target_ref=target_ref,
+        callee_param_identities=param_identities,
+        arguments=args_tuple,
+        sources=source_tuple,
+        path_conditions=(tuple(path_conditions or ()),),
+        coverage_complete=arity_complete,
+        reason=reason,
+    )
+    previous = evidence.get(key)
+    if previous is None:
+        evidence[key] = new_evidence
+        return
+    evidence[key] = _merge_call_argument_evidence(previous, new_evidence)
+
+
+def _merge_call_argument_evidence(
+    previous: CallArgumentEvidence,
+    current: CallArgumentEvidence,
+) -> CallArgumentEvidence:
+    path_conditions = tuple(previous.path_conditions or ()) + tuple(current.path_conditions or ())
+    if (
+        previous.coverage_complete
+        and current.coverage_complete
+        and previous.target_matches(current.target_ref)
+        and previous.callee_param_identities == current.callee_param_identities
+        and len(previous.arguments) == len(current.arguments)
+        and all(
+            _expressions_equivalent(left, right)
+            for left, right in zip(previous.arguments, current.arguments)
+        )
+    ):
+        return CallArgumentEvidence(
+            pcode_op_ref=previous.pcode_op_ref,
+            target_ref=previous.target_ref or current.target_ref,
+            callee_param_identities=previous.callee_param_identities,
+            arguments=previous.arguments,
+            sources=previous.sources,
+            path_conditions=path_conditions,
+            coverage_complete=True,
+            reason=None,
+        )
+    return CallArgumentEvidence(
+        pcode_op_ref=previous.pcode_op_ref,
+        target_ref=previous.target_ref or current.target_ref,
+        callee_param_identities=previous.callee_param_identities or current.callee_param_identities,
+        arguments=(),
+        sources=(),
+        path_conditions=path_conditions,
+        coverage_complete=False,
+        reason=current.reason or previous.reason or "argument_evidence_path_conflict",
+    )
+
+
+def _call_evidence_callee_param_identities(
+    callee_parameters: Sequence[Dict],
+) -> Tuple[Tuple[object, ...], ...]:
+    identities: List[Tuple[object, ...]] = []
+    for index, param_ref in enumerate(_coerce_callee_parameter_refs(callee_parameters)):
+        identity = _parameter_identity_key_from_base_ref(param_ref)
+        if identity is None:
+            identity = ("callee_parameter_ordinal", index)
+        identities.append(identity)
+    return tuple(identities)
+
+
+def _call_argument_recovery_is_complete(
+    callee_parameters: Sequence[Dict],
+    args: Sequence[Expression],
+) -> bool:
+    if not callee_parameters:
+        return True
+    return len(args or ()) >= len(callee_parameters)
+
+
+def _infer_call_argument_sources(
+    args: Sequence[Expression],
+    explicit_args: Sequence[Expression],
+) -> Tuple[str, ...]:
+    sources: List[str] = []
+    for arg in args or ():
+        if any(_expressions_equivalent(arg, explicit) for explicit in explicit_args or ()):
+            sources.append("explicit_input")
+        elif getattr(arg, "expr_type", None) == ExpressionType.PARAMETER:
+            sources.append("live_in_unmodified")
+        else:
+            sources.append("reaching_def")
+    return tuple(sources)
 
 
 def _resolve_store_value_effects(
@@ -997,13 +1199,18 @@ def _recover_call_argument_expressions(
     if not callee_parameters:
         return list(explicit_args)
 
-    explicit_args = _select_aligned_explicit_call_arguments(
+    aligned_explicit_args = _select_aligned_explicit_call_arguments(
         call_op,
         tracer,
         caller_parameters,
         callee_parameters,
         explicit_args,
+        condition_tracker=condition_tracker,
+        current_conditions=current_conditions,
     )
+    if aligned_explicit_args is None:
+        return []
+    explicit_args = aligned_explicit_args
     recovered_args: List[Expression] = []
     for index, callee_param in enumerate(callee_parameters):
         explicit = explicit_args[index] if index < len(explicit_args) else None
@@ -1026,11 +1233,6 @@ def _recover_call_argument_expressions(
             recovered_args.append(explicit)
             continue
 
-        storage_parameter_match = _parameter_expression_from_matching_storage(
-            callee_param,
-            caller_parameters,
-            size=(explicit.size if explicit is not None else None),
-        )
         recovered = _recover_call_argument_from_storage(
             call_op,
             tracer,
@@ -1039,18 +1241,6 @@ def _recover_call_argument_expressions(
             condition_tracker=condition_tracker,
             current_conditions=current_conditions,
         )
-        recovered = _prefer_object_centric_parameter_candidate(
-            recovered,
-            storage_parameter_match,
-            caller_parameters,
-            callee_param,
-        )
-        if recovered is None and index < len(caller_parameters):
-            recovered = _parameter_expression_from_descriptor(
-                caller_parameters[index],
-                size=(explicit.size if explicit is not None else callee_param.get("size")),
-            )
-
         if recovered is not None:
             recovered_args.append(
                 _normalize_call_argument_expression(recovered, index, caller_parameters)
@@ -1058,40 +1248,6 @@ def _recover_call_argument_expressions(
         elif explicit is not None:
             recovered_args.append(explicit)
     return recovered_args
-
-
-def _prefer_object_centric_parameter_candidate(
-    recovered: Optional[Expression],
-    parameter_candidate: Optional[Expression],
-    caller_parameters: Sequence[Dict],
-    callee_param: Optional[Dict],
-) -> Optional[Expression]:
-    if parameter_candidate is None:
-        return recovered
-    if recovered is None:
-        return parameter_candidate
-
-    parameter_descriptor = _resolve_parameter_descriptor(parameter_candidate, caller_parameters)
-    if parameter_descriptor is None:
-        return recovered
-
-    recovered_descriptor = _resolve_parameter_descriptor(recovered, caller_parameters)
-    recovered_rank = _call_argument_semantic_rank(recovered, caller_parameters, callee_param)
-    parameter_rank = _call_argument_semantic_rank(parameter_candidate, caller_parameters, callee_param)
-
-    if recovered_descriptor is not None:
-        return recovered if recovered_rank >= parameter_rank else parameter_candidate
-
-    if getattr(parameter_descriptor, "get", None) is not None and parameter_descriptor.get("implicit_passthrough"):
-        if recovered_rank <= parameter_rank:
-            return parameter_candidate
-        if recovered.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL, ExpressionType.PHI}:
-            return parameter_candidate
-
-    if recovered.expr_type in {ExpressionType.UNKNOWN, ExpressionType.CALL}:
-        return parameter_candidate
-
-    return recovered if recovered_rank > parameter_rank else parameter_candidate
 
 
 def _enumerate_call_argument_variants(
@@ -1216,7 +1372,10 @@ def _select_aligned_explicit_call_arguments(
     caller_parameters: Sequence[Dict],
     callee_parameters: Sequence[Dict],
     explicit_args: Sequence[Expression],
-) -> List[Expression]:
+    *,
+    condition_tracker=None,
+    current_conditions: Optional[Sequence[Condition]] = None,
+) -> Optional[List[Expression]]:
     explicit = list(explicit_args)
     if len(explicit) <= len(callee_parameters):
         return explicit
@@ -1228,69 +1387,54 @@ def _select_aligned_explicit_call_arguments(
             caller_parameters,
             callee_param,
             index,
+            condition_tracker=condition_tracker,
+            current_conditions=current_conditions,
         )
         for index, callee_param in enumerate(callee_parameters)
     ]
 
-    total_explicit = len(explicit)
-    total_params = len(callee_parameters)
-    best_scores: Dict[Tuple[int, int], int] = {}
-    best_paths: Dict[Tuple[int, int], Tuple[int, ...]] = {}
+    if any(preferred is None for preferred in preferred_args):
+        return None
 
-    def solve(explicit_index: int, param_index: int) -> int:
-        key = (explicit_index, param_index)
-        if key in best_scores:
-            return best_scores[key]
-
-        remaining_explicit = total_explicit - explicit_index
-        remaining_params = total_params - param_index
-        if remaining_explicit < remaining_params:
-            best_scores[key] = -10**9
-            best_paths[key] = ()
-            return best_scores[key]
-        if param_index >= total_params:
-            skip_score = -2 * remaining_explicit
-            best_scores[key] = skip_score
-            best_paths[key] = ()
-            return skip_score
-        if explicit_index >= total_explicit:
-            best_scores[key] = -10**9
-            best_paths[key] = ()
-            return best_scores[key]
-
-        skip_penalty = -1 if param_index == 0 else -6
-        skip_score = skip_penalty + solve(explicit_index + 1, param_index)
-        take_tail_score = solve(explicit_index + 1, param_index + 1)
-        if take_tail_score <= -10**8:
-            take_score = take_tail_score
-        else:
-            take_score = _score_call_argument_alignment(
-                explicit[explicit_index],
+    selected: List[Expression] = []
+    used_indexes: Set[int] = set()
+    for preferred, callee_param in zip(preferred_args, callee_parameters):
+        matches = [
+            index for index, expr in enumerate(explicit)
+            if index not in used_indexes
+            and _explicit_argument_matches_preferred(
+                expr,
+                preferred,
                 caller_parameters,
-                callee_parameters[param_index],
-                preferred_args[param_index],
-                explicit_index,
-                param_index,
-                total_explicit,
-                total_params,
-            ) + take_tail_score
-
-        if take_score > skip_score:
-            best_scores[key] = take_score
-            best_paths[key] = (explicit_index,) + best_paths.get(
-                (explicit_index + 1, param_index + 1),
-                (),
+                callee_param,
             )
-        else:
-            best_scores[key] = skip_score
-            best_paths[key] = best_paths.get((explicit_index + 1, param_index), ())
-        return best_scores[key]
+        ]
+        if len(matches) != 1:
+            return None
+        used_indexes.add(matches[0])
+        selected.append(explicit[matches[0]])
+    return selected
 
-    solve(0, 0)
-    selected_indices = list(best_paths.get((0, 0), ()))
-    if len(selected_indices) != total_params:
-        return explicit[:total_params]
-    return [explicit[index] for index in selected_indices]
+
+def _explicit_argument_matches_preferred(
+    expr: Optional[Expression],
+    preferred: Optional[Expression],
+    caller_parameters: Sequence[Dict],
+    callee_param: Optional[Dict],
+) -> bool:
+    if expr is None or preferred is None:
+        return False
+    if _expressions_equivalent(expr, preferred):
+        return True
+    expr_param = _resolve_parameter_descriptor(expr, caller_parameters)
+    preferred_param = _resolve_parameter_descriptor(preferred, caller_parameters)
+    if _parameter_descriptors_share_identity(expr_param, preferred_param):
+        return True
+    expr_size = max(1, int(expr.size or (callee_param or {}).get("size") or 8))
+    preferred_size = max(1, int(preferred.size or (callee_param or {}).get("size") or 8))
+    expr_location = canonicalize_location(expr, caller_parameters, size=expr_size)
+    preferred_location = canonicalize_location(preferred, caller_parameters, size=preferred_size)
+    return expr_location is not None and expr_location == preferred_location
 
 
 def _recover_preferred_call_argument_expression(
@@ -1311,135 +1455,9 @@ def _recover_preferred_call_argument_expression(
         condition_tracker=condition_tracker,
         current_conditions=current_conditions,
     )
-    preferred = _prefer_object_centric_parameter_candidate(
-        preferred,
-        _parameter_expression_from_matching_storage(
-            callee_param,
-            caller_parameters,
-            size=callee_param.get("size"),
-        ),
-        caller_parameters,
-        callee_param,
-    )
-    if preferred is None and index < len(caller_parameters):
-        caller_param = caller_parameters[index]
-        caller_storage = _coerce_storage_info(caller_param.get("storage"))
-        callee_storage = _coerce_storage_info(callee_param.get("storage"))
-        if (
-            caller_storage is not None
-            and callee_storage is not None
-            and _storage_infos_match(caller_storage, callee_storage)
-        ):
-            preferred = _parameter_expression_from_descriptor(
-                caller_param,
-                size=callee_param.get("size"),
-            )
     if preferred is None:
         return None
     return _normalize_call_argument_expression(preferred, index, caller_parameters)
-
-
-def _score_call_argument_alignment(
-    expr: Optional[Expression],
-    caller_parameters: Sequence[Dict],
-    callee_param: Optional[Dict],
-    preferred: Optional[Expression],
-    explicit_index: int,
-    param_index: int,
-    total_explicit: int,
-    total_params: int,
-) -> int:
-    if expr is None:
-        return -10**6
-
-    score = _call_argument_semantic_rank(expr, caller_parameters, callee_param) * 5
-    score += _call_argument_position_bias(
-        explicit_index,
-        param_index,
-        total_explicit,
-        total_params,
-    )
-    expr_param = _resolve_parameter_descriptor(expr, caller_parameters)
-    preferred_param = _resolve_parameter_descriptor(preferred, caller_parameters) if preferred is not None else None
-
-    if preferred is not None:
-        if _expressions_equivalent(expr, preferred):
-            score += 100
-        elif _parameter_descriptors_share_identity(expr_param, preferred_param):
-            score += 85
-        else:
-            expr_size = max(1, int(expr.size or (callee_param or {}).get("size") or 8))
-            preferred_size = max(1, int(preferred.size or (callee_param or {}).get("size") or 8))
-            expr_location = canonicalize_location(expr, caller_parameters, size=expr_size)
-            preferred_location = canonicalize_location(preferred, caller_parameters, size=preferred_size)
-            if expr_location is not None and expr_location == preferred_location:
-                score += 70
-
-    if expr_param is not None:
-        score += 15
-        caller_param = expr_param
-        if caller_param is not None and callee_param is not None:
-            caller_storage = _coerce_storage_info(caller_param.get("storage"))
-            callee_storage = _coerce_storage_info(callee_param.get("storage"))
-            if (
-                caller_storage is not None
-                and callee_storage is not None
-                and _storage_infos_match(caller_storage, callee_storage)
-            ):
-                score += 45
-            try:
-                if int(caller_param.get("index", -1)) == int(callee_param.get("index", -2)):
-                    score += 10
-            except Exception:
-                pass
-    elif expr.expr_type == ExpressionType.CONSTANT:
-        if _parameter_descriptor_looks_pointer(callee_param):
-            try:
-                score += 10 if int(expr.value) == 0 else -5
-            except Exception:
-                score += 0
-        else:
-            score += 12
-    elif expr.expr_type == ExpressionType.PHI:
-        score += 16
-    elif expr.expr_type == ExpressionType.CALL:
-        score += 12
-    elif expr.expr_type == ExpressionType.INTRINSIC:
-        score += 9
-    elif expr.expr_type in {ExpressionType.BINARY_OP, ExpressionType.UNARY_OP, ExpressionType.MEMORY}:
-        score += 5
-
-    try:
-        callee_size = int((callee_param or {}).get("size") or 0)
-    except Exception:
-        callee_size = 0
-    try:
-        expr_size = int(expr.size or 0)
-    except Exception:
-        expr_size = 0
-    if callee_size > 0 and expr_size == callee_size:
-        score += 2
-
-    return score
-
-
-def _call_argument_position_bias(
-    explicit_index: int,
-    param_index: int,
-    total_explicit: int,
-    total_params: int,
-) -> int:
-    extra_prefix = total_explicit - total_params
-    if extra_prefix <= 0:
-        return 0
-
-    expected_index = extra_prefix + param_index
-    delta = explicit_index - expected_index
-    if delta == 0:
-        return 90
-    if delta < 0:
-        return -35 * abs(delta)
-    return -18 * delta
 
 
 def _should_preserve_explicit_indirect_target_argument(
@@ -2017,14 +2035,40 @@ def _find_block_info_for_pcode_op(condition_tracker, pcode_op):
     block_index = getattr(condition_tracker, "block_by_index", None)
     if not isinstance(block_index, dict):
         return None
+    target_key = _pcode_op_ref_key_from_tracker(condition_tracker, pcode_op)
     for block_info in block_index.values():
         try:
             pcode_ops = getattr(block_info, "pcode_ops", None) or []
-            if any(candidate is pcode_op for candidate in pcode_ops):
+            if any(
+                candidate is pcode_op
+                or (
+                    target_key is not None
+                    and _pcode_op_ref_key_from_tracker(condition_tracker, candidate) == target_key
+                )
+                for candidate in pcode_ops
+            ):
                 return block_info
         except Exception:
             continue
     return None
+
+
+def _pcode_op_ref_key_from_tracker(condition_tracker, pcode_op) -> Optional[Tuple[object, ...]]:
+    tracer = getattr(condition_tracker, "tracer", None)
+    make_ref = getattr(tracer, "_make_pcode_op_ref", None)
+    if not callable(make_ref):
+        return None
+    try:
+        ref = make_ref(pcode_op)
+    except Exception:
+        return None
+    stable_key = getattr(ref, "stable_key", None)
+    if not callable(stable_key):
+        return None
+    try:
+        return stable_key()
+    except Exception:
+        return None
 
 
 def _iter_path_ops_before_call(path_blocks, call_op) -> Iterator[object]:
@@ -2042,18 +2086,25 @@ def _compatible_call_block_paths(
     call_op,
     condition_tracker,
     current_conditions: Optional[Sequence[Condition]],
-) -> List[Tuple[List[object], List[Condition]]]:
+) -> Optional[List[Tuple[List[object], List[Condition]]]]:
     if condition_tracker is None:
-        return []
+        return None
     call_block = _find_block_info_for_pcode_op(condition_tracker, call_op)
     if call_block is None:
-        return []
+        return None
     get_paths = getattr(condition_tracker, "get_all_valid_block_paths_to_block", None)
     if not callable(get_paths):
-        return []
+        return None
 
     compatible: List[Tuple[List[object], List[Condition]]] = []
-    for blocks, path_conditions in list(get_paths(call_block) or []):
+    try:
+        path_results = list(get_paths(call_block) or [])
+    except Exception:
+        return None
+    if not path_results:
+        return None
+
+    for blocks, path_conditions in path_results:
         merged = ConditionSimplifier.simplify_conditions(
             list(path_conditions or []) + list(current_conditions or []),
         )
@@ -2257,60 +2308,400 @@ def _recover_call_argument_from_storage(
         condition_tracker,
         current_conditions,
     )
-    if compatible_paths:
-        path_candidates: List[Expression] = []
-        for path_blocks, _path_conditions in compatible_paths:
-            candidate = _select_best_storage_candidate(
-                list(_iter_path_ops_before_call(path_blocks, call_op)),
+    if not compatible_paths:
+        return None
+
+    path_candidates: List[Expression] = []
+    for path_blocks, _path_conditions in compatible_paths:
+        path_ops = list(_iter_path_ops_before_call(path_blocks, call_op))
+        candidate = _select_best_storage_candidate(
+            path_ops,
+            target_storage,
+            tracer,
+            caller_parameters,
+            callee_param,
+            path_blocks=path_blocks,
+            current_conditions=current_conditions,
+        )
+        if candidate is None:
+            candidate = _recover_unmodified_live_in_argument(
+                path_ops,
                 target_storage,
                 tracer,
                 caller_parameters,
                 callee_param,
-                path_blocks=path_blocks,
-                current_conditions=current_conditions,
             )
-            if candidate is not None:
-                path_candidates.append(candidate)
-        if path_candidates:
-            chosen = path_candidates[0]
-            if all(_expressions_equivalent(chosen, candidate) for candidate in path_candidates[1:]):
-                return chosen
-
-    call_order = _get_order_key(call_op)
-    return _select_best_storage_candidate(
-        [
-            op
-            for op in tracer.get_all_pcode_ops()
-            if _get_order_key(op) < call_order
-        ],
-        target_storage,
-        tracer,
-        caller_parameters,
-        callee_param,
-        current_conditions=current_conditions,
-    )
+        if candidate is not None:
+            path_candidates.append(candidate)
+        else:
+            return None
+    if not path_candidates:
+        return None
+    chosen = path_candidates[0]
+    if all(_expressions_equivalent(chosen, candidate) for candidate in path_candidates[1:]):
+        return chosen
+    return None
 
 
-def _parameter_expression_from_matching_storage(
-    callee_param: Dict,
+def _recover_unmodified_live_in_argument(
+    ops: Sequence[object],
+    target_storage: StorageInfo,
+    tracer,
     caller_parameters: Sequence[Dict],
-    size: Optional[int] = None,
+    callee_param: Dict,
 ) -> Optional[Expression]:
-    callee_storage = _coerce_storage_info(callee_param.get("storage"))
-    if callee_storage is None:
+    if _path_writes_storage(ops, target_storage, tracer):
+        return None
+    declared_target_size = _parameter_declared_semantic_size_bytes(callee_param)
+    target_size = declared_target_size or _parameter_semantic_size_bytes(callee_param)
+    descriptor = _resolve_live_in_parameter_descriptor_for_call_storage(
+        caller_parameters,
+        target_storage,
+        required_size_bytes=declared_target_size,
+        allow_register_fragment_extension=declared_target_size is None,
+    )
+    if descriptor is None:
+        return None
+    try:
+        source_size = int(_parameter_semantic_size_bytes(descriptor) or descriptor.get("size") or 0)
+    except Exception:
+        source_size = 0
+    try:
+        target_size = int(target_size or callee_param.get("size") or target_storage.size or source_size or 0)
+    except Exception:
+        target_size = source_size
+    source_size = source_size if source_size > 0 else target_size
+    expr = _parameter_expression_from_descriptor(descriptor, size=source_size or None)
+    if expr is None:
+        return None
+    if target_size > source_size:
+        if declared_target_size is not None:
+            return None
+        source_storage = _coerce_storage_info(descriptor.get("storage"))
+        expr = expr.clone_with(
+            call_argument_width_evidence=CallArgumentWidthEvidence(
+                source_bits=max(1, int(source_size or 0)) * 8,
+                target_bits=max(
+                    max(1, int(target_size or 0)) * 8,
+                    int(getattr(target_storage, "size_bits", 0) or 0),
+                ),
+                source_storage_key=_storage_identity_key(source_storage),
+                target_storage_key=_storage_identity_key(target_storage),
+            )
+        )
+    return expr
+
+
+def _resolve_live_in_parameter_descriptor_for_call_storage(
+    caller_parameters: Sequence[Dict],
+    target_storage: StorageInfo,
+    *,
+    required_size_bytes: Optional[int] = None,
+    allow_register_fragment_extension: bool = False,
+) -> Optional[Dict]:
+    required_bits = max(0, int(required_size_bytes or 0) * 8)
+    descriptor = _resolve_parameter_descriptor_from_identity(
+        caller_parameters,
+        storage_info=target_storage,
+    )
+    if descriptor is not None and _parameter_storage_covers_required_width(
+        descriptor,
+        required_bits,
+    ):
+        return descriptor
+    if target_storage is None or not getattr(target_storage, "is_register", False):
         return None
 
     matches: List[Dict] = []
-    for caller_param in caller_parameters:
-        caller_storage = _coerce_storage_info(caller_param.get("storage"))
-        if caller_storage is None:
+    for parameter in caller_parameters or []:
+        parameter_storage = _coerce_storage_info(parameter.get("storage"))
+        if parameter_storage is None or not getattr(parameter_storage, "is_register", False):
             continue
-        if _storage_infos_match(caller_storage, callee_storage):
-            matches.append(caller_param)
+        if (
+            required_bits > 0
+            and int(getattr(parameter_storage, "size_bits", 0) or 0) < required_bits
+            and not allow_register_fragment_extension
+        ):
+            continue
+        if _register_storage_contains(target_storage, parameter_storage):
+            matches.append(parameter)
 
-    if len(matches) != 1:
+    return matches[0] if len(matches) == 1 else None
+
+
+def _parameter_semantic_size_bytes(param: Optional[Dict]) -> Optional[int]:
+    if not isinstance(param, dict):
         return None
-    return _parameter_expression_from_descriptor(matches[0], size=size or callee_param.get("size"))
+    declared = get_declared_type_size_bytes(
+        param.get("data_type_obj"),
+        param.get("data_type"),
+        fallback_size=None,
+    )
+    if declared is not None and int(declared) > 0:
+        return int(declared)
+    try:
+        size = int(param.get("size") or 0)
+    except Exception:
+        size = 0
+    return size if size > 0 else None
+
+
+def _parameter_declared_semantic_size_bytes(param: Optional[Dict]) -> Optional[int]:
+    if not isinstance(param, dict) or _parameter_type_is_unknown(param):
+        return None
+    declared = get_declared_type_size_bytes(
+        param.get("data_type_obj"),
+        param.get("data_type"),
+        fallback_size=None,
+    )
+    try:
+        declared_size = int(declared or 0)
+    except Exception:
+        declared_size = 0
+    if declared_size <= 0:
+        try:
+            declared_size = int(param.get("size") or 0)
+        except Exception:
+            declared_size = 0
+    return declared_size if declared_size > 0 else None
+
+
+def _parameter_storage_covers_required_width(
+    parameter: Dict,
+    required_bits: int,
+) -> bool:
+    if required_bits <= 0:
+        return True
+    parameter_storage = _coerce_storage_info(parameter.get("storage"))
+    if parameter_storage is None:
+        return False
+    return int(getattr(parameter_storage, "size_bits", 0) or 0) >= required_bits
+
+
+def _parameter_type_is_unknown(param: Optional[Dict]) -> bool:
+    if not isinstance(param, dict):
+        return True
+    type_obj = param.get("data_type_obj")
+    type_name = param.get("data_type")
+    if is_undefined_data_type(type_obj, type_name):
+        return True
+    normalized = str(type_name or "").strip().lower()
+    return not normalized or normalized.startswith("undefined")
+
+
+def _expression_bit_width(expr: Optional[Expression]) -> int:
+    if expr is None:
+        return 0
+    try:
+        width = int(expr.get_bit_width() or 0)
+    except Exception:
+        width = 0
+    if width > 0:
+        return width
+    try:
+        size = int(getattr(expr, "size", 0) or 0)
+    except Exception:
+        size = 0
+    return max(0, size * 8)
+
+
+def _call_argument_width_evidence(expr: Optional[Expression]) -> Optional[CallArgumentWidthEvidence]:
+    evidence = getattr(expr, "call_argument_width_evidence", None)
+    return evidence if isinstance(evidence, CallArgumentWidthEvidence) else None
+
+
+def _call_argument_needs_partial_width_validation(expr: Optional[Expression]) -> bool:
+    evidence = _call_argument_width_evidence(expr)
+    return bool(evidence is not None and evidence.is_partial())
+
+
+def _call_argument_available_bits(expr: Optional[Expression]) -> int:
+    evidence = _call_argument_width_evidence(expr)
+    if evidence is not None and int(evidence.source_bits or 0) > 0:
+        return int(evidence.source_bits)
+    return _expression_bit_width(expr)
+
+
+def _call_arguments_width_safe_for_effect_summary(
+    effect_summary: Optional[EffectSummary],
+    callee_parameters: Sequence[Dict],
+    args: Sequence[Expression],
+) -> bool:
+    if effect_summary is None:
+        return True
+    for index, (callee_param, arg) in enumerate(zip(callee_parameters or [], args or [])):
+        if not _call_argument_needs_partial_width_validation(arg):
+            continue
+        available_bits = _call_argument_available_bits(arg)
+        if available_bits <= 0:
+            return False
+        for effect in effect_summary.effects or []:
+            if _location_uses_parameter(effect.location, callee_param):
+                return False
+            if _expression_uses_parameter_beyond_width(
+                effect.value,
+                callee_param,
+                available_bits,
+                callee_parameters,
+            ):
+                return False
+            for condition in effect.conditions or []:
+                if _expression_uses_parameter_beyond_width(
+                    getattr(condition, "expression", None),
+                    callee_param,
+                    available_bits,
+                    callee_parameters,
+                ):
+                    return False
+    return True
+
+
+def _call_arguments_width_safe_for_callee_analysis(
+    callee_analysis,
+    args: Sequence[Expression],
+) -> bool:
+    callee_parameters = list(getattr(callee_analysis, "parameters", []) or [])
+    for callee_param, arg in zip(callee_parameters, args or []):
+        if not _call_argument_needs_partial_width_validation(arg):
+            continue
+        available_bits = _call_argument_available_bits(arg)
+        if available_bits <= 0:
+            return False
+        for ret in getattr(callee_analysis, "returns", []) or []:
+            if _expression_uses_parameter_beyond_width(
+                getattr(ret, "value", None),
+                callee_param,
+                available_bits,
+                callee_parameters,
+            ):
+                return False
+            for condition in getattr(ret, "conditions", []) or []:
+                if _expression_uses_parameter_beyond_width(
+                    getattr(condition, "expression", None),
+                    callee_param,
+                    available_bits,
+                    callee_parameters,
+                ):
+                    return False
+        effect_summary = getattr(callee_analysis, "effect_summary", None)
+        if not _call_arguments_width_safe_for_effect_summary(
+            effect_summary,
+            callee_parameters,
+            args,
+        ):
+            return False
+    return True
+
+
+def _expression_uses_parameter_beyond_width(
+    expr: Optional[Expression],
+    callee_param: Dict,
+    available_bits: int,
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    location = None
+    if isinstance(runtime_ref, CanonicalLocation):
+        location = runtime_ref
+    elif isinstance(runtime_ref, (PostStateReadRef, PostStateValueRef)):
+        location = getattr(runtime_ref, "location", None)
+    if _location_uses_parameter(location, callee_param):
+        return True
+
+    if _expression_directly_matches_parameter(expr, callee_param, parameters):
+        return _expression_bit_width(expr) > int(available_bits or 0)
+
+    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "SUBPIECE" and len(expr.operands) == 2:
+        source, offset = expr.operands
+        offset_value = getattr(offset, "value", None) if offset.expr_type == ExpressionType.CONSTANT else None
+        if offset_value == 0 and _expression_directly_matches_parameter(source, callee_param, parameters):
+            return _expression_bit_width(expr) > int(available_bits or 0)
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for condition, value in expr.value:
+            if condition is not None and _expression_uses_parameter_beyond_width(
+                getattr(condition, "expression", None),
+                callee_param,
+                available_bits,
+                parameters,
+            ):
+                return True
+            if _expression_uses_parameter_beyond_width(value, callee_param, available_bits, parameters):
+                return True
+        return False
+
+    for operand in getattr(expr, "operands", []) or []:
+        if _expression_uses_parameter_beyond_width(operand, callee_param, available_bits, parameters):
+            return True
+    return False
+
+
+def _expression_directly_matches_parameter(
+    expr: Optional[Expression],
+    callee_param: Dict,
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+    return bool(
+        _parameter_identity_keys_from_expression(expr, parameters).intersection(
+            _parameter_identity_keys_from_descriptor(callee_param)
+        )
+    )
+
+
+def _location_uses_parameter(
+    location: Optional[CanonicalLocation],
+    callee_param: Dict,
+) -> bool:
+    if location is None:
+        return False
+    return _parameter_base_ref_matches_descriptor(getattr(location, "base_ref", None), callee_param)
+
+
+def _register_storage_contains(container: StorageInfo, fragment: StorageInfo) -> bool:
+    if (
+        container is None
+        or fragment is None
+        or not getattr(container, "is_register", False)
+        or not getattr(fragment, "is_register", False)
+    ):
+        return False
+    if not container.shares_base_register_with(fragment):
+        return False
+    container_low = int(getattr(container, "bit_offset_in_base", 0) or 0)
+    container_high = container_low + int(getattr(container, "size_bits", 0) or 0)
+    fragment_low = int(getattr(fragment, "bit_offset_in_base", 0) or 0)
+    fragment_high = fragment_low + int(getattr(fragment, "size_bits", 0) or 0)
+    if container_high <= container_low or fragment_high <= fragment_low:
+        return False
+    return container_low <= fragment_low and fragment_high <= container_high
+
+
+def _path_writes_storage(
+    ops: Sequence[object],
+    target_storage: StorageInfo,
+    tracer,
+) -> bool:
+    for op in ops or []:
+        output = getattr(op, "getOutput", lambda: None)()
+        if output is not None and _varnode_storage_match_rank(output, target_storage, tracer) > 0:
+            return True
+        if (
+            not target_storage.is_register
+            and getattr(op, "getMnemonic", lambda: None)() == "STORE"
+            and getattr(op, "getNumInputs", lambda: 0)() >= 3
+        ):
+            try:
+                store_target = op.getInput(1)
+            except Exception:
+                store_target = None
+            if _stack_varnode_matches_storage(store_target, target_storage):
+                return True
+    return False
 
 
 def _varnode_matches_storage(varnode, target_storage: StorageInfo, tracer) -> bool:
@@ -2382,18 +2773,15 @@ def _normalize_call_argument_expression(
     if expr is None:
         return expr
 
-    if _expression_maps_to_parameter(expr, parameters):
-        return expr
+    descriptor = _resolve_parameter_descriptor(expr, parameters)
+    if descriptor is not None:
+        return _parameter_expression_from_descriptor(descriptor, size=expr.size or None) or expr
 
     if expr.expr_type not in (ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.UNKNOWN):
         return expr
     if getattr(expr, "operands", None):
         return expr
-    if arg_index < 0 or arg_index >= len(parameters):
-        return expr
-
-    fallback = _parameter_expression_from_descriptor(parameters[arg_index], size=expr.size or None)
-    return fallback or expr
+    return expr
 
 
 def _choose_effect_substitution_args(
@@ -2405,43 +2793,7 @@ def _choose_effect_substitution_args(
     direct_location = substitute_location(location, callee_params, args, caller_parameters)
     if direct_location is not None:
         return args
-
-    positional_args = _build_positional_parameter_args(args, caller_parameters)
-    if positional_args is None:
-        return args
-
-    positional_location = substitute_location(
-        location,
-        callee_params,
-        positional_args,
-        caller_parameters,
-    )
-    if positional_location is not None:
-        return positional_args
     return args
-
-
-def _build_positional_parameter_args(
-    args: Sequence[Expression],
-    parameters: Sequence[Dict],
-) -> Optional[List[Expression]]:
-    if not args:
-        return None
-    positional_args: List[Expression] = []
-    changed = False
-    for index, expr in enumerate(args):
-        fallback = _parameter_expression_from_descriptor(
-            parameters[index],
-            size=(expr.size if expr is not None else None),
-        ) if index < len(parameters) else None
-        if fallback is None:
-            positional_args.append(expr)
-            continue
-        positional_args.append(fallback)
-        changed = changed or not _expressions_equivalent(expr, fallback)
-    if not changed:
-        return None
-    return positional_args
 
 
 def _expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequence[Dict]) -> bool:
@@ -2644,9 +2996,12 @@ def _coerce_argument_to_callee_parameter(
     descriptor = callee_param if isinstance(callee_param, dict) else None
     target_size = None
     is_signed = True
+    target_size_is_declared = False
     if descriptor is not None:
         try:
-            target_size = int(descriptor.get("size") or 0)
+            declared_size = _parameter_declared_semantic_size_bytes(descriptor)
+            target_size = int(declared_size or _parameter_semantic_size_bytes(descriptor) or descriptor.get("size") or 0)
+            target_size_is_declared = declared_size is not None
         except Exception:
             target_size = None
         try:
@@ -2682,6 +3037,9 @@ def _coerce_argument_to_callee_parameter(
         )
         narrowed.size = target_size
         return narrowed
+
+    if descriptor is not None and not target_size_is_declared and _parameter_type_is_unknown(descriptor):
+        return cloned
 
     widened = Expression.unary_op(
         "INT_SEXT" if is_signed else "INT_ZEXT",
@@ -2747,20 +3105,6 @@ def _bind_location_to_parameter_refs(
         return location
     if base_ref.parameter_index is not None:
         return location
-    parameter_name = base_ref.parameter_name
-    if not parameter_name:
-        return location
-    for ref in parameter_refs or []:
-        if not isinstance(ref, LocationBaseRef) or not ref.is_parameter():
-            continue
-        if ref.parameter_name != parameter_name:
-            continue
-        return CanonicalLocation(
-            base_ref=ref,
-            offset=location.offset,
-            size=location.size,
-            steps=tuple(location.steps),
-        )
     return location
 
 
@@ -3766,16 +4110,19 @@ def _find_matching_effect_value(
         normalized_effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
         if max_order_key is not None and effect.order_key >= max_order_key:
             continue
-        if ConditionSimplifier.object_centric_is_contradiction(normalized_return_conditions + normalized_effect_conditions):
+        combined_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            normalized_return_conditions + normalized_effect_conditions
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(combined_conditions):
             continue
-        if not locations_match(location, effect.location, normalized_return_conditions):
+        if not locations_match(location, effect.location, combined_conditions):
             continue
-        if not _expression_reads_location(expr, location, normalized_return_conditions, parameters):
+        if not _expression_reads_location(expr, location, combined_conditions, parameters):
             continue
         if _expression_matches_value_under_conditions(
             expr,
             effect.value,
-            normalized_return_conditions + normalized_effect_conditions,
+            combined_conditions,
             parameters,
         ):
             return effect.order_key, effect.value

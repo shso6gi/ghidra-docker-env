@@ -8,6 +8,8 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
     concretize_readonly_loads,
 )
 from scripts.function_tracer_pcode.analysis.effect_summary import (
+    CallArgumentEvidence,
+    CallArgumentWidthEvidence,
     CanonicalLocation,
     LocationStep,
     StoreEffect,
@@ -40,16 +42,23 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     substitute_condition,
     substitute_location,
     _choose_effect_substitution_args,
+    _find_block_info_for_pcode_op,
     _recover_call_argument_expressions,
     _recover_call_argument_from_storage,
+    _record_call_argument_evidence,
     _resolve_call_argument_expression,
     _normalize_call_argument_expression,
     _call_argument_semantic_rank,
+    _call_arguments_width_safe_for_callee_analysis,
+    _coerce_argument_to_callee_parameter,
+    _find_matching_effect_value,
     EffectSummary,
 )
 from scripts.function_tracer_pcode.model import (
     AddressValueRef,
     CallTargetRef,
+    DeferredCallRef,
+    DeferredCallInfo,
     LocationBaseRef,
     ObservedMemoryReadRef,
     PostStateReadRef,
@@ -346,18 +355,18 @@ def test_mips64_handler_detects_spurious_same_pattern_extension_violation():
     analysis1 = FunctionReturnAnalysis(
         function_name="f1",
         entry_point="0x0",
-        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "is_signed": True}],
+        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": True}],
         returns=[],
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="f2",
         entry_point="0x0",
-        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "is_signed": True}],
+        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": True}],
         returns=[],
     )
 
     handler._analyze_parameter_usage = lambda analysis: {
-        "param_1": ParameterSemanticHint(narrow_bits=32, signedness="signed")
+        ("parameter_index", 0): ParameterSemanticHint(narrow_bits=32, signedness="signed")
     }
 
     constraints = handler.detect_spurious_counterexample(
@@ -1582,6 +1591,37 @@ def test_return_analyzer_keeps_object_centric_post_state_for_observed_stale_wrap
     assert normalized.to_string() == "MEM[ptr]"
 
 
+def test_find_matching_effect_value_uses_effect_guard_for_location_alias():
+    left = Expression.parameter("param_1", 0, size=8)
+    right = Expression.parameter("param_2", 1, size=8)
+    read_from_right = Expression.memory(right, size=4)
+    alias_cond = Condition(
+        Expression.binary_op("INT_EQUAL", left, right),
+        False,
+    )
+
+    match = _find_matching_effect_value(
+        read_from_right,
+        _loc("param_2", 0, 4),
+        [],
+        [
+            StoreEffect(
+                location=_loc("param_1", 0, 4),
+                value=read_from_right,
+                conditions=[alias_cond],
+                order_key=17,
+            )
+        ],
+        [
+            _param("param_1", size=8, index=0),
+            _param("param_2", size=8, index=1),
+        ],
+    )
+
+    assert match is not None
+    assert match[0] == 17
+
+
 def test_canonicalize_post_state_subexpressions_does_not_promote_memory_address_parameter():
     param_1 = Expression.parameter("param_1", 0, size=8)
     param_2 = Expression.parameter("param_2", 1, size=8)
@@ -1881,12 +1921,20 @@ def test_recover_call_argument_from_storage_prefers_exact_register_match_for_poi
         ],
     )
     call_op = FakeOp(None, 0x1000, 3)
+    call_block = type("FakeBlock", (), {"pcode_ops": tracer.get_all_pcode_ops() + [call_op]})()
+
+    class FakeConditionTracker:
+        block_by_index = {0: call_block}
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [([call_block], [])]
 
     recovered = _recover_call_argument_from_storage(
         call_op,
         tracer,
         [_param("param_1", size=4, is_signed=False, index=0)],
         {"storage": _reg_storage("a2"), "size": 8},
+        condition_tracker=FakeConditionTracker(),
     )
 
     assert recovered is not None
@@ -2006,6 +2054,13 @@ def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate
         ],
     )
     call_op = FakeOp(None, 0x1000, 3)
+    call_block = type("FakeBlock", (), {"pcode_ops": tracer.get_all_pcode_ops() + [call_op]})()
+
+    class FakeConditionTracker:
+        block_by_index = {0: call_block}
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [([call_block], [])]
 
     recovered = _recover_call_argument_from_storage(
         call_op,
@@ -2017,10 +2072,1121 @@ def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate
             "data_type": "int *",
             "data_type_obj": MockPointerType(),
         },
+        condition_tracker=FakeConditionTracker(),
     )
 
     assert recovered is not None
     assert recovered.to_string() == "(sp + (-48))"
+
+
+def test_recover_call_argument_from_storage_refuses_no_tracker_global_scan():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, name, storage, expr):
+            self.name = name
+            self.storage = storage
+            self.expr = expr
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return 4
+
+    class FakeOp:
+        def __init__(self, output, order):
+            self._output = output
+            self._seqnum = FakeSeqnum(0x1000, order)
+
+        def getMnemonic(self):
+            return "CALL" if self._output is None else "COPY"
+
+        def getOutput(self):
+            return self._output
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeTracer:
+        def __init__(self, ops):
+            self._ops = list(ops)
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return getattr(varnode, "expr", None)
+
+    storage = StorageInfo(**_reg_storage("a0", size_bytes=4))
+    reaching_output = FakeVarnode(
+        "a0_def",
+        storage,
+        Expression.parameter("param_1", 0, size=4),
+    )
+    reaching_def = FakeOp(reaching_output, 1)
+    call_op = FakeOp(None, 10)
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer([reaching_def]),
+        [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4))],
+        {"name": "x", "index": 0, "size": 4, "storage": _reg_storage("a0", size_bytes=4)},
+    )
+
+    assert recovered is None
+
+
+def test_recover_call_argument_expressions_does_not_fabricate_formal_storage_argument():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def getTarget(self):
+            return FakeAddress(0x1000)
+
+        def getOrder(self):
+            return 1
+
+    class FakeCallOp:
+        def getSeqnum(self):
+            return FakeSeqnum()
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+    args = _recover_call_argument_expressions(
+        FakeCallOp(),
+        FakeTracer(),
+        [_param("caller_value", size=8, is_signed=False, storage=_reg_storage("a0"))],
+        [{"name": "callee_value", "index": 0, "size": 8, "storage": _reg_storage("a0")}],
+        [],
+    )
+
+    assert args == []
+
+
+def test_recover_call_argument_from_storage_requires_all_compatible_paths():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, name, storage=None, expr=None, size=4):
+            self.name = name
+            self.storage = storage
+            self.expr = expr
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class FakeOp:
+        def __init__(self, mnemonic, output, offset, order):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def __init__(self, ops):
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return getattr(varnode, "expr", None) or Expression.variable(varnode.name, size=varnode.getSize())
+
+    storage = StorageInfo(**_reg_storage("a0", size_bytes=4))
+    output = FakeVarnode(
+        "a0_def",
+        storage=storage,
+        expr=Expression.parameter("param_1", 0, size=4),
+    )
+    reaching_def = FakeOp("COPY", output, 0x1000, 1)
+    call_op = FakeOp("CALL", None, 0x1000, 10)
+    path_with_def = FakeBlock([reaching_def])
+    path_without_def = FakeBlock([])
+    call_block = FakeBlock([call_op])
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer([reaching_def]),
+        [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a1", size_bytes=4))],
+        {"name": "x", "index": 0, "size": 4, "storage": _reg_storage("a0", size_bytes=4)},
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [path_with_def, call_block],
+                [path_without_def, call_block],
+            ],
+        ),
+    )
+
+    assert recovered is None
+
+
+def test_recover_call_argument_from_storage_accepts_unmodified_live_in_on_all_paths():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeOp:
+        def __init__(self, mnemonic, offset, order):
+            self._mnemonic = mnemonic
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return None
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    call_op = FakeOp("CALL", 0x1000, 10)
+    call_block = FakeBlock([call_op])
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer(),
+        [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4))],
+        {"name": "x", "index": 0, "size": 4, "storage": _reg_storage("a0", size_bytes=4)},
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [FakeBlock([]), call_block],
+                [FakeBlock([]), call_block],
+            ],
+        ),
+    )
+
+    assert recovered is not None
+    assert recovered.to_string() == "param_1"
+
+
+def test_recover_call_argument_from_storage_marks_unknown_full_register_live_in_fragment_partial():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeOp:
+        def __init__(self, mnemonic, offset, order):
+            self._mnemonic = mnemonic
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return None
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    def reg_storage(
+        register_name: str,
+        base_name: str,
+        *,
+        offset: int,
+        size_bits: int,
+        bit_offset_in_base: int,
+    ) -> dict:
+        return {
+            "is_register": True,
+            "space_name": "register",
+            "space_id": 0,
+            "offset": offset,
+            "size": max(1, size_bits // 8),
+            "size_bits": size_bits,
+            "register_name": register_name,
+            "base_register_name": base_name,
+            "base_register_offset": 0x30,
+            "base_register_size": 8,
+            "base_register_size_bits": 64,
+            "bit_offset_in_base": bit_offset_in_base,
+        }
+
+    call_op = FakeOp("CALL", 0x1000, 10)
+    call_block = FakeBlock([call_op])
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer(),
+        [
+            _param(
+                "param_3",
+                size=4,
+                is_signed=True,
+                index=2,
+                storage=reg_storage(
+                    "a2_lo",
+                    "a2",
+                    offset=0x34,
+                    size_bits=32,
+                    bit_offset_in_base=32,
+                ),
+            )
+        ],
+        {
+            "name": "callee_b",
+            "index": 2,
+            "size": 8,
+            "storage": reg_storage(
+                "a2",
+                "a2",
+                offset=0x30,
+                size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        },
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [FakeBlock([]), call_block],
+                [FakeBlock([]), call_block],
+            ],
+        ),
+    )
+
+    assert recovered is not None
+    assert recovered.to_string() == "param_3"
+    assert recovered.size == 4
+    evidence = getattr(recovered, "call_argument_width_evidence", None)
+    assert evidence is not None
+    assert evidence.is_partial() is True
+    assert evidence.source_bits == 32
+    assert evidence.target_bits == 64
+
+
+def test_partial_live_in_argument_rejects_full_width_callee_return_use():
+    arg = Expression.parameter("param_3", 2, size=4).clone_with(
+        call_argument_width_evidence=CallArgumentWidthEvidence(
+            source_bits=32,
+            target_bits=64,
+        )
+    )
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x1000",
+        parameters=[
+            {
+                "name": "param_3",
+                "index": 2,
+                "size": 8,
+                "data_type": "undefined8",
+                "storage": _reg_storage("a2", size_bytes=8),
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.parameter("param_3", 2, size=8),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+    )
+
+    assert _call_arguments_width_safe_for_callee_analysis(callee_analysis, [arg]) is False
+
+
+def test_partial_live_in_argument_allows_low_subpiece_callee_return_use():
+    arg = Expression.parameter("param_3", 2, size=4).clone_with(
+        call_argument_width_evidence=CallArgumentWidthEvidence(
+            source_bits=32,
+            target_bits=64,
+        )
+    )
+    callee_param = Expression.parameter("param_3", 2, size=8)
+    low_piece = Expression.binary_op(
+        "SUBPIECE",
+        callee_param,
+        Expression.constant(0, size=8),
+    )
+    low_piece.size = 4
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x1000",
+        parameters=[
+            {
+                "name": "param_3",
+                "index": 2,
+                "size": 8,
+                "data_type": "undefined8",
+                "storage": _reg_storage("a2", size_bytes=8),
+            }
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=low_piece,
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+    )
+
+    assert _call_arguments_width_safe_for_callee_analysis(callee_analysis, [arg]) is True
+
+
+def test_coerce_argument_to_unknown_callee_param_preserves_fragment_width():
+    arg = Expression.parameter("param_3", 2, size=4)
+
+    coerced = _coerce_argument_to_callee_parameter(
+        arg,
+        {
+            "name": "callee_b",
+            "index": 2,
+            "size": 8,
+            "data_type": "undefined8",
+        },
+    )
+
+    assert coerced is not None
+    assert coerced.expr_type == ExpressionType.PARAMETER
+    assert coerced.size == 4
+    assert coerced.to_string() == "param_3"
+
+
+def test_recover_call_argument_from_storage_refuses_pointer_live_in_from_integer_fragment():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeOp:
+        def __init__(self, mnemonic, offset, order):
+            self._mnemonic = mnemonic
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return None
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    def reg_storage(register_name, base_name, *, offset, size_bits, bit_offset_in_base):
+        return {
+            "is_register": True,
+            "space_name": "register",
+            "space_id": 0,
+            "offset": offset,
+            "size": max(1, size_bits // 8),
+            "size_bits": size_bits,
+            "register_name": register_name,
+            "base_register_name": base_name,
+            "base_register_offset": 0x30,
+            "base_register_size": 8,
+            "base_register_size_bits": 64,
+            "bit_offset_in_base": bit_offset_in_base,
+        }
+
+    call_op = FakeOp("CALL", 0x1000, 10)
+    call_block = FakeBlock([call_op])
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer(),
+        [
+            {
+                **_param(
+                    "param_3",
+                    size=4,
+                    is_signed=True,
+                    index=2,
+                    storage=reg_storage("a2_lo", "a2", offset=0x34, size_bits=32, bit_offset_in_base=32),
+                ),
+                "data_type": "int",
+                "data_type_obj": resolve_mock_data_type("int"),
+            }
+        ],
+        {
+            "name": "callee_ptr",
+            "index": 2,
+            "size": 8,
+            "data_type": "int *",
+            "storage": reg_storage("a2", "a2", offset=0x30, size_bits=64, bit_offset_in_base=0),
+        },
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [FakeBlock([]), call_block],
+                [FakeBlock([]), call_block],
+            ],
+        ),
+    )
+
+    assert recovered is None
+
+
+def test_recover_call_argument_from_storage_accepts_semantic_width_fragment_live_in():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeOp:
+        def __init__(self, mnemonic, offset, order):
+            self._mnemonic = mnemonic
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return None
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+    def reg_storage(
+        register_name: str,
+        base_name: str,
+        *,
+        offset: int,
+        size_bits: int,
+        bit_offset_in_base: int,
+    ) -> dict:
+        return {
+            "is_register": True,
+            "space_name": "register",
+            "space_id": 0,
+            "offset": offset,
+            "size": max(1, size_bits // 8),
+            "size_bits": size_bits,
+            "register_name": register_name,
+            "base_register_name": base_name,
+            "base_register_offset": 0x30,
+            "base_register_size": 8,
+            "base_register_size_bits": 64,
+            "bit_offset_in_base": bit_offset_in_base,
+        }
+
+    call_op = FakeOp("CALL", 0x1000, 10)
+    call_block = FakeBlock([call_op])
+    int_type = resolve_mock_data_type("int")
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer(),
+        [
+            {
+                **_param(
+                    "param_3",
+                    size=4,
+                    is_signed=True,
+                    index=2,
+                    storage=reg_storage(
+                        "a2_lo",
+                        "a2",
+                        offset=0x34,
+                        size_bits=32,
+                        bit_offset_in_base=32,
+                    ),
+                ),
+                "data_type": "int",
+                "data_type_obj": int_type,
+            }
+        ],
+        {
+            "name": "callee_b",
+            "index": 2,
+            "size": 8,
+            "data_type": "int",
+            "data_type_obj": int_type,
+            "storage": reg_storage(
+                "a2",
+                "a2",
+                offset=0x30,
+                size_bits=64,
+                bit_offset_in_base=0,
+            ),
+        },
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [FakeBlock([]), call_block],
+                [FakeBlock([]), call_block],
+            ],
+        ),
+    )
+
+    assert recovered is not None
+    assert recovered.to_string() == "param_3"
+    assert recovered.size == 4
+
+
+def test_recover_call_argument_from_storage_refuses_global_scan_when_cfg_paths_inconclusive():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, name, storage=None, expr=None, size=4):
+            self.name = name
+            self.storage = storage
+            self.expr = expr
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class FakeOp:
+        def __init__(self, mnemonic, output, offset, order):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class InconclusiveConditionTracker:
+        block_by_index = {}
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            raise AssertionError("block lookup should fail before path enumeration")
+
+    class FakeTracer:
+        def __init__(self, ops):
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return getattr(varnode, "expr", None) or Expression.variable(varnode.name, size=varnode.getSize())
+
+    storage = StorageInfo(**_reg_storage("a0", size_bytes=4))
+    reaching_output = FakeVarnode(
+        "a0_def",
+        storage=storage,
+        expr=Expression.parameter("param_1", 0, size=4),
+    )
+    reaching_def = FakeOp("COPY", reaching_output, 0x1000, 1)
+    call_op = FakeOp("CALL", None, 0x1000, 10)
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer([reaching_def]),
+        [_param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4))],
+        {"name": "x", "index": 0, "size": 4, "storage": _reg_storage("a0", size_bytes=4)},
+        condition_tracker=InconclusiveConditionTracker(),
+    )
+
+    assert recovered is None
+
+
+def test_find_block_info_for_pcode_op_uses_stable_ref_not_object_identity():
+    class FakeOp:
+        def __init__(self, ref):
+            self.ref = ref
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeTracer:
+        def _make_pcode_op_ref(self, op):
+            return op.ref
+
+    class FakeConditionTracker:
+        def __init__(self, block):
+            self.tracer = FakeTracer()
+            self.block_by_index = {0: block}
+
+    ref = PcodeOpRef(
+        address_offset=0x1000,
+        seq_time=7,
+        seq_order=0,
+        block_index=3,
+        mnemonic="CALL",
+        input_sizes=(8,),
+        output_size=4,
+    )
+    block_op = FakeOp(ref)
+    query_op = FakeOp(ref)
+    block = FakeBlock([block_op])
+
+    assert _find_block_info_for_pcode_op(FakeConditionTracker(block), query_op) is block
+
+
+def test_recover_call_argument_from_storage_rejects_conflicting_path_args():
+    class FakeAddress:
+        def __init__(self, offset, space_name="ram"):
+            self._offset = offset
+            self._space_name = space_name
+
+        def getOffset(self):
+            return self._offset
+
+        def getAddressSpace(self):
+            return self
+
+        def getName(self):
+            return self._space_name
+
+    class FakeSeqnum:
+        def __init__(self, offset, order):
+            self._target = FakeAddress(offset)
+            self._order = order
+
+        def getTarget(self):
+            return self._target
+
+        def getOrder(self):
+            return self._order
+
+    class FakeVarnode:
+        def __init__(self, name, storage=None, expr=None, size=4):
+            self.name = name
+            self.storage = storage
+            self.expr = expr
+            self._size = size
+
+        def getDef(self):
+            return None
+
+        def getSize(self):
+            return self._size
+
+    class FakeOp:
+        def __init__(self, mnemonic, output, offset, order):
+            self._mnemonic = mnemonic
+            self._output = output
+            self._seqnum = FakeSeqnum(offset, order)
+
+        def getMnemonic(self):
+            return self._mnemonic
+
+        def getOutput(self):
+            return self._output
+
+        def getNumInputs(self):
+            return 0
+
+        def getSeqnum(self):
+            return self._seqnum
+
+    class FakeBlock:
+        def __init__(self, ops):
+            self.pcode_ops = list(ops)
+
+    class FakeConditionTracker:
+        def __init__(self, call_block, paths):
+            self.block_by_index = {0: call_block}
+            self._paths = paths
+
+        def get_all_valid_block_paths_to_block(self, _block):
+            return [(path, []) for path in self._paths]
+
+    class FakeTracer:
+        def __init__(self, ops):
+            self._ops = ops
+
+        def get_all_pcode_ops(self):
+            return self._ops
+
+        def _get_storage_info_from_varnode(self, varnode):
+            return getattr(varnode, "storage", None)
+
+        def trace_varnode(self, varnode, use_cache=False, depth=0):
+            return getattr(varnode, "expr", None) or Expression.variable(varnode.name, size=varnode.getSize())
+
+    storage = StorageInfo(**_reg_storage("a0", size_bytes=4))
+    out_a = FakeVarnode("a0_a", storage=storage, expr=Expression.parameter("param_1", 0, size=4))
+    out_b = FakeVarnode("a0_b", storage=storage, expr=Expression.parameter("param_2", 1, size=4))
+    def_a = FakeOp("COPY", out_a, 0x1000, 1)
+    def_b = FakeOp("COPY", out_b, 0x1000, 2)
+    call_op = FakeOp("CALL", None, 0x1000, 10)
+    call_block = FakeBlock([call_op])
+
+    recovered = _recover_call_argument_from_storage(
+        call_op,
+        FakeTracer([def_a, def_b]),
+        [
+            _param("param_1", size=4, is_signed=False, index=0, storage=_reg_storage("a0", size_bytes=4)),
+            _param("param_2", size=4, is_signed=False, index=1, storage=_reg_storage("a1", size_bytes=4)),
+        ],
+        {"name": "x", "index": 0, "size": 4, "storage": _reg_storage("a0", size_bytes=4)},
+        condition_tracker=FakeConditionTracker(
+            call_block,
+            [
+                [FakeBlock([def_a]), call_block],
+                [FakeBlock([def_b]), call_block],
+            ],
+        ),
+    )
+
+    assert recovered is None
+
+
+def test_incomplete_call_argument_evidence_is_not_applied_to_deferred_call():
+    pcode_ref = PcodeOpRef(address_offset=0x1000, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee"),
+            sequence=0,
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        call_argument_evidence={
+            pcode_ref.stable_key(): CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.from_name("callee"),
+                callee_param_identities=(("parameter", 0),),
+                arguments=(),
+                sources=(),
+                path_conditions=((),),
+                coverage_complete=False,
+                reason="argument_recovery_incomplete",
+            )
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert deferred.arguments == []
+    assert "effect_call_argument_evidence_incomplete" in analysis.analysis_notes
+
+
+def test_zero_argument_call_evidence_is_usable_for_true_no_arg_callee():
+    class FakeTracer:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def _make_pcode_op_ref(self, _op):
+            return self.ref
+
+    pcode_ref = PcodeOpRef(address_offset=0x1100, seq_time=2, seq_order=0, mnemonic="CALL")
+    evidence_map = {}
+
+    _record_call_argument_evidence(
+        evidence_map,
+        FakeTracer(pcode_ref),
+        object(),
+        CallTargetRef.from_name("callee"),
+        [],
+        [],
+        [],
+        coverage_complete=True,
+    )
+
+    evidence = evidence_map[pcode_ref.stable_key()]
+    assert evidence.is_usable() is True
+    assert evidence.coverage_complete is True
+    assert evidence.arguments == ()
 
 
 def test_storage_matches_parameter_rejects_superset_register_alias():
@@ -2286,6 +3452,28 @@ def test_recover_call_argument_expressions_prefers_explicit_stack_local_address_
     assert recovered[2].to_string() == "(sp + (-48))"
 
 
+def test_recover_call_argument_expressions_refuses_unresolved_positional_arguments():
+    class FakeTracer:
+        def get_all_pcode_ops(self):
+            return []
+
+    recovered = _recover_call_argument_expressions(
+        call_op=object(),
+        tracer=FakeTracer(),
+        caller_parameters=[
+            _param("caller_a", size=8, is_signed=False, index=0),
+            _param("caller_b", size=8, is_signed=False, index=1),
+        ],
+        callee_parameters=[
+            {"name": "callee_a", "size": 8},
+            {"name": "callee_b", "size": 8},
+        ],
+        explicit_args=[],
+    )
+
+    assert recovered == []
+
+
 def test_recover_call_argument_expressions_preserves_explicit_phi_function_pointer():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):
@@ -2391,7 +3579,7 @@ def test_recover_call_argument_expressions_preserves_explicit_phi_function_point
     assert recovered[0].to_string() == explicit_target.to_string()
 
 
-def test_recover_call_argument_expressions_selects_callee_aligned_explicit_subsequence():
+def test_recover_call_argument_expressions_refuses_unproven_explicit_subsequence_alignment():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):
             self._offset = offset
@@ -2468,10 +3656,10 @@ def test_recover_call_argument_expressions_selects_callee_aligned_explicit_subse
         ],
     )
 
-    assert [arg.to_string() for arg in recovered] == ["param_1", "param_2", "1"]
+    assert recovered == []
 
 
-def test_recover_call_argument_expressions_prefers_right_aligned_visible_args_over_hidden_prefix():
+def test_recover_call_argument_expressions_refuses_right_aligned_hidden_prefix_without_object_evidence():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):
             self._offset = offset
@@ -2542,7 +3730,7 @@ def test_recover_call_argument_expressions_prefers_right_aligned_visible_args_ov
         ],
     )
 
-    assert [arg.to_string() for arg in recovered] == ["param_3", "4294967293"]
+    assert recovered == []
 
 
 def test_recover_call_argument_expressions_uses_path_sensitive_multiequal_input_for_hidden_arg():
@@ -2818,7 +4006,7 @@ def test_resolve_call_argument_expression_does_not_relabel_call_defined_register
     assert resolved.name == "w0"
 
 
-def test_normalize_call_argument_expression_falls_back_to_positional_parameter():
+def test_normalize_call_argument_expression_refuses_positional_parameter_fallback():
     unresolved = Expression.variable("opaque_arg", size=8)
 
     normalized = _normalize_call_argument_expression(
@@ -2830,28 +4018,44 @@ def test_normalize_call_argument_expression_falls_back_to_positional_parameter()
         ],
     )
 
+    assert normalized is unresolved
+
+
+def test_normalize_call_argument_expression_uses_storage_identity():
+    storage = StorageInfo(**_reg_storage("a1"))
+    variable = Expression.variable("opaque_arg", size=8, storage_info=storage)
+
+    normalized = _normalize_call_argument_expression(
+        variable,
+        0,
+        [
+            _param("param_1", size=8, is_signed=False, index=0, storage=_reg_storage("a0")),
+            _param("param_2", size=8, is_signed=False, index=1, storage=_reg_storage("a1")),
+        ],
+    )
+
     assert normalized.expr_type.name == "PARAMETER"
     assert normalized.name == "param_2"
+    assert normalized.value == 1
 
 
-def test_choose_effect_substitution_args_retries_with_positional_parameters():
+def test_choose_effect_substitution_args_does_not_invent_positional_parameters():
+    args = [Expression.variable("opaque0", size=8), Expression.variable("opaque1", size=8)]
+
     chosen = _choose_effect_substitution_args(
         _loc("a", 0, 4),
         ["a", "b"],
-        [Expression.variable("opaque0", size=8), Expression.variable("opaque1", size=8)],
+        args,
         [
             _param("param_1", size=8, is_signed=False, index=0),
             _param("param_2", size=8, is_signed=False, index=1),
         ],
     )
 
-    assert chosen[0].expr_type.name == "PARAMETER"
-    assert chosen[0].name == "param_1"
-    assert chosen[1].expr_type.name == "PARAMETER"
-    assert chosen[1].name == "param_2"
+    assert chosen is args
 
 
-def test_summarize_store_effects_recovers_argumentless_call_via_matching_parameter_storage():
+def test_summarize_store_effects_marks_argumentless_call_unknown_without_callsite_arg_evidence():
     class FakeAddress:
         def __init__(self, offset):
             self._offset = offset
@@ -2961,12 +4165,9 @@ def test_summarize_store_effects_recovers_argumentless_call_via_matching_paramet
         debug=False,
     )
 
-    assert [arg.name for arg in captured_args["args"]] == ["param_1", "param_2"]
-    assert len(summary.effects) == 2
-    assert summary.effects[0].location == _loc("param_1", 0, 4)
-    assert summary.effects[0].value.to_string() == "MEM[param_2]"
-    assert summary.effects[1].location == _loc("param_2", 0, 4)
-    assert summary.effects[1].value.to_string() == "MEM[param_1]"
+    assert "args" not in captured_args
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
 
 
 def test_summarize_store_effects_substitutes_stack_pointer_relative_out_parameter_locations():
@@ -3929,7 +5130,7 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
     assert [arg.to_string() for arg in captured["args"]] == ["param_1"]
 
 
-def test_summarize_store_effects_uses_callee_aligned_subset_for_hidden_call_operands():
+def test_summarize_store_effects_refuses_hidden_call_operands_without_object_evidence():
     class FakeAddress:
         def __init__(self, offset, space_name="ram"):
             self._offset = offset
@@ -4058,7 +5259,8 @@ def test_summarize_store_effects_uses_callee_aligned_subset_for_hidden_call_oper
     )
 
     assert summary.effects == []
-    assert [arg.to_string() for arg in captured_args["args"]] == ["param_1", "param_2", "1"]
+    assert summary.has_unsupported_call is True
+    assert "args" not in captured_args
 
 
 def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_effects():
@@ -4880,6 +6082,31 @@ def test_call_effect_summary_policy_accepts_interdependent_swap_writes():
     assert is_call_effect_summary_allowed(summary)
 
 
+def test_effect_summary_does_not_rebind_no_index_location_by_parameter_name():
+    unresolved_location = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("dst"),
+        offset=0,
+        size=4,
+    )
+
+    summary = EffectSummary(
+        parameter_names=["dst", "dst"],
+        effects=[
+            StoreEffect(
+                location=unresolved_location,
+                value=Expression.constant(1, size=4),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+    )
+
+    bound_ref = summary.effects[0].location.base_ref
+    assert isinstance(bound_ref, LocationBaseRef)
+    assert bound_ref.is_parameter()
+    assert bound_ref.parameter_index is None
+
+
 def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
     a = Expression.parameter("a", 0, size=8)
     b = Expression.parameter("b", 1, size=8)
@@ -5651,10 +6878,10 @@ def test_normalize_post_state_expression_rewrites_double_indirect_post_state_loa
         [slot_nonnull, inner_nonnull],
         [
             StoreEffect(
-                location=CanonicalLocation(
+                location=_loc(
                     "slot",
-                    0,
-                    4,
+                    offset=0,
+                    size=4,
                     steps=(LocationStep("deref", 8),),
                 ),
                 value=value,

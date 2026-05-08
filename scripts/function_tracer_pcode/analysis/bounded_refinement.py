@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..model import (
@@ -18,7 +19,12 @@ from .condition import ConditionSimplifier, ConditionNormalizer
 from .effect_summary import (
     StoreEffect,
     _build_parameter_replacements,
+    _call_arguments_width_safe_for_callee_analysis,
+    _coerce_argument_to_callee_parameter,
+    _coerce_storage_info,
     _enumerate_constant_expression_branches,
+    _resolve_parameter_descriptor,
+    _storage_infos_match,
     lower_post_state_expression_for_smt_if_needed,
     substitute_condition,
     substitute_expression,
@@ -56,6 +62,23 @@ def _expression_is_fully_resolved(expr: Optional[Expression]) -> bool:
     return True
 
 
+def _callable_accepts_positional_args(fn: Callable, count: int) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    positional_count = 0
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            positional_count += 1
+    return positional_count >= count
+
+
 def _return_info_is_concrete_fallback(ret: Optional[ReturnInfo]) -> bool:
     if ret is None or not _expression_is_fully_resolved(getattr(ret, "value", None)):
         return False
@@ -86,20 +109,29 @@ class BoundedCallRefiner:
         self.max_unroll = max(0, int(max_unroll))
         self.max_cases = max(1, int(max_cases))
         self.debug = debug
+        self._analysis_provider_accepts_args = _callable_accepts_positional_args(
+            analysis_provider,
+            2,
+        )
 
     def _debug(self, message: str) -> None:
         if self.debug:
             print(f"[BoundedCallRefiner] {message}")
+
+    def _record_note(self, analysis: Optional[FunctionReturnAnalysis], note: str) -> None:
+        if analysis is None or not note:
+            return
+        if note not in analysis.analysis_notes:
+            analysis.analysis_notes.append(note)
 
     def _provide_analysis(
         self,
         target: object,
         args: Optional[Sequence[Expression]] = None,
     ) -> Optional[FunctionReturnAnalysis]:
-        try:
+        if self._analysis_provider_accepts_args:
             return self.analysis_provider(target, args)
-        except TypeError:
-            return self.analysis_provider(target)
+        return self.analysis_provider(target)
 
     def refine_analysis(self, analysis: FunctionReturnAnalysis) -> bool:
         if analysis is None or not analysis.returns or not analysis.deferred_calls or self.max_unroll <= 0:
@@ -172,6 +204,7 @@ class BoundedCallRefiner:
                         pcode_identity=ret.pcode_identity,
                         pcode_order=ret.pcode_order,
                         pcode_time=ret.pcode_time,
+                        pcode_op_ref=getattr(ret, "pcode_op_ref", None),
                     )
                 )
                 if len(results) >= self.max_cases:
@@ -236,9 +269,11 @@ class BoundedCallRefiner:
             ExpressionType.VARIABLE,
             ExpressionType.UNKNOWN,
             ExpressionType.LITERAL,
-            ExpressionType.PHI,
         }:
             return [(expr, [])]
+
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            return self._expand_phi_expression(expr, analysis, fuel, trail)
 
         if not expr.operands:
             return [(expr, [])]
@@ -273,6 +308,61 @@ class BoundedCallRefiner:
 
         return results or [(expr, [])]
 
+    def _expand_phi_expression(
+        self,
+        expr: Expression,
+        analysis: FunctionReturnAnalysis,
+        fuel: int,
+        trail: Set[Tuple[object, ...]],
+    ) -> List[ExpressionExpansion]:
+        states: List[Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition]]] = [([], [])]
+        for branch_condition, branch_value in expr.value or []:
+            condition_expansions: List[Tuple[Optional[Condition], List[Condition]]]
+            if branch_condition is None:
+                condition_expansions = [(None, [])]
+            else:
+                condition_expansions = [
+                    (Condition(condition_expr, branch_condition.negated), extra_conditions)
+                    for condition_expr, extra_conditions in self._expand_expression(
+                        branch_condition.expression,
+                        analysis,
+                        fuel,
+                        trail,
+                    )
+                ]
+            value_expansions = self._expand_expression(branch_value, analysis, fuel, trail)
+            next_states: List[Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition]]] = []
+            for built_branches, built_conditions in states:
+                for new_condition, condition_extra in condition_expansions:
+                    for new_value, value_extra in value_expansions:
+                        merged_extra = ConditionSimplifier.simplify_conditions(
+                            list(built_conditions) + list(condition_extra) + list(value_extra)
+                        )
+                        if ConditionSimplifier.is_contradiction(merged_extra):
+                            continue
+                        next_states.append(
+                            (
+                                built_branches + [(new_condition, new_value)],
+                                merged_extra,
+                            )
+                        )
+                        if len(next_states) >= self.max_cases:
+                            break
+                    if len(next_states) >= self.max_cases:
+                        break
+                if len(next_states) >= self.max_cases:
+                    break
+            states = next_states
+            if not states:
+                return [(expr, [])]
+
+        results: List[ExpressionExpansion] = []
+        for branches, extra_conditions in states[: self.max_cases]:
+            rebuilt = Expression.phi(branches)
+            rebuilt.size = expr.size
+            results.append((rebuilt, list(extra_conditions)))
+        return self._deduplicate_expression_expansions(results) or [(expr, [])]
+
     def _expand_deferred_call(
         self,
         deferred: DeferredCallInfo,
@@ -281,19 +371,46 @@ class BoundedCallRefiner:
         trail: Set[Tuple[object, ...]],
     ) -> List[ExpressionExpansion]:
         results: List[ExpressionExpansion] = []
-        for _target_ref, target_conditions, callee_analysis in self._resolve_deferred_call_candidates(
+        candidates = self._resolve_deferred_call_candidates(
             deferred
-        ):
-            if len(deferred.arguments) < len(callee_analysis.parameters):
+        )
+        if not candidates:
+            self._record_note(caller_analysis, "bounded_call_refinement_deferred_target_unresolved")
+            self._debug(
+                f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
+                "no resolved callee analysis"
+            )
+            return []
+
+        had_alignment_failure = False
+        had_return_expansion = False
+        for _target_ref, target_conditions, callee_analysis in candidates:
+            aligned_arguments = self._align_deferred_arguments_to_callee(
+                deferred,
+                caller_analysis.parameters,
+                callee_analysis.parameters,
+            )
+            if len(aligned_arguments) < len(callee_analysis.parameters):
+                had_alignment_failure = True
                 self._debug(
                     f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
-                    f"{len(callee_analysis.parameters)} args, got {len(deferred.arguments)}"
+                    f"{len(callee_analysis.parameters)} args, got {len(aligned_arguments)}"
+                )
+                continue
+            if not _call_arguments_width_safe_for_callee_analysis(
+                callee_analysis,
+                aligned_arguments,
+            ):
+                had_alignment_failure = True
+                self._debug(
+                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
+                    "partial-width argument is used as a full-width callee value"
                 )
                 continue
 
             replacements = _build_parameter_replacements(
                 callee_analysis.parameters,
-                deferred.arguments,
+                aligned_arguments,
             )
             substituted_effects = self._substitute_effects_for_deferred_call(
                 callee_analysis,
@@ -342,10 +459,21 @@ class BoundedCallRefiner:
                         )
                         if ConditionSimplifier.is_contradiction(merged_conditions):
                             continue
+                        had_return_expansion = True
                         results.append((value_expr, merged_conditions))
                         if len(results) >= self.max_cases:
+                            self._record_note(
+                                caller_analysis,
+                                "bounded_call_refinement_deferred_expanded",
+                            )
                             return results[: self.max_cases]
 
+        if results:
+            self._record_note(caller_analysis, "bounded_call_refinement_deferred_expanded")
+        elif had_alignment_failure:
+            self._record_note(caller_analysis, "bounded_call_refinement_argument_alignment_failed")
+        elif not had_return_expansion:
+            self._record_note(caller_analysis, "bounded_call_refinement_return_summary_unusable")
         return self._deduplicate_expression_expansions(results)
 
     def _resolve_deferred_call_candidates(
@@ -356,7 +484,9 @@ class BoundedCallRefiner:
         seen = set()
 
         def add_candidate(target_ref: CallTargetRef, conditions: Sequence[Condition]) -> None:
-            callee_analysis = self._provide_analysis(target_ref, deferred.arguments)
+            callee_analysis = self._provide_analysis(target_ref, None)
+            if callee_analysis is None:
+                callee_analysis = self._provide_analysis(target_ref, deferred.arguments)
             if callee_analysis is None or not callee_analysis.returns:
                 return
             key = (
@@ -381,6 +511,88 @@ class BoundedCallRefiner:
             add_candidate(deferred.target_ref, [])
 
         return candidates
+
+    def _align_deferred_arguments_to_callee(
+        self,
+        deferred: DeferredCallInfo,
+        caller_parameters: Sequence[Dict],
+        callee_parameters: Sequence[Dict],
+    ) -> List[Expression]:
+        arguments = list(getattr(deferred, "arguments", []) or [])
+        if not callee_parameters:
+            return arguments
+
+        if self._deferred_arguments_are_pcode_callsite_ordered(deferred):
+            if len(arguments) < len(callee_parameters):
+                return []
+            aligned: List[Expression] = []
+            for argument, callee_param in zip(arguments, callee_parameters):
+                coerced = _coerce_argument_to_callee_parameter(argument, callee_param)
+                aligned.append(coerced if coerced is not None else argument)
+            return aligned
+
+        if len(arguments) == 1 and len(callee_parameters) == 1:
+            return list(arguments)
+        aligned: List[Expression] = []
+        used_argument_indexes: Set[int] = set()
+        for callee_param in callee_parameters:
+            best_index = None
+            best_score = 0
+            ambiguous_best = False
+            for index, argument in enumerate(arguments):
+                if index in used_argument_indexes:
+                    continue
+                score = self._callee_argument_match_score(
+                    argument,
+                    caller_parameters,
+                    callee_param,
+                )
+                if score > best_score:
+                    best_score = score
+                    best_index = index
+                    ambiguous_best = False
+                elif score == best_score and score > 0:
+                    ambiguous_best = True
+            if best_index is not None and best_score >= 50 and not ambiguous_best:
+                used_argument_indexes.add(best_index)
+                aligned.append(arguments[best_index])
+                continue
+
+        return aligned
+
+    def _deferred_arguments_are_pcode_callsite_ordered(
+        self,
+        deferred: Optional[DeferredCallInfo],
+    ) -> bool:
+        deferred_ref = getattr(deferred, "deferred_call_ref", None)
+        pcode_ref = getattr(deferred_ref, "pcode_op_ref", None)
+        if pcode_ref is None:
+            return False
+        mnemonic = getattr(pcode_ref, "mnemonic", None)
+        if mnemonic is None:
+            return False
+        return str(mnemonic).upper() in {"CALL", "CALLIND"}
+
+    def _callee_argument_match_score(
+        self,
+        argument: Optional[Expression],
+        caller_parameters: Sequence[Dict],
+        callee_param: Dict,
+    ) -> int:
+        if argument is None:
+            return 0
+
+        caller_param = _resolve_parameter_descriptor(argument, caller_parameters)
+        if caller_param is None:
+            return 0
+        caller_storage = _coerce_storage_info(caller_param.get("storage")) if caller_param is not None else None
+        callee_storage = _coerce_storage_info(callee_param.get("storage"))
+        if caller_storage is not None and callee_storage is not None and _storage_infos_match(
+            caller_storage,
+            callee_storage,
+        ):
+            return 100
+        return 0
 
     def _substitute_effects_for_deferred_call(
         self,

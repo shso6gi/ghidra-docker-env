@@ -64,6 +64,7 @@ class Expression:
         read_order_key: Optional[int] = None,
         runtime_ref: Any = None,
         opcode: Optional[int] = None,
+        call_argument_width_evidence: Any = None,
     ):
         self.expr_type = expr_type
         self.value = value
@@ -81,6 +82,7 @@ class Expression:
         self.read_order_key = read_order_key
         self.runtime_ref = runtime_ref
         self.opcode = opcode
+        self.call_argument_width_evidence = call_argument_width_evidence
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
@@ -377,6 +379,7 @@ class Expression:
         read_order_key: Any = _EXPR_UNSET,
         runtime_ref: Any = _EXPR_UNSET,
         opcode: Any = _EXPR_UNSET,
+        call_argument_width_evidence: Any = _EXPR_UNSET,
     ) -> 'Expression':
         """Clone an expression while preserving semantic metadata by default."""
 
@@ -394,6 +397,11 @@ class Expression:
             read_order_key=self.read_order_key if read_order_key is _EXPR_UNSET else read_order_key,
             runtime_ref=getattr(self, "runtime_ref", None) if runtime_ref is _EXPR_UNSET else runtime_ref,
             opcode=getattr(self, "opcode", None) if opcode is _EXPR_UNSET else opcode,
+            call_argument_width_evidence=(
+                getattr(self, "call_argument_width_evidence", None)
+                if call_argument_width_evidence is _EXPR_UNSET
+                else call_argument_width_evidence
+            ),
         )
     
     def equals(self, other: 'Expression') -> bool:

@@ -4,6 +4,7 @@
 import re
 from dataclasses import dataclass
 from contextlib import contextmanager
+from functools import cmp_to_key
 from typing import Iterable, List, Dict, Optional, Any, Set, Tuple, Sequence, cast
 
 from ..model.expression import Expression, ExpressionType, Condition
@@ -20,6 +21,7 @@ from ..model.analysis import (
 from ..model.runtime_refs import (
     AddressValueRef,
     DeferredCallRef,
+    PcodeOpRef,
     PostStateValueRef,
     ReadonlyReductionRef,
     UnknownValueRef,
@@ -178,6 +180,19 @@ class ReturnAnalyzer:
         if self.debug:
             prefix = "  " * indent
             print(f"{prefix}[ReturnAnalyzer] {msg}")
+
+    def _program_is_big_endian(self) -> Optional[bool]:
+        language_getter = getattr(self.program, "getLanguage", None)
+        if not callable(language_getter):
+            return None
+        try:
+            language = language_getter()
+            is_big_endian = getattr(language, "isBigEndian", None)
+            if callable(is_big_endian):
+                return bool(is_big_endian())
+        except Exception:
+            return None
+        return None
 
     def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
         return summarize_expression(expr, max_depth=max_depth)
@@ -409,6 +424,8 @@ class ReturnAnalyzer:
         self._debug_print("=" * 60)
         self._debug_print(f"ReturnInfo dump for {analysis.function_name}")
         self._debug_print(f"Total return candidates: {len(analysis.returns)}")
+        if analysis.analysis_notes:
+            self._debug_print(f"Analysis notes: {analysis.analysis_notes}")
         self._debug_print("=" * 60)
         
         for i, ret_info in enumerate(analysis.returns):
@@ -687,6 +704,7 @@ class ReturnAnalyzer:
         )
         tracer.record_deferred_call = self._make_deferred_call_recorder(function)
         condition_tracker = ConditionTracker(tracer)
+        tracer.condition_tracker = condition_tracker
         from .phi_resolver import PhiHandler
 
         phi_handler = PhiHandler(tracer, condition_tracker)
@@ -805,6 +823,7 @@ class ReturnAnalyzer:
                 signedness_result=signedness_result,
                 deferred_calls=dict(self._current_deferred_calls),
                 effect_summary=effect_summary,
+                program_is_big_endian=self._program_is_big_endian(),
             )
             result.unknown_event_count = len(tracer.unknown_tracker.events)
             result.unknown_event_reasons = sorted(
@@ -870,6 +889,7 @@ class ReturnAnalyzer:
                         result.analysis_notes.append("switch_return_recovery")
 
             result.deferred_calls = dict(self._current_deferred_calls)
+            self._apply_effect_call_argument_evidence_to_deferred_calls(result)
 
             if current_active_key is not None:
                 self._analysis_in_progress[current_active_key] = result
@@ -900,6 +920,20 @@ class ReturnAnalyzer:
                     result.analysis_notes.append(summary[1])
                 self._normalize_return_partition(result)
                 self._mark_incomplete_control_flow(result)
+                if result.deferred_calls:
+                    if current_active_key is not None:
+                        self._analysis_in_progress[current_active_key] = result
+                    try:
+                        self._apply_bounded_call_refinement(
+                            result,
+                            active_functions,
+                            CallTargetRef.from_function(function),
+                        )
+                    finally:
+                        if current_active_key is not None:
+                            self._analysis_in_progress.pop(current_active_key, None)
+                    self._normalize_return_partition(result)
+                    self._mark_incomplete_control_flow(result)
             if (
                 result.has_symbolic_post_state_reads()
                 and "symbolic_post_state_reads" not in result.analysis_notes
@@ -983,6 +1017,7 @@ class ReturnAnalyzer:
             signedness_result=signedness_result,
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,
+            program_is_big_endian=self._program_is_big_endian(),
         )
         summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
         summary = summarizer.try_summarize_pre_return_counted_scalar_loop(
@@ -1007,6 +1042,7 @@ class ReturnAnalyzer:
             signedness_result=signedness_result,
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,
+            program_is_big_endian=self._program_is_big_endian(),
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -1654,6 +1690,7 @@ class ReturnAnalyzer:
             target,
             args: List[Expression],
             call_target_expr: Optional[Expression] = None,
+            pcode_op_ref: Optional[PcodeOpRef] = None,
         ) -> UnknownValueRef:
             target_ref = self._coerce_runtime_target_ref(target) or CallTargetRef.unknown()
             sequence = self._deferred_call_counter
@@ -1667,6 +1704,7 @@ class ReturnAnalyzer:
             deferred_call_ref = DeferredCallRef(
                 caller_program_id=current_function_ref.program_id,
                 caller_entry_offset=current_function_ref.entry_offset,
+                pcode_op_ref=pcode_op_ref,
                 target_ref=target_ref,
                 sequence=sequence,
             )
@@ -1746,6 +1784,43 @@ class ReturnAnalyzer:
                 f"Applied bounded call refinement to '{analysis.function_name}' "
                 f"(remaining deferred calls={len(analysis.deferred_calls)})"
             )
+
+    def _apply_effect_call_argument_evidence_to_deferred_calls(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> None:
+        effect_summary = getattr(analysis, "effect_summary", None)
+        evidence = getattr(effect_summary, "call_argument_evidence", None)
+        if not evidence or not getattr(analysis, "deferred_calls", None):
+            return
+        changed = False
+        incomplete = False
+        for info in analysis.deferred_calls.values():
+            if getattr(info, "arguments", None):
+                continue
+            deferred_ref = getattr(info, "deferred_call_ref", None)
+            pcode_ref = getattr(deferred_ref, "pcode_op_ref", None)
+            stable_key_fn = getattr(pcode_ref, "stable_key", None)
+            if not callable(stable_key_fn):
+                continue
+            call_evidence = evidence.get(stable_key_fn())
+            if call_evidence is None:
+                continue
+            is_usable = getattr(call_evidence, "is_usable", None)
+            if not callable(is_usable) or not is_usable():
+                incomplete = True
+                continue
+            target_matches = getattr(call_evidence, "target_matches", None)
+            if callable(target_matches) and not target_matches(getattr(info, "target_ref", None)):
+                incomplete = True
+                continue
+            args = getattr(call_evidence, "arguments", ())
+            info.arguments = [self._clone_expression(arg) for arg in args]
+            changed = True
+        if changed and "effect_call_argument_evidence" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("effect_call_argument_evidence")
+        if incomplete and "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("effect_call_argument_evidence_incomplete")
 
     def _make_empty_effect_summary(
         self,
@@ -1834,6 +1909,7 @@ class ReturnAnalyzer:
             return_type_obj=None,
             unknown_event_count=1,
             unknown_event_reasons=["indirect_control_flow_unresolved"],
+            program_is_big_endian=self._program_is_big_endian(),
         )
         recovered = self._recover_switch_like_returns_from_pcode(
             placeholder_analysis,
@@ -2273,7 +2349,7 @@ class ReturnAnalyzer:
                             f"found on path {path_index} to RETURN #{return_index} "
                             f"(blocks={block_indexes})"
                         )
-                    continue
+                    return None
 
                 path_recovered = self._recover_implicit_return_from_terminal_call(
                     terminal_call,
@@ -2293,7 +2369,7 @@ class ReturnAnalyzer:
                             "P-code call-wrapper recovery aborted: terminal call expansion "
                             f"failed on path {path_index} to RETURN #{return_index}"
                         )
-                    continue
+                    return None
                 return_results.extend(path_recovered)
 
             if not return_results:
@@ -2947,6 +3023,7 @@ class ReturnAnalyzer:
             return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
+            program_is_big_endian=analysis.program_is_big_endian,
         )
         if affected_analysis.has_unknown_return():
             return True
@@ -2986,6 +3063,7 @@ class ReturnAnalyzer:
             return_type_obj=analysis.return_type_obj,
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
+            program_is_big_endian=analysis.program_is_big_endian,
         )
         if affected_analysis.has_overlapping_unconditional_returns():
             return True
@@ -4180,6 +4258,7 @@ class ReturnAnalyzer:
             )
             callee_tracer.record_deferred_call = self._make_deferred_call_recorder(callee)
             callee_tracker = ConditionTracker(callee_tracer)
+            callee_tracer.condition_tracker = callee_tracker
             from .phi_resolver import PhiHandler
 
             callee_phi_handler = PhiHandler(callee_tracer, callee_tracker)
@@ -5298,6 +5377,7 @@ class ReturnAnalyzer:
                     pcode_identity=ret.pcode_identity,
                     pcode_order=ret.pcode_order,
                     pcode_time=ret.pcode_time,
+                    pcode_op_ref=getattr(ret, "pcode_op_ref", None),
                 )
             )
 
@@ -5320,6 +5400,7 @@ class ReturnAnalyzer:
             signature_hypotheses=list(getattr(analysis, "signature_hypotheses", []) or []),
             comparison_surface=analysis.comparison_surface,
             analysis_scope_key=analysis.analysis_scope_key,
+            program_is_big_endian=analysis.program_is_big_endian,
         )
 
     def _merge_deferred_calls_into_current_analysis(
@@ -7232,6 +7313,21 @@ class ReturnAnalyzer:
             value,
             self._current_parameters,
         )
+        nontrivial_location_wrapper = False
+        effect_value_matches_wrapper = False
+        if expr_location is not None:
+            nontrivial_location_wrapper = self._expression_has_nontrivial_location_wrapper(
+                value,
+                expr_location,
+            )
+            if nontrivial_location_wrapper:
+                effect_value_matches_wrapper = _find_matching_effect_value(
+                    value,
+                    expr_location,
+                    conditions,
+                    effect_summary.effects,
+                    self._current_parameters,
+                ) is not None
         if expr_location is not None:
             post_state_read = resolve_definite_post_state_read_for_location(
                 expr_location,
@@ -7247,7 +7343,8 @@ class ReturnAnalyzer:
                     effect_summary.effects,
                     self._current_parameters,
                 ))
-                yield ("final object-state symbolic", post_state_read)
+                if not nontrivial_location_wrapper or effect_value_matches_wrapper:
+                    yield ("final object-state symbolic", post_state_read)
         if _expression_contains_observed_loads(value):
             yield (
                 "observed-load",
@@ -7749,6 +7846,13 @@ class ReturnAnalyzer:
         simplified_base = ConditionSimplifier.simplify_conditions_object_centric(base_conditions)
         if ConditionSimplifier.object_centric_is_contradiction(simplified_base):
             return []
+        direct_runtime_guards = self._direct_expression_runtime_guard_conditions(expr)
+        if direct_runtime_guards:
+            simplified_base = ConditionSimplifier.simplify_conditions_object_centric(
+                list(simplified_base) + list(direct_runtime_guards)
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(simplified_base):
+                return []
 
         folded_expr = self._fold_constant_expression(
             expr,
@@ -8006,30 +8110,43 @@ class ReturnAnalyzer:
         return_infos: List[ReturnInfo],
     ) -> List[ReturnInfo]:
         preserved: List[ReturnInfo] = []
-        for index, info in enumerate(return_infos):
+        ordered_return_infos = sorted(
+            enumerate(return_infos),
+            key=cmp_to_key(self._compare_return_region_order),
+        )
+        for index, (original_index, info) in enumerate(ordered_return_infos):
             current_regions: List[List[Condition]] = [
-                ConditionSimplifier.simplify_conditions_object_centric(info.conditions or [])
+                self._return_info_effective_region_conditions(info)
             ]
             if ConditionSimplifier.object_centric_is_contradiction(current_regions[0]):
                 continue
 
-            for other_index, other in enumerate(return_infos):
+            for other_index, (_other_original_index, other) in enumerate(ordered_return_infos):
                 if other_index >= index:
                     break
                 if _expressions_equivalent(other.value, info.value):
                     continue
 
+                other_conditions = self._return_info_effective_region_conditions(other)
                 next_regions: List[List[Condition]] = []
                 for region in current_regions:
                     if ConditionSimplifier.object_centric_is_contradiction(region):
                         continue
-                    if not ConditionSimplifier.build_constraint_set(region).overlaps_with(other.conditions or []):
+                    if not ConditionSimplifier.build_constraint_set(region).overlaps_with(other_conditions):
+                        next_regions.append(region)
+                        continue
+                    if not self._return_region_can_be_shadowed_by_prior(
+                        region,
+                        info,
+                        other,
+                        prior_conditions=other_conditions,
+                    ):
                         next_regions.append(region)
                         continue
                     next_regions.extend(
                         self._subtract_return_region_conjunction(
                             region,
-                            other.conditions or [],
+                            other_conditions,
                         )
                     )
                 current_regions = [
@@ -8046,7 +8163,7 @@ class ReturnAnalyzer:
                         address=info.address,
                         value=info.value,
                         conditions=region,
-                        branch_index=self._split_branch_index(info.branch_index, index, split_index),
+                        branch_index=self._split_branch_index(info.branch_index, original_index, split_index),
                         site_metadata={
                             "pcode_identity": info.pcode_identity,
                             "pcode_order": info.pcode_order,
@@ -8055,6 +8172,251 @@ class ReturnAnalyzer:
                     )
                 )
         return preserved
+
+    def _return_info_effective_region_conditions(
+        self,
+        info: ReturnInfo,
+    ) -> List[Condition]:
+        """ReturnInfo conditions plus proof/runtime guards carried by its value."""
+
+        conditions = list(getattr(info, "conditions", None) or [])
+        conditions.extend(self._expression_runtime_guard_conditions(getattr(info, "value", None)))
+        return ConditionSimplifier.simplify_conditions_object_centric(conditions)
+
+    def _expression_runtime_guard_conditions(
+        self,
+        expr: Optional[Expression],
+    ) -> List[Condition]:
+        guards: List[Condition] = []
+        seen: Set[tuple] = set()
+        for node in self._iter_expression_nodes_for_unconditional_runtime_guards(expr):
+            runtime_ref = getattr(node, "runtime_ref", None)
+            for guard in self._runtime_ref_guard_conditions(runtime_ref):
+                try:
+                    key = guard.structural_key(budget=256)
+                except Exception:
+                    key = (id(guard),)
+                if key in seen:
+                    continue
+                seen.add(key)
+                guards.append(guard)
+        return guards
+
+    def _iter_expression_nodes_for_unconditional_runtime_guards(
+        self,
+        expr: Optional[Expression],
+    ):
+        if expr is None:
+            return
+        stack = [expr]
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            yield current
+            if getattr(current, "expr_type", None) == ExpressionType.PHI:
+                continue
+            operands = getattr(current, "operands", None) or ()
+            stack.extend(reversed([operand for operand in operands if operand is not None]))
+
+    def _direct_expression_runtime_guard_conditions(
+        self,
+        expr: Optional[Expression],
+    ) -> List[Condition]:
+        if expr is None:
+            return []
+        return self._runtime_ref_guard_conditions(getattr(expr, "runtime_ref", None))
+
+    def _runtime_ref_guard_conditions(
+        self,
+        runtime_ref,
+    ) -> List[Condition]:
+        guards: List[Condition] = []
+        for owner in (
+            runtime_ref,
+            getattr(runtime_ref, "accumulator_proof", None),
+            getattr(runtime_ref, "loop_summary", None),
+        ):
+            for guard in tuple(getattr(owner, "guard_constraints", ()) or ()):
+                if isinstance(guard, Condition):
+                    guards.append(guard)
+        return guards
+
+    def _return_region_priority_key(
+        self,
+        info: ReturnInfo,
+        original_index: int,
+    ) -> Tuple[int, int, int, int, int, int]:
+        conditions = self._return_info_effective_region_conditions(info)
+        exact_equality_count = sum(
+            1 for condition in conditions if self._condition_is_constant_equality_guard(condition)
+        )
+        readonly_contract_score = self._readonly_reduction_contract_priority_score(info)
+        unresolved_score = 1 if self._expression_contains_unresolved_value(info.value) else 0
+        phi_score = 1 if self._expression_contains_phi(info.value) else 0
+        return (
+            -int(exact_equality_count),
+            -int(readonly_contract_score),
+            -len(conditions),
+            unresolved_score,
+            phi_score,
+            int(original_index),
+        )
+
+    def _compare_return_region_order(
+        self,
+        left_item: Tuple[int, ReturnInfo],
+        right_item: Tuple[int, ReturnInfo],
+    ) -> int:
+        left_original_index, left = left_item
+        right_original_index, right = right_item
+        left_conditions = self._return_info_effective_region_conditions(left)
+        right_conditions = self._return_info_effective_region_conditions(right)
+
+        if not ConditionSimplifier.object_centric_is_contradiction(
+            list(left_conditions) + list(right_conditions)
+        ):
+            left_implies_right = self._return_region_conditions_imply(
+                left_conditions,
+                right_conditions,
+            )
+            right_implies_left = self._return_region_conditions_imply(
+                right_conditions,
+                left_conditions,
+            )
+            if left_implies_right and not right_implies_left:
+                return -1
+            if right_implies_left and not left_implies_right:
+                return 1
+
+        left_key = self._return_region_priority_key(left, left_original_index)
+        right_key = self._return_region_priority_key(right, right_original_index)
+        if left_key < right_key:
+            return -1
+        if left_key > right_key:
+            return 1
+        return 0
+
+    def _return_region_can_be_shadowed_by_prior(
+        self,
+        region: Sequence[Condition],
+        current: ReturnInfo,
+        prior: ReturnInfo,
+        *,
+        prior_conditions: Optional[Sequence[Condition]] = None,
+    ) -> bool:
+        prior_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            prior_conditions
+            if prior_conditions is not None
+            else self._return_info_effective_region_conditions(prior)
+        )
+        if not self._return_region_conditions_mutually_imply(region, prior_conditions):
+            return True
+
+        prior_score = self._readonly_reduction_contract_priority_score(prior)
+        current_score = self._readonly_reduction_contract_priority_score(current)
+        if prior_score > current_score:
+            return True
+        if current_score > prior_score:
+            return False
+
+        # Same condition region with different values is not a valid partition
+        # refinement unless one side carries a proof-backed semantic contract.
+        return False
+
+    def _return_region_conditions_imply(
+        self,
+        antecedent: Sequence[Condition],
+        consequent: Sequence[Condition],
+    ) -> bool:
+        consequent = list(consequent or [])
+        if not consequent:
+            return True
+        antecedent_set = ConditionSimplifier.build_constraint_set(antecedent or [])
+        if antecedent_set.is_contradictory:
+            return False
+        return antecedent_set.implies_all(consequent)
+
+    def _return_region_conditions_mutually_imply(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
+        return self._return_region_conditions_imply(
+            left,
+            right,
+        ) and self._return_region_conditions_imply(
+            right,
+            left,
+        )
+
+    def _condition_is_constant_equality_guard(self, condition: Condition) -> bool:
+        if condition is None:
+            return False
+        expr = getattr(condition, "expression", None)
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if self._condition_logical_operator(condition) != "INT_EQUAL" or len(getattr(expr, "operands", ()) or ()) != 2:
+            return False
+        left, right = expr.operands
+        left_is_const = getattr(left, "expr_type", None) == ExpressionType.CONSTANT
+        right_is_const = getattr(right, "expr_type", None) == ExpressionType.CONSTANT
+        return left_is_const != right_is_const
+
+    def _condition_logical_operator(
+        self,
+        condition: Condition,
+    ) -> Optional[str]:
+        expr = getattr(condition, "expression", None)
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return None
+        operator = getattr(expr, "operator", None)
+        if not getattr(condition, "negated", False):
+            return operator
+        if operator == "INT_EQUAL":
+            return "INT_NOTEQUAL"
+        if operator == "INT_NOTEQUAL":
+            return "INT_EQUAL"
+        return operator
+
+    def _readonly_reduction_contract_priority_score(
+        self,
+        info: ReturnInfo,
+    ) -> int:
+        best_score = 0
+        for node in _iter_expression_nodes(info.value, include_phi_conditions=False):
+            runtime_ref = getattr(node, "runtime_ref", None)
+            if isinstance(runtime_ref, ReadonlyReductionRef):
+                best_score = max(
+                    best_score,
+                    self._readonly_reduction_ref_contract_priority_score(runtime_ref),
+                )
+        return best_score
+
+    def _readonly_reduction_ref_contract_priority_score(
+        self,
+        runtime_ref: ReadonlyReductionRef,
+    ) -> int:
+        proof = getattr(runtime_ref, "accumulator_proof", None)
+        if proof is None:
+            return 0
+        if not bool(getattr(proof, "return_region_value_proven", False)):
+            return 0
+        contract_key = None
+        contract_key_fn = getattr(runtime_ref, "readonly_term_sequence_contract_key", None)
+        if callable(contract_key_fn):
+            try:
+                contract_key = contract_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                contract_key = None
+        if contract_key is None:
+            return 0
+
+        semantic_witnesses = tuple(getattr(runtime_ref, "semantic_witnesses", ()) or ())
+        exact_return_witnesses = tuple(getattr(proof, "exact_return_witnesses", ()) or ())
+        loop_body_witnesses = tuple(getattr(proof, "loop_body_witnesses", ()) or ())
+        seed_terms = tuple(getattr(proof, "seed_terms", ()) or ())
+        return 1 + len(semantic_witnesses) + len(exact_return_witnesses) + len(loop_body_witnesses) + len(seed_terms)
 
     def _subtract_return_region_conjunction(
         self,

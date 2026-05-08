@@ -21,6 +21,7 @@ from ..model import (
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
+    LoopVariableIdentityRef,
     LocationBaseRef,
     PcodeBlockRef,
     PcodeOpRef,
@@ -29,6 +30,7 @@ from ..model import (
     ReadonlyReductionTermRef,
     ReadonlyReductionWitness,
     ReturnInfo,
+    StorageInfo,
     StateTransitionLoopSummaryRef,
 )
 from ..model.render_smt import (
@@ -45,10 +47,14 @@ from ..model.runtime_refs import UnknownValueRef
 from ..smt.interface import SolverStatus
 from ..smt.solvers.z3 import Z3Solver
 from ..equivalence.formula.returns import coerce_value_to_bitvec_width
-from ..equivalence.formula.symbol_replace import build_symbol_replacer
 from ..equivalence.formula.types import ParameterInfo
+from ..equivalence.param_semantics import (
+    parameter_identity_key_from_descriptor,
+    parameter_identity_key_from_expression,
+)
 from .condition import ConditionConstraintSet, ConditionSimplifier, ConditionNormalizer
 from .condition.bitvector import eval_constant_raw
+from .condition.smt_oracle import ConditionSMTOracle
 from .effect_summary import (
     CanonicalLocation,
     _expressions_equivalent_under_conditions,
@@ -149,6 +155,8 @@ class ReadonlyRoundedCountCandidate:
     rounded_varnode: object
     lane_count: int
     start_index: int = 0
+    tail_start_index_delta: int = 0
+    tail_index_source_varnode: Optional[object] = None
 
 
 @dataclass(frozen=True)
@@ -634,11 +642,20 @@ class StructuralRecurrenceSummarizer:
             return None
         space_varnode = op.getInput(0)
 
-        address = getattr(space_varnode, "getAddress", lambda: None)()
+        try:
+            address = getattr(space_varnode, "getAddress", lambda: None)()
+        except Exception:
+            address = None
         address_space = getattr(address, "getAddressSpace", lambda: None)() if address is not None else None
         input_space_ref = self._address_space_ref(address_space)
-        offset = getattr(space_varnode, "getOffset", lambda: None)()
-        size = getattr(space_varnode, "getSize", lambda: None)()
+        try:
+            offset = getattr(space_varnode, "getOffset", lambda: None)()
+        except Exception:
+            offset = None
+        try:
+            size = getattr(space_varnode, "getSize", lambda: None)()
+        except Exception:
+            size = None
         offset_int = self._safe_int(offset)
         size_int = self._safe_int(size)
         target_space_ref = self._resolve_store_target_address_space_ref(offset_int)
@@ -1268,91 +1285,47 @@ class StructuralRecurrenceSummarizer:
     def _collect_summary_parameter_specs(
         self,
         *exprs: Optional[Expression],
-    ) -> List[dict]:
-        specs: Dict[str, dict] = {}
-
-        def visit(expr: Optional[Expression]) -> None:
-            if expr is None:
-                return
-            expr_type = getattr(expr, "expr_type", None)
-            if expr_type == ExpressionType.PARAMETER:
-                name = getattr(expr, "name", None)
-                if not name:
-                    return
-                size = max(1, int(getattr(expr, "size", 0) or 4))
-                index = int(getattr(expr, "value", -1) or -1)
-                candidate = {
-                    "name": name,
-                    "index": index,
-                    "size": size,
-                    "data_type": getattr(expr, "data_type", None),
-                }
-                existing = specs.get(name)
-                if existing is None or int(existing.get("size", 0) or 0) < size:
-                    specs[name] = candidate
-                return
-            if expr_type == ExpressionType.PHI:
-                for cond, branch_value in getattr(expr, "value", None) or []:
-                    if cond is not None:
-                        visit(getattr(cond, "expression", None))
-                    visit(branch_value)
-                return
-            for operand in getattr(expr, "operands", None) or []:
-                visit(operand)
-
-        for expr in exprs:
-            visit(expr)
-
-        ordered = sorted(
-            specs.values(),
-            key=lambda item: (
-                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
-                item.get("name") or "",
-            ),
-        )
-        for fallback_index, spec in enumerate(ordered):
-            if int(spec.get("index", -1)) < 0:
-                spec["index"] = fallback_index
-        return ordered
+    ) -> Optional[List[dict]]:
+        return self._collect_expression_symbol_specs(*exprs)
 
     def _collect_expression_symbol_specs(
         self,
         *exprs: Optional[Expression],
-    ) -> List[dict]:
-        specs: Dict[str, dict] = {}
+    ) -> Optional[List[dict]]:
+        specs: Dict[Tuple[Any, ...], dict] = {}
+        unresolved_symbol = False
 
-        def add_symbol(name: Optional[str], size: int, index: int = -1, data_type=None) -> None:
-            if not name:
+        def add_symbol(identity: Optional[Tuple[Any, ...]], candidate: dict) -> None:
+            if identity is None:
                 return
+            size = max(1, int(candidate.get("size", 0) or 4))
             candidate = {
-                "name": name,
-                "index": index,
-                "size": max(1, int(size or 4)),
-                "data_type": data_type,
+                **candidate,
+                "identity": identity,
+                "size": size,
             }
-            existing = specs.get(name)
-            if existing is None or int(existing.get("size", 0) or 0) < int(candidate["size"]):
-                specs[name] = candidate
+            existing = specs.get(identity)
+            if existing is None or int(existing.get("size", 0) or 0) < size:
+                specs[identity] = candidate
 
         def visit(expr: Optional[Expression]) -> None:
+            nonlocal unresolved_symbol
             if expr is None:
                 return
             expr_type = getattr(expr, "expr_type", None)
             if expr_type == ExpressionType.PARAMETER:
-                add_symbol(
-                    getattr(expr, "name", None),
-                    int(getattr(expr, "size", 0) or 4),
-                    int(getattr(expr, "value", -1) or -1),
-                    getattr(expr, "data_type", None),
-                )
+                identity = self._summary_symbol_identity_from_expression(expr)
+                if identity is None:
+                    unresolved_symbol = True
+                    return
+                add_symbol(identity, self._summary_symbol_spec_from_expression(expr))
                 return
             if expr_type == ExpressionType.VARIABLE:
-                add_symbol(
-                    getattr(expr, "name", None),
-                    int(getattr(expr, "size", 0) or 4),
-                    -1,
-                    getattr(expr, "data_type", None),
-                )
+                identity = self._summary_symbol_identity_from_expression(expr)
+                if identity is None:
+                    unresolved_symbol = True
+                    return
+                add_symbol(identity, self._summary_symbol_spec_from_expression(expr))
                 return
             if expr_type == ExpressionType.PHI:
                 for cond, branch_value in getattr(expr, "value", None) or []:
@@ -1365,24 +1338,134 @@ class StructuralRecurrenceSummarizer:
 
         for expr in exprs:
             visit(expr)
+        if unresolved_symbol:
+            return None
         ordered = sorted(
             specs.values(),
             key=lambda item: (
-                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
-                item.get("name") or "",
+                self._summary_symbol_identity_sort_key(item.get("identity")),
+                int(item.get("size", 0) or 0),
             ),
         )
-        for fallback_index, spec in enumerate(ordered):
-            if int(spec.get("index", -1)) < 0:
-                spec["index"] = fallback_index
+        for ordinal, spec in enumerate(ordered):
+            spec["aux_name"] = f"aux_sym_{ordinal}"
+            spec["aux_index"] = ordinal
         return ordered
+
+    def _summary_symbol_identity_from_descriptor(
+        self,
+        parameter: dict,
+    ) -> Optional[Tuple[Any, ...]]:
+        identity = parameter_identity_key_from_descriptor(parameter)
+        if identity is not None:
+            return identity
+        try:
+            index = int(parameter.get("index", -1))
+        except (TypeError, ValueError):
+            return None
+        if index < -1:
+            return ("synthetic_parameter_index", index)
+        return None
+
+    def _summary_symbol_identity_from_expression(
+        self,
+        expr: Expression,
+    ) -> Optional[Tuple[Any, ...]]:
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type == ExpressionType.PARAMETER:
+            identity = parameter_identity_key_from_expression(expr)
+            if identity is not None:
+                return identity
+            try:
+                index = int(getattr(expr, "value", -1) or -1)
+            except (TypeError, ValueError):
+                return None
+            if index < -1:
+                return ("synthetic_parameter_index", index)
+            return None
+        if expr_type == ExpressionType.VARIABLE:
+            storage_key = self._summary_storage_identity_key(getattr(expr, "storage_info", None))
+            if storage_key is not None:
+                return ("variable_storage", storage_key)
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            semantic_key = getattr(runtime_ref, "semantic_key", None)
+            if callable(semantic_key):
+                try:
+                    key = semantic_key()
+                except (AttributeError, TypeError, ValueError):
+                    key = None
+                if key is not None:
+                    return ("variable_runtime_semantic", key)
+            stable_key = getattr(runtime_ref, "stable_key", None)
+            if callable(stable_key):
+                try:
+                    key = stable_key()
+                except (AttributeError, TypeError, ValueError):
+                    key = None
+                if key is not None:
+                    return ("variable_runtime_stable", key)
+            return ("expression_object", id(expr))
+        return None
+
+    def _summary_symbol_spec_from_expression(
+        self,
+        expr: Expression,
+    ) -> dict:
+        return {
+            "name": str(getattr(expr, "name", None) or ""),
+            "index": int(getattr(expr, "value", -1) or -1),
+            "size": max(1, int(getattr(expr, "size", 0) or 4)),
+            "data_type": getattr(expr, "data_type", None),
+            "is_signed": bool(getattr(expr, "is_signed", True)),
+        }
+
+    def _summary_storage_identity_key(self, storage_info) -> Optional[Tuple[Any, ...]]:
+        if isinstance(storage_info, dict):
+            try:
+                storage_info = StorageInfo(**storage_info)
+            except Exception:
+                return None
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                return storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                return None
+        return None
+
+    def _summary_symbol_identity_sort_key(self, identity) -> Tuple[int, str]:
+        if not isinstance(identity, tuple) or not identity:
+            return (9, "")
+        kind = identity[0]
+        if kind == "parameter_index" and len(identity) >= 2:
+            try:
+                return (0, f"{int(identity[1]):08d}")
+            except (TypeError, ValueError):
+                return (0, repr(identity[1]))
+        if kind == "parameter_storage" and len(identity) >= 2:
+            return (1, repr(identity[1]))
+        if kind == "synthetic_parameter_index" and len(identity) >= 2:
+            try:
+                return (2, f"{int(identity[1]):08d}")
+            except (TypeError, ValueError):
+                return (2, repr(identity[1]))
+        if kind == "variable_storage" and len(identity) >= 2:
+            return (3, repr(identity[1]))
+        if kind in {"variable_runtime_semantic", "variable_runtime_stable"} and len(identity) >= 2:
+            return (4, repr(identity[1]))
+        if kind == "expression_object" and len(identity) >= 2:
+            try:
+                return (8, f"{int(identity[1]):020d}")
+            except (TypeError, ValueError):
+                return (8, repr(identity[1]))
+        return (8, repr(identity))
 
     def _prove_expression_equivalence_under_conditions(
         self,
         left: Expression,
         right: Expression,
         conditions: Sequence[Condition],
-        parameters: Sequence[dict],
+        parameters: Optional[Sequence[dict]],
     ) -> bool:
         if left.equals(right):
             return True
@@ -1398,7 +1481,7 @@ class StructuralRecurrenceSummarizer:
         left: Expression,
         right: Expression,
         conditions: Sequence[Condition],
-        parameters: Sequence[dict],
+        parameters: Optional[Sequence[dict]],
     ) -> Optional[str]:
         if left is None or right is None:
             return None
@@ -1414,17 +1497,27 @@ class StructuralRecurrenceSummarizer:
             right,
             *(condition.expression for condition in conditions or [] if condition is not None),
         )
-        symbol_specs: Dict[str, dict] = {str(item.get("name")): dict(item) for item in expression_symbols}
+        if expression_symbols is None:
+            return None
+        symbol_specs: Dict[Tuple[Any, ...], dict] = {
+            item.get("identity"): dict(item)
+            for item in expression_symbols
+            if item.get("identity") is not None
+        }
         for parameter in parameters or []:
-            name = str(parameter.get("name") or "")
-            if not name:
+            identity = self._summary_symbol_identity_from_descriptor(dict(parameter))
+            if identity is None:
                 continue
-            existing = symbol_specs.get(name)
+            candidate = dict(parameter)
+            candidate["identity"] = identity
+            candidate["size"] = max(1, int(candidate.get("size", 0) or 4))
+            existing = symbol_specs.get(identity)
             if existing is None or int(existing.get("size", 0) or 0) < int(parameter.get("size", 0) or 0):
-                symbol_specs[name] = dict(parameter)
+                symbol_specs[identity] = candidate
+        ordered_symbol_specs = self._assign_summary_auxiliary_symbols(symbol_specs.values())
 
         symbol_infos = self._build_auxiliary_parameter_infos(
-            symbol_specs.values(),
+            ordered_symbol_specs,
         )
         for symbol in symbol_infos:
             declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
@@ -1447,8 +1540,6 @@ class StructuralRecurrenceSummarizer:
                     continue
                 seen_unknown_decls.add(decl)
                 declarations.append(f"(declare-const {decl[0]} (_ BitVec {decl[1]}))")
-        render = build_symbol_replacer(symbol_infos, [])
-
         intrinsic_declarations: List[str] = []
         for expr in (left, right):
             for declaration in collect_intrinsic_smt_declarations(expr):
@@ -1466,22 +1557,45 @@ class StructuralRecurrenceSummarizer:
         for condition in conditions or []:
             if condition is None:
                 continue
-            assertions.append(f"(assert {render(condition)})")
+            rendered_condition = self._render_summary_auxiliary_smt(condition, ordered_symbol_specs)
+            if rendered_condition is None:
+                return None
+            assertions.append(f"(assert {rendered_condition})")
         target_bits = max(1, self._expression_equivalence_target_bits(left, right))
+        left_rendered = self._render_summary_auxiliary_smt(left, ordered_symbol_specs)
+        right_rendered = self._render_summary_auxiliary_smt(right, ordered_symbol_specs)
+        if left_rendered is None or right_rendered is None:
+            return None
         left_smt = coerce_value_to_bitvec_width(
             left,
-            render(left),
+            left_rendered,
             target_bits,
             use_sign_extension=False,
         )
         right_smt = coerce_value_to_bitvec_width(
             right,
-            render(right),
+            right_rendered,
             target_bits,
             use_sign_extension=False,
         )
         assertions.append(f"(assert (not (= {left_smt} {right_smt})))")
         return "\n".join(declarations + assertions + ["(check-sat)"])
+
+    def _assign_summary_auxiliary_symbols(
+        self,
+        symbol_specs: Iterable[dict],
+    ) -> List[dict]:
+        ordered = sorted(
+            (dict(spec) for spec in symbol_specs or [] if spec.get("identity") is not None),
+            key=lambda item: (
+                self._summary_symbol_identity_sort_key(item.get("identity")),
+                int(item.get("size", 0) or 0),
+            ),
+        )
+        for ordinal, spec in enumerate(ordered):
+            spec["aux_name"] = spec.get("aux_name") or f"aux_sym_{ordinal}"
+            spec["aux_index"] = ordinal
+        return ordered
 
     def _collect_expression_memory_widths(
         self,
@@ -1529,29 +1643,122 @@ class StructuralRecurrenceSummarizer:
         symbol_specs: Sequence[dict],
     ) -> List[ParameterInfo]:
         infos: List[ParameterInfo] = []
-        seen: set[str] = set()
         for spec in sorted(
             symbol_specs or [],
             key=lambda item: (
-                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
-                item.get("name") or "",
+                self._summary_symbol_identity_sort_key(item.get("identity")),
+                int(item.get("size", 0) or 0),
             ),
         ):
-            name = str(spec.get("name") or "")
-            if not name or name in seen:
+            aux_name = str(spec.get("aux_name") or "")
+            if not aux_name:
                 continue
-            seen.add(name)
             width_bits = max(1, int(spec.get("size", 0) or 4)) * 8
             infos.append(
                 ParameterInfo(
-                    original_name=name,
-                    smt_name=f"{name}_aux",
+                    original_name=aux_name,
+                    smt_name=aux_name,
                     bit_width=width_bits,
-                    index=int(spec.get("index", -1) or -1),
+                    index=int(spec.get("aux_index", -1) or -1),
                     is_signed=bool(spec.get("is_signed", True)),
                 )
             )
         return infos
+
+    def _render_summary_auxiliary_smt(
+        self,
+        node,
+        symbol_specs: Sequence[dict],
+    ) -> Optional[str]:
+        identity_to_spec = {
+            spec.get("identity"): spec
+            for spec in symbol_specs or []
+            if spec.get("identity") is not None and spec.get("aux_name")
+        }
+        if isinstance(node, Condition):
+            cloned_expr = self._clone_summary_expression_for_smt(node.expression, identity_to_spec)
+            if cloned_expr is None:
+                return None
+            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
+        if isinstance(node, Expression):
+            cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
+            return cloned_expr.to_smt() if cloned_expr is not None else None
+        return None
+
+    def _clone_summary_expression_for_smt(
+        self,
+        expr: Optional[Expression],
+        identity_to_spec: Dict[Tuple[Any, ...], dict],
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+            identity = self._summary_symbol_identity_from_expression(expr)
+            if identity is None:
+                return None
+            symbol_spec = identity_to_spec.get(identity)
+            if symbol_spec is None:
+                return None
+            aux_name = str(symbol_spec.get("aux_name") or "")
+            if not aux_name:
+                return None
+            try:
+                occurrence_size = max(1, int(getattr(expr, "size", 0) or 4))
+                symbol_size = max(1, int(symbol_spec.get("size", 0) or occurrence_size))
+            except (TypeError, ValueError):
+                return None
+            if occurrence_size > symbol_size:
+                return None
+            aux_expr = Expression.parameter(
+                aux_name,
+                index=int(symbol_spec.get("aux_index", -1) or -1),
+                data_type=getattr(expr, "data_type", None),
+                data_type_obj=getattr(expr, "data_type_obj", None),
+                size=symbol_size,
+                storage_info=getattr(expr, "storage_info", None),
+            )
+            if occurrence_size == symbol_size:
+                return aux_expr
+            return Expression(
+                ExpressionType.BINARY_OP,
+                operator="SUBPIECE",
+                operands=[
+                    aux_expr,
+                    Expression.constant(0, size=8),
+                ],
+                size=occurrence_size,
+            )
+        if expr_type == ExpressionType.PHI:
+            branches = []
+            for condition, value in getattr(expr, "value", None) or []:
+                cloned_condition = None
+                if condition is not None:
+                    cloned_condition_expr = self._clone_summary_expression_for_smt(
+                        condition.expression,
+                        identity_to_spec,
+                    )
+                    if cloned_condition_expr is None:
+                        return None
+                    cloned_condition = Condition(
+                        cloned_condition_expr,
+                        bool(getattr(condition, "negated", False)),
+                    )
+                cloned_value = self._clone_summary_expression_for_smt(value, identity_to_spec)
+                if cloned_value is None:
+                    return None
+                branches.append((cloned_condition, cloned_value))
+            return expr.clone_with(value=branches)
+        operands = getattr(expr, "operands", None) or []
+        if not operands:
+            return expr
+        cloned_operands = []
+        for operand in operands:
+            cloned_operand = self._clone_summary_expression_for_smt(operand, identity_to_spec)
+            if cloned_operand is None:
+                return None
+            cloned_operands.append(cloned_operand)
+        return expr.clone_with(operands=cloned_operands)
 
     def _negate_simple_condition_set(
         self,
@@ -1798,12 +2005,32 @@ class StructuralRecurrenceSummarizer:
                 seq_order = None
         parent = getattr(pcode_op, "getParent", lambda: None)()
         block_ref = self._make_pcode_block_ref(parent)
+        input_sizes = []
+        try:
+            num_inputs = int(pcode_op.getNumInputs())
+        except Exception:
+            num_inputs = 0
+        for input_index in range(max(0, num_inputs)):
+            try:
+                input_varnode = pcode_op.getInput(input_index)
+                input_size = int(input_varnode.getSize())
+            except Exception:
+                continue
+            if input_size > 0:
+                input_sizes.append(input_size)
+        try:
+            output_varnode = pcode_op.getOutput()
+            output_size = int(output_varnode.getSize()) if output_varnode is not None else None
+        except Exception:
+            output_size = None
         return PcodeOpRef(
             address_offset=address_offset,
             seq_time=seq_time,
             seq_order=seq_order,
             block_index=block_ref.block_index if block_ref is not None else None,
             mnemonic=getattr(pcode_op, "getMnemonic", lambda: None)(),
+            input_sizes=tuple(input_sizes),
+            output_size=output_size,
         )
 
     def _make_pcode_block_ref(self, block) -> Optional[PcodeBlockRef]:
@@ -2261,7 +2488,13 @@ class StructuralRecurrenceSummarizer:
                 continue
             if init_expr is None or self._expression_is_unresolved(init_expr):
                 continue
-            placeholder = Expression.variable("__loop_acc", size=getattr(phi_output, "getSize", lambda: 4)() or 4)
+            placeholder = self._loop_variable_expression(
+                None,
+                "accumulator",
+                "__loop_acc",
+                phi_output,
+                getattr(phi_output, "getSize", lambda: 4)() or 4,
+            )
             accumulator = CountedLoopAccumulator(
                 phi_op=phi_op,
                 phi_output=phi_output,
@@ -2298,11 +2531,56 @@ class StructuralRecurrenceSummarizer:
                     break
             if all_backedges_resolved:
                 candidates.append(accumulator)
+        candidates = self._assign_counted_loop_accumulator_binder_ordinals(candidates)
         candidates.sort(
             key=lambda candidate: self._counted_loop_accumulator_priority(candidate),
             reverse=True,
         )
         return candidates
+
+    def _assign_counted_loop_accumulator_binder_ordinals(
+        self,
+        accumulators: Sequence[CountedLoopAccumulator],
+    ) -> List[CountedLoopAccumulator]:
+        loop_variable_binder_scope = self._new_loop_variable_binder_scope()
+        rebound: List[CountedLoopAccumulator] = []
+        for accumulator in accumulators:
+            if accumulator.phi_output is None:
+                rebound.append(accumulator)
+                continue
+            placeholder = self._loop_variable_expression(
+                loop_variable_binder_scope,
+                "accumulator",
+                accumulator.placeholder.name or "__loop_acc",
+                accumulator.phi_output,
+                getattr(accumulator.phi_output, "getSize", lambda: None)()
+                or getattr(accumulator.placeholder, "size", None)
+                or 4,
+            )
+            member_placeholders: List[Expression] = []
+            for output in accumulator.member_outputs:
+                if output is accumulator.phi_output:
+                    member_placeholders.append(placeholder)
+                    continue
+                member_placeholders.append(
+                    self._loop_variable_expression(
+                        loop_variable_binder_scope,
+                        "accumulator",
+                        "__loop_acc",
+                        output,
+                        getattr(output, "getSize", lambda: None)()
+                        or getattr(accumulator.placeholder, "size", None)
+                        or 4,
+                    )
+                )
+            rebound.append(
+                replace(
+                    accumulator,
+                    placeholder=placeholder,
+                    member_placeholders=tuple(member_placeholders),
+                )
+            )
+        return rebound
 
     def _counted_loop_accumulator_priority(
         self,
@@ -3577,9 +3855,13 @@ class StructuralRecurrenceSummarizer:
             return None
         in_size = int(getattr(header_block, "getInSize", lambda: 0)() or 0)
         header_key = self._block_key(header_block)
-        state_placeholder = Expression.variable(
+        loop_variable_binder_scope = self._new_loop_variable_binder_scope()
+        state_placeholder = self._loop_variable_expression(
+            loop_variable_binder_scope,
+            "state",
             "__loop_state",
-            size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
+            state_output,
+            max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
         )
         latch_infos = []
         state_guard_exprs = []
@@ -3681,6 +3963,7 @@ class StructuralRecurrenceSummarizer:
             init_index=init_index,
             backedge_indices=backedge_indices,
             analysis=analysis,
+            loop_variable_binder_scope=loop_variable_binder_scope,
         )
         if accumulator_model is None:
             return None
@@ -3727,9 +4010,13 @@ class StructuralRecurrenceSummarizer:
         if phi_indices is None:
             return None
         init_index, backedge_indices = phi_indices
-        state_placeholder = Expression.variable(
+        loop_variable_binder_scope = self._new_loop_variable_binder_scope()
+        state_placeholder = self._loop_variable_expression(
+            loop_variable_binder_scope,
+            "state",
             "__loop_state",
-            size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
+            state_output,
+            max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
         )
         state_guard = self._build_pcode_expression(
             cbranch_op.getInput(1),
@@ -3782,6 +4069,7 @@ class StructuralRecurrenceSummarizer:
             init_index=init_index,
             backedge_indices=backedge_indices,
             analysis=analysis,
+            loop_variable_binder_scope=loop_variable_binder_scope,
         )
         if accumulator_model is None:
             return None
@@ -4422,7 +4710,10 @@ class StructuralRecurrenceSummarizer:
         init_index: int,
         backedge_indices: Sequence[int],
         analysis=None,
+        loop_variable_binder_scope: Optional[Dict[Tuple[str, Tuple[Any, ...]], int]] = None,
     ) -> Optional[Tuple[object, object, Expression, Expression, Expression]]:
+        if loop_variable_binder_scope is None:
+            loop_variable_binder_scope = self._new_loop_variable_binder_scope()
         candidates = []
         for phi_op in phi_ops:
             if phi_op is state_phi:
@@ -4439,9 +4730,12 @@ class StructuralRecurrenceSummarizer:
             phi_output = getattr(phi_op, "getOutput", lambda: None)()
             if phi_output is None:
                 continue
-            accumulator_placeholder = Expression.variable(
+            accumulator_placeholder = self._loop_variable_expression(
+                loop_variable_binder_scope,
+                "accumulator",
                 "__loop_acc",
-                size=max(1, int(getattr(phi_output, "getSize", lambda: 4)() or 4)),
+                phi_output,
+                max(1, int(getattr(phi_output, "getSize", lambda: 4)() or 4)),
             )
             init_expr = self._build_pcode_expression(
                 phi_op.getInput(phi_init_index),
@@ -4899,14 +5193,7 @@ class StructuralRecurrenceSummarizer:
             )
             if ConditionSimplifier.object_centric_is_contradiction(broad_positive_conditions):
                 continue
-            broad_positive_returns = self._readonly_reduction_region_returns(
-                analysis,
-                broad_positive_conditions,
-            )
-            if not broad_positive_returns:
-                continue
-
-            accumulator_proof = self._detect_readonly_sum_accumulator_proof(
+            accumulator_proofs = self._collect_readonly_sum_accumulator_proofs(
                 high_function,
                 analysis,
                 pointer_param,
@@ -4914,67 +5201,79 @@ class StructuralRecurrenceSummarizer:
                 counter_signed=counter_signed,
                 positive_conditions=broad_positive_conditions,
             )
-            if accumulator_proof is None:
+            if not accumulator_proofs:
                 continue
 
-            positive_conditions = self._readonly_reduction_positive_conditions(
-                analysis,
-                pointer_param,
-                count_param,
-                loop_start_index=int(accumulator_proof.start_index),
-                signed_counter=counter_signed,
-            )
-            if ConditionSimplifier.object_centric_is_contradiction(positive_conditions):
-                continue
-            overlapping_positive_returns = self._readonly_reduction_replaceable_positive_returns(
-                analysis,
-                pointer_param,
-                count_param,
-                broad_positive_conditions,
-                positive_conditions,
-                expected_signed=counter_signed,
-                declared_signedness=self._analysis_parameter_declared_signedness(
+            for accumulator_proof in accumulator_proofs:
+                positive_conditions = self._readonly_reduction_positive_conditions(
                     analysis,
+                    pointer_param,
                     count_param,
-                ),
-                accumulator_proof=accumulator_proof,
-            )
-            if not overlapping_positive_returns:
-                continue
-            viable_candidates.append(
-                (
-                    counter_signed,
-                    broad_positive_conditions,
-                    accumulator_proof,
-                    positive_conditions,
-                    overlapping_positive_returns,
+                    loop_start_index=int(accumulator_proof.start_index),
+                    signed_counter=counter_signed,
                 )
-            )
+                if ConditionSimplifier.object_centric_is_contradiction(positive_conditions):
+                    continue
+                overlapping_positive_returns = self._readonly_reduction_replaceable_positive_returns(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    broad_positive_conditions,
+                    positive_conditions,
+                    expected_signed=counter_signed,
+                    declared_signedness=self._analysis_parameter_declared_signedness(
+                        analysis,
+                        count_param,
+                    ),
+                    accumulator_proof=accumulator_proof,
+                )
+                if not overlapping_positive_returns:
+                    synthetic_positive_return = self._readonly_synthetic_positive_return_from_proof(
+                        accumulator_proof,
+                        positive_conditions,
+                        result_size=self._readonly_reduction_result_size(
+                            analysis,
+                            positive_conditions=positive_conditions,
+                        ),
+                    )
+                    if synthetic_positive_return is None:
+                        continue
+                    if not self._readonly_region_returns_are_subsumable_by_proof(
+                        analysis,
+                        pointer_param,
+                        count_param,
+                        positive_conditions,
+                        accumulator_proof,
+                    ):
+                        continue
+                    overlapping_positive_returns = [synthetic_positive_return]
+                if not overlapping_positive_returns:
+                    continue
+                viable_candidates.append(
+                    (
+                        counter_signed,
+                        broad_positive_conditions,
+                        accumulator_proof,
+                        positive_conditions,
+                        overlapping_positive_returns,
+                    )
+                )
 
         if not viable_candidates:
             self._debug("Declined readonly reduction summary: no proven positive-region counter signedness candidate")
             return None
 
-        if len(viable_candidates) == 1:
-            selected_candidate = viable_candidates[0]
-        else:
-            declared_signedness = self._analysis_parameter_declared_signedness(
-                analysis,
-                count_param,
+        selected_candidate = self._select_readonly_reduction_candidate(
+            analysis,
+            pointer_param,
+            count_param,
+            viable_candidates,
+        )
+        if selected_candidate is None:
+            self._debug(
+                "Declined readonly reduction summary: positive-region counter/proof candidate remains ambiguous"
             )
-            matching_declared: List[Tuple[bool, List[Condition], ReductionAccumulatorProof, List[Condition], List[ReturnInfo]]] = []
-            if declared_signedness is not None:
-                matching_declared = [
-                    candidate
-                    for candidate in viable_candidates
-                    if bool(candidate[0]) == bool(declared_signedness)
-                ]
-            if len(matching_declared) != 1:
-                self._debug(
-                    "Declined readonly reduction summary: positive-region counter signedness remains ambiguous after local-declaration tie-break"
-                )
-                return None
-            selected_candidate = matching_declared[0]
+            return None
 
         (
             counter_signed,
@@ -5008,7 +5307,14 @@ class StructuralRecurrenceSummarizer:
         preserved_exact_positive_returns: List[ReturnInfo] = []
         retained_positive_returns: List[ReturnInfo] = []
         preserved_exact_counts: set[int] = set()
-        for ret in overlapping_positive_returns:
+        ordered_overlapping_positive_returns = self._order_readonly_exact_positive_returns(
+            overlapping_positive_returns,
+            analysis,
+            pointer_param,
+            count_param,
+            preliminary_proof,
+        )
+        for ret in ordered_overlapping_positive_returns:
             exact_count = self._exact_counter_value_from_conditions(
                 ret.conditions or [],
                 str(count_param.get("name") or ""),
@@ -5016,13 +5322,21 @@ class StructuralRecurrenceSummarizer:
             if exact_count is None:
                 retained_positive_returns.append(ret)
                 continue
-            if self._readonly_exact_positive_return_is_absorbable(
+            absorbable = self._readonly_exact_positive_return_is_absorbable(
                 analysis,
                 pointer_param,
                 ret,
                 preliminary_proof,
                 exact_count=int(exact_count),
-            ):
+            )
+            prefix_score = self._readonly_exact_positive_return_prefix_score(
+                analysis,
+                pointer_param,
+                ret,
+                preliminary_proof,
+                exact_count=int(exact_count),
+            )
+            if prefix_score <= 0 and absorbable:
                 retained_positive_returns.append(ret)
                 continue
             if not self._readonly_exact_count_region_is_fully_covered_by_return(
@@ -5044,7 +5358,14 @@ class StructuralRecurrenceSummarizer:
                     True,
                 )
             )
-        for ret in (analysis.returns or []):
+        ordered_analysis_returns = self._order_readonly_exact_positive_returns(
+            analysis.returns or [],
+            analysis,
+            pointer_param,
+            count_param,
+            preliminary_proof,
+        )
+        for ret in ordered_analysis_returns:
             if ret in preserved_exact_positive_returns:
                 continue
             if not self._return_overlaps_conditions(ret, positive_conditions):
@@ -5055,13 +5376,21 @@ class StructuralRecurrenceSummarizer:
             )
             if exact_count is None or int(exact_count) in preserved_exact_counts:
                 continue
-            if self._readonly_exact_positive_return_is_absorbable(
+            absorbable = self._readonly_exact_positive_return_is_absorbable(
                 analysis,
                 pointer_param,
                 ret,
                 preliminary_proof,
                 exact_count=int(exact_count),
-            ):
+            )
+            prefix_score = self._readonly_exact_positive_return_prefix_score(
+                analysis,
+                pointer_param,
+                ret,
+                preliminary_proof,
+                exact_count=int(exact_count),
+            )
+            if prefix_score <= 0 and absorbable:
                 continue
             if not self._readonly_exact_count_region_is_fully_covered_by_return(
                 ret,
@@ -5120,6 +5449,25 @@ class StructuralRecurrenceSummarizer:
         if reduction_ref is None:
             self._debug("Declined readonly reduction summary: accumulator proof cannot lower to READONLY_SUM")
             return None
+        preserved_returns = [
+            ret for ret in preserved_returns
+            if not self._readonly_preserved_summary_is_subsumed_by_replacement(
+                analysis,
+                pointer_param,
+                count_param,
+                ret,
+                summary_positive_conditions,
+                positive_conditions,
+                accumulator_proof,
+                reduction_ref,
+            )
+            and not self._readonly_unresolved_preserved_return_is_subsumed_by_replacement(
+                ret,
+                summary_positive_conditions,
+                accumulator_proof,
+                reduction_ref,
+            )
+        ]
         summary_expr = Expression.intrinsic(
             "READONLY_SUM",
             [summary_pointer_expr, summary_count_expr],
@@ -5128,25 +5476,759 @@ class StructuralRecurrenceSummarizer:
             opcode=READONLY_SUM_OPCODE,
         )
         positive_anchor = overlapping_positive_returns[0]
-        summarized_returns = list(preserved_returns)
-        summarized_returns.append(
-            ReturnInfo(
-                address=positive_anchor.address,
-                value=summary_expr,
-                conditions=list(summary_positive_conditions),
-                branch_index=10_200,
-                pcode_identity=positive_anchor.pcode_identity,
-                pcode_order=positive_anchor.pcode_order,
-                pcode_time=positive_anchor.pcode_time,
-            )
+        summary_return = ReturnInfo(
+            address=positive_anchor.address,
+            value=summary_expr,
+            conditions=list(summary_positive_conditions),
+            branch_index=10_200,
+            pcode_identity=positive_anchor.pcode_identity,
+            pcode_order=positive_anchor.pcode_order,
+            pcode_time=positive_anchor.pcode_time,
+            pcode_op_ref=getattr(positive_anchor, "pcode_op_ref", None),
         )
+        summarized_returns: List[ReturnInfo] = []
+        inserted_summary = False
+        for preserved_return in preserved_returns:
+            if (
+                not inserted_summary
+                and self._readonly_summary_return_should_precede_preserved_return(
+                    summary_return,
+                    preserved_return,
+                    reduction_ref,
+                )
+            ):
+                summarized_returns.append(summary_return)
+                inserted_summary = True
+            summarized_returns.append(preserved_return)
+        if not inserted_summary:
+            summarized_returns.append(summary_return)
         summarized_returns.extend(preserved_exact_positive_returns)
+        summarized_returns = self._synthesize_exact_returns_from_readonly_witnesses(
+            analysis,
+            pointer_param,
+            count_param,
+            broad_positive_conditions=broad_positive_conditions,
+            summary_positive_conditions=summary_positive_conditions,
+            existing_returns=summarized_returns,
+            reduction_ref=reduction_ref,
+            result_size=result_size,
+        )
+        summarized_returns = self._synthesize_bounded_prefix_exact_returns(
+            analysis,
+            high_function,
+            pointer_param,
+            count_param,
+            counter_signed=counter_signed,
+            broad_positive_conditions=broad_positive_conditions,
+            existing_returns=summarized_returns,
+            result_size=result_size,
+        )
+        self._debug(f"Readonly reduction summary return count after bounded synthesis: {len(summarized_returns)}")
         self._debug(
             f"Recovered readonly pointer-reduction summary for '{function.getName()}' "
             f"(pointer={pointer_param.get('name')}, count={count_param.get('name')}, "
             f"stride={accumulator_proof.stride}, element_size={accumulator_proof.element_size})"
         )
         return summarized_returns, "readonly_pointer_reduction_summary"
+
+    def _select_readonly_reduction_candidate(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        candidates: Sequence[
+            Tuple[bool, List[Condition], ReductionAccumulatorProof, List[Condition], List[ReturnInfo]]
+        ],
+    ) -> Optional[Tuple[bool, List[Condition], ReductionAccumulatorProof, List[Condition], List[ReturnInfo]]]:
+        """Choose the proof that best explains the object-level return terms.
+
+        Ghidra sometimes assigns a wider or unsigned local declaration to a
+        counter whose loop body is proven through a narrower or signed P-code
+        view.  The declaration is useful as a tie-breaker, but the stronger
+        evidence is whether a proof's seed/start contract explains the
+        materialized return-site loads and the proven return value site.
+        """
+
+        candidates = tuple(candidates or ())
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        declared_signedness = self._analysis_parameter_declared_signedness(
+            analysis,
+            count_param,
+        )
+        scored = [
+            (
+                self._readonly_reduction_candidate_score(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    candidate,
+                    declared_signedness=declared_signedness,
+                ),
+                index,
+                candidate,
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best_score = scored[0][0]
+        tied = [item for item in scored if item[0] == best_score]
+        if len(tied) == 1:
+            return tied[0][2]
+
+        tied_contract_keys = {
+            candidate[2].readonly_term_sequence_contract_key()
+            for _score, _index, candidate in tied
+        }
+        tied_counter_signedness = {bool(candidate[0]) for _score, _index, candidate in tied}
+        if len(tied_counter_signedness) > 1 and declared_signedness is None:
+            return None
+        if len(tied_contract_keys) == 1 and None not in tied_contract_keys:
+            first_conditions = tied[0][2][3]
+            if all(
+                self._conditions_equivalent_object_centric(
+                    first_conditions,
+                    candidate[3],
+                )
+                for _score, _index, candidate in tied[1:]
+            ):
+                return min(tied, key=lambda item: item[1])[2]
+        return None
+
+    def _readonly_reduction_candidate_score(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        candidate: Tuple[bool, List[Condition], ReductionAccumulatorProof, List[Condition], List[ReturnInfo]],
+        *,
+        declared_signedness: Optional[bool],
+    ) -> Tuple[int, int, int, int, int, int]:
+        counter_signed, _broad_conditions, proof, positive_conditions, overlapping_returns = candidate
+        contract_score = 0
+        region_site_score = 0
+        anchor_score = 0
+        for ret in overlapping_returns or ():
+            if self._readonly_materialized_positive_return_matches_accumulator_contract(
+                analysis,
+                pointer_param,
+                count_param,
+                ret,
+                proof,
+            ):
+                contract_score += 100
+            anchor_count = self._readonly_positive_return_accumulator_anchor_count(
+                analysis,
+                pointer_param,
+                count_param,
+                ret,
+                proof,
+            )
+            if anchor_count is not None:
+                anchor_score += 20 + min(16, int(anchor_count))
+            if self._readonly_return_region_value_is_proven(
+                ret,
+                positive_conditions,
+                proof,
+            ):
+                region_site_score += 10
+        score_fn = getattr(proof, "readonly_term_sequence_specificity_score", None)
+        try:
+            seed_score = max(0, int(score_fn())) if callable(score_fn) else 0
+        except (TypeError, ValueError):
+            seed_score = 0
+        return_site_evidence_score = (
+            30
+            if bool(getattr(proof, "return_region_value_proven", False))
+            else 0
+        )
+        return_site_evidence_score += min(16, len(tuple(getattr(proof, "return_op_refs", ()) or ())))
+        return_site_evidence_score += min(16, len(tuple(getattr(proof, "return_value_op_refs", ()) or ())))
+        declared_score = (
+            1
+            if declared_signedness is not None and bool(counter_signed) == bool(declared_signedness)
+            else 0
+        )
+        return (
+            int(region_site_score),
+            int(return_site_evidence_score),
+            int(seed_score),
+            int(anchor_score),
+            int(contract_score),
+            int(declared_score),
+        )
+
+    def _synthesize_exact_returns_from_readonly_witnesses(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        broad_positive_conditions: Sequence[Condition],
+        summary_positive_conditions: Sequence[Condition],
+        existing_returns: Sequence[ReturnInfo],
+        reduction_ref: ReadonlyReductionRef,
+        result_size: int,
+    ) -> List[ReturnInfo]:
+        synthesized = list(existing_returns or ())
+        witnesses = tuple(getattr(reduction_ref, "semantic_witnesses", ()) or ())
+        if not witnesses:
+            return synthesized
+
+        anchor = next(iter(synthesized), None)
+        for witness in witnesses:
+            exact_count = int(getattr(witness, "exact_count", 0) or 0)
+            if exact_count <= 0 or exact_count > 16:
+                continue
+            if self._conditions_allow_counter_value(summary_positive_conditions, count_param, exact_count):
+                continue
+            if not self._conditions_allow_counter_value(broad_positive_conditions, count_param, exact_count):
+                continue
+            terms = tuple(getattr(witness, "terms", ()) or ())
+            if not self._readonly_witness_terms_form_scalar_prefix(
+                terms,
+                exact_count=exact_count,
+                result_size=result_size,
+            ):
+                continue
+            existing_count_returns = [
+                ret for ret in synthesized
+                if self._conditions_imply_counter_value(ret.conditions or [], count_param, exact_count)
+            ]
+            if any(
+                self._readonly_exact_positive_return_prefix_score(
+                    analysis,
+                    pointer_param,
+                    ret,
+                    None,
+                    exact_count=exact_count,
+                )
+                > 0
+                for ret in existing_count_returns
+            ):
+                continue
+            if existing_count_returns:
+                self._debug(
+                    "Skipped exact readonly witness synthesis: existing exact-count return "
+                    f"already materializes count={exact_count}"
+                )
+                continue
+
+            value = self._build_readonly_reduction_expression_from_terms(
+                pointer_param,
+                terms,
+                constant_bias=int(getattr(reduction_ref, "constant_bias", 0) or 0),
+                result_size=result_size,
+            )
+            if value is None:
+                continue
+
+            conditions = ConditionSimplifier.simplify_conditions_object_centric(
+                list(broad_positive_conditions or []) + [self._counter_equality_condition(count_param, exact_count)]
+            )
+            if ConditionSimplifier.object_centric_is_contradiction(conditions):
+                continue
+
+            site_anchor = anchor or next(iter(existing_returns or ()), None)
+            synthesized.append(
+                ReturnInfo(
+                    address=getattr(site_anchor, "address", "readonly_exact_witness") if site_anchor is not None else "readonly_exact_witness",
+                    value=value,
+                    conditions=conditions,
+                    branch_index=10_400 + exact_count,
+                    pcode_identity=getattr(site_anchor, "pcode_identity", None) if site_anchor is not None else None,
+                    pcode_order=getattr(site_anchor, "pcode_order", None) if site_anchor is not None else None,
+                    pcode_time=getattr(site_anchor, "pcode_time", None) if site_anchor is not None else None,
+                    pcode_op_ref=getattr(site_anchor, "pcode_op_ref", None) if site_anchor is not None else None,
+                )
+            )
+            self._debug(
+                "Synthesized exact readonly return from semantic witness "
+                f"for count={exact_count} terms={[int(term.byte_offset) for term in terms]}"
+            )
+        return synthesized
+
+    def _readonly_witness_terms_form_scalar_prefix(
+        self,
+        terms: Sequence[ReadonlyReductionTermRef],
+        *,
+        exact_count: int,
+        result_size: int,
+    ) -> bool:
+        if exact_count <= 0 or len(tuple(terms or ())) != int(exact_count):
+            return False
+        access_size = max(1, int(result_size or 0))
+        sorted_terms = tuple(sorted(terms or (), key=lambda term: (int(term.byte_offset), int(term.access_size))))
+        expected_offsets = [index * access_size for index in range(int(exact_count))]
+        return (
+            [int(term.byte_offset) for term in sorted_terms] == expected_offsets
+            and all(max(1, int(term.access_size or 0)) == access_size for term in sorted_terms)
+        )
+
+    def _readonly_synthetic_positive_return_from_proof(
+        self,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+        positive_conditions: Sequence[Condition],
+        *,
+        result_size: int,
+    ) -> Optional[ReturnInfo]:
+        """Create a positive-region anchor from object-centric return proof.
+
+        Some decompiler/P-code expansions fail to materialize the return value
+        candidate for the loop body even though the accumulator proof has
+        concrete return-site def-use evidence.  In that case the object proof is
+        stronger than the missing return case: it identifies the accumulator,
+        its memory terms, and the return op/value refs.  The synthetic return is
+        only a carrier for conditions and site identity; the caller immediately
+        replaces its value with the structured READONLY_SUM summary.
+        """
+
+        if accumulator_proof is None:
+            return None
+        if not bool(getattr(accumulator_proof, "return_region_value_proven", False)):
+            return None
+        site_refs = tuple(getattr(accumulator_proof, "return_op_refs", ()) or ()) + tuple(
+            getattr(accumulator_proof, "return_value_op_refs", ()) or ()
+        )
+        if not site_refs:
+            return None
+        site_ref = site_refs[0]
+        address_offset = getattr(site_ref, "address_offset", None)
+        seq_time = getattr(site_ref, "seq_time", None)
+        seq_order = getattr(site_ref, "seq_order", None)
+        address = (
+            f"{int(address_offset):08x}"
+            if address_offset is not None
+            else "synthetic_readonly_positive"
+        )
+        pcode_identity = (
+            f"{address}:t{int(seq_time)}"
+            if seq_time is not None
+            else f"{address}:synthetic_readonly_positive"
+        )
+        return ReturnInfo(
+            address=address,
+            value=Expression.constant(0, size=max(1, int(result_size or 0))),
+            conditions=list(positive_conditions or []),
+            branch_index=10_250,
+            pcode_identity=pcode_identity,
+            pcode_order=None if seq_order is None else int(seq_order),
+            pcode_time=None if seq_time is None else int(seq_time),
+            pcode_op_ref=site_ref,
+        )
+
+    def _synthesize_bounded_prefix_exact_returns(
+        self,
+        analysis,
+        high_function,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        counter_signed: bool,
+        broad_positive_conditions: Sequence[Condition],
+        existing_returns: Sequence[ReturnInfo],
+        result_size: int,
+    ) -> List[ReturnInfo]:
+        synthesized = list(existing_returns or ())
+        proofs = self._collect_readonly_prefix_accumulator_proofs(
+            analysis,
+            high_function,
+            pointer_param,
+            count_param,
+            counter_signed=counter_signed,
+            positive_conditions=broad_positive_conditions,
+            result_size=result_size,
+        )
+        if not proofs:
+            self._debug("Skipped bounded prefix exact synthesis: no prefix accumulator proofs")
+            return synthesized
+        self._debug(f"Bounded prefix exact synthesis: considering {len(proofs)} prefix proof(s)")
+        count_name = str(count_param.get("name") or "")
+        existing_exact_counts = {
+            int(exact_count)
+            for ret in synthesized
+            for exact_count in [self._exact_counter_value_from_conditions(ret.conditions or [], count_name)]
+            if exact_count is not None and int(exact_count) > 0
+        }
+        for proof in proofs:
+            anchor_returns = []
+            bounded_region_anchors: List[Tuple[ReturnInfo, List[Condition]]] = []
+            max_upper_bound = None
+            for ret in getattr(analysis, "returns", None) or ():
+                exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
+                exact_count_was_inferred_from_terms = False
+                if exact_count is None:
+                    extracted = self._extract_readonly_return_terms_and_bias(
+                        analysis,
+                        pointer_param,
+                        ret,
+                        proof,
+                    )
+                    if extracted is not None:
+                        extracted_terms, _constant_bias = extracted
+                        exact_count = self._infer_exact_count_from_readonly_terms(
+                            ret.conditions or [],
+                            extracted_terms,
+                            count_param,
+                            proof,
+                        )
+                        if exact_count is None:
+                            candidate_count = len(tuple(extracted_terms or ()))
+                            expected_terms = proof.full_terms_for_count_value(int(candidate_count))
+                            if (
+                                candidate_count > 0
+                                and expected_terms is not None
+                                and tuple(term.stable_key() for term in extracted_terms) == tuple(
+                                    term.stable_key() for term in expected_terms
+                                )
+                                and self._conditions_imply_counter_value(
+                                    ret.conditions or [],
+                                    count_param,
+                                    int(candidate_count),
+                                )
+                            ):
+                                exact_count = int(candidate_count)
+                                exact_count_was_inferred_from_terms = True
+                        else:
+                            exact_count_was_inferred_from_terms = True
+                upper_bound = self._infer_upper_bound_from_conditions(ret.conditions or [], count_name)
+                if exact_count is not None and int(exact_count) > 0:
+                    if not exact_count_was_inferred_from_terms and not self._readonly_positive_return_proves_count_value(
+                        analysis,
+                        pointer_param,
+                        count_param,
+                        ret,
+                        proof,
+                        count_value=int(exact_count),
+                    ):
+                        continue
+                    if upper_bound is None or int(upper_bound) < int(exact_count):
+                        continue
+                    anchor_returns.append(ret)
+                    if int(upper_bound) > int(exact_count):
+                        bounded_conditions = self._bounded_prefix_region_conditions_from_exact_anchor(
+                            ret.conditions or [],
+                            count_param,
+                            exact_count=int(exact_count),
+                            upper_bound=int(upper_bound),
+                        )
+                        if bounded_conditions is not None:
+                            bounded_region_anchors.append((ret, bounded_conditions))
+                    max_upper_bound = int(upper_bound) if max_upper_bound is None else max(max_upper_bound, int(upper_bound))
+                    continue
+                if upper_bound is None or int(upper_bound) <= 0 or int(upper_bound) > 16:
+                    continue
+                if not self._readonly_return_region_value_is_proven(
+                    ret,
+                    tuple(getattr(proof, "guard_constraints", ()) or broad_positive_conditions or ()),
+                    proof,
+                ):
+                    continue
+                if any(proof.full_terms_for_count_value(count_value) is None for count_value in range(1, int(upper_bound) + 1)):
+                    continue
+                anchor_returns.append(ret)
+                bounded_region_anchors.append((ret, list(ret.conditions or [])))
+                max_upper_bound = int(upper_bound) if max_upper_bound is None else max(max_upper_bound, int(upper_bound))
+            if not anchor_returns or max_upper_bound is None or max_upper_bound <= 0 or max_upper_bound > 16:
+                self._debug("Skipped bounded prefix exact synthesis: no bounded/exact anchor returns")
+                continue
+            anchor = anchor_returns[0]
+            synthesis_base_conditions = (
+                list(bounded_region_anchors[0][1])
+                if bounded_region_anchors
+                else list(anchor.conditions or broad_positive_conditions or [])
+            )
+            added_for_anchor: Dict[int, ReturnInfo] = {}
+            for count_value in range(1, max_upper_bound + 1):
+                if count_value in existing_exact_counts and not bounded_region_anchors:
+                    continue
+                terms = proof.full_terms_for_count_value(count_value)
+                if terms is None:
+                    continue
+                value = self._build_readonly_reduction_expression_from_terms(
+                    pointer_param,
+                    terms,
+                    constant_bias=int(getattr(proof, "constant_bias", 0) or 0),
+                    result_size=result_size,
+                )
+                if value is None:
+                    continue
+                conditions = list(synthesis_base_conditions)
+                conditions.append(self._counter_equality_condition(count_param, count_value))
+                exact_return = ReturnInfo(
+                    address=anchor.address,
+                    value=value,
+                    conditions=conditions,
+                    branch_index=10_300 + count_value,
+                    pcode_identity=anchor.pcode_identity,
+                    pcode_order=anchor.pcode_order,
+                    pcode_time=anchor.pcode_time,
+                    pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+                )
+                if bounded_region_anchors:
+                    insert_at = self._bounded_prefix_exact_insert_index(
+                        synthesized,
+                        bounded_region_anchors,
+                    )
+                    synthesized.insert(insert_at + len(added_for_anchor), exact_return)
+                else:
+                    synthesized.append(exact_return)
+                self._debug(
+                    "Synthesized bounded prefix exact return "
+                    f"for count={count_value} from proof start_index={proof.start_index} "
+                    f"terms={[term.byte_offset for term in terms]}"
+                )
+                added_for_anchor[int(count_value)] = exact_return
+                existing_exact_counts.add(count_value)
+            for bounded_anchor, bounded_conditions in bounded_region_anchors:
+                exact_cover = [
+                    exact_return
+                    for count_value, exact_return in sorted(added_for_anchor.items())
+                    if self._conditions_allow_counter_value(
+                        bounded_conditions,
+                        count_param,
+                        int(count_value),
+                    )
+                ]
+                if exact_cover and (
+                    self._readonly_region_is_covered_by_returns(
+                        bounded_conditions,
+                        exact_cover,
+                    )
+                    or self._readonly_bounded_counter_region_is_covered_by_exact_returns(
+                        bounded_conditions,
+                        exact_cover,
+                        count_param,
+                    )
+                ):
+                    synthesized = [
+                        ret for ret in synthesized
+                        if ret is not bounded_anchor
+                        and not self._conditions_equivalent_object_centric(
+                            ret.conditions or [],
+                            bounded_conditions,
+                        )
+                    ]
+        return synthesized
+
+    def _bounded_prefix_exact_insert_index(
+        self,
+        existing_returns: Sequence[ReturnInfo],
+        bounded_region_anchors: Sequence[Tuple[ReturnInfo, Sequence[Condition]]],
+    ) -> int:
+        for index, existing in enumerate(existing_returns or []):
+            if any(existing is bounded_anchor for bounded_anchor, _ in bounded_region_anchors or []):
+                return index
+        for index, existing in enumerate(existing_returns or []):
+            if any(
+                self._conditions_equivalent_object_centric(existing.conditions or [], bounded_conditions)
+                for _bounded_anchor, bounded_conditions in bounded_region_anchors or []
+            ):
+                return index
+        return len(existing_returns or [])
+
+    def _conditions_equivalent_object_centric(
+        self,
+        left: Sequence[Condition],
+        right: Sequence[Condition],
+    ) -> bool:
+        left_set = ConditionConstraintSet.from_conditions(left or [])
+        right_set = ConditionConstraintSet.from_conditions(right or [])
+        if left_set.implies_all(right or []) and right_set.implies_all(left or []):
+            return True
+        return self._conditions_imply_with_smt(left or [], right or []) and self._conditions_imply_with_smt(
+            right or [],
+            left or [],
+        )
+
+    def _conditions_imply_with_smt(
+        self,
+        source: Sequence[Condition],
+        target: Sequence[Condition],
+    ) -> bool:
+        for condition in target or []:
+            unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(source or []) + [condition.negate()]
+            )
+            if unsat is not True:
+                return False
+        return True
+
+    def _readonly_bounded_counter_region_is_covered_by_exact_returns(
+        self,
+        region_conditions: Sequence[Condition],
+        exact_returns: Sequence[ReturnInfo],
+        count_param: dict,
+    ) -> bool:
+        count_name = str(count_param.get("name") or "")
+        if not count_name:
+            return False
+        upper_bound = self._infer_upper_bound_from_conditions(region_conditions or [], count_name)
+        if upper_bound is None or int(upper_bound) <= 0 or int(upper_bound) > 16:
+            return False
+        saw_reachable_count = False
+        for count_value in range(1, int(upper_bound) + 1):
+            if not self._conditions_allow_counter_value(region_conditions or [], count_param, int(count_value)):
+                continue
+            saw_reachable_count = True
+            if not any(
+                self._conditions_imply_counter_value(ret.conditions or [], count_param, int(count_value))
+                and self._readonly_exact_count_region_is_fully_covered_by_return(
+                    ret,
+                    region_conditions,
+                    count_param,
+                    int(count_value),
+                )
+                for ret in exact_returns or []
+            ):
+                return False
+        return saw_reachable_count
+
+    def _bounded_prefix_region_conditions_from_exact_anchor(
+        self,
+        conditions: Sequence[Condition],
+        count_param: dict,
+        *,
+        exact_count: int,
+        upper_bound: int,
+    ) -> Optional[List[Condition]]:
+        """Recover the bounded prefix region around an exact materialized witness.
+
+        Some compilers expose only one exact return from a bounded prefix loop
+        after PHI expansion, e.g. count==1 under 0<count<4.  The exact-count
+        predicate is a witness selector, not part of the enclosing bounded
+        region.  Drop only object-identified singleton counter predicates for
+        the same count, then require SMT satisfiability for every synthesized
+        count.  This keeps non-counter guards and non-singleton counter bounds
+        intact.
+        """
+
+        if upper_bound <= 0 or exact_count <= 0 or exact_count > upper_bound:
+            return None
+        count_name = str(count_param.get("name") or "")
+        if not count_name:
+            return None
+        retained: List[Condition] = []
+        dropped_singleton = False
+        for condition in ConditionSimplifier.simplify_conditions_object_centric(list(conditions or [])):
+            if (
+                self._condition_references_only_counter_parameter(condition, count_name)
+                and self._exact_counter_value_from_conditions([condition], count_name) == int(exact_count)
+            ):
+                dropped_singleton = True
+                continue
+            retained.append(condition)
+        if not dropped_singleton:
+            return None
+        retained = ConditionSimplifier.simplify_conditions_object_centric(retained)
+        for count_value in range(1, int(upper_bound) + 1):
+            if not self._conditions_allow_counter_value(retained, count_param, int(count_value)):
+                return None
+        return retained
+
+    def _condition_references_only_counter_parameter(
+        self,
+        condition: Optional[Condition],
+        param_name: str,
+    ) -> bool:
+        expr = getattr(condition, "expression", None)
+        if expr is None or not param_name:
+            return False
+        saw_counter = False
+        for node in self._iter_expression_nodes(expr):
+            if getattr(node, "expr_type", None) != ExpressionType.PARAMETER:
+                continue
+            if getattr(node, "name", None) != param_name:
+                return False
+            saw_counter = True
+        return saw_counter
+
+    def _collect_readonly_prefix_accumulator_proofs(
+        self,
+        analysis,
+        high_function,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        counter_signed: bool,
+        positive_conditions: Sequence[Condition],
+        result_size: int,
+    ) -> List[ReductionAccumulatorProof]:
+        if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
+            return []
+        pointer_base_ref = LocationBaseRef.parameter(
+            pointer_param.get("name", "ptr"),
+            index=pointer_param.get("index"),
+            owner_program_id=pointer_param.get("owner_program_id"),
+            owner_entry_offset=pointer_param.get("owner_entry_offset"),
+        )
+        count_expr = self._parameter_expression(count_param)
+        all_ops = list(self._iter_pcode_ops(high_function))
+        pointer_phis: List[Dict[str, object]] = []
+        index_phis: List[Dict[str, object]] = []
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            pointer_match = self._match_pointer_progression_phi(op, pointer_param)
+            if pointer_match is not None:
+                pointer_phis.append(pointer_match)
+            index_match = self._match_index_progression_phi(op)
+            if index_match is not None:
+                index_phis.append(index_match)
+        proofs: List[ReductionAccumulatorProof] = []
+        seen = set()
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                continue
+            proof = self._match_accumulator_phi(
+                op,
+                analysis,
+                pointer_param,
+                count_param,
+                pointer_base_ref,
+                count_expr,
+                counter_signed,
+                pointer_phis,
+                index_phis,
+                result_size=result_size,
+                positive_conditions=positive_conditions,
+            )
+            if proof is None:
+                continue
+            if int(getattr(proof, "start_index", 0) or 0) != 0:
+                continue
+            if int(getattr(proof, "start_offset", 0) or 0) != 0:
+                continue
+            if tuple(getattr(proof, "seed_terms", ()) or ()) or getattr(proof, "seed_term_count", None) not in {None, 0}:
+                continue
+            key = proof.stable_key() or repr(proof)
+            if key in seen:
+                continue
+            seen.add(key)
+            proofs.append(proof)
+        return proofs
+
+    def _infer_upper_bound_from_conditions(
+        self,
+        conditions: Sequence[Condition],
+        param_name: str,
+    ) -> Optional[int]:
+        upper_bounds: List[int] = []
+        for condition in conditions or []:
+            relation = self._condition_relation(condition, param_name)
+            if relation is None:
+                continue
+            relation_name, constant = relation
+            if relation_name == "<=":
+                upper_bounds.append(int(constant))
+            elif relation_name == "<":
+                upper_bounds.append(int(constant) - 1)
+        if not upper_bounds:
+            return None
+        return min(upper_bounds)
 
     def _readonly_reduction_condition_signature(
         self,
@@ -5296,7 +6378,22 @@ class StructuralRecurrenceSummarizer:
                 accumulator_proof=next_proof,
             )
             if not next_overlapping_positive_returns:
-                return None
+                synthetic_positive_return = self._readonly_synthetic_positive_return_from_proof(
+                    next_proof,
+                    next_positive_conditions,
+                    result_size=result_size,
+                )
+                if synthetic_positive_return is None:
+                    return None
+                if not self._readonly_region_returns_are_subsumable_by_proof(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    next_positive_conditions,
+                    next_proof,
+                ):
+                    return None
+                next_overlapping_positive_returns = [synthetic_positive_return]
             next_state_key = self._readonly_reduction_normalization_state_key(
                 next_proof,
                 next_positive_conditions,
@@ -5543,6 +6640,63 @@ class StructuralRecurrenceSummarizer:
             if self._return_conditions_imply_conditions(ret, conditions)
         ]
 
+    def _readonly_region_returns_are_subsumable_by_proof(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        conditions: Sequence[Condition],
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> bool:
+        """Check whether existing region returns can coexist with a proof anchor.
+
+        When a broad loop region is proven from PHI/def-use evidence, optimized
+        code may still expose one or more exact-count returns inside that
+        region.  Those exact returns should not block the synthetic anchor if
+        each one is itself explained by the same object-centric term sequence.
+        """
+
+        region_returns = self._readonly_reduction_region_returns(analysis, conditions)
+        if not region_returns:
+            return True
+        if accumulator_proof is None:
+            return False
+        if self._readonly_proof_return_sites_cover_returns(accumulator_proof, region_returns):
+            return True
+        count_name = str(count_param.get("name") or "")
+        for ret in region_returns:
+            exact_count = self._exact_counter_value_from_conditions(
+                ret.conditions or [],
+                count_name,
+            )
+            if exact_count is None or int(exact_count) <= 0:
+                return False
+            if not self._readonly_positive_return_proves_count_value(
+                analysis,
+                pointer_param,
+                count_param,
+                ret,
+                accumulator_proof,
+                count_value=int(exact_count),
+            ):
+                return False
+        return True
+
+    def _readonly_proof_return_sites_cover_returns(
+        self,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+        returns: Sequence[ReturnInfo],
+    ) -> bool:
+        if accumulator_proof is None or not bool(getattr(accumulator_proof, "return_region_value_proven", False)):
+            return False
+        return_refs = tuple(getattr(accumulator_proof, "return_op_refs", ()) or ())
+        if not return_refs:
+            return False
+        for ret in returns or ():
+            if not any(self._return_info_matches_pcode_op_ref(ret, ref) for ref in return_refs):
+                return False
+        return True
+
     def _readonly_reduction_replaceable_positive_returns(
         self,
         analysis,
@@ -5562,6 +6716,14 @@ class StructuralRecurrenceSummarizer:
             if self._return_overlaps_conditions(ret, conditions)
         ]
         if not overlapping_returns:
+            return []
+        if self._readonly_exact_materialized_returns_conflict_with_accumulator_proof(
+            analysis,
+            pointer_param,
+            count_param,
+            conditions,
+            accumulator_proof,
+        ):
             return []
 
         replaceable_returns: List[ReturnInfo] = []
@@ -5615,7 +6777,22 @@ class StructuralRecurrenceSummarizer:
             )
             if has_exact_count_proof:
                 replaceable_returns.append(ret)
-                coverage_returns.append(ret)
+                if self._readonly_region_value_proof_allows_broadened_positive_coverage(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    ret,
+                    conditions,
+                    accumulator_proof,
+                ):
+                    coverage_returns.append(
+                        replace(
+                            ret,
+                            conditions=list(conditions or []),
+                        )
+                    )
+                else:
+                    coverage_returns.append(ret)
                 continue
             loop_anchor_count = self._readonly_positive_return_accumulator_anchor_count(
                 analysis,
@@ -5639,6 +6816,13 @@ class StructuralRecurrenceSummarizer:
                 conditions,
                 accumulator_proof,
             )
+            has_vectorized_region_sequence_proof = (
+                self._readonly_vectorized_return_region_sequence_is_proven(
+                    ret,
+                    conditions,
+                    accumulator_proof,
+                )
+            )
             has_materialized_readonly_terms = loop_anchor_count is not None or (
                 self._readonly_positive_return_has_materialized_readonly_terms(
                     analysis,
@@ -5647,12 +6831,59 @@ class StructuralRecurrenceSummarizer:
                     accumulator_proof,
                 )
             )
+            if has_vectorized_region_sequence_proof and not has_exact_count_proof:
+                replaceable_returns.append(ret)
+                coverage_returns.append(
+                    replace(
+                        ret,
+                        conditions=list(conditions or []),
+                    )
+                )
+                continue
+            if (
+                has_materialized_readonly_terms
+                and has_region_value_proof
+                and not has_loop_anchor
+                and not has_exact_count_proof
+                and not self._readonly_materialized_positive_return_matches_accumulator_contract(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    ret,
+                    accumulator_proof,
+                )
+            ):
+                extracted_for_debug = self._extract_readonly_return_terms_and_bias(
+                    analysis,
+                    pointer_param,
+                    ret,
+                    accumulator_proof,
+                )
+                if extracted_for_debug is not None:
+                    debug_terms, debug_bias = extracted_for_debug
+                    self._debug(
+                        "Readonly materialized region contract mismatch: "
+                        f"terms={[(term.byte_offset, term.access_size) for term in debug_terms]}, "
+                        f"bias={debug_bias}, "
+                        f"proof_start_index={getattr(accumulator_proof, 'start_index', None)}, "
+                        f"proof_start_offset={getattr(accumulator_proof, 'start_offset', None)}, "
+                        f"proof_seed_terms={[(term.byte_offset, term.access_size) for term in (getattr(accumulator_proof, 'seed_terms', ()) or ())]}"
+                    )
+                self._debug(
+                    "Declined readonly reduction summary: materialized positive return "
+                    "flows to the return region but does not match the accumulator term contract"
+                )
+                return []
             if (
                 has_materialized_readonly_terms
                 and not has_region_value_proof
                 and not has_loop_anchor
                 and not has_exact_count_proof
             ):
+                self._debug(
+                    "Declined readonly reduction summary: materialized positive return "
+                    "has no exact-count, loop-anchor, or return-region value proof"
+                )
                 return []
             if not ret_constraint_set.implies_all(conditions or []):
                 counter_only_extra_guards = self._readonly_return_has_only_counter_guards_beyond_conditions(
@@ -5740,6 +6971,265 @@ class StructuralRecurrenceSummarizer:
         if not self._readonly_region_is_covered_by_returns(conditions, coverage_returns):
             return []
         return replaceable_returns
+
+    def _readonly_exact_materialized_returns_conflict_with_accumulator_proof(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        conditions: Sequence[Condition],
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> bool:
+        """Reject a loop summary proof contradicted by exact return evidence.
+
+        A broad PHI proof can reach a return region while still describing the
+        wrong memory sequence.  Exact materialized returns inside that same
+        guarded region are stronger object-level witnesses: if the proof cannot
+        reproduce their readonly term sequence for the exact counter value, the
+        proof must not be promoted to a summary even when the final summary case
+        later excludes that one exact value.
+        """
+
+        if analysis is None or accumulator_proof is None:
+            return False
+        count_name = str(count_param.get("name") or "")
+        if not count_name:
+            return False
+
+        for ret in getattr(analysis, "returns", None) or ():
+            exact_count = self._exact_counter_value_from_conditions(
+                ret.conditions or [],
+                count_name,
+            )
+            if exact_count is None or int(exact_count) <= 0:
+                continue
+            exact_count = int(exact_count)
+            if not self._conditions_allow_counter_value(conditions or [], count_param, exact_count):
+                continue
+            if ConditionSimplifier.object_centric_is_contradiction(
+                list(ret.conditions or []) + list(conditions or [])
+            ):
+                continue
+            overlap_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(ret.conditions or []) + list(conditions or [])
+            )
+            if overlap_unsat is True:
+                continue
+
+            extracted = self._extract_readonly_return_terms_and_bias(
+                analysis,
+                pointer_param,
+                ret,
+                accumulator_proof,
+            )
+            if extracted is None:
+                continue
+            expected_terms = accumulator_proof.full_terms_for_count_value(exact_count)
+            if expected_terms is None:
+                self._debug(
+                    "Declined readonly reduction summary: exact materialized return "
+                    f"count={exact_count} has no proof term contract"
+                )
+                return True
+            if self._readonly_positive_return_proves_count_value(
+                analysis,
+                pointer_param,
+                count_param,
+                ret,
+                accumulator_proof,
+                count_value=exact_count,
+            ):
+                continue
+            terms, constant_bias = extracted
+            self._debug(
+                "Declined readonly reduction summary: exact materialized return "
+                f"count={exact_count} conflicts with accumulator term contract "
+                f"(terms={[(term.byte_offset, term.access_size) for term in terms]}, "
+                f"expected={[(term.byte_offset, term.access_size) for term in expected_terms]}, "
+                f"bias={constant_bias})"
+            )
+            return True
+        return False
+
+    def _readonly_preserved_summary_is_subsumed_by_replacement(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        ret: ReturnInfo,
+        replacement_conditions: Sequence[Condition],
+        proof_region_conditions: Sequence[Condition],
+        replacement_proof: Optional[ReductionAccumulatorProof],
+        replacement_ref: Optional[ReadonlyReductionRef],
+    ) -> bool:
+        if replacement_proof is None or replacement_ref is None:
+            return False
+        existing_ref = self._readonly_reduction_ref_from_return(ret)
+        if existing_ref is None:
+            return False
+        result_size = max(
+            1,
+            int(getattr(replacement_ref, "result_size", 0) or getattr(ret.value, "size", 0) or 0),
+        )
+        existing_key = existing_ref.readonly_term_sequence_contract_key(result_size=result_size)
+        replacement_key = replacement_ref.readonly_term_sequence_contract_key(result_size=result_size)
+        if existing_key is not None and existing_key == replacement_key:
+            return False
+        if self._readonly_reduction_ref_specificity(replacement_ref) < self._readonly_reduction_ref_specificity(
+            existing_ref
+        ):
+            return False
+        replacement_proves_return_site = self._readonly_return_region_value_is_proven(
+            ret,
+            replacement_conditions,
+            replacement_proof,
+        )
+        existing_proof = getattr(existing_ref, "accumulator_proof", None)
+        existing_contract_conflicts = (
+            existing_proof is not None
+            and self._readonly_exact_materialized_returns_conflict_with_accumulator_proof(
+                analysis,
+                pointer_param,
+                count_param,
+                proof_region_conditions,
+                existing_proof,
+            )
+        )
+        if not replacement_proves_return_site and not existing_contract_conflicts:
+            return False
+        if not self._conditions_imply_with_smt(ret.conditions or [], replacement_conditions or []):
+            return False
+        self._debug(
+            "Dropped preserved readonly summary subsumed by proof-backed replacement "
+            f"(existing_contract={existing_key}, replacement_contract={replacement_key})"
+        )
+        return True
+
+    def _readonly_unresolved_preserved_return_is_subsumed_by_replacement(
+        self,
+        ret: ReturnInfo,
+        replacement_conditions: Sequence[Condition],
+        replacement_proof: Optional[ReductionAccumulatorProof],
+        replacement_ref: Optional[ReadonlyReductionRef],
+    ) -> bool:
+        """Drop less-precise unresolved artifacts covered by a proven summary.
+
+        Optimized readonly reductions can leave PHI-circular expansion artifacts
+        at the same RETURN site and guard as the object-centric accumulator
+        proof.  Those artifacts are not independent semantic regions; keeping
+        them lets the monolithic fallback choose an unconstrained UNKNOWN value
+        even though the proof-backed READONLY_SUM already models that return
+        site.  Only same-site, guard-covered, unresolved values are removed.
+        Precise materialized returns remain as evidence and can still reject a
+        bad summary contract earlier.
+        """
+
+        if replacement_proof is None or replacement_ref is None:
+            return False
+        if not self._expression_tree_contains_type(getattr(ret, "value", None), ExpressionType.UNKNOWN):
+            return False
+        if not bool(getattr(replacement_proof, "return_region_value_proven", False)):
+            return False
+        contract_key_fn = getattr(replacement_ref, "readonly_term_sequence_contract_key", None)
+        if not callable(contract_key_fn):
+            return False
+        try:
+            contract_key = contract_key_fn(result_size=getattr(replacement_ref, "result_size", None))
+        except (AttributeError, TypeError, ValueError):
+            contract_key = None
+        if contract_key is None:
+            return False
+        if ConditionSimplifier.object_centric_is_contradiction(
+            list(ret.conditions or []) + list(replacement_conditions or [])
+        ):
+            return False
+        if not self._readonly_return_region_value_is_proven(
+            ret,
+            replacement_conditions,
+            replacement_proof,
+        ):
+            return False
+        self._debug(
+            "Dropped unresolved readonly return artifact subsumed by proof-backed summary "
+            f"(contract={contract_key})"
+        )
+        return True
+
+    def _readonly_reduction_ref_specificity(
+        self,
+        reduction_ref: ReadonlyReductionRef,
+    ) -> int:
+        score_fn = getattr(reduction_ref, "readonly_term_sequence_specificity_score", None)
+        if callable(score_fn):
+            try:
+                return max(0, int(score_fn()))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    def _readonly_reduction_ref_from_return(
+        self,
+        ret: ReturnInfo,
+    ) -> Optional[ReadonlyReductionRef]:
+        value = getattr(ret, "value", None)
+        if getattr(value, "expr_type", None) != ExpressionType.INTRINSIC:
+            return None
+        runtime_ref = getattr(value, "runtime_ref", None)
+        if isinstance(runtime_ref, ReadonlyReductionRef):
+            return runtime_ref
+        return None
+
+    def _readonly_summary_return_should_precede_preserved_return(
+        self,
+        summary_return: ReturnInfo,
+        preserved_return: ReturnInfo,
+        summary_ref: ReadonlyReductionRef,
+    ) -> bool:
+        preserved_ref = self._readonly_reduction_ref_from_return(preserved_return)
+        if preserved_ref is None:
+            return False
+        result_size = max(
+            1,
+            int(getattr(summary_ref, "result_size", 0) or getattr(summary_return.value, "size", 0) or 0),
+        )
+        summary_key = summary_ref.readonly_term_sequence_contract_key(result_size=result_size)
+        preserved_key = preserved_ref.readonly_term_sequence_contract_key(result_size=result_size)
+        if summary_key is not None and summary_key == preserved_key:
+            return False
+        if self._readonly_reduction_ref_specificity(summary_ref) < self._readonly_reduction_ref_specificity(
+            preserved_ref
+        ):
+            return False
+        if not self._conditions_imply_with_smt(
+            summary_return.conditions or [],
+            preserved_return.conditions or [],
+        ):
+            return False
+        return True
+
+    def _readonly_vectorized_return_region_sequence_is_proven(
+        self,
+        ret: ReturnInfo,
+        positive_conditions: Sequence[Condition],
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> bool:
+        if accumulator_proof is None:
+            return False
+        if getattr(accumulator_proof, "source", None) != "vectorized_readonly_prefix_sum":
+            return False
+        if not bool(getattr(accumulator_proof, "return_region_value_proven", False)):
+            return False
+        if not self._readonly_return_region_value_is_proven(
+            ret,
+            positive_conditions,
+            accumulator_proof,
+        ):
+            return False
+        side_effect_profile = getattr(accumulator_proof, "side_effect_profile", None)
+        requires_effect_proof = getattr(side_effect_profile, "requires_effect_proof", None)
+        if callable(requires_effect_proof) and requires_effect_proof():
+            return False
+        return True
 
     def _readonly_positive_prefix_is_exactly_covered(
         self,
@@ -5839,6 +7329,20 @@ class StructuralRecurrenceSummarizer:
             positive_conditions,
             accumulator_proof,
         ):
+            if self._readonly_positive_return_has_materialized_readonly_terms(
+                analysis,
+                pointer_param,
+                ret,
+                accumulator_proof,
+            ):
+                return self._readonly_positive_return_materializes_count_value(
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    ret,
+                    accumulator_proof,
+                    count_value=int(count_value),
+                )
             expected_terms = accumulator_proof.full_terms_for_count_value(int(count_value))
             return expected_terms is not None
         return False
@@ -5977,15 +7481,94 @@ class StructuralRecurrenceSummarizer:
         if not term_key:
             return None
 
-        candidate_counts = {
-            max(1, int(len(terms))),
-            max(1, int(getattr(accumulator_proof, "start_index", 0) or 0) + 1),
-        }
+        candidate_counts = self._readonly_candidate_counts_from_term_contract(
+            terms,
+            accumulator_proof,
+        )
         for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ()):
             candidate_counts.add(max(1, int(getattr(witness, "exact_count", 0) or 0)))
         for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ()):
             candidate_counts.add(max(1, int(getattr(witness, "exact_count", 0) or 0)))
 
+        for count_value in sorted(candidate_counts):
+            if count_value <= 0:
+                continue
+            expected_terms = accumulator_proof.full_terms_for_count_value(int(count_value))
+            if expected_terms is None:
+                continue
+            if term_key == tuple(term.stable_key() for term in expected_terms):
+                return int(count_value)
+        return None
+
+    def _readonly_materialized_positive_return_matches_accumulator_contract(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        ret: ReturnInfo,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> bool:
+        """Validate a materialized return against the accumulator term sequence.
+
+        Return-site def-use reachability proves that a PHI/update reaches a
+        RETURN, but it does not by itself prove that every condition region
+        using that return has the same memory term sequence.  If the returned
+        expression is already materialized as readonly load terms, the terms
+        must match a count value allowed by the return guard and by the proof's
+        explicit semantic contract.
+        """
+
+        if analysis is None or accumulator_proof is None:
+            return False
+        extracted = self._extract_readonly_return_terms_and_bias(
+            analysis,
+            pointer_param,
+            ret,
+            accumulator_proof,
+        )
+        if extracted is None:
+            return False
+        terms, constant_bias = extracted
+        result_size = max(
+            1,
+            int(getattr(accumulator_proof, "result_size", 0) or getattr(ret.value, "size", 0) or 0),
+        )
+        expected_bias = int(getattr(accumulator_proof, "constant_bias", 0) or 0)
+        if self._normalize_readonly_constant_bias(int(constant_bias), result_size) != self._normalize_readonly_constant_bias(
+            expected_bias,
+            result_size,
+        ):
+            return False
+
+        count_name = str(count_param.get("name") or "")
+        candidate_counts = set()
+        exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
+        if exact_count is not None and int(exact_count) > 0:
+            candidate_counts.add(int(exact_count))
+        inferred_count = self._infer_exact_count_from_readonly_terms(
+            ret.conditions or [],
+            terms,
+            count_param,
+            accumulator_proof,
+        )
+        if inferred_count is not None and int(inferred_count) > 0:
+            candidate_counts.add(int(inferred_count))
+        candidate_counts.update(
+            self._readonly_candidate_counts_from_term_contract(
+                terms,
+                accumulator_proof,
+            )
+        )
+        for witness in tuple(getattr(accumulator_proof, "loop_body_witnesses", ()) or ()):
+            witness_count = int(getattr(witness, "exact_count", 0) or 0)
+            if witness_count > 0:
+                candidate_counts.add(witness_count)
+        for witness in tuple(getattr(accumulator_proof, "exact_return_witnesses", ()) or ()):
+            witness_count = int(getattr(witness, "exact_count", 0) or 0)
+            if witness_count > 0:
+                candidate_counts.add(witness_count)
+
+        term_key = tuple(term.stable_key() for term in terms)
         for count_value in sorted(candidate_counts):
             if count_value <= 0:
                 continue
@@ -5995,8 +7578,33 @@ class StructuralRecurrenceSummarizer:
             if expected_terms is None:
                 continue
             if term_key == tuple(term.stable_key() for term in expected_terms):
-                return int(count_value)
-        return None
+                return True
+        return False
+
+    def _readonly_candidate_counts_from_term_contract(
+        self,
+        terms: Sequence[ReadonlyReductionTermRef],
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> set[int]:
+        term_count = len(tuple(terms or ()))
+        candidate_counts = {max(1, int(term_count))}
+        if accumulator_proof is None:
+            return candidate_counts
+        start_index = int(getattr(accumulator_proof, "start_index", 0) or 0)
+        index_step = int(getattr(accumulator_proof, "index_step", 1) or 1)
+        candidate_counts.add(max(1, start_index + 1))
+        explicit_seed_count = len(tuple(getattr(accumulator_proof, "seed_terms", ()) or ()))
+        if explicit_seed_count > 0 and term_count >= explicit_seed_count and index_step > 0:
+            candidate_counts.add(max(1, start_index + (term_count - explicit_seed_count) * index_step))
+        seed_term_count = getattr(accumulator_proof, "seed_term_count", None)
+        if seed_term_count is not None:
+            try:
+                implicit_seed_count = int(seed_term_count)
+            except (TypeError, ValueError):
+                implicit_seed_count = -1
+            if implicit_seed_count >= 0 and term_count >= implicit_seed_count and index_step > 0:
+                candidate_counts.add(max(1, start_index + (term_count - implicit_seed_count) * index_step))
+        return candidate_counts
 
     def _readonly_loop_anchor_covers_return_region(
         self,
@@ -6029,13 +7637,35 @@ class StructuralRecurrenceSummarizer:
         site_refs = return_refs + return_value_refs
         if not site_refs:
             return False
-        if not any(
-            self._return_info_matches_pcode_op_ref(ret, ref) for ref in site_refs
-        ):
-            return False
-        return ConditionConstraintSet.from_conditions(ret.conditions or []).implies_all(
-            positive_conditions or []
+        matches_return_site = any(
+            self._return_info_matches_pcode_op_ref(ret, ref) for ref in return_refs
         )
+        matches_value_site = any(
+            self._return_info_matches_reachable_value_pcode_op_ref(ret, ref) for ref in return_value_refs
+        )
+        if not matches_return_site and not matches_value_site:
+            return False
+        if ConditionConstraintSet.from_conditions(ret.conditions or []).implies_all(
+            positive_conditions or []
+        ):
+            return True
+        return self._conditions_imply_with_smt(ret.conditions or [], positive_conditions or [])
+
+    def _return_info_matches_reachable_value_pcode_op_ref(
+        self,
+        ret: ReturnInfo,
+        ref: PcodeOpRef,
+    ) -> bool:
+        """Match a value op only when ReturnInfo carries that exact value site.
+
+        Def-use proof from a value op to RETURN is represented by separately
+        recording the reachable RETURN refs.  This method is intentionally
+        strict so a nearby sequence number cannot stand in for reachability.
+        """
+
+        if ref is None:
+            return False
+        return self._return_info_matches_pcode_op_ref(ret, ref)
 
     def _return_info_matches_pcode_op_ref(
         self,
@@ -6044,6 +7674,9 @@ class StructuralRecurrenceSummarizer:
     ) -> bool:
         if ref is None:
             return False
+        ret_ref = getattr(ret, "pcode_op_ref", None)
+        if isinstance(ret_ref, PcodeOpRef):
+            return ret_ref.stable_key() == ref.stable_key()
         _ret_address, ret_time, ret_order = self._return_info_pcode_site(ret)
         if ret_time is not None and ref.seq_time is not None:
             if int(ret_time) == int(ref.seq_time):
@@ -6084,6 +7717,9 @@ class StructuralRecurrenceSummarizer:
         return address is not None and int(address) == int(ref.address_offset)
 
     def _return_info_address_offset(self, ret: ReturnInfo) -> Optional[int]:
+        ret_ref = getattr(ret, "pcode_op_ref", None)
+        if isinstance(ret_ref, PcodeOpRef) and ret_ref.address_offset is not None:
+            return int(ret_ref.address_offset)
         candidates = [getattr(ret, "address", None), getattr(ret, "pcode_identity", None)]
         for candidate in candidates:
             if not isinstance(candidate, str) or not candidate:
@@ -6097,6 +7733,9 @@ class StructuralRecurrenceSummarizer:
         self,
         ret: ReturnInfo,
     ) -> Optional[PcodeOpRef]:
+        ret_ref = getattr(ret, "pcode_op_ref", None)
+        if isinstance(ret_ref, PcodeOpRef):
+            return ret_ref
         address_offset, ret_time, ret_order = self._return_info_pcode_site(ret)
         if ret_time is None and ret_order is None:
             return None
@@ -6522,6 +8161,39 @@ class StructuralRecurrenceSummarizer:
         counter_signed: bool,
         positive_conditions: Sequence[Condition] = (),
     ) -> Optional[ReductionAccumulatorProof]:
+        proofs = self._collect_readonly_sum_accumulator_proofs(
+            high_function,
+            analysis,
+            pointer_param,
+            count_param,
+            counter_signed=counter_signed,
+            positive_conditions=positive_conditions,
+        )
+        return proofs[0] if proofs else None
+
+    def _collect_readonly_sum_accumulator_proofs(
+        self,
+        high_function,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        *,
+        counter_signed: bool,
+        positive_conditions: Sequence[Condition] = (),
+    ) -> List[ReductionAccumulatorProof]:
+        patched_detect = self.__dict__.get("_detect_readonly_sum_accumulator_proof")
+        if patched_detect is not None:
+            proof = patched_detect(
+                high_function,
+                analysis,
+                pointer_param,
+                count_param,
+                counter_signed=counter_signed,
+                positive_conditions=positive_conditions,
+            )
+            return [proof] if proof is not None else []
+        if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
+            return []
         pointer_phis: List[Dict[str, object]] = []
         index_phis: List[Dict[str, object]] = []
         pointer_base_ref = LocationBaseRef.parameter(
@@ -6556,8 +8228,12 @@ class StructuralRecurrenceSummarizer:
             counter_signed=counter_signed,
             positive_conditions=positive_conditions,
         )
+        matches: List[ReductionAccumulatorProof] = []
+        seen_keys = set()
         if vectorized_match is not None:
-            return vectorized_match
+            key = vectorized_match.stable_key() or repr(vectorized_match)
+            seen_keys.add(key)
+            matches.append(vectorized_match)
 
         for op in all_ops:
             if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
@@ -6576,11 +8252,15 @@ class StructuralRecurrenceSummarizer:
                 positive_conditions=positive_conditions,
             )
             if accumulator_match is not None:
-                return accumulator_match
+                key = accumulator_match.stable_key() or repr(accumulator_match)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                matches.append(accumulator_match)
 
         if not pointer_phis and not index_phis:
             self._debug("Declined readonly reduction summary: no pointer/index progression PHI found")
-        return None
+        return matches
 
     def _detect_vectorized_readonly_prefix_sum_accumulator_proof(
         self,
@@ -6624,6 +8304,7 @@ class StructuralRecurrenceSummarizer:
             rounded_vn = rounded_candidate.rounded_varnode
             lane_count = int(rounded_candidate.lane_count)
             start_index = int(rounded_candidate.start_index)
+            tail_start_index_delta = int(getattr(rounded_candidate, "tail_start_index_delta", 0) or 0)
             if lane_count <= 1:
                 continue
             vector_stride = lane_count * result_size
@@ -6757,14 +8438,29 @@ class StructuralRecurrenceSummarizer:
                 count_param,
                 rounded_vn,
                 element_size=result_size,
-                start_offset=start_offset,
-                start_index=start_index,
+                start_offset=start_offset + tail_start_index_delta * result_size,
+                start_index=start_index + tail_start_index_delta,
+                max_unrolled_terms=max(0, lane_count - 1),
+                tail_index_source_varnode=getattr(rounded_candidate, "tail_index_source_varnode", None),
+                lane_count=lane_count,
             ):
                 self._debug(
                     "Declined vectorized readonly prefix-sum candidate: "
                     f"no scalar tail from rounded count to full count (lanes={lane_count}, start_index={start_index})"
                 )
                 continue
+            seed_terms = self._vector_prefix_seed_terms_from_exact_returns(
+                analysis,
+                pointer_param,
+                count_param,
+                positive_conditions,
+                start_index=start_index,
+                element_size=result_size,
+            )
+            seed_term_count = None
+            if seed_terms is None:
+                seed_terms = ()
+                seed_term_count = int(start_index) if int(start_index) > 0 else None
             self._debug(
                 "Recovered vectorized readonly prefix-sum accumulator proof "
                 f"(lanes={lane_count}, start_index={start_index}, element_size={result_size})"
@@ -6783,8 +8479,8 @@ class StructuralRecurrenceSummarizer:
                 index_step=1,
                 index_scale=int(result_size),
                 signed_counter=counter_signed,
-                seed_terms=(),
-                seed_term_count=int(start_index) if int(start_index) > 0 else None,
+                seed_terms=tuple(seed_terms),
+                seed_term_count=seed_term_count,
                 lane_terms=(),
                 guard_constraints=tuple(positive_conditions or ()),
                 entry_block_ref=self._make_pcode_block_ref(getattr(pointer_phi, "getParent", lambda: None)()),
@@ -6794,6 +8490,197 @@ class StructuralRecurrenceSummarizer:
                 source="vectorized_readonly_prefix_sum",
             )
         return None
+
+    def _vector_prefix_seed_terms_from_exact_returns(
+        self,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        seed_region_conditions: Sequence[Condition],
+        *,
+        start_index: int,
+        element_size: int,
+    ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        """Recover pre-loop seed terms for vectorized reductions.
+
+        A vectorized reduction can start at a peeled logical index without
+        being a true prefix.  For example, wrong-tail uses seed terms at
+        offsets 0 and 8, then starts the loop at index 3.  Treating every
+        skipped index as an implicit prefix seed would be unsound, so this
+        derives the seed set only from exact object-level return witnesses.
+        """
+
+        if analysis is None or int(start_index) <= 0 or int(element_size) <= 0:
+            return None
+        start_offset = int(start_index) * int(element_size)
+        count_name = str(count_param.get("name") or "")
+        candidates: Dict[Tuple[Tuple[Any, ...], ...], Tuple[ReadonlyReductionTermRef, ...]] = {}
+        for ret in getattr(analysis, "returns", None) or ():
+            if not self._return_overlaps_conditions(ret, seed_region_conditions):
+                continue
+            exact_count = self._exact_counter_value_from_conditions(ret.conditions or [], count_name)
+            if exact_count is None or int(exact_count) <= int(start_index):
+                continue
+            extracted = self._extract_readonly_return_terms_and_bias(
+                analysis,
+                pointer_param,
+                ret,
+                None,
+            )
+            if extracted is None:
+                self._debug(
+                    "Skipped vectorized readonly seed witness: "
+                    f"no readonly term extraction for count={exact_count}"
+                )
+                continue
+            terms, constant_bias = extracted
+            result_size = max(1, int(getattr(ret.value, "size", 0) or element_size))
+            if self._normalize_readonly_constant_bias(int(constant_bias), result_size) != 0:
+                self._debug(
+                    "Skipped vectorized readonly seed witness: "
+                    f"non-zero constant bias for count={exact_count}"
+                )
+                continue
+            term_counts = Counter((int(term.byte_offset), int(term.access_size)) for term in terms or ())
+            expected_loop_offsets = tuple(
+                range(start_offset, int(exact_count) * int(element_size), int(element_size))
+            )
+            if not expected_loop_offsets:
+                continue
+            missing_loop_term = False
+            for offset in expected_loop_offsets:
+                key = (int(offset), int(element_size))
+                if term_counts.get(key, 0) <= 0:
+                    missing_loop_term = True
+                    break
+                term_counts[key] -= 1
+                if term_counts[key] <= 0:
+                    term_counts.pop(key, None)
+            if missing_loop_term:
+                self._debug(
+                    "Skipped vectorized readonly seed witness: "
+                    f"missing suffix term for count={exact_count}, expected_offsets={list(expected_loop_offsets)}"
+                )
+                continue
+            seed_terms: List[ReadonlyReductionTermRef] = []
+            valid_seed = True
+            for (byte_offset, access_size), count in sorted(term_counts.items()):
+                if count != 1:
+                    valid_seed = False
+                    break
+                if int(access_size) != int(element_size):
+                    valid_seed = False
+                    break
+                if int(byte_offset) < 0 or int(byte_offset) >= start_offset:
+                    valid_seed = False
+                    break
+                if int(byte_offset) % int(element_size) != 0:
+                    valid_seed = False
+                    break
+                seed_terms.append(
+                    ReadonlyReductionTermRef(
+                        byte_offset=int(byte_offset),
+                        access_size=int(access_size),
+                    )
+                )
+            if not valid_seed:
+                self._debug(
+                    "Skipped vectorized readonly seed witness: "
+                    f"remaining terms are not valid seed terms for count={exact_count}"
+                )
+                continue
+            seed_key = tuple(term.stable_key() for term in seed_terms)
+            candidates.setdefault(seed_key, tuple(seed_terms))
+        if not candidates:
+            candidates.update(
+                self._vector_prefix_seed_terms_from_materialized_region_returns(
+                    analysis,
+                    pointer_param,
+                    seed_region_conditions,
+                    start_offset=start_offset,
+                    element_size=element_size,
+                )
+            )
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                self._debug("Declined vectorized readonly prefix-sum seed recovery: ambiguous seed witnesses")
+            return None
+        recovered = next(iter(candidates.values()))
+        self._debug(
+            "Recovered vectorized readonly prefix-sum seed terms from object-level returns: "
+            f"offsets={[term.byte_offset for term in recovered]}"
+        )
+        return recovered
+
+    def _vector_prefix_seed_terms_from_materialized_region_returns(
+        self,
+        analysis,
+        pointer_param: dict,
+        seed_region_conditions: Sequence[Condition],
+        *,
+        start_offset: int,
+        element_size: int,
+    ) -> Dict[Tuple[Tuple[Any, ...], ...], Tuple[ReadonlyReductionTermRef, ...]]:
+        candidates: Dict[Tuple[Tuple[Any, ...], ...], Tuple[ReadonlyReductionTermRef, ...]] = {}
+        if analysis is None or int(start_offset) <= 0 or int(element_size) <= 0:
+            return candidates
+        for ret in getattr(analysis, "returns", None) or ():
+            if not self._return_overlaps_conditions(ret, seed_region_conditions):
+                continue
+            extracted = self._extract_readonly_return_terms_and_bias(
+                analysis,
+                pointer_param,
+                ret,
+                None,
+            )
+            if extracted is None:
+                continue
+            terms, constant_bias = extracted
+            result_size = max(1, int(getattr(ret.value, "size", 0) or element_size))
+            if self._normalize_readonly_constant_bias(int(constant_bias), result_size) != 0:
+                continue
+            term_counts = Counter((int(term.byte_offset), int(term.access_size)) for term in terms or ())
+            loop_offsets = sorted(
+                byte_offset
+                for byte_offset, access_size in term_counts
+                if int(access_size) == int(element_size) and int(byte_offset) >= int(start_offset)
+            )
+            if not loop_offsets:
+                continue
+            expected_loop_offsets = list(range(int(start_offset), max(loop_offsets) + int(element_size), int(element_size)))
+            if loop_offsets != expected_loop_offsets:
+                continue
+            for offset in expected_loop_offsets:
+                key = (int(offset), int(element_size))
+                if term_counts.get(key, 0) != 1:
+                    term_counts.clear()
+                    break
+                term_counts.pop(key, None)
+            if not term_counts:
+                continue
+            seed_terms: List[ReadonlyReductionTermRef] = []
+            valid_seed = True
+            for (byte_offset, access_size), count in sorted(term_counts.items()):
+                if (
+                    count != 1
+                    or int(access_size) != int(element_size)
+                    or int(byte_offset) < 0
+                    or int(byte_offset) >= int(start_offset)
+                    or int(byte_offset) % int(element_size) != 0
+                ):
+                    valid_seed = False
+                    break
+                seed_terms.append(
+                    ReadonlyReductionTermRef(
+                        byte_offset=int(byte_offset),
+                        access_size=int(access_size),
+                    )
+                )
+            if not valid_seed:
+                continue
+            seed_key = tuple(term.stable_key() for term in seed_terms)
+            candidates.setdefault(seed_key, tuple(seed_terms))
+        return candidates
 
     def _readonly_reduction_result_size(
         self,
@@ -6822,47 +8709,183 @@ class StructuralRecurrenceSummarizer:
         count_param: dict,
     ) -> List[ReadonlyRoundedCountCandidate]:
         candidates: List[ReadonlyRoundedCountCandidate] = []
+        seen: set[Tuple[Any, ...]] = set()
         for op in all_ops:
-            if getattr(op, "getMnemonic", lambda: None)() != "INT_AND":
+            candidate = self._readonly_round_down_candidate_from_op(op, count_param)
+            if candidate is None:
                 continue
-            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
-                continue
-            left = self._follow_passthrough_varnode(op.getInput(0))
-            right = self._follow_passthrough_varnode(op.getInput(1))
-            mask = self._varnode_unsigned_constant_value(left)
-            value = right
-            if mask is None:
-                mask = self._varnode_unsigned_constant_value(right)
-                value = left
-            if mask is None:
-                continue
-            source = self._rounded_count_source(value, count_param)
-            if source is None:
-                continue
-            source_vn, start_index = source
-            count_width_bits = self._infer_counter_bit_width(
-                self._trace_varnode_expression(value),
-                str(count_param.get("name", "") or ""),
+            key = (
+                self._varnode_cache_key(candidate.rounded_varnode),
+                int(candidate.lane_count),
+                int(candidate.start_index),
+                int(candidate.tail_start_index_delta),
+                self._varnode_cache_key(candidate.tail_index_source_varnode),
             )
-            if count_width_bits is None:
-                count_width_bits = self._varnode_bit_width(source_vn)
-            if count_width_bits is None:
-                count_width_bits = self._varnode_bit_width(value)
-            if count_width_bits is None:
-                count_width_bits = max(1, int(count_param.get("size", 0) or 0)) * 8
-            lane_count = self._power_of_two_rounding_from_mask(mask, count_width_bits=count_width_bits)
-            if lane_count is None:
+            if key in seen:
                 continue
-            output = getattr(op, "getOutput", lambda: None)()
-            if output is not None:
-                candidates.append(
-                    ReadonlyRoundedCountCandidate(
-                        rounded_varnode=output,
-                        lane_count=int(lane_count),
-                        start_index=int(start_index),
-                    )
-                )
+            seen.add(key)
+            candidates.append(candidate)
         return candidates
+
+    def _readonly_round_down_candidate_from_op(
+        self,
+        op,
+        count_param: dict,
+    ) -> Optional[ReadonlyRoundedCountCandidate]:
+        mnemonic = getattr(op, "getMnemonic", lambda: None)()
+        if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return None
+        if mnemonic == "INT_AND":
+            return self._readonly_round_down_mask_candidate(op, count_param)
+        if mnemonic == "INT_MULT":
+            return self._readonly_round_down_multiply_candidate(op, count_param)
+        if mnemonic == "INT_LEFT":
+            return self._readonly_round_down_shift_candidate(op, count_param)
+        return None
+
+    def _readonly_round_down_mask_candidate(
+        self,
+        op,
+        count_param: dict,
+    ) -> Optional[ReadonlyRoundedCountCandidate]:
+        left = self._follow_passthrough_varnode(op.getInput(0))
+        right = self._follow_passthrough_varnode(op.getInput(1))
+        mask = self._varnode_unsigned_constant_value(left)
+        value = right
+        if mask is None:
+            mask = self._varnode_unsigned_constant_value(right)
+            value = left
+        if mask is None:
+            return None
+        source = self._rounded_count_source(value, count_param)
+        if source is None:
+            return None
+        source_vn, start_index = source
+        count_width_bits = self._infer_counter_bit_width(
+            self._trace_varnode_expression(value),
+            str(count_param.get("name", "") or ""),
+        )
+        if count_width_bits is None:
+            count_width_bits = self._varnode_bit_width(source_vn)
+        if count_width_bits is None:
+            count_width_bits = self._varnode_bit_width(value)
+        if count_width_bits is None:
+            count_width_bits = max(1, int(count_param.get("size", 0) or 0)) * 8
+        lane_count = self._power_of_two_rounding_from_mask(mask, count_width_bits=count_width_bits)
+        if lane_count is None:
+            return None
+        output = getattr(op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+        return ReadonlyRoundedCountCandidate(
+            rounded_varnode=output,
+            lane_count=int(lane_count),
+            start_index=int(start_index),
+        )
+
+    def _readonly_round_down_multiply_candidate(
+        self,
+        op,
+        count_param: dict,
+    ) -> Optional[ReadonlyRoundedCountCandidate]:
+        left = self._follow_passthrough_varnode(op.getInput(0))
+        right = self._follow_passthrough_varnode(op.getInput(1))
+        lane_count = self._varnode_unsigned_constant_value(right)
+        quotient = left
+        if lane_count is None:
+            lane_count = self._varnode_unsigned_constant_value(left)
+            quotient = right
+        lane_count = self._valid_power_of_two_lane_count(lane_count)
+        if lane_count is None:
+            return None
+        source = self._round_down_quotient_source(quotient, count_param, lane_count)
+        if source is None:
+            return None
+        output = getattr(op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+        source_vn, start_index, tail_start_index_delta = source
+        return ReadonlyRoundedCountCandidate(
+            rounded_varnode=output,
+            lane_count=int(lane_count),
+            start_index=int(start_index),
+            tail_start_index_delta=int(tail_start_index_delta),
+            tail_index_source_varnode=source_vn if int(tail_start_index_delta) > 0 else None,
+        )
+
+    def _readonly_round_down_shift_candidate(
+        self,
+        op,
+        count_param: dict,
+    ) -> Optional[ReadonlyRoundedCountCandidate]:
+        value = self._follow_passthrough_varnode(op.getInput(0))
+        shift = self._varnode_unsigned_constant_value(op.getInput(1))
+        if shift is None:
+            return None
+        lane_count = self._valid_power_of_two_lane_count(1 << int(shift))
+        if lane_count is None:
+            return None
+        source = self._round_down_quotient_source(value, count_param, lane_count)
+        if source is None:
+            return None
+        output = getattr(op, "getOutput", lambda: None)()
+        if output is None:
+            return None
+        source_vn, start_index, tail_start_index_delta = source
+        return ReadonlyRoundedCountCandidate(
+            rounded_varnode=output,
+            lane_count=int(lane_count),
+            start_index=int(start_index),
+            tail_start_index_delta=int(tail_start_index_delta),
+            tail_index_source_varnode=source_vn if int(tail_start_index_delta) > 0 else None,
+        )
+
+    def _round_down_quotient_source(
+        self,
+        quotient_vn,
+        count_param: dict,
+        lane_count: int,
+    ) -> Optional[Tuple[object, int, int]]:
+        quotient_vn = self._follow_passthrough_varnode(quotient_vn)
+        def_op = getattr(quotient_vn, "getDef", lambda: None)()
+        if def_op is None or int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        dividend = self._follow_passthrough_varnode(def_op.getInput(0))
+        divisor_or_shift = self._varnode_unsigned_constant_value(def_op.getInput(1))
+        if mnemonic == "INT_SUB" and divisor_or_shift == 1:
+            source = self._round_down_quotient_source(dividend, count_param, lane_count)
+            if source is None:
+                return None
+            source_vn, start_index, tail_start_index_delta = source
+            return source_vn, start_index, tail_start_index_delta + int(lane_count)
+        if mnemonic in {"INT_DIV", "INT_SDIV"}:
+            if divisor_or_shift is None or int(divisor_or_shift) != int(lane_count):
+                return None
+            source = self._rounded_count_source(dividend, count_param)
+            if source is None:
+                return None
+            _count_source_vn, start_index = source
+            return dividend, start_index, 0
+        if mnemonic in {"INT_RIGHT", "INT_SRIGHT"}:
+            if divisor_or_shift is None or int(lane_count) != (1 << int(divisor_or_shift)):
+                return None
+            source = self._rounded_count_source(dividend, count_param)
+            if source is None:
+                return None
+            _count_source_vn, start_index = source
+            return dividend, start_index, 0
+        return None
+
+    def _valid_power_of_two_lane_count(self, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        lane_count = int(value)
+        if lane_count <= 1:
+            return None
+        if lane_count & (lane_count - 1):
+            return None
+        return lane_count
 
     def _rounded_count_source(
         self,
@@ -6870,7 +8893,7 @@ class StructuralRecurrenceSummarizer:
         count_param: dict,
     ) -> Optional[Tuple[object, int]]:
         value = self._follow_passthrough_varnode(value)
-        if self._varnode_matches_parameter(value, count_param.get("name", "")):
+        if self._varnode_matches_parameter(value, count_param):
             return value, 0
 
         def_op = getattr(value, "getDef", lambda: None)()
@@ -6882,17 +8905,17 @@ class StructuralRecurrenceSummarizer:
 
         left = self._follow_passthrough_varnode(def_op.getInput(0))
         right = self._follow_passthrough_varnode(def_op.getInput(1))
-        if mnemonic == "INT_SUB" and self._varnode_matches_parameter(left, count_param.get("name", "")):
+        if mnemonic == "INT_SUB" and self._varnode_matches_parameter(left, count_param):
             peeled = self._varnode_unsigned_constant_value(right)
             if peeled is not None and int(peeled) >= 0:
                 return left, int(peeled)
             return None
         if mnemonic == "INT_ADD":
-            if self._varnode_matches_parameter(left, count_param.get("name", "")):
+            if self._varnode_matches_parameter(left, count_param):
                 delta = self._signed_varnode_constant_value(right)
                 if delta is not None and int(delta) <= 0:
                     return left, -int(delta)
-            if self._varnode_matches_parameter(right, count_param.get("name", "")):
+            if self._varnode_matches_parameter(right, count_param):
                 delta = self._signed_varnode_constant_value(left)
                 if delta is not None and int(delta) <= 0:
                     return right, -int(delta)
@@ -7022,7 +9045,7 @@ class StructuralRecurrenceSummarizer:
                 if base_offset is None:
                     return None
                 return int(base_offset) + int(index) * int(elem)
-        if self._varnode_matches_parameter(candidate_vn, pointer_param.get("name", "")):
+        if self._varnode_matches_parameter(candidate_vn, pointer_param):
             return 0
         return None
 
@@ -7061,13 +9084,13 @@ class StructuralRecurrenceSummarizer:
                 left = self._follow_passthrough_varnode(op.getInput(0))
                 right = self._follow_passthrough_varnode(op.getInput(1))
                 if (
-                    self._varnode_matches_parameter(left, pointer_param.get("name", ""))
+                    self._varnode_matches_parameter(left, pointer_param)
                     and self._signed_varnode_constant_value(right) == int(byte_offset)
                 ):
                     return True
                 if (
                     mnemonic == "INT_ADD"
-                    and self._varnode_matches_parameter(right, pointer_param.get("name", ""))
+                    and self._varnode_matches_parameter(right, pointer_param)
                     and self._signed_varnode_constant_value(left) == int(byte_offset)
                 ):
                     return True
@@ -7076,7 +9099,7 @@ class StructuralRecurrenceSummarizer:
                 index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(op.getInput(1)))
                 elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(op.getInput(2)))
                 if (
-                    self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                    self._varnode_matches_parameter(base, pointer_param)
                     and index is not None
                     and elem is not None
                     and int(index) * int(elem) == int(byte_offset)
@@ -7108,21 +9131,18 @@ class StructuralRecurrenceSummarizer:
         return offsets
 
     def _byte_offset_from_pointer(self, address_varnode, pointer_phi) -> Optional[int]:
+        def_op = getattr(address_varnode, "getDef", lambda: None)()
+        if def_op is not None and getattr(def_op, "getMnemonic", lambda: None)() == "PTRADD":
+            if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+                base = self._follow_passthrough_varnode(def_op.getInput(0))
+                if self._same_varnode_value(base, pointer_phi):
+                    index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+                    elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+                    if index is not None and elem is not None:
+                        return int(index) * int(elem)
         if self._same_varnode_value(address_varnode, pointer_phi):
             return 0
-        def_op = getattr(address_varnode, "getDef", lambda: None)()
-        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "PTRADD":
-            return None
-        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 3:
-            return None
-        base = self._follow_passthrough_varnode(def_op.getInput(0))
-        if not self._same_varnode_value(base, pointer_phi):
-            return None
-        index = self._signed_varnode_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
-        elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
-        if index is None or elem is None:
-            return None
-        return int(index) * int(elem)
+        return None
 
     def _vector_prefix_lanes_cover_block(
         self,
@@ -7412,6 +9432,21 @@ class StructuralRecurrenceSummarizer:
             return False
         return True
 
+    def _load_lanes_flow_additively_to_any_return(
+        self,
+        load_output,
+        *,
+        load_size: int,
+        element_size: int,
+    ) -> bool:
+        required_lanes = max(1, int(load_size) // max(1, int(element_size)))
+        if required_lanes <= 1:
+            return self._varnode_has_additive_return_contribution(load_output)
+        lane_roots = self._collect_scalar_lane_roots(load_output, element_size=element_size)
+        if len(lane_roots) != required_lanes:
+            return False
+        return all(self._varnode_has_additive_return_contribution(lane) for lane in lane_roots)
+
     def _collect_scalar_lane_roots(
         self,
         start_varnode,
@@ -7509,6 +9544,61 @@ class StructuralRecurrenceSummarizer:
                         return 2
                     stack.append((output, next_coefficient))
         return min(return_count, 2)
+
+    def _varnode_has_additive_return_contribution(
+        self,
+        start_varnode,
+        *,
+        budget: int = 128,
+    ) -> bool:
+        allowed = {
+            "INT_ADD",
+            "COPY",
+            "CAST",
+            "INT_ZEXT",
+            "INT_SEXT",
+            "SUBPIECE",
+            "MULTIEQUAL",
+        }
+        stack = [(start_varnode, 1)]
+        seen_coefficients: Dict[Tuple[Any, ...], int] = {}
+        steps = 0
+        while stack and steps < budget:
+            current, coefficient = stack.pop()
+            steps += 1
+            if coefficient != 1:
+                return False
+            key = self._varnode_cache_key(current)
+            previous = seen_coefficients.get(key)
+            if previous is not None and previous >= coefficient:
+                continue
+            seen_coefficients[key] = coefficient
+            for op in self._iter_varnode_descendant_ops(current):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                input_multiplicity = self._varnode_input_multiplicity(op, current)
+                if input_multiplicity <= 0:
+                    continue
+                if mnemonic == "RETURN":
+                    return True
+                if mnemonic not in allowed:
+                    continue
+                if mnemonic == "MULTIEQUAL":
+                    accepted_phi_input = self._multiequal_input_is_accumulator_update(
+                        op,
+                        current,
+                    )
+                    if not accepted_phi_input:
+                        continue
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is None:
+                    continue
+                next_coefficient = coefficient
+                if mnemonic == "INT_ADD":
+                    next_coefficient *= input_multiplicity
+                if next_coefficient != 1:
+                    return False
+                stack.append((output, next_coefficient))
+        return False
 
     def _multiequal_input_is_accumulator_update(self, phi_op, input_varnode) -> bool:
         return self._same_varnode_identity(
@@ -7910,6 +10000,9 @@ class StructuralRecurrenceSummarizer:
         element_size: int,
         start_offset: int = 0,
         start_index: int = 0,
+        max_unrolled_terms: int = 0,
+        tail_index_source_varnode=None,
+        lane_count: Optional[int] = None,
     ) -> bool:
         tail_starts = self._tail_start_varnodes_from_rounded_count(
             all_ops,
@@ -7917,6 +10010,8 @@ class StructuralRecurrenceSummarizer:
             rounded_vn,
             element_size=element_size,
             start_offset=start_offset,
+            tail_index_source_varnode=tail_index_source_varnode,
+            lane_count=lane_count,
         )
         if not tail_starts:
             self._debug(
@@ -7977,6 +10072,16 @@ class StructuralRecurrenceSummarizer:
                 )
                 continue
             return True
+        if self._has_unrolled_scalar_tail_from_rounded_count(
+            all_ops,
+            tail_starts,
+            count_param,
+            element_size=element_size,
+            max_terms=max_unrolled_terms,
+            tail_index_source_varnode=tail_index_source_varnode,
+            lane_count=lane_count,
+        ):
+            return True
         return False
 
     def _tail_load_contributes_additively_to_return(
@@ -8008,6 +10113,201 @@ class StructuralRecurrenceSummarizer:
                 return True
         return False
 
+    def _has_unrolled_scalar_tail_from_rounded_count(
+        self,
+        all_ops: Sequence[object],
+        tail_starts: Sequence[object],
+        count_param: dict,
+        *,
+        element_size: int,
+        max_terms: int,
+        tail_index_source_varnode=None,
+        lane_count: Optional[int] = None,
+    ) -> bool:
+        """Recognize a finite scalar tail emitted as guarded straight-line loads."""
+
+        if int(max_terms) <= 0 or not tail_starts:
+            return False
+        if not self._unrolled_tail_count_guards_are_object_linked(
+            all_ops,
+            tail_starts,
+            count_param,
+            max_terms=int(max_terms),
+            tail_index_source_varnode=tail_index_source_varnode,
+            lane_count=lane_count,
+        ):
+            self._debug("Declined vectorized readonly prefix-sum tail: unrolled tail guards are incomplete")
+            return False
+
+        covered_offsets = set()
+        for load_op in all_ops:
+            if getattr(load_op, "getMnemonic", lambda: None)() != "LOAD":
+                continue
+            if int(getattr(load_op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            output = getattr(load_op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            load_size = max(1, int(getattr(output, "getSize", lambda: element_size)() or element_size))
+            if load_size != int(element_size):
+                continue
+            address = self._follow_passthrough_varnode(load_op.getInput(1))
+            term_index = None
+            for tail_start in tail_starts:
+                byte_offset = self._byte_offset_from_pointer_like(address, tail_start)
+                if byte_offset is None:
+                    continue
+                if int(byte_offset) % int(element_size) != 0:
+                    continue
+                candidate_index = int(byte_offset) // int(element_size)
+                if 0 <= candidate_index < int(max_terms):
+                    term_index = candidate_index
+                    break
+            if term_index is None:
+                continue
+            if not self._load_lanes_flow_additively_to_any_return(
+                output,
+                load_size=load_size,
+                element_size=element_size,
+            ):
+                continue
+            covered_offsets.add(int(term_index))
+        expected_offsets = set(range(int(max_terms)))
+        if covered_offsets != expected_offsets:
+            self._debug(
+                "Declined vectorized readonly prefix-sum tail: "
+                f"unrolled tail load coverage={tuple(sorted(covered_offsets))} "
+                f"expected={tuple(sorted(expected_offsets))}"
+            )
+            return False
+        return True
+
+    def _unrolled_tail_count_guards_are_object_linked(
+        self,
+        all_ops: Sequence[object],
+        tail_starts: Sequence[object],
+        count_param: dict,
+        *,
+        max_terms: int,
+        tail_index_source_varnode=None,
+        lane_count: Optional[int] = None,
+    ) -> bool:
+        if int(max_terms) <= 0:
+            return False
+        if tail_index_source_varnode is not None and lane_count is not None:
+            if not self._has_zero_tail_residue_guard(all_ops, tail_index_source_varnode, lane_count):
+                return False
+        tail_index_vns = self._tail_index_varnodes_from_tail_starts(tail_starts)
+        if not tail_index_vns:
+            return False
+        required_cutoffs = set(range(1, int(max_terms)))
+        if not required_cutoffs:
+            return True
+        proven_cutoffs = set()
+        compare_ops = {
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_LESSEQUAL",
+            "INT_SLESS",
+            "INT_SLESSEQUAL",
+        }
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() not in compare_ops:
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            if self._varnode_matches_parameter(left, count_param):
+                cutoff = self._tail_index_plus_constant_delta(right, tail_index_vns)
+                if cutoff in required_cutoffs:
+                    proven_cutoffs.add(int(cutoff))
+            if self._varnode_matches_parameter(right, count_param):
+                cutoff = self._tail_index_plus_constant_delta(left, tail_index_vns)
+                if cutoff in required_cutoffs:
+                    proven_cutoffs.add(int(cutoff))
+        return proven_cutoffs == required_cutoffs
+
+    def _tail_index_varnodes_from_tail_starts(self, tail_starts: Sequence[object]) -> Tuple[object, ...]:
+        indices: List[object] = []
+        for tail_start in tail_starts or ():
+            candidate = self._follow_passthrough_varnode(tail_start)
+            def_op = getattr(candidate, "getDef", lambda: None)()
+            if def_op is None:
+                continue
+            mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+            if mnemonic == "PTRADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+                indices.append(self._follow_passthrough_varnode(def_op.getInput(1)))
+        unique: List[object] = []
+        seen = set()
+        for index_vn in indices:
+            key = self._varnode_cache_key(index_vn)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(index_vn)
+        return tuple(unique)
+
+    def _tail_index_plus_constant_delta(
+        self,
+        candidate_vn,
+        tail_index_vns: Sequence[object],
+    ) -> Optional[int]:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        for tail_index in tail_index_vns or ():
+            if self._same_varnode_value(candidate_vn, tail_index):
+                return 0
+            delta = self._counter_plus_constant_delta(candidate_vn, tail_index)
+            if delta is not None:
+                return int(delta)
+        return None
+
+    def _has_zero_tail_residue_guard(
+        self,
+        all_ops: Sequence[object],
+        tail_index_source_varnode,
+        lane_count: int,
+    ) -> bool:
+        mask = int(lane_count) - 1
+        if mask <= 0:
+            return False
+        for op in all_ops:
+            if getattr(op, "getMnemonic", lambda: None)() not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+                continue
+            if int(getattr(op, "getNumInputs", lambda: 0)() or 0) < 2:
+                continue
+            left = self._follow_passthrough_varnode(op.getInput(0))
+            right = self._follow_passthrough_varnode(op.getInput(1))
+            if self._signed_varnode_constant_value(left) == 0 and self._varnode_is_tail_source_mask(
+                right,
+                tail_index_source_varnode,
+                mask,
+            ):
+                return True
+            if self._signed_varnode_constant_value(right) == 0 and self._varnode_is_tail_source_mask(
+                left,
+                tail_index_source_varnode,
+                mask,
+            ):
+                return True
+        return False
+
+    def _varnode_is_tail_source_mask(self, candidate_vn, source_vn, mask: int) -> bool:
+        if source_vn is None:
+            return False
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "INT_AND":
+            return False
+        if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        left = self._follow_passthrough_varnode(def_op.getInput(0))
+        right = self._follow_passthrough_varnode(def_op.getInput(1))
+        if self._same_varnode_value(left, source_vn) and self._varnode_unsigned_constant_value(right) == int(mask):
+            return True
+        return self._same_varnode_value(right, source_vn) and self._varnode_unsigned_constant_value(left) == int(mask)
+
     def _tail_start_varnodes_from_rounded_count(
         self,
         all_ops: Sequence[object],
@@ -8016,6 +10316,8 @@ class StructuralRecurrenceSummarizer:
         *,
         element_size: int,
         start_offset: int = 0,
+        tail_index_source_varnode=None,
+        lane_count: Optional[int] = None,
     ) -> Tuple[object, ...]:
         starts: List[object] = []
         for op in all_ops:
@@ -8028,9 +10330,42 @@ class StructuralRecurrenceSummarizer:
                 rounded_vn,
                 element_size=element_size,
                 byte_offset=int(start_offset),
+            ) or self._varnode_is_base_plus_scaled_tail_source_index(
+                output,
+                pointer_param,
+                tail_index_source_varnode,
+                lane_count=lane_count,
+                element_size=element_size,
             ):
                 starts.append(output)
-        return tuple(starts)
+        changed = True
+        while changed:
+            changed = False
+            for op in all_ops:
+                if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                    continue
+                output = getattr(op, "getOutput", lambda: None)()
+                if output is None or any(self._same_varnode_identity(output, start) for start in starts):
+                    continue
+                input_count = int(getattr(op, "getNumInputs", lambda: 0)() or 0)
+                if any(
+                    any(
+                        self._same_varnode_value(self._follow_passthrough_varnode(op.getInput(index)), start)
+                        for start in starts
+                    )
+                    for index in range(input_count)
+                ):
+                    starts.append(output)
+                    changed = True
+        unique: List[object] = []
+        seen = set()
+        for start in starts:
+            key = self._varnode_cache_key(start)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(start)
+        return tuple(unique)
 
     def _has_scalar_tail_bound_to_count(
         self,
@@ -8145,7 +10480,7 @@ class StructuralRecurrenceSummarizer:
         left = self._follow_passthrough_varnode(def_op.getInput(0))
         right = self._follow_passthrough_varnode(def_op.getInput(1))
         return (
-            self._varnode_matches_parameter(left, count_param.get("name", ""))
+            self._varnode_matches_parameter(left, count_param)
             and self._same_varnode_value(right, rounded_vn)
         )
 
@@ -8165,7 +10500,7 @@ class StructuralRecurrenceSummarizer:
             return False
         left = self._follow_passthrough_varnode(def_op.getInput(0))
         right = self._follow_passthrough_varnode(def_op.getInput(1))
-        if not self._varnode_matches_parameter(left, count_param.get("name", "")):
+        if not self._varnode_matches_parameter(left, count_param):
             return False
         return self._rounded_tail_index_varnode_matches(
             right,
@@ -8198,23 +10533,21 @@ class StructuralRecurrenceSummarizer:
 
     def _byte_offset_from_pointer_like(self, candidate_vn, base_vn) -> Optional[int]:
         candidate_vn = self._follow_passthrough_varnode(candidate_vn)
-        if self._same_varnode_value(candidate_vn, base_vn):
-            return 0
         offset = self._byte_offset_from_pointer(candidate_vn, base_vn)
         if offset is not None:
             return int(offset)
         def_op = getattr(candidate_vn, "getDef", lambda: None)()
-        if def_op is None:
-            return None
-        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
-        if mnemonic not in {"INT_ADD", "PTRSUB"} or int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
-            return None
-        left = self._follow_passthrough_varnode(def_op.getInput(0))
-        right = self._follow_passthrough_varnode(def_op.getInput(1))
-        if self._same_varnode_value(left, base_vn):
-            return self._signed_varnode_constant_value(right)
-        if mnemonic == "INT_ADD" and self._same_varnode_value(right, base_vn):
-            return self._signed_varnode_constant_value(left)
+        if def_op is not None:
+            mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+            if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+                left = self._follow_passthrough_varnode(def_op.getInput(0))
+                right = self._follow_passthrough_varnode(def_op.getInput(1))
+                if self._same_varnode_value(left, base_vn):
+                    return self._signed_varnode_constant_value(right)
+                if mnemonic == "INT_ADD" and self._same_varnode_value(right, base_vn):
+                    return self._signed_varnode_constant_value(left)
+        if self._same_varnode_value(candidate_vn, base_vn):
+            return 0
         return None
 
     def _varnode_is_base_plus_scaled_parameter(
@@ -8237,13 +10570,13 @@ class StructuralRecurrenceSummarizer:
             elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
             if (
                 elem == int(element_size)
-                and self._varnode_matches_parameter(base, pointer_param.get("name", ""))
-                and self._varnode_matches_parameter(index, count_param.get("name", ""))
+                and self._varnode_matches_parameter(base, pointer_param)
+                and self._varnode_matches_parameter(index, count_param)
                 and int(byte_offset) == 0
             ):
                 return True
         scaled_count = self._scaled_parameter_varnode(candidate_vn, count_param, element_size=element_size)
-        if scaled_count is not None and self._varnode_matches_parameter(scaled_count, pointer_param.get("name", "")):
+        if scaled_count is not None and self._varnode_matches_parameter(scaled_count, pointer_param):
             return int(byte_offset) == 0
         if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(def_op.getInput(0))
@@ -8266,14 +10599,14 @@ class StructuralRecurrenceSummarizer:
                     element_size=element_size,
                     byte_offset=0,
                 )
-            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
+            if self._varnode_matches_parameter(left, pointer_param):
                 return self._varnode_is_scaled_parameter_plus_constant(
                     right,
                     count_param,
                     element_size=element_size,
                     byte_offset=byte_offset,
                 )
-            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param.get("name", "")):
+            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param):
                 return self._varnode_is_scaled_parameter_plus_constant(
                     left,
                     count_param,
@@ -8307,13 +10640,13 @@ class StructuralRecurrenceSummarizer:
                 index_delta = self._counter_plus_constant_delta(index, counter_vn)
                 if (
                     index_delta is not None
-                    and self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                    and self._varnode_matches_parameter(base, pointer_param)
                     and int(index_delta) * int(element_size) == int(byte_offset)
                 ):
                     return True
                 if (
                     int(byte_offset) % int(element_size) == 0
-                    and self._varnode_matches_parameter(base, pointer_param.get("name", ""))
+                    and self._varnode_matches_parameter(base, pointer_param)
                     and self._rounded_tail_index_varnode_matches(
                         index,
                         counter_vn,
@@ -8342,20 +10675,176 @@ class StructuralRecurrenceSummarizer:
                     element_size=element_size,
                     byte_offset=0,
                 )
-            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
+            if self._varnode_matches_parameter(left, pointer_param):
                 return self._varnode_is_scaled_counter_plus_constant(
                     right,
                     counter_vn,
                     element_size=element_size,
                     byte_offset=byte_offset,
                 )
-            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param.get("name", "")):
+            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param):
                 return self._varnode_is_scaled_counter_plus_constant(
                     left,
                     counter_vn,
                     element_size=element_size,
                     byte_offset=byte_offset,
                 )
+        return False
+
+    def _varnode_is_base_plus_scaled_tail_source_index(
+        self,
+        candidate_vn,
+        pointer_param: dict,
+        tail_index_source_varnode,
+        *,
+        lane_count: Optional[int],
+        element_size: int,
+    ) -> bool:
+        if tail_index_source_varnode is None or lane_count is None:
+            return False
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "PTRADD" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 3:
+            base = self._follow_passthrough_varnode(def_op.getInput(0))
+            index = self._follow_passthrough_varnode(def_op.getInput(1))
+            elem = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(2)))
+            return (
+                elem == int(element_size)
+                and self._varnode_matches_parameter(base, pointer_param)
+                and self._varnode_matches_tail_index_source_or(index, tail_index_source_varnode, lane_count)
+            )
+        if mnemonic in {"INT_ADD", "PTRSUB"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._varnode_matches_parameter(left, pointer_param):
+                return self._varnode_is_scaled_tail_source_index(
+                    right,
+                    tail_index_source_varnode,
+                    lane_count=lane_count,
+                    element_size=element_size,
+                )
+            if mnemonic == "INT_ADD" and self._varnode_matches_parameter(right, pointer_param):
+                return self._varnode_is_scaled_tail_source_index(
+                    left,
+                    tail_index_source_varnode,
+                    lane_count=lane_count,
+                    element_size=element_size,
+                )
+        return False
+
+    def _varnode_is_scaled_tail_source_index(
+        self,
+        candidate_vn,
+        tail_index_source_varnode,
+        *,
+        lane_count: int,
+        element_size: int,
+    ) -> bool:
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            if self._varnode_unsigned_constant_value(right) == int(element_size):
+                return self._varnode_matches_tail_index_source_or(left, tail_index_source_varnode, lane_count)
+            if self._varnode_unsigned_constant_value(left) == int(element_size):
+                return self._varnode_matches_tail_index_source_or(right, tail_index_source_varnode, lane_count)
+            return False
+        if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            shifted = self._follow_passthrough_varnode(def_op.getInput(0))
+            shift_bits = self._varnode_unsigned_constant_value(self._follow_passthrough_varnode(def_op.getInput(1)))
+            return (
+                shift_bits is not None
+                and (1 << int(shift_bits)) == int(element_size)
+                and self._varnode_matches_tail_index_source_or(shifted, tail_index_source_varnode, lane_count)
+            )
+        if mnemonic == "INT_OR" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            low_bits = max(0, (int(element_size) - 1).bit_length())
+            return (
+                self._varnode_is_scaled_tail_source_index(
+                    left,
+                    tail_index_source_varnode,
+                    lane_count=lane_count,
+                    element_size=element_size,
+                )
+                and self._varnode_low_bits_clear(right, low_bits)
+            ) or (
+                self._varnode_is_scaled_tail_source_index(
+                    right,
+                    tail_index_source_varnode,
+                    lane_count=lane_count,
+                    element_size=element_size,
+                )
+                and self._varnode_low_bits_clear(left, low_bits)
+            )
+        return False
+
+    def _varnode_matches_tail_index_source_or(
+        self,
+        candidate_vn,
+        tail_index_source_varnode,
+        lane_count: int,
+    ) -> bool:
+        if tail_index_source_varnode is None:
+            return False
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        if self._same_varnode_value(candidate_vn, tail_index_source_varnode):
+            return int(lane_count) == 1
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is not None and getattr(def_op, "getMnemonic", lambda: None)() == "INT_OR":
+            if int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+                left = self._follow_passthrough_varnode(def_op.getInput(0))
+                right = self._follow_passthrough_varnode(def_op.getInput(1))
+                mask = int(lane_count) - 1
+                if self._same_varnode_value(left, tail_index_source_varnode) and self._signed_varnode_constant_value(right) == mask:
+                    return True
+                if self._same_varnode_value(right, tail_index_source_varnode) and self._signed_varnode_constant_value(left) == mask:
+                    return True
+        if def_op is not None and getattr(def_op, "getMnemonic", lambda: None)() == "MULTIEQUAL":
+            input_count = int(getattr(def_op, "getNumInputs", lambda: 0)() or 0)
+            for index in range(input_count):
+                try:
+                    input_vn = self._phi_input_value_varnode(def_op, index)
+                except Exception:
+                    input_vn = None
+                if input_vn is None:
+                    try:
+                        input_vn = def_op.getInput(index)
+                    except Exception:
+                        continue
+                if self._varnode_matches_tail_index_source_or(input_vn, tail_index_source_varnode, lane_count):
+                    return True
+        return False
+
+    def _varnode_low_bits_clear(self, candidate_vn, bit_count: int) -> bool:
+        if int(bit_count) <= 0:
+            return True
+        candidate_vn = self._follow_passthrough_varnode(candidate_vn)
+        mask = (1 << int(bit_count)) - 1
+        constant = self._varnode_unsigned_constant_value(candidate_vn)
+        if constant is not None:
+            return (int(constant) & mask) == 0
+        def_op = getattr(candidate_vn, "getDef", lambda: None)()
+        if def_op is None or int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) < 2:
+            return False
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic == "INT_AND":
+            left = self._follow_passthrough_varnode(def_op.getInput(0))
+            right = self._follow_passthrough_varnode(def_op.getInput(1))
+            left_const = self._varnode_unsigned_constant_value(left)
+            right_const = self._varnode_unsigned_constant_value(right)
+            if left_const is not None and (int(left_const) & mask) == 0:
+                return True
+            if right_const is not None and (int(right_const) & mask) == 0:
+                return True
         return False
 
     def _counter_plus_constant_delta(
@@ -8596,9 +11085,9 @@ class StructuralRecurrenceSummarizer:
         if mnemonic == "INT_MULT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(def_op.getInput(0))
             right = self._follow_passthrough_varnode(def_op.getInput(1))
-            if self._varnode_matches_parameter(left, count_param.get("name", "")) and self._varnode_unsigned_constant_value(right) == int(element_size):
+            if self._varnode_matches_parameter(left, count_param) and self._varnode_unsigned_constant_value(right) == int(element_size):
                 return left
-            if self._varnode_matches_parameter(right, count_param.get("name", "")) and self._varnode_unsigned_constant_value(left) == int(element_size):
+            if self._varnode_matches_parameter(right, count_param) and self._varnode_unsigned_constant_value(left) == int(element_size):
                 return right
         if mnemonic == "INT_LEFT" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             shifted = self._follow_passthrough_varnode(def_op.getInput(0))
@@ -8606,7 +11095,7 @@ class StructuralRecurrenceSummarizer:
             if (
                 shift_bits is not None
                 and (1 << int(shift_bits)) == int(element_size)
-                and self._varnode_matches_parameter(shifted, count_param.get("name", ""))
+                and self._varnode_matches_parameter(shifted, count_param)
             ):
                 return shifted
         return None
@@ -8818,6 +11307,10 @@ class StructuralRecurrenceSummarizer:
                 term.stable_key() for term in expected_terms
             ):
                 return tuple(extracted_terms)
+            if expected_terms is not None and self._readonly_term_multiset_key(extracted_terms) == self._readonly_term_multiset_key(
+                expected_terms
+            ):
+                return tuple(expected_terms)
         canonical_terms = self._canonicalize_readonly_exact_witness_terms(
             analysis,
             pointer_param,
@@ -8911,6 +11404,116 @@ class StructuralRecurrenceSummarizer:
         )
         return witness_terms is not None
 
+    def _order_readonly_exact_positive_returns(
+        self,
+        returns: Sequence[ReturnInfo],
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> List[ReturnInfo]:
+        return [
+            ret
+            for _index, ret in sorted(
+                enumerate(returns or ()),
+                key=lambda item: self._readonly_exact_positive_return_selection_key(
+                    item[1],
+                    item[0],
+                    analysis,
+                    pointer_param,
+                    count_param,
+                    accumulator_proof,
+                ),
+            )
+        ]
+
+    def _readonly_exact_positive_return_selection_key(
+        self,
+        ret: ReturnInfo,
+        original_index: int,
+        analysis,
+        pointer_param: dict,
+        count_param: dict,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+    ) -> Tuple[int, int, int, int, int]:
+        exact_count = self._exact_counter_value_from_conditions(
+            ret.conditions or [],
+            str(count_param.get("name") or ""),
+        )
+        if exact_count is None or int(exact_count) <= 0:
+            return (1, 0, 0, 0, int(original_index))
+        prefix_score = self._readonly_exact_positive_return_prefix_score(
+            analysis,
+            pointer_param,
+            ret,
+            accumulator_proof,
+            exact_count=int(exact_count),
+        )
+        unresolved_score = 1 if self._expression_tree_contains_type(ret.value, ExpressionType.UNKNOWN) else 0
+        phi_score = 1 if self._expression_tree_contains_type(ret.value, ExpressionType.PHI) else 0
+        return (0, -int(prefix_score), unresolved_score, phi_score, int(original_index))
+
+    def _readonly_exact_positive_return_prefix_score(
+        self,
+        analysis,
+        pointer_param: dict,
+        ret: ReturnInfo,
+        accumulator_proof: Optional[ReductionAccumulatorProof],
+        *,
+        exact_count: int,
+    ) -> int:
+        extracted = self._extract_readonly_return_terms_and_bias(
+            analysis,
+            pointer_param,
+            ret,
+            accumulator_proof,
+        )
+        if extracted is None:
+            return 0
+        terms, constant_bias = extracted
+        if self._self_consistent_readonly_exact_witness_terms(
+            ret,
+            accumulator_proof,
+            exact_count=int(exact_count),
+            extracted_terms=terms,
+            constant_bias=int(constant_bias),
+        ) is not None:
+            return 30 + int(exact_count)
+
+        expected_terms = (
+            accumulator_proof.full_terms_for_count_value(int(exact_count))
+            if accumulator_proof is not None
+            else None
+        )
+        if expected_terms is not None and (
+            tuple(term.stable_key() for term in terms) == tuple(term.stable_key() for term in expected_terms)
+            or self._readonly_term_multiset_key(terms) == self._readonly_term_multiset_key(expected_terms)
+        ):
+            return 20 + int(exact_count)
+        if len(tuple(terms or ())) == int(exact_count):
+            return 10 + int(exact_count)
+        return 0
+
+    def _expression_tree_contains_type(
+        self,
+        expr: Optional[Expression],
+        expr_type: ExpressionType,
+    ) -> bool:
+        if expr is None:
+            return False
+        if expr.expr_type == expr_type:
+            return True
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            return any(
+                (condition is not None and self._expression_tree_contains_type(condition.expression, expr_type))
+                or self._expression_tree_contains_type(value, expr_type)
+                for condition, value in expr.value
+            )
+        return any(
+            self._expression_tree_contains_type(operand, expr_type)
+            for operand in (expr.operands or [])
+        )
+
     def _canonicalize_readonly_exact_witness_terms(
         self,
         analysis,
@@ -8958,11 +11561,20 @@ class StructuralRecurrenceSummarizer:
                 analysis.parameters or [],
             ):
                 return tuple(expected_terms)
-        if extracted_terms is not None and tuple(term.stable_key() for term in extracted_terms) == tuple(
-            term.stable_key() for term in expected_terms
+        if extracted_terms is not None and (
+            tuple(term.stable_key() for term in extracted_terms) == tuple(
+                term.stable_key() for term in expected_terms
+            )
+            or self._readonly_term_multiset_key(extracted_terms) == self._readonly_term_multiset_key(expected_terms)
         ):
             return tuple(expected_terms)
         return None
+
+    def _readonly_term_multiset_key(
+        self,
+        terms: Sequence[ReadonlyReductionTermRef],
+    ) -> Tuple[object, ...]:
+        return tuple(sorted((term.stable_key() for term in terms or ()), key=repr))
 
     def _build_readonly_reduction_expression_from_terms(
         self,
@@ -9041,7 +11653,12 @@ class StructuralRecurrenceSummarizer:
     ) -> bool:
         equality = self._counter_equality_condition(count_param, count_value)
         constraint_set = ConditionConstraintSet.from_conditions(conditions or [])
-        return constraint_set.implies_condition(equality)
+        if constraint_set.implies_condition(equality):
+            return True
+        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
+            list(conditions or []) + [equality.negate()]
+        )
+        return bool(solver_unsat) if solver_unsat is not None else False
 
     def _conditions_allow_counter_value(
         self,
@@ -9051,7 +11668,12 @@ class StructuralRecurrenceSummarizer:
     ) -> bool:
         equality = self._counter_equality_condition(count_param, count_value)
         constraint_set = ConditionConstraintSet.from_conditions(conditions or [])
-        return constraint_set.overlaps_with([equality])
+        if not constraint_set.overlaps_with([equality]):
+            solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
+                list(conditions or []) + [equality]
+            )
+            return bool(solver_unsat is False)
+        return True
 
     def _counter_equality_condition(
         self,
@@ -9304,13 +11926,27 @@ class StructuralRecurrenceSummarizer:
         if incoming_block is None:
             return raw_input
 
+        fallback_output = None
+        phi_output = getattr(phi_op, "getOutput", lambda: None)()
         block_ops = list(self._iter_block_ops(incoming_block))
         for candidate_op in reversed(block_ops):
             output = getattr(candidate_op, "getOutput", lambda: None)()
             if output is None:
                 continue
             if self._same_storage_varnode(output, raw_input):
-                return output
+                if self._same_high_variable(output, raw_input) or self._same_high_variable(output, phi_output):
+                    return output
+                if fallback_output is None:
+                    fallback_output = output
+        if fallback_output is not None:
+            if (
+                self._same_high_variable(raw_input, phi_output)
+                and not self._same_storage_varnode(raw_input, phi_output)
+                and not self._same_high_variable(fallback_output, raw_input)
+                and not self._same_high_variable(fallback_output, phi_output)
+            ):
+                return raw_input
+            return fallback_output
         return raw_input
 
     def _phi_incoming_block(self, phi_parent, input_index: int):
@@ -9375,6 +12011,32 @@ class StructuralRecurrenceSummarizer:
             )
         except Exception:
             return False
+
+    def _same_high_variable(self, left, right) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            left_high = left.getHigh()
+            right_high = right.getHigh()
+        except Exception:
+            return False
+        if left_high is None or right_high is None:
+            return False
+        if left_high is right_high:
+            return True
+        try:
+            if left_high == right_high:
+                return True
+        except Exception:
+            pass
+        try:
+            left_symbol = left_high.getSymbol()
+            right_symbol = right_high.getSymbol()
+            if left_symbol is not None and right_symbol is not None and left_symbol is right_symbol:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _match_pointer_progression_phi(
         self,
@@ -9468,6 +12130,7 @@ class StructuralRecurrenceSummarizer:
             pointer_param,
             pointer_phis,
             index_phis,
+            result_size=result_size,
         )
         if candidate is None:
             return None
@@ -9476,6 +12139,7 @@ class StructuralRecurrenceSummarizer:
             pointer_param,
             pointer_phis,
             index_phis,
+            result_size=result_size,
         )
         if not load_progressions:
             return None
@@ -9520,21 +12184,16 @@ class StructuralRecurrenceSummarizer:
             ),
             None,
         )
-        return_op_refs = self._reachable_return_op_refs_from_varnodes(
+        direct_value_refs, direct_return_refs = self._direct_return_value_and_return_refs_from_varnodes(
             (
                 getattr(phi_op, "getOutput", lambda: None)(),
                 getattr(candidate.back_def, "getOutput", lambda: None)(),
                 candidate.back_varnode,
             )
         )
-        return_value_op_refs = self._reachable_return_value_op_refs_from_varnodes(
-            (
-                getattr(phi_op, "getOutput", lambda: None)(),
-                getattr(candidate.back_def, "getOutput", lambda: None)(),
-                candidate.back_varnode,
-            )
-        )
-        return ReductionAccumulatorProof(
+        return_op_refs = self._dedupe_pcode_refs(tuple(direct_return_refs))
+        return_value_op_refs = self._dedupe_pcode_refs(tuple(direct_value_refs))
+        proof = ReductionAccumulatorProof(
             reduction_kind="memory_sum",
             pointer_base_ref=pointer_base_ref,
             count_parameter_name=count_param.get("name", "count"),
@@ -9562,7 +12221,14 @@ class StructuralRecurrenceSummarizer:
             return_region_value_proven=bool(return_op_refs or return_value_op_refs),
             source="recurrence_summary",
         )
-        return None
+        self._debug(
+            "Readonly accumulator proof candidate: "
+            f"start_index={proof.start_index}, start_offset={proof.start_offset}, "
+            f"seed_terms={[term.byte_offset for term in proof.seed_terms]}, "
+            f"return_refs={[ref.to_dict() for ref in proof.return_op_refs]}, "
+            f"return_value_refs={[ref.to_dict() for ref in proof.return_value_op_refs]}"
+        )
+        return proof
 
     def _match_accumulator_phi_candidate(
         self,
@@ -9570,6 +12236,8 @@ class StructuralRecurrenceSummarizer:
         pointer_param: dict,
         pointer_phis: Sequence[Dict[str, object]],
         index_phis: Sequence[Dict[str, object]],
+        *,
+        result_size: Optional[int] = None,
     ) -> Optional[ReadonlyAccumulatorPhiCandidate]:
         output = getattr(phi_op, "getOutput", lambda: None)()
         if output is None:
@@ -9602,6 +12270,7 @@ class StructuralRecurrenceSummarizer:
                     pointer_param,
                     pointer_phis,
                     index_phis,
+                    result_size=result_size,
                 )
                 if load_progressions is None or not load_progressions:
                     continue
@@ -9629,6 +12298,8 @@ class StructuralRecurrenceSummarizer:
         pointer_param: dict,
         pointer_phis: Sequence[Dict[str, object]],
         index_phis: Sequence[Dict[str, object]],
+        *,
+        result_size: Optional[int] = None,
     ) -> List[Dict[str, object]]:
         grouped = list(candidate.load_progressions)
         parent_block = getattr(candidate.phi_op, "getParent", lambda: None)()
@@ -9644,6 +12315,7 @@ class StructuralRecurrenceSummarizer:
                 pointer_param,
                 pointer_phis,
                 index_phis,
+                result_size=result_size,
             )
             if sibling is None:
                 continue
@@ -9747,8 +12419,61 @@ class StructuralRecurrenceSummarizer:
             return None
         seed_terms = tuple(terms)
         if tuple(term.stable_key() for term in seed_terms) != tuple(term.stable_key() for term in expected):
-            return None
+            if not self._readonly_seed_terms_are_materialized_pre_loop(
+                seed_terms,
+                load_signature,
+            ):
+                return None
         return seed_terms
+
+    def _readonly_seed_terms_are_materialized_pre_loop(
+        self,
+        seed_terms: Sequence[ReadonlyReductionTermRef],
+        load_signature: Dict[str, int],
+    ) -> bool:
+        """Accept non-prefix accumulator seeds only when their object layout is proven.
+
+        A loop may start at a later logical index with an accumulator initialized
+        from selected earlier memory terms.  That is not equivalent to a normal
+        prefix unless the selected terms happen to cover the full omitted range,
+        so the terms are preserved verbatim in the runtime proof.
+        """
+
+        seed_terms = tuple(seed_terms or ())
+        if not seed_terms:
+            return False
+        start_index = int(load_signature.get("start_index", 0) or 0)
+        index_step = int(load_signature.get("index_step", 1) or 1)
+        index_scale = int(load_signature.get("index_scale", load_signature.get("stride", 0)) or 0)
+        element_size = int(load_signature.get("element_size", 0) or 0)
+        start_offset = int(load_signature.get("start_offset", 0) or 0)
+        if start_index <= 0 or index_step <= 0 or index_scale <= 0 or element_size <= 0:
+            return False
+
+        term_start_offset = start_offset - start_index * index_scale
+        seen_offsets = set()
+        for term in seed_terms:
+            try:
+                byte_offset = int(term.byte_offset)
+                access_size = max(1, int(term.access_size or 0))
+            except (TypeError, ValueError):
+                return False
+            if access_size != element_size:
+                return False
+            if byte_offset in seen_offsets:
+                return False
+            seen_offsets.add(byte_offset)
+            if byte_offset < term_start_offset or byte_offset >= start_offset:
+                return False
+            logical_delta = byte_offset - term_start_offset
+            if logical_delta < 0 or (logical_delta % index_scale) != 0:
+                return False
+            logical_index = logical_delta // index_scale
+            if logical_index < 0 or logical_index >= start_index:
+                return False
+            if ((start_index - logical_index) % index_step) != 0:
+                return False
+        return True
 
     def _expected_readonly_prefix_seed_terms(
         self,
@@ -9760,12 +12485,14 @@ class StructuralRecurrenceSummarizer:
         element_size = int(load_signature.get("element_size", 0) or 0)
         if start_index <= 0 or index_step <= 0 or index_scale <= 0 or element_size <= 0:
             return ()
+        start_offset = int(load_signature.get("start_offset", start_index * index_scale) or 0)
+        term_start_offset = start_offset - start_index * index_scale
         first_index = start_index % index_step
         if first_index == start_index:
             return ()
         return tuple(
             ReadonlyReductionTermRef(
-                byte_offset=int(index * index_scale),
+                byte_offset=int(term_start_offset + index * index_scale),
                 access_size=element_size,
             )
             for index in range(first_index, start_index, index_step)
@@ -9781,6 +12508,7 @@ class StructuralRecurrenceSummarizer:
         *,
         lsb_byte_offset: int = 0,
         narrowed_size: Optional[int] = None,
+        result_size: Optional[int] = None,
     ) -> Optional[List[Dict[str, object]]]:
         if varnode is None or depth > 8:
             return None
@@ -9818,6 +12546,7 @@ class StructuralRecurrenceSummarizer:
                 depth + 1,
                 lsb_byte_offset=lsb_byte_offset,
                 narrowed_size=narrowed_size,
+                result_size=result_size,
             )
             right = self._collect_load_progressions_from_varnode(
                 def_op.getInput(1),
@@ -9827,12 +12556,32 @@ class StructuralRecurrenceSummarizer:
                 depth + 1,
                 lsb_byte_offset=lsb_byte_offset,
                 narrowed_size=narrowed_size,
+                result_size=result_size,
             )
             if left is None or right is None:
                 return None
             return left + right
         if mnemonic == "INT_SEXT":
-            return None
+            input_varnode = self._follow_readonly_load_addend_passthrough(def_op.getInput(0))
+            input_size = max(1, int(getattr(input_varnode, "getSize", lambda: 0)() or 0))
+            result_bytes = int(result_size or 0)
+            if result_bytes <= 0 or result_bytes > input_size:
+                return None
+            next_narrowed_size = (
+                result_bytes
+                if narrowed_size is None
+                else min(int(narrowed_size), result_bytes)
+            )
+            return self._collect_load_progressions_from_varnode(
+                input_varnode,
+                pointer_param,
+                pointer_phis,
+                index_phis,
+                depth + 1,
+                lsb_byte_offset=lsb_byte_offset,
+                narrowed_size=next_narrowed_size,
+                result_size=result_size,
+            )
         if mnemonic in {"SUBPIECE", "INT_RIGHT", "INT_ZEXT", "CAST", "COPY"}:
             next_lsb_byte_offset = int(lsb_byte_offset)
             next_narrowed_size = narrowed_size
@@ -9867,6 +12616,7 @@ class StructuralRecurrenceSummarizer:
                 depth + 1,
                 lsb_byte_offset=next_lsb_byte_offset,
                 narrowed_size=next_narrowed_size,
+                result_size=result_size,
             )
         if mnemonic == "INT_AND" and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_readonly_load_addend_passthrough(def_op.getInput(0))
@@ -9885,6 +12635,7 @@ class StructuralRecurrenceSummarizer:
                     depth + 1,
                     lsb_byte_offset=lsb_byte_offset,
                     narrowed_size=narrowed_size or mask_width,
+                    result_size=result_size,
                 )
             if right_const is not None:
                 mask_width = self._low_mask_width_bytes_from_value(int(right_const))
@@ -9898,6 +12649,7 @@ class StructuralRecurrenceSummarizer:
                     depth + 1,
                     lsb_byte_offset=lsb_byte_offset,
                     narrowed_size=narrowed_size or mask_width,
+                    result_size=result_size,
                 )
         return None
 
@@ -9983,13 +12735,23 @@ class StructuralRecurrenceSummarizer:
         address_varnode = self._follow_passthrough_varnode(load_op.getInput(1))
         address_def = getattr(address_varnode, "getDef", lambda: None)()
         mnemonic = getattr(address_def, "getMnemonic", lambda: None)() if address_def is not None else None
+        contextual_pointer_phis = self._pointer_phis_for_load_context(
+            pointer_phis,
+            load_op,
+            address_def,
+        )
+        contextual_index_phis = self._index_phis_for_load_context(
+            index_phis,
+            load_op,
+            address_def,
+        )
         if address_def is not None and mnemonic == "PTRADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 3:
             base_input = self._follow_passthrough_varnode(address_def.getInput(0))
             index_input = self._follow_passthrough_varnode(address_def.getInput(1))
             elem_size = self._varnode_constant_value(self._follow_passthrough_varnode(address_def.getInput(2)))
             constant_index = self._varnode_constant_value(index_input)
             if elem_size is not None and elem_size > 0 and constant_index is not None:
-                for pointer_info in pointer_phis:
+                for pointer_info in contextual_pointer_phis:
                     if self._same_varnode_value(base_input, pointer_info["phi_output"]):
                         signature = self._load_progression_from_pointer_phi(
                             load_op,
@@ -10002,11 +12764,11 @@ class StructuralRecurrenceSummarizer:
                         return {
                             **signature,
                         }
-            index_info = self._matched_index_progression(index_input, index_phis)
+            index_info = self._matched_index_progression(index_input, contextual_index_phis)
             if (
                 elem_size is not None
                 and elem_size > 0
-                and self._varnode_matches_parameter(base_input, pointer_param.get("name", ""))
+                and self._varnode_matches_parameter(base_input, pointer_param)
                 and index_info is not None
             ):
                 return {
@@ -10022,7 +12784,7 @@ class StructuralRecurrenceSummarizer:
         if address_def is not None and mnemonic == "INT_ADD" and int(getattr(address_def, "getNumInputs", lambda: 0)() or 0) >= 2:
             left = self._follow_passthrough_varnode(address_def.getInput(0))
             right = self._follow_passthrough_varnode(address_def.getInput(1))
-            for pointer_info in pointer_phis:
+            for pointer_info in contextual_pointer_phis:
                 if self._same_varnode_value(left, pointer_info["phi_output"]) and self._varnode_constant_value(right) == 0:
                     return self._load_progression_from_pointer_phi(
                         load_op,
@@ -10035,10 +12797,13 @@ class StructuralRecurrenceSummarizer:
                         pointer_info,
                         load_size=load_size,
                     )
-            if self._varnode_matches_parameter(left, pointer_param.get("name", "")):
-                scaled = self._scaled_index_stride_and_start(right, index_phis)
+            if self._varnode_matches_parameter(left, pointer_param):
+                scaled = self._scaled_index_stride_and_start(right, contextual_index_phis)
                 if scaled is not None and scaled[0] > 0:
+                    induction_info = self._induction_info_from_scaled_index(right, contextual_index_phis)
                     return {
+                        "load_op_ref": self._make_pcode_op_ref(load_op),
+                        "induction_phi_ref": self._make_pcode_op_ref(induction_info.get("phi_op") if induction_info else None),
                         "stride": int(scaled[0]),
                         "element_size": load_size,
                         "start_offset": int(scaled[1]),
@@ -10046,10 +12811,13 @@ class StructuralRecurrenceSummarizer:
                         "index_step": int(scaled[3]),
                         "index_scale": int(scaled[4]),
                     }
-            if self._varnode_matches_parameter(right, pointer_param.get("name", "")):
-                scaled = self._scaled_index_stride_and_start(left, index_phis)
+            if self._varnode_matches_parameter(right, pointer_param):
+                scaled = self._scaled_index_stride_and_start(left, contextual_index_phis)
                 if scaled is not None and scaled[0] > 0:
+                    induction_info = self._induction_info_from_scaled_index(left, contextual_index_phis)
                     return {
+                        "load_op_ref": self._make_pcode_op_ref(load_op),
+                        "induction_phi_ref": self._make_pcode_op_ref(induction_info.get("phi_op") if induction_info else None),
                         "stride": int(scaled[0]),
                         "element_size": load_size,
                         "start_offset": int(scaled[1]),
@@ -10057,7 +12825,7 @@ class StructuralRecurrenceSummarizer:
                         "index_step": int(scaled[3]),
                         "index_scale": int(scaled[4]),
                     }
-        for pointer_info in pointer_phis:
+        for pointer_info in contextual_pointer_phis:
             if self._same_varnode_value(address_varnode, pointer_info["phi_output"]):
                 return self._load_progression_from_pointer_phi(
                     load_op,
@@ -10065,6 +12833,54 @@ class StructuralRecurrenceSummarizer:
                     load_size=load_size,
                 )
         return None
+
+    def _pointer_phis_for_load_context(
+        self,
+        pointer_phis: Sequence[Dict[str, object]],
+        load_op,
+        address_def,
+    ) -> List[Dict[str, object]]:
+        if not pointer_phis:
+            return []
+        context_blocks = {
+            self._pcode_block_group_key(getattr(load_op, "getParent", lambda: None)()),
+            self._pcode_block_group_key(getattr(address_def, "getParent", lambda: None)()),
+        }
+        context_blocks.discard(None)
+
+        def rank(pointer_info: Dict[str, object]) -> Tuple[int, str]:
+            phi_block = self._pcode_block_group_key(
+                getattr(pointer_info.get("phi_op"), "getParent", lambda: None)()
+            )
+            same_context = phi_block in context_blocks if phi_block is not None else False
+            phi_ref = self._make_pcode_op_ref(pointer_info.get("phi_op"))
+            return (0 if same_context else 1, repr(phi_ref.stable_key()) if phi_ref is not None else "")
+
+        return sorted(list(pointer_phis), key=rank)
+
+    def _index_phis_for_load_context(
+        self,
+        index_phis: Sequence[Dict[str, object]],
+        load_op,
+        address_def,
+    ) -> List[Dict[str, object]]:
+        if not index_phis:
+            return []
+        context_blocks = {
+            self._pcode_block_group_key(getattr(load_op, "getParent", lambda: None)()),
+            self._pcode_block_group_key(getattr(address_def, "getParent", lambda: None)()),
+        }
+        context_blocks.discard(None)
+
+        def rank(index_info: Dict[str, object]) -> Tuple[int, str]:
+            phi_block = self._pcode_block_group_key(
+                getattr(index_info.get("phi_op"), "getParent", lambda: None)()
+            )
+            same_context = phi_block in context_blocks if phi_block is not None else False
+            phi_ref = self._make_pcode_op_ref(index_info.get("phi_op"))
+            return (0 if same_context else 1, repr(phi_ref.stable_key()) if phi_ref is not None else "")
+
+        return sorted(list(index_phis), key=rank)
 
     def _load_progression_from_pointer_phi(
         self,
@@ -10110,6 +12926,26 @@ class StructuralRecurrenceSummarizer:
         for info in index_phis:
             if self._same_varnode_value(varnode, info["phi_output"]):
                 return info
+        return None
+
+    def _induction_info_from_scaled_index(
+        self,
+        varnode,
+        index_phis: Sequence[Dict[str, object]],
+    ) -> Optional[Dict[str, object]]:
+        varnode = self._follow_passthrough_varnode(varnode)
+        direct = self._matched_index_progression(varnode, index_phis)
+        if direct is not None:
+            return direct
+        def_op = getattr(varnode, "getDef", lambda: None)()
+        if def_op is None:
+            return None
+        mnemonic = getattr(def_op, "getMnemonic", lambda: None)()
+        if mnemonic in {"INT_MULT", "INT_LEFT"} and int(getattr(def_op, "getNumInputs", lambda: 0)() or 0) >= 2:
+            left = self._induction_info_from_scaled_index(def_op.getInput(0), index_phis)
+            if left is not None:
+                return left
+            return self._induction_info_from_scaled_index(def_op.getInput(1), index_phis)
         return None
 
     def _matches_index_progression(
@@ -10316,6 +13152,67 @@ class StructuralRecurrenceSummarizer:
             return ("varnode", address_key, def_key)
         return ("varnode_id", id(varnode))
 
+    def _new_loop_variable_binder_scope(self) -> Dict[Tuple[str, Tuple[Any, ...]], int]:
+        return {}
+
+    def _loop_variable_binder_ordinal(
+        self,
+        scope: Optional[Dict[Tuple[str, Tuple[Any, ...]], int]],
+        role: str,
+        varnode,
+    ) -> int:
+        if scope is None:
+            return 0
+        key = self._varnode_cache_key(varnode)
+        if key is None:
+            return 0
+        role_key = str(role or "loop_variable")
+        scoped_key = (role_key, key)
+        if scoped_key not in scope:
+            scope[scoped_key] = sum(
+                1 for existing_role, _existing_key in scope
+                if existing_role == role_key
+            )
+        return int(scope[scoped_key])
+
+    def _loop_variable_expression(
+        self,
+        scope: Optional[Dict[Tuple[str, Tuple[Any, ...]], int]],
+        role: str,
+        name: str,
+        varnode,
+        size: object,
+    ) -> Expression:
+        try:
+            normalized_size = max(1, int(size or 4))
+        except (TypeError, ValueError):
+            normalized_size = 4
+        return Expression.variable(
+            name,
+            size=normalized_size,
+            runtime_ref=self._loop_variable_identity_ref(
+                role,
+                varnode,
+                binder_ordinal=self._loop_variable_binder_ordinal(scope, role, varnode),
+            ),
+        )
+
+    def _loop_variable_identity_ref(
+        self,
+        role: str,
+        varnode,
+        *,
+        binder_ordinal: int = 0,
+    ) -> Optional[LoopVariableIdentityRef]:
+        key = self._varnode_cache_key(varnode)
+        if key is None:
+            return None
+        return LoopVariableIdentityRef(
+            role=str(role or "loop_variable"),
+            binder_ordinal=max(0, int(binder_ordinal)),
+            varnode_key=key,
+        )
+
     def _same_varnode_value(self, left, right) -> bool:
         if left is None or right is None:
             return False
@@ -10374,28 +13271,81 @@ class StructuralRecurrenceSummarizer:
     def _varnode_matches_parameter(
         self,
         varnode,
-        param_name: str,
+        parameter: dict,
     ) -> bool:
+        if not isinstance(parameter, dict):
+            return False
         varnode = self._follow_passthrough_varnode(varnode)
+        parameter_identities = self._parameter_identity_keys_from_descriptor(parameter)
+        if not parameter_identities:
+            return False
+
+        varnode_storage = self._storage_info_from_varnode(varnode)
+        storage_key = self._summary_storage_identity_key(varnode_storage)
+        if storage_key is not None and ("parameter_storage", storage_key) in parameter_identities:
+            return True
+
         high = getattr(varnode, "getHigh", lambda: None)()
-        high_name = getattr(high, "getName", lambda: None)
-        if callable(high_name):
-            try:
-                if high_name() == param_name:
-                    return True
-            except Exception:
-                pass
         symbol_getter = getattr(high, "getSymbol", lambda: None)
         if callable(symbol_getter):
             try:
                 symbol = symbol_getter()
-                symbol_name = getattr(symbol, "getName", lambda: None)
-                if callable(symbol_name) and symbol_name() == param_name:
+                symbol_index = self._parameter_index_from_symbol(symbol)
+                if symbol_index is not None and ("parameter_index", symbol_index) in parameter_identities:
                     return True
             except Exception:
                 pass
         expr = self._trace_varnode_expression(varnode)
-        return self._parameter_name_from_expr(expr) == param_name
+        expr_identity = (
+            parameter_identity_key_from_expression(expr)
+            if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER
+            else None
+        )
+        return bool(expr_identity is not None and expr_identity in parameter_identities)
+
+    def _parameter_identity_keys_from_descriptor(
+        self,
+        parameter: dict,
+    ) -> set[Tuple[Any, ...]]:
+        identities: set[Tuple[Any, ...]] = set()
+        try:
+            index = int(parameter.get("index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            identities.add(("parameter_index", index))
+        storage_key = self._summary_storage_identity_key(
+            parameter.get("storage_info", parameter.get("storage"))
+        )
+        if storage_key is not None:
+            identities.add(("parameter_storage", storage_key))
+        return identities
+
+    def _storage_info_from_varnode(self, varnode) -> Optional[StorageInfo]:
+        getter = getattr(self.tracer, "_get_storage_info_from_varnode", None)
+        if callable(getter):
+            try:
+                storage = getter(varnode)
+                if isinstance(storage, StorageInfo):
+                    return storage
+                if isinstance(storage, dict):
+                    return StorageInfo(**storage)
+            except Exception:
+                return None
+        return None
+
+    def _parameter_index_from_symbol(self, symbol) -> Optional[int]:
+        for method_name in ("getCategoryIndex", "getCategory"):
+            getter = getattr(symbol, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                index = int(getter())
+            except Exception:
+                continue
+            if index >= 0:
+                return index
+        return None
 
     def _varnode_constant_value(
         self,
@@ -10530,9 +13480,99 @@ class StructuralRecurrenceSummarizer:
         *,
         budget: int = 128,
     ) -> Tuple[PcodeOpRef, ...]:
+        value_refs, _return_refs = self._reachable_return_value_and_return_refs_from_varnodes(
+            start_varnodes,
+            budget=budget,
+        )
+        return value_refs
+
+    def _direct_return_value_and_return_refs_from_varnodes(
+        self,
+        start_varnodes: Sequence[object],
+        *,
+        budget: int = 128,
+    ) -> Tuple[Tuple[PcodeOpRef, ...], Tuple[PcodeOpRef, ...]]:
+        """Return refs proven to use the tracked value as the whole return.
+
+        Reachability through an arithmetic op only proves contribution.  A
+        scalar accumulator summary may replace a return region only when the
+        accumulator value itself reaches RETURN, possibly through value-
+        preserving width/passthrough ops.  Vectorized summaries have a separate
+        lane-contribution proof and intentionally keep using the broader
+        reachability collector after that proof succeeds.
+        """
+
+        passthrough_mnemonics = {
+            "COPY",
+            "CAST",
+            "INT_ZEXT",
+            "INT_SEXT",
+            "SUBPIECE",
+        }
+        stack: List[Tuple[object, Tuple[PcodeOpRef, ...]]] = [
+            (varnode, ()) for varnode in (start_varnodes or ()) if varnode is not None
+        ]
+        seen_states = set()
+        value_refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
+        return_refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
+        while stack and len(seen_states) < budget:
+            current, path_refs = stack.pop()
+            for equivalent in self._high_varnode_instances(current):
+                state_key = (
+                    id(equivalent),
+                    tuple(ref.stable_key() for ref in path_refs),
+                )
+                if state_key in seen_states:
+                    continue
+                seen_states.add(state_key)
+                for op in self._iter_varnode_descendant_ops(equivalent):
+                    mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                    if mnemonic == "RETURN":
+                        ref = self._make_pcode_op_ref(op)
+                        if (
+                            ref is not None
+                            and (
+                                ref.address_offset is not None
+                                or ref.seq_time is not None
+                                or ref.seq_order is not None
+                            )
+                        ):
+                            return_refs.setdefault(ref.stable_key(), ref)
+                            for value_ref in path_refs:
+                                value_refs.setdefault(value_ref.stable_key(), value_ref)
+                        continue
+                    if mnemonic not in passthrough_mnemonics:
+                        continue
+                    output = getattr(op, "getOutput", lambda: None)()
+                    if output is None:
+                        continue
+                    ref = self._make_pcode_op_ref(op)
+                    next_path_refs = path_refs
+                    if (
+                        ref is not None
+                        and (
+                            ref.address_offset is not None
+                            or ref.seq_time is not None
+                            or ref.seq_order is not None
+                        )
+                    ):
+                        next_path_refs = tuple(path_refs) + (ref,)
+                    stack.append((output, next_path_refs))
+        return (
+            tuple(sorted(value_refs.values(), key=lambda ref: repr(ref.stable_key()))),
+            tuple(sorted(return_refs.values(), key=lambda ref: repr(ref.stable_key()))),
+        )
+
+    def _reachable_return_value_and_return_refs_from_varnodes(
+        self,
+        start_varnodes: Sequence[object],
+        *,
+        budget: int = 128,
+    ) -> Tuple[Tuple[PcodeOpRef, ...], Tuple[PcodeOpRef, ...]]:
         stack = [varnode for varnode in start_varnodes if varnode is not None]
         seen_varnodes = set()
-        refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
+        value_refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
+        return_refs: Dict[Tuple[Any, ...], PcodeOpRef] = {}
         while stack and len(seen_varnodes) < budget:
             current = stack.pop()
             current_id = id(current)
@@ -10549,8 +13589,23 @@ class StructuralRecurrenceSummarizer:
                         stack.append(output)
                     if getattr(op, "getMnemonic", lambda: None)() == "RETURN":
                         ref = self._make_pcode_op_ref(op)
-                    elif output is not None and self._reachable_return_op_refs_from_varnodes((output,)):
-                        ref = self._make_pcode_op_ref(op)
+                        if (
+                            ref is not None
+                            and (
+                                ref.address_offset is not None
+                                or ref.seq_time is not None
+                                or ref.seq_order is not None
+                            )
+                        ):
+                            return_refs.setdefault(ref.stable_key(), ref)
+                    elif output is not None:
+                        reachable_returns = self._reachable_return_op_refs_from_varnodes((output,))
+                        if not reachable_returns:
+                            ref = None
+                        else:
+                            for return_ref in reachable_returns:
+                                return_refs.setdefault(return_ref.stable_key(), return_ref)
+                            ref = self._make_pcode_op_ref(op)
                     else:
                         ref = None
                     if (
@@ -10561,8 +13616,11 @@ class StructuralRecurrenceSummarizer:
                             or ref.seq_order is not None
                         )
                     ):
-                        refs.setdefault(ref.stable_key(), ref)
-        return tuple(sorted(refs.values(), key=lambda ref: repr(ref.stable_key())))
+                        value_refs.setdefault(ref.stable_key(), ref)
+        return (
+            tuple(sorted(value_refs.values(), key=lambda ref: repr(ref.stable_key()))),
+            tuple(sorted(return_refs.values(), key=lambda ref: repr(ref.stable_key()))),
+        )
 
     def _high_varnode_instances(self, varnode) -> Tuple[object, ...]:
         instances = [varnode]
@@ -11383,13 +14441,19 @@ class StructuralRecurrenceSummarizer:
 
     def _parameter_expression(self, param_info: dict) -> Expression:
         size = int(param_info.get("size") or 4)
+        storage_info = param_info.get("storage_info", param_info.get("storage"))
+        if isinstance(storage_info, dict):
+            try:
+                storage_info = StorageInfo(**storage_info)
+            except Exception:
+                storage_info = None
         return Expression.parameter(
             param_info.get("name", "param_1"),
             index=int(param_info.get("index", 0)),
             data_type=param_info.get("data_type"),
             data_type_obj=param_info.get("data_type_obj"),
             size=size,
-            storage_info=param_info.get("storage_info"),
+            storage_info=storage_info,
         )
 
     def _is_direct_self_call(self, op, function_name: str) -> bool:
@@ -11544,6 +14608,15 @@ class StructuralRecurrenceSummarizer:
             return expr, (expr.size * 8) if expr.size else None
         if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_ZEXT", "INT_SEXT"} and len(expr.operands) == 1:
             return self._normalize_counter_view(expr.operands[0], param_name)
+        if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "SUBPIECE" and len(expr.operands) == 2:
+            source, offset = expr.operands
+            offset_value = self._raw_constant_value(offset)
+            if offset_value == 0:
+                source_counter = self._normalize_counter_view(source, param_name)
+                if source_counter is not None:
+                    expr_bits = (expr.size * 8) if expr.size else None
+                    if expr_bits is not None and expr_bits > 0:
+                        return source_counter[0], expr_bits
         if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_AND" or len(expr.operands) != 2:
             return None
 

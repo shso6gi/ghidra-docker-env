@@ -2,14 +2,19 @@
 """SMT query builders for PairwiseStrategy."""
 
 import os
+from functools import cmp_to_key
 from typing import Any, Dict, List, Tuple
 
-from ...model import FunctionReturnAnalysis
+from ...model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
 from ...analysis.condition.simplifier import ConditionSimplifier
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
+from ..param_semantics import hint_objects_by_identity
+from ..semantic_width import SemanticWidthNormalizer
 from ..normalize import normalize_expression, NormalizationContext, NormalizationSettings
 from ..formula.returns import (
+    compare_readonly_summary_values_by_priority,
     coerce_value_to_bitvec_width,
+    get_return_size,
 )
 from .pairwise_models import ReturnCase
 
@@ -22,9 +27,17 @@ def extract_return_cases(
     cases = []
     merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
     settings = normalization_settings or NormalizationSettings.safe()
+    condition_rewriter = _build_condition_rewriter(analysis)
 
     for index, ret_info in enumerate(analysis.returns):
-        query_conditions = _build_object_centric_condition_basis(ret_info.conditions)
+        raw_conditions = [
+            _rewrite_guard_condition(condition, condition_rewriter)
+            for condition in list(ret_info.conditions or [])
+        ]
+        query_conditions = _build_object_centric_condition_basis(
+            raw_conditions
+            + _runtime_summary_guard_conditions(ret_info.value, condition_rewriter)
+        )
         if _condition_region_is_unsat(query_conditions):
             continue
         normalized_value = normalize_expression(
@@ -44,6 +57,7 @@ def extract_return_cases(
             effect_summary=getattr(analysis, "effect_summary", None),
             comparison_surface=analysis.get_comparison_surface(),
             summary_conditions=query_conditions,
+            program_is_big_endian=getattr(analysis, "program_is_big_endian", None),
         )
         key = _build_return_case_key(case)
         existing = merged_cases.get(key)
@@ -54,7 +68,231 @@ def extract_return_cases(
         merged_cases[key] = case
         cases.append(case)
 
-    return cases
+    return _build_effective_return_case_partition(
+        cases,
+        return_size=get_return_size(analysis),
+    )
+
+
+def _build_condition_rewriter(analysis: FunctionReturnAnalysis):
+    parameter_rewriter = _ParameterMetadataRewriter(getattr(analysis, "parameters", []) or [])
+    semantic_rewriter = SemanticWidthNormalizer(hint_objects_by_identity(analysis)).rewrite_expression
+
+    def rewrite(expr: Expression | None) -> Expression | None:
+        if expr is None:
+            return None
+        metadata_normalized = parameter_rewriter.rewrite(expr)
+        return semantic_rewriter(metadata_normalized)
+
+    return rewrite
+
+
+class _ParameterMetadataRewriter:
+    """Align parameter Expression objects with the active analysis descriptors."""
+
+    def __init__(self, parameters):
+        self._params_by_index: Dict[int, Dict[str, Any]] = {}
+        self._params_by_storage: Dict[Tuple[object, ...], Dict[str, Any]] = {}
+        params_by_storage: Dict[Tuple[object, ...], List[Dict[str, Any]]] = {}
+        for parameter in parameters or []:
+            descriptor = dict(parameter or {})
+            index = descriptor.get("index")
+            if isinstance(index, int) and index >= 0:
+                self._params_by_index[index] = descriptor
+            storage_key = _storage_identity_key(descriptor.get("storage_info", descriptor.get("storage")))
+            if storage_key is not None:
+                params_by_storage.setdefault(storage_key, []).append(descriptor)
+        self._params_by_storage = {
+            storage_key: descriptors[0]
+            for storage_key, descriptors in params_by_storage.items()
+            if len(descriptors) == 1
+        }
+
+    def rewrite(self, expr: Expression | None) -> Expression | None:
+        if expr is None:
+            return None
+        if expr.expr_type == ExpressionType.PARAMETER:
+            return self._rewrite_parameter(expr)
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            return self._rewrite_phi(expr)
+
+        operands = getattr(expr, "operands", None) or []
+        if not operands:
+            return expr
+        rewritten_operands = [self.rewrite(operand) for operand in operands]
+        if all(new is old for new, old in zip(rewritten_operands, operands)):
+            return expr
+        return _clone_expression_with(expr, operands=rewritten_operands)
+
+    def _rewrite_parameter(self, expr: Expression) -> Expression:
+        descriptor = None
+        has_index = isinstance(expr.value, int) and expr.value >= 0
+        if has_index:
+            descriptor = self._params_by_index.get(expr.value)
+        else:
+            storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
+            if storage_key is not None:
+                descriptor = self._params_by_storage.get(storage_key)
+        if descriptor is None:
+            return expr
+
+        desired_size = int(descriptor.get("size", 0) or 0)
+        desired_type = descriptor.get("data_type") or expr.data_type
+        desired_index = descriptor.get("index", expr.value)
+        if (
+            desired_size <= 0
+            or (
+                desired_size == expr.size
+                and desired_type == expr.data_type
+                and desired_index == expr.value
+            )
+        ):
+            return expr
+
+        return Expression(
+            expr_type=expr.expr_type,
+            value=desired_index,
+            operator=expr.operator,
+            operands=list(expr.operands or []),
+            size=desired_size,
+            name=expr.name,
+            data_type=desired_type,
+            data_type_obj=getattr(expr, "data_type_obj", None),
+            storage_info=expr.storage_info,
+            read_order_key=expr.read_order_key,
+            runtime_ref=getattr(expr, "runtime_ref", None),
+            opcode=getattr(expr, "opcode", None),
+        )
+
+    def _rewrite_phi(self, expr: Expression) -> Expression:
+        changed = False
+        branches = []
+        for condition, value in expr.value:
+            rewritten_condition = None
+            if condition is not None:
+                rewritten_condition_expr = self.rewrite(condition.expression)
+                rewritten_condition = Condition(rewritten_condition_expr, condition.negated)
+                changed = changed or (rewritten_condition_expr is not condition.expression)
+            rewritten_value = self.rewrite(value)
+            changed = changed or (rewritten_value is not value)
+            branches.append((rewritten_condition, rewritten_value))
+
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
+        rebuilt.storage_info = expr.storage_info
+        rebuilt.read_order_key = expr.read_order_key
+        rebuilt.runtime_ref = getattr(expr, "runtime_ref", None)
+        return rebuilt
+
+
+def _clone_expression_with(expr: Expression, *, operands) -> Expression:
+    return Expression(
+        expr_type=expr.expr_type,
+        value=expr.value,
+        operator=expr.operator,
+        operands=list(operands or []),
+        size=expr.size,
+        name=expr.name,
+        data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
+    )
+
+
+def _storage_identity_key(storage_info) -> Tuple[object, ...] | None:
+    storage_info = _coerce_storage_info(storage_info)
+    if storage_info is None:
+        return None
+    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+    if not callable(storage_key_fn):
+        return None
+    try:
+        return storage_key_fn()
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_storage_info(storage_info) -> StorageInfo | None:
+    if storage_info is None:
+        return None
+    if isinstance(storage_info, StorageInfo):
+        return storage_info
+    if not isinstance(storage_info, dict):
+        return None
+    try:
+        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
+        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
+        return StorageInfo(
+            is_register=is_register,
+            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
+            space_id=storage_info.get("space_id"),
+            offset=int(storage_info.get("offset", 0) or 0),
+            size=int(storage_info.get("size", 0) or 0),
+            size_bits=int(storage_info.get("size_bits", 0) or 0),
+            register_name=storage_info.get("register_name"),
+            register_offset=storage_info.get("register_offset"),
+            register_size=storage_info.get("register_size"),
+            register_size_bits=storage_info.get("register_size_bits"),
+            base_register_name=storage_info.get("base_register_name"),
+            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
+            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
+            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
+            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
+            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
+            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
+        )
+    except Exception:
+        return None
+
+
+def _runtime_summary_guard_conditions(
+    value_expr: Expression | None,
+    guard_rewriter=None,
+) -> List[Condition]:
+    guards: List[Condition] = []
+    seen: set[tuple] = set()
+    for node in _iter_expression_nodes(value_expr):
+        runtime_ref = getattr(node, "runtime_ref", None)
+        for owner in (
+            runtime_ref,
+            getattr(runtime_ref, "accumulator_proof", None),
+            getattr(runtime_ref, "loop_summary", None),
+        ):
+            for guard in tuple(getattr(owner, "guard_constraints", ()) or ()):
+                if not isinstance(guard, Condition):
+                    continue
+                key = guard.structural_key(budget=256)
+                if key in seen:
+                    continue
+                seen.add(key)
+                guards.append(_rewrite_guard_condition(guard, guard_rewriter))
+    return guards
+
+
+def _rewrite_guard_condition(condition: Condition, guard_rewriter=None) -> Condition:
+    if guard_rewriter is None:
+        return condition
+    rewritten_expr = guard_rewriter(condition.expression)
+    if rewritten_expr is condition.expression:
+        return condition
+    return Condition(rewritten_expr, condition.negated)
+
+
+def _iter_expression_nodes(expr: Expression | None):
+    if expr is None:
+        return
+    yield expr
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+        return
+    for operand in getattr(expr, "operands", None) or ():
+        yield from _iter_expression_nodes(operand)
 
 
 def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
@@ -68,6 +306,79 @@ def _build_return_case_key(case: ReturnCase) -> Tuple[tuple, tuple]:
         include_semantic_runtime_refs=True,
     )
     return cond_key, value_key
+
+
+def _build_effective_return_case_partition(
+    cases: List[ReturnCase],
+    *,
+    return_size: int,
+) -> List[ReturnCase]:
+    """Make pairwise cases match the ordered SMT return partition.
+
+    Pairwise checks each return case independently, so overlapping cases must
+    carry the same shadowing semantics as the full ``ite`` return definition:
+    a later case is active only outside all earlier, higher-priority cases.
+    Conditions stay as ``Condition``/``Expression`` objects and are lowered to
+    SMT later by the normal renderer.
+    """
+
+    if len(cases) <= 1:
+        return cases
+    ordered = _order_return_cases_for_effective_partition(
+        cases,
+        return_size=return_size,
+    )
+    effective_cases: List[ReturnCase] = []
+    prior_cases: List[ReturnCase] = []
+    for case in ordered:
+        effective_conditions = list(case.conditions or [])
+        for prior in prior_cases:
+            if _condition_region_is_unsat(effective_conditions + list(prior.conditions or [])):
+                continue
+            prior_condition = Condition.combine_and(list(prior.conditions or []))
+            if prior_condition is not None:
+                effective_conditions.append(prior_condition.negate())
+        effective_conditions = _build_object_centric_condition_basis(effective_conditions)
+        if _condition_region_is_unsat(effective_conditions):
+            prior_cases.append(case)
+            continue
+        case.update_conditions(effective_conditions, summary_conditions=effective_conditions)
+        effective_cases.append(case)
+        prior_cases.append(case)
+    return effective_cases
+
+
+def _order_return_cases_for_effective_partition(
+    cases: List[ReturnCase],
+    *,
+    return_size: int,
+) -> List[ReturnCase]:
+    def _compare(left: ReturnCase, right: ReturnCase) -> int:
+        readonly_priority = compare_readonly_summary_values_by_priority(
+            left.value_expr,
+            left.conditions,
+            right.value_expr,
+            right.conditions,
+            return_size=return_size,
+        )
+        if readonly_priority != 0:
+            return readonly_priority
+
+        left_set = ConditionSimplifier.build_constraint_set(left.conditions or [])
+        right_set = ConditionSimplifier.build_constraint_set(right.conditions or [])
+        left_implies_right = left_set.implies_all(right.conditions or [])
+        right_implies_left = right_set.implies_all(left.conditions or [])
+        if left_implies_right and not right_implies_left:
+            return -1
+        if right_implies_left and not left_implies_right:
+            return 1
+        left_len = len(left.conditions or [])
+        right_len = len(right.conditions or [])
+        if left_len != right_len:
+            return -1 if left_len > right_len else 1
+        return -1 if int(left.index) < int(right.index) else (1 if int(left.index) > int(right.index) else 0)
+
+    return sorted(cases, key=cmp_to_key(_compare))
 
 
 def _build_object_centric_condition_basis(conditions) -> List[Any]:
