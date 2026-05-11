@@ -10,7 +10,14 @@ from .counterexample import FormattedCounterexample
 from .typing.fixer import TypeFixResult
 from ..transform.rewrite.rules import RewriteResult
 from .debug_trace import DebugTrace  # 新規追加
-from .unknown_reason import UnknownReasonRecord, coerce_unknown_reason_records
+from .unknown_reason import (
+    UnknownRecoveryAction,
+    UnknownReasonRecord,
+    build_unknown_recovery_actions,
+    coerce_unknown_recovery_actions,
+    coerce_unknown_reason_records,
+    summarize_unknown_recovery_backlog,
+)
 
 
 @dataclass
@@ -84,6 +91,7 @@ class EquivalenceResult:
     pairwise_stats: Optional[Dict[str, int]] = None
     pairwise_debug_stats: Optional[Dict[str, int]] = None
     unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
+    unknown_recovery_actions: List[UnknownRecoveryAction] = field(default_factory=list)
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
     debug_trace: Optional[DebugTrace] = None
@@ -93,6 +101,14 @@ class EquivalenceResult:
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
+        if self.unknown_recovery_actions:
+            self.unknown_recovery_actions = list(
+                coerce_unknown_recovery_actions(self.unknown_recovery_actions)
+            )
+        else:
+            self.unknown_recovery_actions = list(
+                build_unknown_recovery_actions(self.unknown_reasons)
+            )
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -150,6 +166,10 @@ class EquivalenceResult:
             "pairwise_stats": self.pairwise_stats,
             "pairwise_debug_stats": self.pairwise_debug_stats,
             "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
+            "unknown_recovery_actions": [
+                action.to_dict() for action in self.unknown_recovery_actions
+            ],
+            "unknown_recovery_backlog": summarize_unknown_recovery_backlog(self.unknown_reasons),
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
@@ -255,6 +275,18 @@ class EquivalenceResult:
                 )
             if len(self.unknown_reasons) > 10:
                 lines.append(f"  ... ({len(self.unknown_reasons) - 10} more)")
+
+            recovery_backlog = summarize_unknown_recovery_backlog(self.unknown_reasons)
+            if recovery_backlog:
+                lines.append("")
+                lines.append("UNKNOWN Recovery Proof Backlog:")
+                for reason_id, entry in recovery_backlog.items():
+                    proof_kinds = ", ".join(entry.get("proof_obligation_counts", {}).keys())
+                    if not proof_kinds:
+                        proof_kinds = entry.get("recovery_proof_kind") or "none"
+                    lines.append(
+                        f"  {reason_id}: count={entry.get('count', 0)}, proofs={proof_kinds}"
+                    )
                 
         lines.append("")
         

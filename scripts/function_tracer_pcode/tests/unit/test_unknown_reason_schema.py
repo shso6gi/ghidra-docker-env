@@ -6,10 +6,14 @@ from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownRecoveryActionStatus,
+    UnknownReasonRecord,
     UnknownRecoveryProofKind,
     UnknownReasonId,
+    get_unknown_recovery_plan,
     get_unknown_reason_definition,
     make_unknown_reason,
+    summarize_unknown_recovery_backlog,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
@@ -92,6 +96,85 @@ def test_recovery_fallback_reason_ids_are_registered_not_solver_timeout():
     assert rewrite.reason_id != UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
 
 
+def test_plan15_recovery_plan_maps_core_reasons_to_required_proofs():
+    return_width = get_unknown_recovery_plan(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)
+    recoverable_partial = get_unknown_recovery_plan(UnknownReasonId.RECOVERABLE_PARTIAL)
+    readonly_identity = get_unknown_recovery_plan(UnknownReasonId.READONLY_IDENTITY_MISSING)
+    method_b = get_unknown_recovery_plan(UnknownReasonId.METHOD_B_CLOSURE_BLOCKED)
+
+    assert [obligation.proof_kind for obligation in return_width.proof_obligations] == [
+        UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
+        UnknownRecoveryProofKind.HIGH_BIT_PROOF.value,
+    ]
+    assert [obligation.required_evidence for obligation in return_width.proof_obligations] == [
+        ("calling_convention", "return_storage", "narrow_return_width"),
+        ("producer_width", "extension_semantics", "high_bits_irrelevant_or_equal"),
+    ]
+    assert [obligation.proof_kind for obligation in recoverable_partial.proof_obligations] == [
+        UnknownRecoveryProofKind.PATH_SENSITIVE_ARGUMENT_MERGE.value,
+    ]
+    assert [obligation.required_evidence for obligation in recoverable_partial.proof_obligations] == [
+        ("callsite_guard_partition", "argument_value_by_path", "callee_parameter_storage"),
+    ]
+    assert [obligation.proof_kind for obligation in readonly_identity.proof_obligations] == [
+        UnknownRecoveryProofKind.STORAGE_BACKED_IDENTITY_PROPAGATION.value,
+    ]
+    assert [obligation.required_evidence for obligation in readonly_identity.proof_obligations] == [
+        ("object_storage_identity", "count_identity", "guard_implication", "finite_witness"),
+    ]
+    assert [obligation.proof_kind for obligation in method_b.proof_obligations] == [
+        UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value,
+        UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION.value,
+    ]
+    assert [obligation.required_evidence for obligation in method_b.proof_obligations] == [
+        ("seed_compensation", "term_sequence", "pure_side_effect_profile"),
+        ("guard_partition", "partition_coverage_proof"),
+    ]
+
+
+def test_unknown_reason_record_serializes_recovery_proof_obligations():
+    record = make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)
+    payload = record.to_dict()
+    roundtrip = UnknownReasonRecord.from_dict(payload)
+
+    assert payload["recovery_proof_kind"] == UnknownRecoveryProofKind.ABI_RELATION_HIGH_BIT_PROOF.value
+    assert [
+        obligation["proof_stage"]
+        for obligation in payload["recovery_proof_obligations"]
+    ] == ["abi_relation", "high_bit_relation"]
+    assert [
+        obligation.proof_kind
+        for obligation in roundtrip.recovery_proof_obligations
+    ] == [
+        UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
+        UnknownRecoveryProofKind.HIGH_BIT_PROOF.value,
+    ]
+
+
+def test_unknown_recovery_backlog_groups_required_proofs_by_reason():
+    summary = summarize_unknown_recovery_backlog(
+        [
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                pair_or_case="(0,0)",
+            ),
+            make_unknown_reason(
+                UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+                pair_or_case="(0,1)",
+            ),
+        ]
+    )
+
+    assert summary[UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value]["proof_obligation_counts"] == {
+        UnknownRecoveryProofKind.ABI_RELATION_PROOF.value: 1,
+        UnknownRecoveryProofKind.HIGH_BIT_PROOF.value: 1,
+    }
+    assert summary[UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value]["proof_obligation_counts"] == {
+        UnknownRecoveryProofKind.PROOF_BACKED_COVERING_CASE.value: 1,
+        UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION.value: 1,
+    }
+
+
 def test_strategy_and_equivalence_result_serialize_typed_unknown_reasons():
     strategy_result = StrategyResult(
         is_equivalent=None,
@@ -127,6 +210,38 @@ def test_strategy_and_equivalence_result_serialize_typed_unknown_reasons():
 
     assert payload["unknown_reasons"][0]["reason_id"] == UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION.value
     assert payload["unknown_reasons"][0]["pair_or_case"] == "(0,0)"
+
+
+def test_equivalence_result_serializes_unknown_recovery_backlog():
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RECOVERABLE_PARTIAL,
+                stage="S_EFFECT_SUMMARY",
+                pair_or_case="left",
+            ),
+            make_unknown_reason(
+                UnknownReasonId.READONLY_IDENTITY_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+        ],
+    )
+
+    backlog = result.to_dict()["unknown_recovery_backlog"]
+
+    assert backlog[UnknownReasonId.RECOVERABLE_PARTIAL.value]["proof_obligation_counts"] == {
+        UnknownRecoveryProofKind.PATH_SENSITIVE_ARGUMENT_MERGE.value: 1,
+    }
+    assert backlog[UnknownReasonId.READONLY_IDENTITY_MISSING.value]["proof_obligation_counts"] == {
+        UnknownRecoveryProofKind.STORAGE_BACKED_IDENTITY_PROPAGATION.value: 1,
+    }
 
 
 class _FakeCase:
@@ -324,6 +439,57 @@ def test_checker_check_bridges_strategy_unknown_reasons_to_equivalence_result():
     assert result.to_dict()["unknown_reasons"][0]["pair_or_case"] == "(0,0)"
 
 
+def test_checker_check_builds_reason_selected_recovery_actions():
+    strategy_result = StrategyResult(
+        is_equivalent=None,
+        solver_results=_unknown_solver_result(),
+        total_pairs=1,
+        unknown_pairs=1,
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+                evidence_refs=("return_storage:r0",),
+            )
+        ],
+    )
+    checker = EquivalenceChecker(
+        timeout=1,
+        debug=False,
+        enable_rewrite=False,
+        strategy="pairwise",
+    )
+
+    result = checker.check(
+        create_mock_analysis("left"),
+        create_mock_analysis("right"),
+        "left.bin",
+        "right.bin",
+        force_strategy=_FakeStrategy(strategy_result),
+    )
+    payload = result.to_dict()
+
+    assert [action.proof_kind for action in result.unknown_recovery_actions] == [
+        UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
+        UnknownRecoveryProofKind.HIGH_BIT_PROOF.value,
+    ]
+    assert [action.status for action in result.unknown_recovery_actions] == [
+        UnknownRecoveryActionStatus.PLANNED.value,
+        UnknownRecoveryActionStatus.PLANNED.value,
+    ]
+    assert payload["unknown_recovery_actions"][0]["required_evidence"] == [
+        "calling_convention",
+        "return_storage",
+        "narrow_return_width",
+    ]
+    assert payload["unknown_recovery_actions"][1]["required_evidence"] == [
+        "producer_width",
+        "extension_semantics",
+        "high_bits_irrelevant_or_equal",
+    ]
+
+
 def test_unknown_by_reason_counts_primary_reason_once_per_pair():
     trace = DebugTrace(final_result=None)
     result = EquivalenceResult(
@@ -445,3 +611,82 @@ def test_intermediate_observed_unknown_reason_is_not_final_contributor():
         UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
     }
     assert payload["unknown_reason_counts"] == {}
+
+
+def test_debug_trace_recovery_backlog_uses_final_primary_reason_per_pair():
+    trace = DebugTrace(final_result=None)
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        pairwise_stats={
+            "total_pairs": 1,
+            "unsat_pairs": 0,
+            "sat_pairs": 0,
+            "unknown_pairs": 1,
+            "error_pairs": 0,
+        },
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+            make_unknown_reason(
+                UnknownReasonId.METHOD_B_CLOSURE_BLOCKED,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+        ],
+    )
+
+    record_attempt_from_result(
+        trace,
+        attempt_id=1,
+        retry_count=0,
+        phase="P0_BASELINE",
+        result=result,
+        transition_reason="UNKNOWN",
+        type_fix_result=None,
+        strategy_name="pairwise",
+    )
+
+    payload = trace.to_dict()
+
+    assert payload["unknown_recovery_backlog"] == {
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: {
+            "count": 1,
+            "target_regression": "return_width_bridge_missing",
+            "recovery_proof_kind": UnknownRecoveryProofKind.ABI_RELATION_HIGH_BIT_PROOF.value,
+            "proof_obligation_counts": {
+                UnknownRecoveryProofKind.ABI_RELATION_PROOF.value: 1,
+                UnknownRecoveryProofKind.HIGH_BIT_PROOF.value: 1,
+            },
+            "proof_obligations": [
+                {
+                    "proof_kind": UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
+                    "proof_stage": "abi_relation",
+                    "required_evidence": [
+                        "calling_convention",
+                        "return_storage",
+                        "narrow_return_width",
+                    ],
+                    "description": "Prove the compared return storages are related by the active ABI.",
+                },
+                {
+                    "proof_kind": UnknownRecoveryProofKind.HIGH_BIT_PROOF.value,
+                    "proof_stage": "high_bit_relation",
+                    "required_evidence": [
+                        "producer_width",
+                        "extension_semantics",
+                        "high_bits_irrelevant_or_equal",
+                    ],
+                    "description": "Prove the wider return high bits cannot change the semantic result.",
+                },
+            ],
+        },
+    }
+    assert UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value in payload["observed_unknown_recovery_backlog"]

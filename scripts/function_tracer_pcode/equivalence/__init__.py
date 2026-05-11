@@ -18,11 +18,18 @@ from .strategies import CheckStrategy, MonolithicStrategy, PairwiseStrategy
 from .unknown_reason import (
     UnknownAggregationUnit,
     UnknownDecisionEffect,
+    UnknownRecoveryAction,
+    UnknownRecoveryActionStatus,
     UnknownReasonClass,
     UnknownReasonId,
     UnknownReasonRecord,
     UnknownReasonScope,
+    UnknownRecoveryPlan,
+    UnknownRecoveryProofObligation,
     UnknownRecoveryProofKind,
+    build_unknown_recovery_actions,
+    get_unknown_recovery_plan,
+    summarize_unknown_recovery_backlog,
 )
 
 __all__ = [
@@ -65,9 +72,16 @@ __all__ = [
     'PairwiseStrategy',
     "UnknownAggregationUnit",
     "UnknownDecisionEffect",
+    "UnknownRecoveryAction",
+    "UnknownRecoveryActionStatus",
     "UnknownReasonClass",
     "UnknownReasonId",
     "UnknownReasonRecord",
     "UnknownReasonScope",
+    "UnknownRecoveryPlan",
+    "UnknownRecoveryProofObligation",
     "UnknownRecoveryProofKind",
+    "build_unknown_recovery_actions",
+    "get_unknown_recovery_plan",
+    "summarize_unknown_recovery_backlog",
 ]

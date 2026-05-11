@@ -7,7 +7,9 @@ from enum import Enum
 
 from .unknown_reason import (
     UnknownReasonRecord,
+    build_unknown_recovery_actions,
     coerce_unknown_reason_records,
+    summarize_unknown_recovery_backlog,
     summarize_unknown_reason_counts,
 )
 
@@ -316,6 +318,24 @@ class DebugTrace:
                 primary_by_aggregation_unit=True,
             ),
             "observed_unknown_reason_counts": summarize_unknown_reason_counts(observed_unknown_reasons),
+            "unknown_recovery_backlog": summarize_unknown_recovery_backlog(
+                final_unknown_reasons,
+                primary_by_aggregation_unit=True,
+            ),
+            "unknown_recovery_actions": [
+                action.to_dict()
+                for action in build_unknown_recovery_actions(
+                    final_unknown_reasons,
+                    primary_by_aggregation_unit=True,
+                )
+            ],
+            "observed_unknown_recovery_backlog": summarize_unknown_recovery_backlog(
+                observed_unknown_reasons
+            ),
+            "observed_unknown_recovery_actions": [
+                action.to_dict()
+                for action in build_unknown_recovery_actions(observed_unknown_reasons)
+            ],
             "final_result": self.final_result,
             "total_time": self.total_time,
             "error_message": self.error_message,
