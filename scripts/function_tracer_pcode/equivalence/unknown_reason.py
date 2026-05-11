@@ -444,8 +444,24 @@ def coerce_unknown_reason_records(values: Optional[Iterable[Any]]) -> Tuple[Unkn
     return tuple(coerce_unknown_reason_record(value) for value in (values or ()))
 
 
-def summarize_unknown_reason_counts(values: Optional[Iterable[Any]]) -> Dict[str, int]:
+def summarize_unknown_reason_counts(
+    values: Optional[Iterable[Any]],
+    *,
+    primary_by_aggregation_unit: bool = False,
+) -> Dict[str, int]:
     counts: Dict[str, int] = {}
-    for record in coerce_unknown_reason_records(values):
+    records = coerce_unknown_reason_records(values)
+    if primary_by_aggregation_unit:
+        primary_records: Dict[Tuple[str, str], UnknownReasonRecord] = {}
+        fallback_index = 0
+        for record in records:
+            aggregation_key = str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
+            unit_key = record.pair_or_case or record.stage
+            if unit_key is None:
+                unit_key = f"record:{fallback_index}"
+                fallback_index += 1
+            primary_records.setdefault((aggregation_key, unit_key), record)
+        records = tuple(primary_records.values())
+    for record in records:
         counts[record.reason_id] = int(counts.get(record.reason_id, 0) or 0) + 1
     return counts

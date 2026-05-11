@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
+from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
@@ -14,6 +15,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
 from scripts.function_tracer_pcode.model import Expression
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from conftest import create_mock_analysis
 
 
 def _unknown_solver_result() -> ParallelResult:
@@ -207,3 +209,239 @@ def test_debug_trace_attempt_carries_typed_unknown_reasons():
 
     assert payload["attempts"][0]["unknown_reasons"][0]["reason_id"] == UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
     assert payload["unknown_reason_counts"][UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value] == 1
+
+
+def test_unknown_reason_propagates_from_strategy_result_to_final_summary():
+    strategy_result = StrategyResult(
+        is_equivalent=None,
+        solver_results=_unknown_solver_result(),
+        total_pairs=2,
+        unknown_pairs=2,
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+            make_unknown_reason(
+                UnknownReasonId.NORMALIZATION_NO_CHANGE,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,1)",
+            ),
+        ],
+    )
+    result = EquivalenceResult(
+        is_equivalent=strategy_result.is_equivalent,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=strategy_result.solver_results,
+        pairwise_stats={
+            "total_pairs": strategy_result.total_pairs,
+            "unsat_pairs": strategy_result.unsat_pairs,
+            "sat_pairs": strategy_result.sat_pairs,
+            "unknown_pairs": strategy_result.unknown_pairs,
+            "error_pairs": strategy_result.error_pairs,
+        },
+        unknown_reasons=strategy_result.unknown_reasons,
+    )
+    trace = DebugTrace(final_result=None)
+
+    record_attempt_from_result(
+        trace,
+        attempt_id=1,
+        retry_count=0,
+        phase="P0_BASELINE",
+        result=result,
+        transition_reason="UNKNOWN",
+        type_fix_result=None,
+        strategy_name="pairwise",
+    )
+
+    result_payload = result.to_dict()
+    trace_payload = trace.to_dict()
+
+    assert [
+        reason["reason_id"] for reason in result_payload["unknown_reasons"]
+    ] == [
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+        UnknownReasonId.NORMALIZATION_NO_CHANGE.value,
+    ]
+    assert [
+        reason["reason_id"]
+        for reason in trace_payload["attempts"][0]["unknown_reasons"]
+    ] == [
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+        UnknownReasonId.NORMALIZATION_NO_CHANGE.value,
+    ]
+    assert sum(trace_payload["unknown_reason_counts"].values()) == strategy_result.unknown_pairs
+    assert trace_payload["unknown_reason_counts"] == {
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
+        UnknownReasonId.NORMALIZATION_NO_CHANGE.value: 1,
+    }
+
+
+class _FakeStrategy:
+    def __init__(self, result: StrategyResult):
+        self.result = result
+
+    def check(self, *_args, **_kwargs):
+        return self.result
+
+
+def test_checker_check_bridges_strategy_unknown_reasons_to_equivalence_result():
+    strategy_result = StrategyResult(
+        is_equivalent=None,
+        solver_results=_unknown_solver_result(),
+        total_pairs=1,
+        unknown_pairs=1,
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            )
+        ],
+    )
+    checker = EquivalenceChecker(
+        timeout=1,
+        debug=False,
+        enable_rewrite=False,
+        strategy="pairwise",
+    )
+
+    result = checker.check(
+        create_mock_analysis("left"),
+        create_mock_analysis("right"),
+        "left.bin",
+        "right.bin",
+        force_strategy=_FakeStrategy(strategy_result),
+    )
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED.value
+    assert result.to_dict()["unknown_reasons"][0]["pair_or_case"] == "(0,0)"
+
+
+def test_unknown_by_reason_counts_primary_reason_once_per_pair():
+    trace = DebugTrace(final_result=None)
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        pairwise_stats={
+            "total_pairs": 1,
+            "unsat_pairs": 0,
+            "sat_pairs": 0,
+            "unknown_pairs": 1,
+            "error_pairs": 0,
+        },
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+            make_unknown_reason(
+                UnknownReasonId.NORMALIZATION_NO_CHANGE,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            ),
+        ],
+    )
+
+    record_attempt_from_result(
+        trace,
+        attempt_id=1,
+        retry_count=0,
+        phase="P0_BASELINE",
+        result=result,
+        transition_reason="UNKNOWN",
+        type_fix_result=None,
+        strategy_name="pairwise",
+    )
+
+    payload = trace.to_dict()
+
+    assert sum(payload["unknown_reason_counts"].values()) == result.pairwise_stats["unknown_pairs"]
+    assert payload["unknown_reason_counts"] == {
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
+    }
+    assert payload["observed_unknown_reason_counts"] == {
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
+        UnknownReasonId.NORMALIZATION_NO_CHANGE.value: 1,
+    }
+
+
+def test_intermediate_observed_unknown_reason_is_not_final_contributor():
+    trace = DebugTrace(final_result=True)
+    observed_unknown = EquivalenceResult(
+        is_equivalent=None,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        pairwise_stats={
+            "total_pairs": 1,
+            "unsat_pairs": 0,
+            "sat_pairs": 0,
+            "unknown_pairs": 1,
+            "error_pairs": 0,
+        },
+        unknown_reasons=[
+            make_unknown_reason(
+                UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                stage="S_PAIRWISE",
+                pair_or_case="(0,0)",
+            )
+        ],
+    )
+    final_equivalent = EquivalenceResult(
+        is_equivalent=True,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="mock",
+                    status=SolverStatus.UNSAT,
+                    elapsed_time=0.01,
+                )
+            ]
+        ),
+    )
+
+    record_attempt_from_result(
+        trace,
+        attempt_id=1,
+        retry_count=0,
+        phase="P0_BASELINE",
+        result=observed_unknown,
+        transition_reason="UNKNOWN",
+        type_fix_result=None,
+        strategy_name="pairwise",
+    )
+    record_attempt_from_result(
+        trace,
+        attempt_id=2,
+        retry_count=1,
+        phase="P1_RECOVERY",
+        result=final_equivalent,
+        transition_reason="UNSAT",
+        type_fix_result=None,
+        strategy_name="pairwise",
+    )
+
+    payload = trace.to_dict()
+
+    assert payload["observed_unknown_reason_counts"] == {
+        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
+    }
+    assert payload["unknown_reason_counts"] == {}

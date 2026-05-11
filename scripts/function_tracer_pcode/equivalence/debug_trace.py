@@ -287,18 +287,35 @@ class DebugTrace:
         return "\n".join(lines)
     
     def to_dict(self) -> Dict[str, Any]:
-        all_unknown_reasons = [
+        observed_unknown_reasons = [
             reason
             for attempt in self.attempts
             for reason in getattr(attempt, "unknown_reasons", []) or []
         ]
+        final_unknown_reasons = []
+        if self.final_result is None:
+            final_transition_reasons = {
+                TransitionReason.UNKNOWN.value,
+                TransitionReason.TIMEOUT.value,
+            }
+            for attempt in reversed(self.attempts):
+                if (
+                    attempt.result is None
+                    and attempt.transition_reason in final_transition_reasons
+                ):
+                    final_unknown_reasons = list(getattr(attempt, "unknown_reasons", []) or [])
+                    break
         return {
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "planned_phases": self.planned_phases,
             "known_phases": self.known_phases,
             "used_phases": self.get_used_phases(),
             "phase_usage": self.get_phase_usage(),
-            "unknown_reason_counts": summarize_unknown_reason_counts(all_unknown_reasons),
+            "unknown_reason_counts": summarize_unknown_reason_counts(
+                final_unknown_reasons,
+                primary_by_aggregation_unit=True,
+            ),
+            "observed_unknown_reason_counts": summarize_unknown_reason_counts(observed_unknown_reasons),
             "final_result": self.final_result,
             "total_time": self.total_time,
             "error_message": self.error_message,
