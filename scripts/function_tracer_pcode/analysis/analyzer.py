@@ -44,6 +44,7 @@ from .signedness import SignednessDetector
 from .effect_summary import (
     CanonicalLocation,
     EffectSummary,
+    CallArgumentEvidence,
     _build_parameter_replacements,
     _expression_location_ref,
     _expression_reads_location,
@@ -1815,8 +1816,6 @@ class ReturnAnalyzer:
         changed = False
         incomplete = False
         for info in analysis.deferred_calls.values():
-            if getattr(info, "arguments", None):
-                continue
             deferred_ref = getattr(info, "deferred_call_ref", None)
             pcode_ref = getattr(deferred_ref, "pcode_op_ref", None)
             stable_key_fn = getattr(pcode_ref, "stable_key", None)
@@ -1827,23 +1826,36 @@ class ReturnAnalyzer:
                 continue
             target_matches = getattr(call_evidence, "target_matches", None)
             target_match_ok = not callable(target_matches) or target_matches(getattr(info, "target_ref", None))
-            is_usable = getattr(call_evidence, "is_usable", None)
-            if not callable(is_usable) or not is_usable():
-                is_blocker = True
-                is_incomplete_blocker = getattr(call_evidence, "is_incomplete_blocker", None)
-                if callable(is_incomplete_blocker):
-                    is_blocker = bool(is_incomplete_blocker())
-                if not target_match_ok:
-                    is_blocker = True
-                if is_blocker:
-                    incomplete = True
-                continue
+            reason = getattr(call_evidence, "reason", None)
             if not target_match_ok:
+                status = CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+                is_blocker = True
+            else:
+                status = getattr(call_evidence, "recovery_status", CallArgumentEvidence.RECOVERY_INCONCLUSIVE)
+                if status not in {
+                    CallArgumentEvidence.RECOVERY_COMPLETE,
+                    CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+                    CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+                }:
+                    status = CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+            if status == CallArgumentEvidence.RECOVERY_COMPLETE:
+                args = getattr(call_evidence, "arguments", ())
+                info.arguments = [self._clone_expression(arg) for arg in args]
+                changed = True
+                is_blocker = False
+            elif status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL:
+                is_blocker = False
+            else:
+                status = CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+                is_blocker = True
+
+            if callable(getattr(info, "set_call_argument_recovery_state", None)):
+                info.set_call_argument_recovery_state(status, reason)
+            else:
+                info.call_argument_recovery_status = status
+                info.call_argument_recovery_reason = reason
+            if is_blocker:
                 incomplete = True
-                continue
-            args = getattr(call_evidence, "arguments", ())
-            info.arguments = [self._clone_expression(arg) for arg in args]
-            changed = True
         if changed and "effect_call_argument_evidence" not in analysis.analysis_notes:
             analysis.analysis_notes.append("effect_call_argument_evidence")
         if incomplete and "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes:
@@ -5501,6 +5513,16 @@ class ReturnAnalyzer:
                     else None
                 ),
                 deferred_call_ref=info.deferred_call_ref,
+                call_argument_recovery_status=getattr(
+                    info,
+                    "call_argument_recovery_status",
+                    CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+                ),
+                call_argument_recovery_reason=getattr(
+                    info,
+                    "call_argument_recovery_reason",
+                    None,
+                ),
             )
             specialized_deferred_calls[info.deferred_call_ref.stable_key()] = specialized_info
             original_to_specialized[info.deferred_call_ref.stable_key()] = specialized_info
@@ -5583,6 +5605,17 @@ class ReturnAnalyzer:
                 continue
             deferred_key = info.deferred_call_ref.stable_key()
             if deferred_key in self._current_deferred_calls:
+                existing = self._current_deferred_calls[deferred_key]
+                merged_status, merged_reason = self._merge_call_argument_recovery_state(
+                    getattr(existing, "call_argument_recovery_status", None),
+                    getattr(existing, "call_argument_recovery_reason", None),
+                    getattr(info, "call_argument_recovery_status", None),
+                    getattr(info, "call_argument_recovery_reason", None),
+                )
+                existing.set_call_argument_recovery_state(
+                    merged_status,
+                    merged_reason,
+                )
                 continue
 
             cloned_target_expr = (
@@ -5600,8 +5633,48 @@ class ReturnAnalyzer:
                     for arg in (info.arguments or [])
                 ],
                 call_target_expr=cloned_target_expr,
-                deferred_call_ref=info.deferred_call_ref,
-            )
+                    deferred_call_ref=info.deferred_call_ref,
+                    call_argument_recovery_status=getattr(
+                        info,
+                        "call_argument_recovery_status",
+                        CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+                    ),
+                    call_argument_recovery_reason=getattr(
+                        info,
+                        "call_argument_recovery_reason",
+                        None,
+                    ),
+                )
+
+    @staticmethod
+    def _merge_call_argument_recovery_state(
+        existing_status: Optional[str],
+        existing_reason: Optional[str],
+        incoming_status: Optional[str],
+        incoming_reason: Optional[str],
+    ) -> Tuple[str, Optional[str]]:
+        rank = {
+            CallArgumentEvidence.RECOVERY_COMPLETE: 0,
+            CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL: 1,
+            CallArgumentEvidence.RECOVERY_INCONCLUSIVE: 2,
+        }
+
+        def normalize_status(status: Optional[str]) -> str:
+            value = str(status or CallArgumentEvidence.RECOVERY_INCONCLUSIVE)
+            return value if value in rank else CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
+        existing_norm = normalize_status(existing_status)
+        incoming_norm = normalize_status(incoming_status)
+        existing_rank = rank[existing_norm]
+        incoming_rank = rank[incoming_norm]
+
+        if incoming_rank > existing_rank:
+            return incoming_norm, incoming_reason or existing_reason
+        if existing_rank > incoming_rank:
+            return existing_norm, existing_reason
+        if (existing_reason is None) and (incoming_reason is not None):
+            return incoming_norm, incoming_reason
+        return existing_norm, existing_reason
 
     def _normalize_call_target_expression(
         self,

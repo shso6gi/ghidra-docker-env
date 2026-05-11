@@ -97,7 +97,7 @@ class PcodeTracer:
         self.high_function = high_function
         self.debug = debug
         self.record_deferred_call: Optional[
-            Callable[[Any, List[Expression], Optional[Expression]], Any]
+            Callable[[Any, List[Expression], Optional[Expression], Optional[PcodeOpRef]], Any]
         ] = None
         self._debug_message_limit = 4000
         self._debug_message_count = 0
@@ -126,6 +126,30 @@ class PcodeTracer:
         self._parameter_descriptors = self._collect_parameter_descriptors()
         
         self._collect_debug_info()
+
+    def _record_deferred_call(
+        self,
+        target_ref: CallTargetRef,
+        args: List[Expression],
+        call_target_expr: Optional[Expression],
+        pcode_op_ref: Optional[PcodeOpRef],
+    ):
+        if self.record_deferred_call is None:
+            return None
+        try:
+            return self.record_deferred_call(
+                target_ref,
+                args,
+                call_target_expr,
+                pcode_op_ref,
+            )
+        except TypeError:
+            try:
+                return self.record_deferred_call(target_ref, args, call_target_expr)
+            except Exception:
+                return None
+        except Exception:
+            return None
 
     def _clone_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:
@@ -538,14 +562,12 @@ class PcodeTracer:
                 depth,
                 use_cache,
             )
-            try:
-                recorded = self.record_deferred_call(
-                    target_ref,
-                    deferred_args,
-                    deferred_target_expr,
-                )
-            except Exception:
-                recorded = None
+            recorded = self._record_deferred_call(
+                target_ref,
+                deferred_args,
+                deferred_target_expr,
+                self._make_pcode_op_ref(pcode_op),
+            )
             if isinstance(recorded, str):
                 display_name = recorded
             else:

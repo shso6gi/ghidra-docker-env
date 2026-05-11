@@ -84,6 +84,21 @@ class CheckStrategy(ABC):
                 reasons.append(f"{label}:{reason}")
         return reasons
 
+    def _collect_equivalence_blocking_unsafety_reasons(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> List[str]:
+        """UNSAT を final EQUIVALENT と確定するには危険な解析要因を収集する。"""
+        reasons: List[str] = []
+        for label, analysis in (("function1", analysis1), ("function2", analysis2)):
+            getter = getattr(analysis, "get_equivalence_blocking_unsafety_reasons", None)
+            if not callable(getter):
+                continue
+            for reason in getter():
+                reasons.append(f"{label}:{reason}")
+        return reasons
+
     def _collect_return_coverage_unsafety_reasons(
         self,
         base_ctx: Dict[str, Any],

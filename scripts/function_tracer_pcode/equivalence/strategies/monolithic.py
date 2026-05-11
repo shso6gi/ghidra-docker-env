@@ -197,6 +197,10 @@ class MonolithicStrategy(CheckStrategy):
                 analysis1,
                 analysis2,
             )
+            equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(
+                analysis1,
+                analysis2,
+            )
             if final_is_equivalent is False:
                 hints1 = infer_parameter_semantics(analysis1)
                 hints2 = infer_parameter_semantics(analysis2)
@@ -232,6 +236,12 @@ class MonolithicStrategy(CheckStrategy):
                         replace2,
                     )
                 )
+            if final_is_equivalent is True and equivalence_blocking_reasons:
+                self._debug_print(
+                    "Monolithic UNSAT downgraded to UNKNOWN due to incomplete effect analysis "
+                    f"({', '.join(equivalence_blocking_reasons)})"
+                )
+                final_is_equivalent = None
             if final_is_equivalent is False and sat_unsafety_reasons:
                 self._debug_print(
                     "Monolithic SAT downgraded to UNKNOWN due to unsafe analysis summary "

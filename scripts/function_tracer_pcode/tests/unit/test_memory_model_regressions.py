@@ -3313,11 +3313,171 @@ def test_incomplete_call_argument_evidence_is_not_applied_to_deferred_call():
     ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
 
     assert deferred.arguments == []
+    assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+    assert deferred.call_argument_recovery_reason == "argument_recovery_incomplete"
     assert "effect_call_argument_evidence_incomplete" in analysis.analysis_notes
 
 
 def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_blocker():
     pcode_ref = PcodeOpRef(address_offset=0x1008, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.parameter("existing_arg", 0, size=4)],
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee"),
+            sequence=0,
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        call_argument_evidence={
+            pcode_ref.stable_key(): CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.from_name("callee"),
+                callee_param_identities=(("parameter", 0), ("parameter", 1)),
+                arguments=(Expression.parameter("param_1", 0, size=4),),
+                sources=("explicit_input",),
+                path_conditions=((),),
+                coverage_complete=False,
+                recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+                reason="argument_recovery_recoverable_partial",
+            )
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert len(deferred.arguments) == 1
+    assert deferred.arguments[0].to_dict() == Expression.parameter("existing_arg", 0, size=4).to_dict()
+    assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    assert deferred.call_argument_recovery_reason == "argument_recovery_recoverable_partial"
+    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
+    assert "effect_call_argument_evidence" not in analysis.analysis_notes
+
+
+def test_inconclusive_call_argument_evidence_marks_existing_recovered_args_inconclusive():
+    pcode_ref = PcodeOpRef(address_offset=0x1011, seq_time=1, seq_order=1, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.parameter("param_1", 0, size=4)],
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee"),
+            sequence=0,
+        ),
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        call_argument_evidence={
+            pcode_ref.stable_key(): CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.from_name("callee"),
+                callee_param_identities=(("parameter", 0),),
+                arguments=(),
+                sources=(),
+                path_conditions=((),),
+                coverage_complete=False,
+                reason="argument_recovery_incomplete",
+            )
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert len(deferred.arguments) == 1
+    assert deferred.arguments[0].to_dict() == Expression.parameter("param_1", 0, size=4).to_dict()
+    assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+    assert deferred.call_argument_recovery_reason == "argument_recovery_incomplete"
+    assert "effect_call_argument_evidence_incomplete" in analysis.analysis_notes
+
+
+def test_complete_call_argument_evidence_is_applied_to_deferred_call_and_marked_complete():
+    pcode_ref = PcodeOpRef(address_offset=0x1018, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee"),
+            sequence=0,
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        call_argument_evidence={
+            pcode_ref.stable_key(): CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.from_name("callee"),
+                callee_param_identities=(("parameter", 0),),
+                arguments=(Expression.parameter("param_1", 0, size=4),),
+                sources=("explicit_input",),
+                path_conditions=((),),
+                coverage_complete=True,
+            )
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert deferred.arguments == [Expression.parameter("param_1", 0, size=4)]
+    assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
+    assert deferred.call_argument_recovery_reason is None
+    assert "effect_call_argument_evidence" in analysis.analysis_notes
+    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
+
+
+def test_deferred_call_default_recovery_status_is_inconclusive_without_proof():
+    deferred_with_args = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.parameter("param_1", 0, size=4)],
+    )
+    assert deferred_with_args.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
+    deferred_without_args = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#1",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[],
+    )
+    assert deferred_without_args.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
+    deferred_unknown_args = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#2",
+        target_ref=CallTargetRef.from_name("callee"),
+    )
+    assert deferred_unknown_args.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
+
+def test_recoverable_partial_call_argument_evidence_state_is_not_decisive():
+    pcode_ref = PcodeOpRef(address_offset=0x1010, seq_time=1, seq_order=0, mnemonic="CALL")
     deferred = DeferredCallInfo(
         placeholder_name="call_out_of_scope:callee#0",
         target_ref=CallTargetRef.from_name("callee"),
@@ -3354,9 +3514,79 @@ def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_b
 
     ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
 
-    assert deferred.arguments == []
-    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
-    assert "effect_call_argument_evidence" not in analysis.analysis_notes
+    assert "effect_call_argument_evidence_incomplete" not in analysis.get_decisive_sat_unsafety_reasons()
+    assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    assert deferred.call_argument_recovery_reason == "argument_recovery_recoverable_partial"
+
+
+def test_call_argument_recovery_state_survives_specialize_and_merge_deferred_call_flow():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.parameter("param_1", 0, size=4)],
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+        call_argument_recovery_reason="argument_recovery_recoverable_partial",
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x2000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+        returns=[],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    specialized = analyzer._specialize_call_analysis(
+        analysis,
+        [Expression.parameter("specialized_param_1", 0, size=4)],
+    )
+    specialized_deferred = next(iter(specialized.deferred_calls.values()))
+    assert specialized_deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    assert (
+        specialized_deferred.call_argument_recovery_reason
+        == "argument_recovery_recoverable_partial"
+    )
+
+    analyzer._current_deferred_calls = {}
+    analyzer._merge_deferred_calls_into_current_analysis(specialized.deferred_calls)
+    merged = next(iter(analyzer._current_deferred_calls.values()))
+    assert merged.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    assert merged.call_argument_recovery_reason == "argument_recovery_recoverable_partial"
+
+
+def test_merge_deferred_calls_into_current_analysis_preserves_most_conservative_state():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x2020, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred_ref = DeferredCallRef(
+        pcode_op_ref=pcode_ref,
+        target_ref=CallTargetRef.from_name("callee"),
+        sequence=0,
+    )
+    analyzer._current_deferred_calls = {
+        deferred_ref.stable_key(): DeferredCallInfo(
+            placeholder_name="call_out_of_scope:callee#0",
+            target_ref=CallTargetRef.from_name("callee"),
+            arguments=[Expression.parameter("known", 0, size=4)],
+            deferred_call_ref=deferred_ref,
+            call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+        )
+    }
+    analyzer._merge_deferred_calls_into_current_analysis(
+        {
+            deferred_ref.stable_key(): DeferredCallInfo(
+                placeholder_name="call_out_of_scope:callee#0",
+                target_ref=CallTargetRef.from_name("callee"),
+                arguments=[],
+                deferred_call_ref=deferred_ref,
+                call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+                call_argument_recovery_reason="argument_recovery_inconclusive",
+            )
+        }
+    )
+
+    merged = next(iter(analyzer._current_deferred_calls.values()))
+    assert merged.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+    assert merged.call_argument_recovery_reason == "argument_recovery_inconclusive"
 
 
 def test_tri_state_call_argument_evidence_merge_preserves_usable_evidence():

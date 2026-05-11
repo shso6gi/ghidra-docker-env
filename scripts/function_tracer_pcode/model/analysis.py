@@ -64,6 +64,14 @@ class DeferredCallInfo:
     arguments: List["Expression"] = field(default_factory=list)
     call_target_expr: Optional["Expression"]
     display_hint: Optional[str]
+    call_argument_recovery_status: str = "inconclusive"
+    call_argument_recovery_reason: Optional[str] = None
+
+    _VALID_CALL_ARGUMENT_RECOVERY_STATUSES = {
+        "complete",
+        "recoverable_partial",
+        "inconclusive",
+    }
 
     def __init__(
         self,
@@ -73,7 +81,11 @@ class DeferredCallInfo:
         call_target_expr: Optional["Expression"] = None,
         sequence: Optional[int] = None,
         deferred_call_ref: Optional[DeferredCallRef] = None,
+        call_argument_recovery_status: Optional[str] = None,
+        call_argument_recovery_reason: Optional[str] = None,
     ) -> None:
+        if call_argument_recovery_status is None:
+            call_argument_recovery_status = "inconclusive"
         normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
         self.deferred_call_ref = deferred_call_ref or DeferredCallRef(
             target_ref=normalized,
@@ -83,10 +95,47 @@ class DeferredCallInfo:
         self.arguments = list(arguments or [])
         self.call_target_expr = call_target_expr
         self.display_hint = placeholder_name or self.deferred_call_ref.display_name()
+        self.call_argument_recovery_status = self._normalize_call_argument_recovery_status(
+            call_argument_recovery_status
+        )
+        self.call_argument_recovery_reason = call_argument_recovery_reason
 
     @property
     def placeholder_name(self) -> str:
         return self.display_hint or self.deferred_call_ref.display_name()
+
+    @staticmethod
+    def _normalize_call_argument_recovery_status(status: object) -> str:
+        raw_status = str(status or "inconclusive")
+        return raw_status if raw_status in DeferredCallInfo._VALID_CALL_ARGUMENT_RECOVERY_STATUSES else "inconclusive"
+
+    def set_call_argument_recovery_state(
+        self,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        self.call_argument_recovery_status = self._normalize_call_argument_recovery_status(
+            status
+        )
+        self.call_argument_recovery_reason = reason
+
+    def call_argument_recovery_is_complete(self) -> bool:
+        return (
+            self.call_argument_recovery_status
+            == "complete"
+        )
+
+    def call_argument_recovery_is_recoverable_partial(self) -> bool:
+        return (
+            self.call_argument_recovery_status
+            == "recoverable_partial"
+        )
+
+    def call_argument_recovery_is_incomplete(self) -> bool:
+        return (
+            self.call_argument_recovery_status
+            == "inconclusive"
+        )
 
     @property
     def sequence(self) -> Optional[int]:
@@ -132,6 +181,8 @@ class DeferredCallInfo:
             "target_ref": self.target_ref.to_dict(),
             "unknown_ref": self.unknown_ref.to_dict(),
             "arguments": [arg.to_dict() for arg in self.arguments],
+            "call_argument_recovery_status": self.call_argument_recovery_status,
+            "call_argument_recovery_reason": self.call_argument_recovery_reason,
         }
         if self.call_target_expr is not None:
             result["call_target_expr"] = self.call_target_expr.to_dict()
@@ -872,6 +923,18 @@ class FunctionReturnAnalysis:
             } and note not in reasons:
                 reasons.append(note)
 
+        if (
+            "effect_call_argument_evidence_incomplete" not in reasons
+            and getattr(self, "deferred_calls", None)
+        ):
+            for deferred_call in self.deferred_calls.values():
+                if (
+                    getattr(deferred_call, "call_argument_recovery_status", None)
+                    == "inconclusive"
+                ):
+                    reasons.append("effect_call_argument_evidence_incomplete")
+                    break
+
         return reasons
 
     def get_equivalence_blocking_unsafety_reasons(self) -> List[str]:
@@ -897,8 +960,21 @@ class FunctionReturnAnalysis:
         for note in self.analysis_notes:
             if note in {
                 "effect_summary_path_coverage_incomplete",
+                "effect_call_argument_evidence_incomplete",
             } and note not in reasons:
                 reasons.append(note)
+
+        if (
+            "effect_call_argument_evidence_incomplete" not in reasons
+            and getattr(self, "deferred_calls", None)
+        ):
+            for deferred_call in self.deferred_calls.values():
+                if (
+                    getattr(deferred_call, "call_argument_recovery_status", None)
+                    == "inconclusive"
+                ):
+                    reasons.append("effect_call_argument_evidence_incomplete")
+                    break
         return reasons
 
     def _expr_bit_width(self, expr) -> int:
