@@ -1378,6 +1378,43 @@ def _bias_key(value: int, result_size: int) -> Tuple[int, int]:
     return bits, int(value) % (1 << bits)
 
 
+def _normalize_storage_identity_key(value: Optional[Tuple[Any, ...]]) -> Optional[Tuple[Any, ...]]:
+    if value is None:
+        return None
+    return tuple(value)
+
+
+def _count_parameter_semantic_identity(
+    *,
+    count_parameter_index: Optional[int],
+    count_parameter_storage_identity_key: Optional[Tuple[Any, ...]],
+) -> Optional[Tuple[Any, ...]]:
+    identities = _count_parameter_semantic_identities(
+        count_parameter_index=count_parameter_index,
+        count_parameter_storage_identity_key=count_parameter_storage_identity_key,
+    )
+    return identities[0] if identities else None
+
+
+def _count_parameter_semantic_identities(
+    *,
+    count_parameter_index: Optional[int],
+    count_parameter_storage_identity_key: Optional[Tuple[Any, ...]],
+) -> Tuple[Tuple[Any, ...], ...]:
+    identities = []
+    storage_key = _normalize_storage_identity_key(count_parameter_storage_identity_key)
+    if storage_key is not None:
+        identities.append(("parameter_storage", storage_key))
+    if count_parameter_index is not None:
+        try:
+            index = int(count_parameter_index)
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            identities.append(("parameter", index))
+    return tuple(identities)
+
+
 @dataclass(frozen=True)
 class LoopSummaryRef:
     """Unified semantic loop summary shared by all recurrence summaries.
@@ -2005,7 +2042,7 @@ class ReductionAccumulatorProof:
             object.__setattr__(
                 self,
                 "count_parameter_storage_identity_key",
-                tuple(self.count_parameter_storage_identity_key),
+                _normalize_storage_identity_key(self.count_parameter_storage_identity_key),
             )
         object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
         lane_terms = tuple(
@@ -2126,7 +2163,17 @@ class ReductionAccumulatorProof:
         if self.side_effect_profile.requires_effect_proof():
             return None
         pointer_key = self.pointer_base_ref.semantic_key()
+        count_identity = self.count_parameter_semantic_identity()
+        if count_identity is None:
+            return None
         limit_key = _loop_summary_limit_semantic_key(self.limit_expr)
+        if limit_key is None:
+            count_storage_key = _normalize_storage_identity_key(
+                self.count_parameter_storage_identity_key
+            )
+            if count_storage_key is None:
+                return None
+            limit_key = ("loop_limit_count_storage_identity", count_storage_key)
         side_effect_key = self.side_effect_profile.semantic_key()
         if pointer_key is None or limit_key is None or side_effect_key is None:
             return None
@@ -2152,6 +2199,7 @@ class ReductionAccumulatorProof:
             "readonly_reduction_term_sequence_contract",
             self.reduction_kind,
             pointer_key,
+            count_identity,
             limit_key,
             max(1, int(target_result_size)),
             int(canonical_start),
@@ -2175,6 +2223,18 @@ class ReductionAccumulatorProof:
         if target_result_size < proof_result_size and self.reduction_kind not in {"sum", "memory_sum"}:
             return None
         return target_result_size
+
+    def count_parameter_semantic_identity(self) -> Optional[Tuple[Any, ...]]:
+        return _count_parameter_semantic_identity(
+            count_parameter_index=self.count_parameter_index,
+            count_parameter_storage_identity_key=self.count_parameter_storage_identity_key,
+        )
+
+    def count_parameter_semantic_identities(self) -> Tuple[Tuple[Any, ...], ...]:
+        return _count_parameter_semantic_identities(
+            count_parameter_index=self.count_parameter_index,
+            count_parameter_storage_identity_key=self.count_parameter_storage_identity_key,
+        )
 
     def _readonly_contract_scalar_geometry(
         self,
@@ -2884,7 +2944,7 @@ class ReadonlyReductionRef:
             object.__setattr__(
                 self,
                 "count_parameter_storage_identity_key",
-                tuple(self.count_parameter_storage_identity_key),
+                _normalize_storage_identity_key(self.count_parameter_storage_identity_key),
             )
         source_biases = []
         if loop_summary is not None:
@@ -2994,7 +3054,7 @@ class ReadonlyReductionRef:
         )
         if proof_key is not None:
             pointer_identity = self.pointer_base_ref.semantic_key()
-            count_identity = self._count_parameter_semantic_identity()
+            count_identity = self.count_parameter_semantic_identity()
             if pointer_identity is None or count_identity is None:
                 return None
             return (
@@ -3011,7 +3071,7 @@ class ReadonlyReductionRef:
             if loop_key is None:
                 return None
             pointer_identity = self.pointer_base_ref.semantic_key()
-            count_identity = self._count_parameter_semantic_identity()
+            count_identity = self.count_parameter_semantic_identity()
             if pointer_identity is None or count_identity is None:
                 return None
             return (
@@ -3027,7 +3087,7 @@ class ReadonlyReductionRef:
         if witness_prefix is None:
             return None
         pointer_identity = self.pointer_base_ref.semantic_key()
-        count_identity = self._count_parameter_semantic_identity()
+        count_identity = self.count_parameter_semantic_identity()
         if pointer_identity is None or count_identity is None:
             return None
         return (
@@ -3041,18 +3101,20 @@ class ReadonlyReductionRef:
             tuple(witness.stable_key() for witness in witness_prefix),
         )
 
+    def count_parameter_semantic_identity(self) -> Optional[Tuple[Any, ...]]:
+        return _count_parameter_semantic_identity(
+            count_parameter_index=self.count_parameter_index,
+            count_parameter_storage_identity_key=self.count_parameter_storage_identity_key,
+        )
+
+    def count_parameter_semantic_identities(self) -> Tuple[Tuple[Any, ...], ...]:
+        return _count_parameter_semantic_identities(
+            count_parameter_index=self.count_parameter_index,
+            count_parameter_storage_identity_key=self.count_parameter_storage_identity_key,
+        )
+
     def _count_parameter_semantic_identity(self) -> Optional[Tuple[Any, ...]]:
-        if self.count_parameter_storage_identity_key is not None:
-            return ("parameter_storage", self.count_parameter_storage_identity_key)
-        if self.count_parameter_index is None:
-            return None
-        try:
-            index = int(self.count_parameter_index)
-        except (TypeError, ValueError):
-            return None
-        if index < 0:
-            return None
-        return ("parameter", index)
+        return self.count_parameter_semantic_identity()
 
     def readonly_term_sequence_specificity_score(self) -> int:
         """Relative precision of this readonly reduction contract."""

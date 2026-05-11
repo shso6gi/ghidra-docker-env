@@ -1411,13 +1411,17 @@ class StructuralRecurrenceSummarizer:
         self,
         expr: Expression,
     ) -> dict:
-        return {
+        result = {
             "name": str(getattr(expr, "name", None) or ""),
             "index": int(getattr(expr, "value", -1) or -1),
             "size": max(1, int(getattr(expr, "size", 0) or 4)),
             "data_type": getattr(expr, "data_type", None),
             "is_signed": bool(getattr(expr, "is_signed", True)),
         }
+        storage_info = getattr(expr, "storage_info", None)
+        if storage_info is not None:
+            result["storage_info"] = storage_info
+        return result
 
     def _summary_storage_identity_key(self, storage_info) -> Optional[Tuple[Any, ...]]:
         if isinstance(storage_info, dict):
@@ -1432,6 +1436,54 @@ class StructuralRecurrenceSummarizer:
             except (AttributeError, TypeError, ValueError):
                 return None
         return None
+
+    def _summary_storage_info_from_parameter(self, param: dict) -> Optional[StorageInfo]:
+        storage_info = param.get("storage_info", param.get("storage")) if isinstance(param, dict) else None
+        if isinstance(storage_info, StorageInfo):
+            return storage_info
+        if isinstance(storage_info, dict):
+            try:
+                return StorageInfo(**storage_info)
+            except Exception:
+                return None
+        return None
+
+    def _parameter_storage_identity_key(self, param: dict) -> Optional[Tuple[Any, ...]]:
+        return self._summary_storage_identity_key(
+            param.get("storage_info", param.get("storage")) if isinstance(param, dict) else None
+        )
+
+    def _location_base_ref_from_parameter(self, param: dict, *, default_name: str) -> LocationBaseRef:
+        name = param.get("name", default_name) if isinstance(param, dict) else default_name
+        try:
+            index = int(param.get("index")) if isinstance(param, dict) and param.get("index") is not None else None
+        except (TypeError, ValueError):
+            index = None
+        if index is not None and index >= 0:
+            return LocationBaseRef.parameter(
+                name,
+                index=index,
+                owner_program_id=param.get("owner_program_id") if isinstance(param, dict) else None,
+                owner_entry_offset=param.get("owner_entry_offset") if isinstance(param, dict) else None,
+            )
+        storage_info = self._summary_storage_info_from_parameter(param if isinstance(param, dict) else {})
+        storage_key = self._summary_storage_identity_key(storage_info)
+        if storage_info is not None and storage_key is not None:
+            offset = (
+                int(getattr(storage_info, "base_register_offset", 0) or 0)
+                if bool(getattr(storage_info, "is_register", False))
+                else int(getattr(storage_info, "offset", 0) or 0)
+            )
+            size = max(1, int(getattr(storage_info, "size", 0) or 0))
+            return LocationBaseRef.storage(
+                space_id=getattr(storage_info, "space_id", None),
+                space_name=getattr(storage_info, "space_name", None),
+                offset=offset,
+                size=size,
+                storage_identity_key=storage_key,
+                display_hint=name,
+            )
+        return LocationBaseRef.parameter(name, index=None)
 
     def _summary_symbol_identity_sort_key(self, identity) -> Tuple[int, str]:
         if not isinstance(identity, tuple) or not identity:
@@ -6159,12 +6211,7 @@ class StructuralRecurrenceSummarizer:
     ) -> List[ReductionAccumulatorProof]:
         if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
             return []
-        pointer_base_ref = LocationBaseRef.parameter(
-            pointer_param.get("name", "ptr"),
-            index=pointer_param.get("index"),
-            owner_program_id=pointer_param.get("owner_program_id"),
-            owner_entry_offset=pointer_param.get("owner_entry_offset"),
-        )
+        pointer_base_ref = self._location_base_ref_from_parameter(pointer_param, default_name="ptr")
         count_expr = self._parameter_expression(count_param)
         all_ops = list(self._iter_pcode_ops(high_function))
         pointer_phis: List[Dict[str, object]] = []
@@ -8196,12 +8243,7 @@ class StructuralRecurrenceSummarizer:
             return []
         pointer_phis: List[Dict[str, object]] = []
         index_phis: List[Dict[str, object]] = []
-        pointer_base_ref = LocationBaseRef.parameter(
-            pointer_param.get("name", "ptr"),
-            index=pointer_param.get("index"),
-            owner_program_id=pointer_param.get("owner_program_id"),
-            owner_entry_offset=pointer_param.get("owner_entry_offset"),
-        )
+        pointer_base_ref = self._location_base_ref_from_parameter(pointer_param, default_name="ptr")
         count_expr = self._parameter_expression(count_param)
         result_size = self._readonly_reduction_result_size(
             analysis,
@@ -8470,6 +8512,7 @@ class StructuralRecurrenceSummarizer:
                 pointer_base_ref=pointer_base_ref,
                 count_parameter_name=count_param.get("name", "count"),
                 count_parameter_index=count_param.get("index"),
+                count_parameter_storage_identity_key=self._parameter_storage_identity_key(count_param),
                 limit_expr=count_expr,
                 result_size=max(1, int(result_size)),
                 stride=int(result_size),
@@ -12198,6 +12241,7 @@ class StructuralRecurrenceSummarizer:
             pointer_base_ref=pointer_base_ref,
             count_parameter_name=count_param.get("name", "count"),
             count_parameter_index=count_param.get("index"),
+            count_parameter_storage_identity_key=self._parameter_storage_identity_key(count_param),
             limit_expr=count_expr,
             result_size=max(1, int(result_size or first["element_size"])),
             stride=int(first["stride"]),
@@ -14441,15 +14485,14 @@ class StructuralRecurrenceSummarizer:
 
     def _parameter_expression(self, param_info: dict) -> Expression:
         size = int(param_info.get("size") or 4)
-        storage_info = param_info.get("storage_info", param_info.get("storage"))
-        if isinstance(storage_info, dict):
-            try:
-                storage_info = StorageInfo(**storage_info)
-            except Exception:
-                storage_info = None
+        storage_info = self._summary_storage_info_from_parameter(param_info)
+        try:
+            index = int(param_info.get("index")) if param_info.get("index") is not None else -1
+        except (TypeError, ValueError):
+            index = -1
         return Expression.parameter(
             param_info.get("name", "param_1"),
-            index=int(param_info.get("index", 0)),
+            index=index,
             data_type=param_info.get("data_type"),
             data_type_obj=param_info.get("data_type_obj"),
             size=size,

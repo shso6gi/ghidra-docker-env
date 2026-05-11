@@ -39,6 +39,8 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise import Pairwi
 from scripts.function_tracer_pcode.equivalence.strategies import pairwise as pairwise_module
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import build_pair_query
+from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.returns import _readonly_refs_share_surface
 from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
@@ -395,6 +397,213 @@ def test_storage_backed_pointer_and_count_identity_participates_in_readonly_shor
 
     assert decision.equivalent is True
     assert decision.reason == "readonly_reduction_contract"
+
+
+def test_storage_backed_count_identity_is_public_serialized_and_contract_keyed():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    count_storage_key = count_storage.storage_identity_key()
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="renamed_count",
+        count_parameter_index=None,
+        count_parameter_storage_identity_key=count_storage_key,
+        limit_expr=Expression.parameter("renamed_count", data_type="int", size=4),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    )
+    readonly_ref = proof.lower_to_readonly_reduction_ref()
+
+    assert proof.count_parameter_semantic_identity() == ("parameter_storage", count_storage_key)
+    assert proof.readonly_term_sequence_contract_key() is not None
+    assert proof.to_dict()["count_parameter_storage_identity_key"] == count_storage_key
+    assert readonly_ref is not None
+    assert readonly_ref.count_parameter_semantic_identity() == ("parameter_storage", count_storage_key)
+    assert readonly_ref.count_parameter_semantic_identities() == (
+        ("parameter_storage", count_storage_key),
+    )
+    assert readonly_ref.semantic_key() is not None
+    assert readonly_ref.to_dict()["count_parameter_storage_identity_key"] == count_storage_key
+
+
+def test_storage_backed_count_identity_keeps_index_backcompat_for_readonly_consumers():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    count_storage_key = count_storage.storage_identity_key()
+    count_with_storage = Expression.parameter(
+        "renamed_count",
+        index=1,
+        data_type="int",
+        size=4,
+        storage_info=count_storage,
+    )
+    storage_backed_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="renamed_count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage_key,
+        limit_expr=count_with_storage,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    legacy_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    indexed_operand_without_storage = Expression.parameter("count", index=1, data_type="int", size=4)
+    builder = FormulaBuilder()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert storage_backed_ref is not None
+    assert legacy_ref is not None
+    assert storage_backed_ref.count_parameter_semantic_identity() == (
+        "parameter_storage",
+        count_storage_key,
+    )
+    assert storage_backed_ref.count_parameter_semantic_identities() == (
+        ("parameter_storage", count_storage_key),
+        ("parameter", 1),
+    )
+    assert builder._readonly_count_operand_matches_ref(
+        indexed_operand_without_storage,
+        storage_backed_ref,
+    )
+    assert strategy._readonly_count_identities_compatible(storage_backed_ref, legacy_ref)
+    assert _readonly_refs_share_surface(storage_backed_ref, legacy_ref)
+    storage_contract = storage_backed_ref.readonly_term_sequence_contract_key(result_size=4)
+    legacy_contract = legacy_ref.readonly_term_sequence_contract_key(result_size=4)
+    assert storage_contract is not None
+    assert legacy_contract is not None
+    assert storage_contract != legacy_contract
+    assert strategy._readonly_reduction_contract_shortcut_decision(
+        storage_backed_ref,
+        legacy_ref,
+        requires_guard_equivalence=False,
+        result_size=4,
+    ).equivalent
+
+
+def test_storage_backed_count_identity_conflict_rejects_index_fallback():
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    other_count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a2",
+        base_register_name="a2",
+        size=4,
+        size_bits=32,
+    )
+    count_storage_key = count_storage.storage_identity_key()
+    other_count_storage_key = other_count_storage.storage_identity_key()
+    left_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="left_count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=count_storage_key,
+        limit_expr=Expression.parameter(
+            "left_count",
+            index=1,
+            data_type="int",
+            size=4,
+            storage_info=count_storage,
+        ),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    right_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="right_count",
+        count_parameter_index=1,
+        count_parameter_storage_identity_key=other_count_storage_key,
+        limit_expr=Expression.parameter(
+            "right_count",
+            index=1,
+            data_type="int",
+            size=4,
+            storage_info=other_count_storage,
+        ),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+    ).lower_to_readonly_reduction_ref()
+    conflicting_operand = Expression.parameter(
+        "right_count",
+        index=1,
+        data_type="int",
+        size=4,
+        storage_info=other_count_storage,
+    )
+    builder = FormulaBuilder()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert left_ref is not None
+    assert right_ref is not None
+    assert not builder._readonly_count_operand_matches_ref(conflicting_operand, left_ref)
+    assert not _readonly_refs_share_surface(left_ref, right_ref)
+    assert not strategy._readonly_count_identities_compatible(left_ref, right_ref)
+    conflicting_parameters = [
+        {
+            "name": "right_count",
+            "index": 1,
+            "data_type": "int",
+            "size": 4,
+            "storage_info": other_count_storage,
+        }
+    ]
+    assert strategy._reduction_count_parameter_descriptor(
+        conflicting_parameters,
+        left_ref.accumulator_proof,
+    ) is None
+    assert strategy._reduction_count_parameter_expression(
+        conflicting_parameters,
+        left_ref.accumulator_proof,
+        32,
+    ) is None
+    decision = strategy._readonly_reduction_contract_shortcut_decision(
+        left_ref,
+        right_ref,
+        requires_guard_equivalence=False,
+        result_size=4,
+    )
+    assert not decision.equivalent
+    assert decision.reason == "readonly_contract_mismatch"
 
 
 def test_pairwise_parameter_identity_key_refuses_descriptor_name_fallback():

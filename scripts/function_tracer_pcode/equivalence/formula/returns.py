@@ -394,6 +394,14 @@ def _readonly_ref_from_value(value) -> Optional[ReadonlyReductionRef]:
 
 
 def _readonly_ref_count_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
+    identity_fn = getattr(ref, "count_parameter_semantic_identity", None)
+    if callable(identity_fn):
+        try:
+            identity = identity_fn()
+        except (TypeError, ValueError):
+            identity = None
+        if identity is not None:
+            return identity
     identity_fn = getattr(ref, "_count_parameter_semantic_identity", None)
     if callable(identity_fn):
         try:
@@ -413,6 +421,59 @@ def _readonly_ref_count_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[ob
     return ("parameter", index)
 
 
+def _readonly_ref_count_identities(ref: ReadonlyReductionRef) -> set[Tuple[object, ...]]:
+    identities: set[Tuple[object, ...]] = set()
+    identities_fn = getattr(ref, "count_parameter_semantic_identities", None)
+    if callable(identities_fn):
+        try:
+            identities.update(tuple(identity) for identity in identities_fn() if identity is not None)
+        except (TypeError, ValueError):
+            pass
+    identity = _readonly_ref_count_identity(ref)
+    if identity is not None:
+        identities.add(tuple(identity))
+    storage_key = getattr(ref, "count_parameter_storage_identity_key", None)
+    if storage_key is not None:
+        identities.add(("parameter_storage", tuple(storage_key)))
+    try:
+        index = getattr(ref, "count_parameter_index", None)
+        if index is not None and int(index) >= 0:
+            identities.add(("parameter", int(index)))
+    except (TypeError, ValueError):
+        pass
+    return identities
+
+
+def _readonly_ref_count_storage_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
+    storage_key = getattr(ref, "count_parameter_storage_identity_key", None)
+    if storage_key is None:
+        return None
+    return ("parameter_storage", tuple(storage_key))
+
+
+def _readonly_ref_count_index_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
+    index = getattr(ref, "count_parameter_index", None)
+    try:
+        if index is not None and int(index) >= 0:
+            return ("parameter", int(index))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _readonly_refs_count_identity_compatible(
+    left: ReadonlyReductionRef,
+    right: ReadonlyReductionRef,
+) -> bool:
+    left_storage = _readonly_ref_count_storage_identity(left)
+    right_storage = _readonly_ref_count_storage_identity(right)
+    if left_storage is not None and right_storage is not None:
+        return left_storage == right_storage
+    left_index = _readonly_ref_count_index_identity(left)
+    right_index = _readonly_ref_count_index_identity(right)
+    return left_index is not None and right_index is not None and left_index == right_index
+
+
 def _readonly_ref_surface_key(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
     pointer_key = ref.pointer_base_ref.semantic_key()
     if pointer_key is None:
@@ -428,6 +489,22 @@ def _readonly_ref_surface_key(ref: ReadonlyReductionRef) -> Optional[Tuple[objec
         max(1, int(ref.result_size or 0)),
         bool(ref.signed_counter),
         int(getattr(ref, "constant_bias", 0) or 0),
+    )
+
+
+def _readonly_refs_share_surface(left: ReadonlyReductionRef, right: ReadonlyReductionRef) -> bool:
+    left_pointer = left.pointer_base_ref.semantic_key()
+    right_pointer = right.pointer_base_ref.semantic_key()
+    if left_pointer is None or right_pointer is None or left_pointer != right_pointer:
+        return False
+    if not _readonly_refs_count_identity_compatible(left, right):
+        return False
+    return (
+        str(left.reduction_kind) == str(right.reduction_kind)
+        and max(1, int(left.result_size or 0)) == max(1, int(right.result_size or 0))
+        and bool(left.signed_counter) == bool(right.signed_counter)
+        and int(getattr(left, "constant_bias", 0) or 0)
+        == int(getattr(right, "constant_bias", 0) or 0)
     )
 
 
@@ -492,9 +569,7 @@ def compare_readonly_summary_values_by_priority(
     right_ref = _readonly_ref_from_value(right_value)
     if left_ref is None or right_ref is None:
         return 0
-    left_surface = _readonly_ref_surface_key(left_ref)
-    right_surface = _readonly_ref_surface_key(right_ref)
-    if left_surface is None or left_surface != right_surface:
+    if not _readonly_refs_share_surface(left_ref, right_ref):
         return 0
     left_contract = left_ref.readonly_term_sequence_contract_key(result_size=return_size)
     right_contract = right_ref.readonly_term_sequence_contract_key(result_size=return_size)

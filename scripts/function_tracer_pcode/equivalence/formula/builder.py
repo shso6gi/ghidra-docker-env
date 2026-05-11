@@ -845,19 +845,35 @@ class FormulaBuilder:
         reduction_ref: ReadonlyReductionRef,
     ) -> bool:
         count_storage_key = getattr(reduction_ref, "count_parameter_storage_identity_key", None)
-        if count_storage_key is not None:
-            expr_storage_key = self._expression_storage_identity_through_width_views(expr)
-            return expr_storage_key is not None and tuple(expr_storage_key) == tuple(count_storage_key)
+        ref_storage_key = tuple(count_storage_key) if count_storage_key is not None else None
         count_index = getattr(reduction_ref, "count_parameter_index", None)
-        if count_index is None:
-            return False
-        expr_index = self._expression_parameter_index_through_width_views(expr)
-        if expr_index is None:
-            return False
+        ref_index = None
         try:
-            return int(expr_index) == int(count_index)
+            if count_index is not None and int(count_index) >= 0:
+                ref_index = int(count_index)
         except (TypeError, ValueError):
-            return False
+            pass
+
+        expr_storage_key = self._expression_storage_identity_through_width_views(expr)
+        if expr_storage_key is not None:
+            expr_storage_key = tuple(expr_storage_key)
+        if ref_storage_key is not None and expr_storage_key is not None:
+            return ref_storage_key == expr_storage_key
+
+        expr_index = self._expression_parameter_index_through_width_views(expr)
+        normalized_expr_index = None
+        try:
+            if expr_index is not None and int(expr_index) >= 0:
+                normalized_expr_index = int(expr_index)
+        except (TypeError, ValueError):
+            pass
+        if ref_storage_key is not None or expr_storage_key is not None:
+            return (
+                ref_index is not None
+                and normalized_expr_index is not None
+                and ref_index == normalized_expr_index
+            )
+        return ref_index is not None and normalized_expr_index is not None and ref_index == normalized_expr_index
 
     def _expression_parameter_index_through_width_views(self, expr) -> Optional[int]:
         if expr is None:

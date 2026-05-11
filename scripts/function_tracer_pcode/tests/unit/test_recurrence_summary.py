@@ -105,6 +105,33 @@ def _cond(operator: str, left: Expression, right: Expression, negated: bool = Fa
     return Condition(Expression.binary_op(operator, left, right), negated=negated)
 
 
+def test_readonly_parameter_helpers_preserve_storage_backed_identity_without_fabricated_index():
+    storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
+    param = {
+        "name": "renamed_count",
+        "size": 4,
+        "data_type": "int",
+        "storage_info": storage,
+    }
+
+    expr = summarizer._parameter_expression(param)
+    base_ref = summarizer._location_base_ref_from_parameter(param, default_name="count")
+
+    assert expr.value == -1
+    assert expr.storage_info is storage
+    assert summarizer._parameter_storage_identity_key(param) == storage.storage_identity_key()
+    assert base_ref.is_storage()
+    assert base_ref.semantic_key() == ("storage_identity", storage.storage_identity_key())
+
+
 def _expression_operators(expr: Expression | None) -> set[str]:
     operators = set()
     if expr is None:

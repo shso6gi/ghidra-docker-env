@@ -14,6 +14,7 @@ from ...model import (
     FunctionReturnAnalysis,
     ReadonlyReductionRef,
     ReadonlyReductionTermRef,
+    StorageInfo,
     compare_loop_summaries,
 )
 from ...analysis.effect_summary import canonicalize_location
@@ -915,8 +916,6 @@ class PairwiseStrategy(CheckStrategy):
 
         left_base_key = getattr(getattr(left_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
         right_base_key = getattr(getattr(right_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
-        left_count_key = self._readonly_count_identity_key(left_ref)
-        right_count_key = self._readonly_count_identity_key(right_ref)
         effective_result_size = self._readonly_contract_effective_result_size(
             left_ref,
             right_ref,
@@ -929,9 +928,7 @@ class PairwiseStrategy(CheckStrategy):
             or left_base_key is None
             or right_base_key is None
             or left_base_key != right_base_key
-            or left_count_key is None
-            or right_count_key is None
-            or left_count_key != right_count_key
+            or not self._readonly_count_identities_compatible(left_ref, right_ref)
             or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), effective_result_size)
             != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), effective_result_size)
         ):
@@ -946,7 +943,12 @@ class PairwiseStrategy(CheckStrategy):
         )
         if left_semantic_key is None or right_semantic_key is None:
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_term_sequence")
-        if left_semantic_key != right_semantic_key:
+        if not self._readonly_reduction_contract_keys_compatible(
+            left_semantic_key,
+            right_semantic_key,
+            left_ref,
+            right_ref,
+        ):
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_term_sequence_mismatch")
         return _RuntimeShortcutDecision(True, requires_guard_equivalence, reason="readonly_reduction_contract")
 
@@ -1019,7 +1021,41 @@ class PairwiseStrategy(CheckStrategy):
                 return None
         return None
 
+    def _readonly_reduction_contract_keys_compatible(
+        self,
+        left_key: tuple,
+        right_key: tuple,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        if left_key == right_key:
+            return True
+        if (
+            not isinstance(left_key, tuple)
+            or not isinstance(right_key, tuple)
+            or len(left_key) != len(right_key)
+            or len(left_key) < 5
+            or left_key[0] != "readonly_reduction_term_sequence_contract"
+            or right_key[0] != "readonly_reduction_term_sequence_contract"
+        ):
+            return False
+        if left_key[:3] != right_key[:3] or left_key[4:] != right_key[4:]:
+            return False
+        if not self._readonly_count_identities_compatible(left_ref, right_ref):
+            return False
+        return tuple(left_key[3]) in self._readonly_count_identity_keys(left_ref) and tuple(
+            right_key[3]
+        ) in self._readonly_count_identity_keys(right_ref)
+
     def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
+        identity_fn = getattr(readonly_ref, "count_parameter_semantic_identity", None)
+        if callable(identity_fn):
+            try:
+                identity = identity_fn()
+            except (AttributeError, TypeError, ValueError):
+                identity = None
+            if identity is not None:
+                return identity
         storage_key = getattr(readonly_ref, "count_parameter_storage_identity_key", None)
         if storage_key is not None:
             return ("parameter_storage", tuple(storage_key))
@@ -1030,6 +1066,66 @@ class PairwiseStrategy(CheckStrategy):
         except (TypeError, ValueError):
             pass
         return None
+
+    def _readonly_count_identity_keys(self, readonly_ref: ReadonlyReductionRef) -> set[tuple]:
+        identities: set[tuple] = set()
+        identities_fn = getattr(readonly_ref, "count_parameter_semantic_identities", None)
+        if callable(identities_fn):
+            try:
+                identities.update(tuple(identity) for identity in identities_fn() if identity is not None)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        identity = self._readonly_count_identity_key(readonly_ref)
+        if identity is not None:
+            identities.add(tuple(identity))
+        storage_key = getattr(readonly_ref, "count_parameter_storage_identity_key", None)
+        if storage_key is not None:
+            identities.add(("parameter_storage", tuple(storage_key)))
+        index = getattr(readonly_ref, "count_parameter_index", None)
+        try:
+            if index is not None and int(index) >= 0:
+                identities.add(("parameter", int(index)))
+        except (TypeError, ValueError):
+            pass
+        return identities
+
+    def _readonly_count_storage_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
+        storage_key = getattr(readonly_ref, "count_parameter_storage_identity_key", None)
+        if storage_key is None:
+            return None
+        return ("parameter_storage", tuple(storage_key))
+
+    def _readonly_count_index_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
+        index = getattr(readonly_ref, "count_parameter_index", None)
+        try:
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _readonly_count_identities_compatible(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+    ) -> bool:
+        return self._count_identity_components_compatible(
+            self._readonly_count_storage_identity_key(left_ref),
+            self._readonly_count_index_identity_key(left_ref),
+            self._readonly_count_storage_identity_key(right_ref),
+            self._readonly_count_index_identity_key(right_ref),
+        )
+
+    def _count_identity_components_compatible(
+        self,
+        left_storage: Optional[tuple],
+        left_index: Optional[tuple],
+        right_storage: Optional[tuple],
+        right_index: Optional[tuple],
+    ) -> bool:
+        if left_storage is not None and right_storage is not None:
+            return left_storage == right_storage
+        return left_index is not None and right_index is not None and left_index == right_index
 
     def _runtime_refs_semantic_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
@@ -1974,25 +2070,23 @@ class PairwiseStrategy(CheckStrategy):
     ) -> bool:
         if exact_count <= 0:
             return False
-        count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
-        count_index = getattr(accumulator_proof, "count_parameter_index", None)
-        if count_index is None:
-            return False
         count_bits = max(
             self._case_reduction_count_bit_width(exact_case, accumulator_proof),
             self._case_reduction_count_bit_width(summary_case, accumulator_proof),
         )
-        count_size = max(1, (int(count_bits) + 7) // 8)
-        count_expr = Expression.parameter(
-            count_name or "count",
-            index=int(count_index) if count_index is not None else -1,
-            size=count_size,
+        count_expr = self._reduction_count_parameter_expression(
+            list(getattr(exact_case, "parameters", None) or [])
+            + list(getattr(summary_case, "parameters", None) or []),
+            accumulator_proof,
+            int(count_bits),
         )
+        if count_expr is None:
+            return False
         equality = Condition(
             Expression.binary_op(
                 "INT_EQUAL",
                 count_expr,
-                Expression.constant(int(exact_count), size=count_size),
+                Expression.constant(int(exact_count), size=max(1, (int(count_bits) + 7) // 8)),
             ),
             False,
         )
@@ -2078,25 +2172,232 @@ class PairwiseStrategy(CheckStrategy):
     ) -> Optional[Condition]:
         if exact_count <= 0:
             return None
-        count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
-        count_index = getattr(accumulator_proof, "count_parameter_index", None)
-        if count_index is None:
-            return None
         count_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
-        count_size = max(1, (int(count_bits) + 7) // 8)
-        count_expr = Expression.parameter(
-            count_name or "count",
-            index=int(count_index) if count_index is not None else -1,
-            size=count_size,
+        count_expr = self._reduction_count_parameter_expression(
+            getattr(case, "parameters", None) or [],
+            accumulator_proof,
+            int(count_bits),
         )
+        if count_expr is None:
+            return None
         return Condition(
             Expression.binary_op(
                 "INT_EQUAL",
                 count_expr,
-                Expression.constant(int(exact_count), size=count_size),
+                Expression.constant(int(exact_count), size=max(1, (int(count_bits) + 7) // 8)),
             ),
             False,
         )
+
+    def _reduction_count_parameter_expression(
+        self,
+        parameters: Sequence[Dict[str, Any]],
+        accumulator_proof,
+        count_bits: int,
+    ) -> Optional[Expression]:
+        count_size = max(1, (max(1, int(count_bits)) + 7) // 8)
+        descriptor = self._reduction_count_parameter_descriptor(parameters, accumulator_proof)
+        proof_index = getattr(accumulator_proof, "count_parameter_index", None)
+        count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
+        storage_info = None
+        if descriptor is None and self._parameters_have_conflicting_reduction_count_storage(
+            parameters,
+            accumulator_proof,
+        ):
+            return None
+        if descriptor is not None:
+            count_name = str(descriptor.get("name") or count_name or "count")
+            storage_info = self._storage_info_from_parameter_descriptor(descriptor)
+            if proof_index is None:
+                proof_index = descriptor.get("index")
+        try:
+            index = int(proof_index) if proof_index is not None else -1
+        except (TypeError, ValueError):
+            index = -1
+        if index < 0 and storage_info is None:
+            return None
+        return Expression.parameter(
+            count_name or "count",
+            index=index,
+            size=count_size,
+            data_type=descriptor.get("data_type") if descriptor is not None else None,
+            data_type_obj=descriptor.get("data_type_obj") if descriptor is not None else None,
+            storage_info=storage_info,
+        )
+
+    def _reduction_count_parameter_descriptor(
+        self,
+        parameters: Sequence[Dict[str, Any]],
+        accumulator_proof,
+    ) -> Optional[Dict[str, Any]]:
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
+        if proof_storage is None and proof_index is None:
+            return None
+        for parameter in parameters or []:
+            if self._count_identity_components_compatible(
+                proof_storage,
+                proof_index,
+                self._parameter_descriptor_storage_identity_key(parameter),
+                self._parameter_descriptor_index_identity_key(parameter),
+            ):
+                return parameter
+        return None
+
+    def _parameters_have_conflicting_reduction_count_storage(
+        self,
+        parameters: Sequence[Dict[str, Any]],
+        accumulator_proof,
+    ) -> bool:
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
+        if proof_storage is None or proof_index is None:
+            return False
+        for parameter in parameters or []:
+            parameter_index = self._parameter_descriptor_index_identity_key(parameter)
+            parameter_storage = self._parameter_descriptor_storage_identity_key(parameter)
+            if parameter_index == proof_index and parameter_storage is not None and parameter_storage != proof_storage:
+                return True
+        return False
+
+    def _reduction_count_storage_identity_key(self, accumulator_proof) -> Optional[tuple]:
+        storage_key = getattr(accumulator_proof, "count_parameter_storage_identity_key", None)
+        if storage_key is None:
+            return None
+        return ("parameter_storage", tuple(storage_key))
+
+    def _reduction_count_index_identity_key(self, accumulator_proof) -> Optional[tuple]:
+        index = getattr(accumulator_proof, "count_parameter_index", None)
+        try:
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _reduction_count_identity_keys(self, accumulator_proof) -> set[tuple]:
+        identities: set[tuple] = set()
+        identities_fn = getattr(accumulator_proof, "count_parameter_semantic_identities", None)
+        if callable(identities_fn):
+            try:
+                identities.update(tuple(identity) for identity in identities_fn() if identity is not None)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        identity_fn = getattr(accumulator_proof, "count_parameter_semantic_identity", None)
+        if callable(identity_fn):
+            try:
+                identity = identity_fn()
+            except (AttributeError, TypeError, ValueError):
+                identity = None
+            if identity is not None:
+                identities.add(tuple(identity))
+        storage_key = getattr(accumulator_proof, "count_parameter_storage_identity_key", None)
+        if storage_key is not None:
+            identities.add(("parameter_storage", tuple(storage_key)))
+        index = getattr(accumulator_proof, "count_parameter_index", None)
+        try:
+            if index is not None and int(index) >= 0:
+                identities.add(("parameter", int(index)))
+        except (TypeError, ValueError):
+            pass
+        return identities
+
+    def _storage_info_from_parameter_descriptor(self, parameter: Dict[str, Any]) -> Optional[StorageInfo]:
+        storage = parameter.get("storage_info", parameter.get("storage")) if isinstance(parameter, dict) else None
+        if isinstance(storage, StorageInfo):
+            return storage
+        if isinstance(storage, dict):
+            try:
+                return StorageInfo(**storage)
+            except Exception:
+                return None
+        return None
+
+    def _parameter_descriptor_storage_identity_key(self, parameter: Dict[str, Any]) -> Optional[tuple]:
+        storage_info = self._storage_info_from_parameter_descriptor(parameter)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if not callable(storage_key_fn):
+            return None
+        try:
+            storage_key = storage_key_fn()
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if storage_key is None:
+            return None
+        return ("parameter_storage", tuple(storage_key))
+
+    def _parameter_descriptor_index_identity_key(self, parameter: Dict[str, Any]) -> Optional[tuple]:
+        if not isinstance(parameter, dict):
+            return None
+        try:
+            index = parameter.get("index")
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _parameter_descriptor_identity_keys(self, parameter: Dict[str, Any]) -> set[tuple]:
+        identities: set[tuple] = set()
+        if not isinstance(parameter, dict):
+            return identities
+        try:
+            index = parameter.get("index")
+            if index is not None and int(index) >= 0:
+                identities.add(("parameter", int(index)))
+        except (TypeError, ValueError):
+            pass
+        storage_info = self._storage_info_from_parameter_descriptor(parameter)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                storage_key = None
+            if storage_key is not None:
+                identities.add(("parameter_storage", tuple(storage_key)))
+        return identities
+
+    def _parameter_expression_storage_identity_key(self, expr: Expression) -> Optional[tuple]:
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if not callable(storage_key_fn):
+            return None
+        try:
+            storage_key = storage_key_fn()
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if storage_key is None:
+            return None
+        return ("parameter_storage", tuple(storage_key))
+
+    def _parameter_expression_index_identity_key(self, expr: Expression) -> Optional[tuple]:
+        try:
+            index = getattr(expr, "value", None)
+            if index is not None and int(index) >= 0:
+                return ("parameter", int(index))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _parameter_expression_identity_keys(self, expr: Expression) -> set[tuple]:
+        identities: set[tuple] = set()
+        try:
+            index = getattr(expr, "value", None)
+            if index is not None and int(index) >= 0:
+                identities.add(("parameter", int(index)))
+        except (TypeError, ValueError):
+            pass
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                storage_key = None
+            if storage_key is not None:
+                identities.add(("parameter_storage", tuple(storage_key)))
+        return identities
 
     def _case_has_direct_reduction_count_equality(
         self,
@@ -2316,15 +2617,27 @@ class PairwiseStrategy(CheckStrategy):
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
             return None
         pointer_ref = getattr(accumulator_proof, "pointer_base_ref", None)
-        proof_index = getattr(pointer_ref, "parameter_index", None)
-        expr_index = getattr(expr, "value", None)
-        if proof_index is not None:
-            try:
-                if expr_index is not None and int(expr_index) == int(proof_index):
-                    return ("parameter", int(proof_index))
-            except (TypeError, ValueError):
-                return None
+        proof_key = getattr(pointer_ref, "semantic_key", lambda: None)()
+        if proof_key is None:
             return None
+        expr_keys = set()
+        try:
+            expr_index = getattr(expr, "value", None)
+            if expr_index is not None and int(expr_index) >= 0:
+                expr_keys.add(("parameter", int(expr_index)))
+        except (TypeError, ValueError):
+            pass
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                storage_key = None
+            if storage_key is not None:
+                expr_keys.add(("storage_identity", tuple(storage_key)))
+        if proof_key in expr_keys:
+            return proof_key
         return None
 
     def _extract_reduction_count_affine(
@@ -2433,26 +2746,12 @@ class PairwiseStrategy(CheckStrategy):
     ) -> bool:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
             return False
-        expr_index = getattr(expr, "value", None)
-        proof_index = getattr(accumulator_proof, "count_parameter_index", None)
-        if proof_index is not None:
-            try:
-                return expr_index is not None and int(expr_index) == int(proof_index)
-            except (TypeError, ValueError):
-                return False
-            return False
-        proof_storage_key = getattr(accumulator_proof, "count_parameter_storage_identity_key", None)
-        if proof_storage_key is not None:
-            storage_info = getattr(expr, "storage_info", None)
-            storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-            if not callable(storage_key_fn):
-                return False
-            try:
-                expr_storage_key = storage_key_fn()
-            except (AttributeError, TypeError, ValueError):
-                return False
-            return expr_storage_key is not None and tuple(expr_storage_key) == tuple(proof_storage_key)
-        return False
+        return self._count_identity_components_compatible(
+            self._parameter_expression_storage_identity_key(expr),
+            self._parameter_expression_index_identity_key(expr),
+            self._reduction_count_storage_identity_key(accumulator_proof),
+            self._reduction_count_index_identity_key(accumulator_proof),
+        )
 
     def _case_reduction_count_bit_width(
         self,
@@ -2460,15 +2759,15 @@ class PairwiseStrategy(CheckStrategy):
         accumulator_proof,
     ) -> int:
         proof_bits = self._reduction_count_bit_width(accumulator_proof)
-        count_index = getattr(accumulator_proof, "count_parameter_index", None)
+        proof_storage = self._reduction_count_storage_identity_key(accumulator_proof)
+        proof_index = self._reduction_count_index_identity_key(accumulator_proof)
         for parameter in getattr(case, "parameters", None) or []:
-            matches = False
-            if count_index is not None and parameter.get("index") is not None:
-                try:
-                    matches = int(parameter.get("index")) == int(count_index)
-                except (TypeError, ValueError):
-                    matches = False
-            if not matches:
+            if not self._count_identity_components_compatible(
+                self._parameter_descriptor_storage_identity_key(parameter),
+                self._parameter_descriptor_index_identity_key(parameter),
+                proof_storage,
+                proof_index,
+            ):
                 continue
             try:
                 size = int(parameter.get("size", 0) or 0)
