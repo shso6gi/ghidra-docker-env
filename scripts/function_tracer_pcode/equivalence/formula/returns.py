@@ -28,8 +28,26 @@ from .params import build_symbol_name_mapping
 from .types import ParameterInfo
 
 
+RETURN_WIDTH_BRIDGE_MISSING_REASON = "return_width_bridge_missing"
+
+
 class ReturnWidthMismatchError(ValueError):
     """Raised when a proof would compare only overlapping return bits."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        context: Optional[str] = None,
+        return_size1: Optional[int] = None,
+        return_size2: Optional[int] = None,
+        reason_id: str = RETURN_WIDTH_BRIDGE_MISSING_REASON,
+    ):
+        super().__init__(message)
+        self.context = context
+        self.return_size1 = return_size1
+        self.return_size2 = return_size2
+        self.reason_id = reason_id
 
 
 def require_equal_return_bit_widths(
@@ -44,15 +62,24 @@ def require_equal_return_bit_widths(
         bits2 = int(return_size2)
     except (TypeError, ValueError) as exc:
         raise ReturnWidthMismatchError(
-            f"{context}: invalid return width ({return_size1!r} vs {return_size2!r})"
+            f"{context}: invalid return width ({return_size1!r} vs {return_size2!r})",
+            context=context,
+            return_size1=None,
+            return_size2=None,
         ) from exc
     if bits1 <= 0 or bits2 <= 0:
         raise ReturnWidthMismatchError(
-            f"{context}: invalid return width ({bits1} vs {bits2})"
+            f"{context}: invalid return width ({bits1} vs {bits2})",
+            context=context,
+            return_size1=bits1,
+            return_size2=bits2,
         )
     if bits1 != bits2:
         raise ReturnWidthMismatchError(
-            f"{context}: return width mismatch ({bits1} vs {bits2}); explicit bridge proof required"
+            f"{context}: return width mismatch ({bits1} vs {bits2}); explicit bridge proof required",
+            context=context,
+            return_size1=bits1,
+            return_size2=bits2,
         )
     return bits1
 

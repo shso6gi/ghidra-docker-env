@@ -8,9 +8,10 @@ from typing import Optional, Dict, Any
 from ...model import FunctionReturnAnalysis
 from ...smt import ParallelResult
 from ..formula.symbol_replace import build_symbol_replacer
+from ..formula.returns import ReturnWidthMismatchError
 from ..normalize import NormalizationSettings
 from ..param_semantics import infer_parameter_semantics
-from ..semantic_width import normalize_analysis_semantic_width
+from ..semantic_width import align_return_value_extension_surfaces, normalize_analysis_semantic_width
 from .base import CheckStrategy, StrategyResult
 from .pairwise_query_builder import extract_return_cases
 from .pairwise_query_executor import validate_counterexample_globally
@@ -38,10 +39,21 @@ class MonolithicStrategy(CheckStrategy):
         if not counterexample_raw:
             return True
 
-        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
+        base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        render_analysis1 = normalize_analysis_semantic_width(
+            normalized1,
+            infer_parameter_semantics(normalized1),
+            base_ctx.get("extra_vars1", []),
+        )
+        render_analysis2 = normalize_analysis_semantic_width(
+            normalized2,
+            infer_parameter_semantics(normalized2),
+            base_ctx.get("extra_vars2", []),
+        )
 
-        cases1 = extract_return_cases(analysis1, self.normalization_settings)
-        cases2 = extract_return_cases(analysis2, self.normalization_settings)
+        cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
+        cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
         if not cases1 or not cases2:
             self._debug_print(
                 "Monolithic SAT counterexample rejected: no return cases available for validation"
@@ -65,6 +77,83 @@ class MonolithicStrategy(CheckStrategy):
             replace2,
             counterexample_raw,
         )
+
+    def _build_validation_analyses(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> tuple[FunctionReturnAnalysis, FunctionReturnAnalysis]:
+        hints1 = infer_parameter_semantics(analysis1)
+        hints2 = infer_parameter_semantics(analysis2)
+        normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
+        normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
+        return align_return_value_extension_surfaces(
+            normalized1,
+            normalized2,
+        )
+
+    def _collect_monolithic_return_coverage_unsafety_reasons(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> list[str]:
+        normalized1, normalized2 = self._build_validation_analyses(analysis1, analysis2)
+        preliminary_cases1 = extract_return_cases(normalized1, self.normalization_settings)
+        preliminary_cases2 = extract_return_cases(normalized2, self.normalization_settings)
+        if self._return_cases_have_object_centric_total_coverage(
+            preliminary_cases1
+        ) and self._return_cases_have_object_centric_total_coverage(preliminary_cases2):
+            return []
+
+        base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        render_analysis1 = normalize_analysis_semantic_width(
+            normalized1,
+            infer_parameter_semantics(normalized1),
+            base_ctx.get("extra_vars1", []),
+        )
+        render_analysis2 = normalize_analysis_semantic_width(
+            normalized2,
+            infer_parameter_semantics(normalized2),
+            base_ctx.get("extra_vars2", []),
+        )
+        render_analysis1, render_analysis2 = align_return_value_extension_surfaces(
+            render_analysis1,
+            render_analysis2,
+        )
+        cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
+        cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
+        replace1 = build_symbol_replacer(
+            base_ctx["params1"],
+            base_ctx.get("extra_vars1", []),
+        )
+        replace2 = build_symbol_replacer(
+            base_ctx["params2"],
+            base_ctx.get("extra_vars2", []),
+        )
+        reasons = self._collect_return_coverage_unsafety_reasons(
+            base_ctx,
+            cases1,
+            cases2,
+            replace1,
+            replace2,
+        )
+        self._record_return_coverage_notes(analysis1, analysis2, reasons)
+        return reasons
+
+    def _record_return_coverage_notes(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        reasons: list[str],
+    ) -> None:
+        for label, analysis in (("function1", analysis1), ("function2", analysis2)):
+            if f"{label}:return_coverage_gap" in reasons and "return_case_coverage_gap" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("return_case_coverage_gap")
+            if (
+                f"{label}:return_coverage_inconclusive" in reasons
+                and "return_case_coverage_inconclusive" not in analysis.analysis_notes
+            ):
+                analysis.analysis_notes.append("return_case_coverage_inconclusive")
     
     def check(
         self,
@@ -171,6 +260,20 @@ class MonolithicStrategy(CheckStrategy):
                 constrained_fragments=constrained_fragments
             )
         
+        except ReturnWidthMismatchError as e:
+            reason_id = getattr(e, "reason_id", "return_width_bridge_missing")
+            self._debug_print(f"Monolithic check blocked: {reason_id}: {e}")
+            return StrategyResult(
+                is_equivalent=None,
+                solver_results=ParallelResult(results=[]),
+                smt_formula=None,
+                counterexample_raw=None,
+                return_var1=None,
+                return_var2=None,
+                constrained_fragments=[],
+                pairwise_debug_stats={reason_id: 1},
+            )
+
         except Exception as e:
             self._debug_print(f"Exception in monolithic check: {e}")
             if self.debug:

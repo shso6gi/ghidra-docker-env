@@ -9,6 +9,7 @@ import time
 from ..model import FunctionReturnAnalysis, FunctionSignature
 from ..smt import ParallelSolverRunner, ParallelResult, SolverResult, SolverStatus
 from .formula import FormulaBuilder
+from .formula.returns import ReturnWidthMismatchError
 from .counterexample import CounterexampleFormatter
 from .typing.fixer import TypeFixer, TypeFixerConfig, TypeFixResult
 from .result import EquivalenceResult, RewriteInfo
@@ -405,6 +406,7 @@ class EquivalenceChecker:
                 ctx.original_signature2
             )
         
+        rewrite_info = None
         try:
             # リライトを適用
             analysis1, analysis2, rewrite_info = self._apply_rewrite(
@@ -473,6 +475,35 @@ class EquivalenceChecker:
                 constrained_fragments=[],
                 rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints
+            )
+
+        except ReturnWidthMismatchError as e:
+            reason_id = getattr(e, "reason_id", "return_width_bridge_missing")
+            self._debug_print(f"ABI retry blocked: {reason_id}: {e}")
+            blocked_analysis1 = locals().get("analysis1", ctx.analysis1)
+            blocked_analysis2 = locals().get("analysis2", ctx.analysis2)
+            return EquivalenceResult(
+                is_equivalent=None,
+                function1_name=ctx.function_name1,
+                function2_name=ctx.function_name2,
+                binary1_name=ctx.binary1_name,
+                binary2_name=ctx.binary2_name,
+                solver_results=ParallelResult(results=[]),
+                counterexample=None,
+                smt_formula=None,
+                total_time=time.time() - start_time,
+                type_fix_result=ctx.type_fix_result,
+                retry_count=retry_count,
+                function1_signature=ctx.original_signature1,
+                function2_signature=ctx.original_signature2,
+                effective_function1_signature=FunctionSignature.from_analysis(blocked_analysis1),
+                effective_function2_signature=FunctionSignature.from_analysis(blocked_analysis2),
+                function1_signature_hypotheses=list(blocked_analysis1.signature_hypotheses),
+                function2_signature_hypotheses=list(blocked_analysis2.signature_hypotheses),
+                constrained_fragments=[],
+                rewrite_info=rewrite_info,
+                mips64_abi_constraints=abi_constraints,
+                pairwise_debug_stats={reason_id: 1},
             )
         
         except Exception as e:

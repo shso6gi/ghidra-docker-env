@@ -55,6 +55,9 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
                 self._debug_print(
                     f"    Loop-template abstraction skipped for pair {pair_id}: {exc}"
                 )
+            if getattr(base_result, "blocking_reason", None) is None:
+                base_result.blocking_reason = getattr(exc, "reason_id", "return_width_bridge_missing")
+                base_result.blocking_detail = str(exc)
             return base_result
         if target_bits <= 0:
             return base_result

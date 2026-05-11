@@ -439,6 +439,40 @@ def test_formula_builder_rejects_monolithic_return_width_overlap_assertion():
         FormulaBuilder().build_equivalence_formula(analysis1, analysis2)
 
 
+def test_monolithic_strategy_returns_unknown_for_unbridged_return_width_mismatch():
+    analysis1 = create_mock_analysis(
+        "wide_return",
+        return_type="ulong",
+        returns=[
+            ReturnInfo(address="0x1000", value=Expression.constant(0x1_0000_0001, 8), conditions=[]),
+        ],
+    )
+    analysis2 = create_mock_analysis(
+        "narrow_return",
+        return_type="uint",
+        returns=[
+            ReturnInfo(address="0x2000", value=Expression.constant(1, 4), conditions=[]),
+        ],
+    )
+
+    class _NoSolver:
+        def run_parallel(self, _formula):
+            raise AssertionError("solver must not run for unbridged return width mismatch")
+
+        def run_sequential(self, _formula):
+            raise AssertionError("solver must not run for unbridged return width mismatch")
+
+    result = MonolithicStrategy(
+        FormulaBuilder(),
+        _NoSolver(),
+        debug=False,
+    ).check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.smt_formula is None
+    assert result.pairwise_debug_stats == {"return_width_bridge_missing": 1}
+
+
 def test_formula_builder_rejects_width_mismatch_overlap_readonly_contract_axioms():
     base = Expression.parameter("param_1", index=0, data_type="int *", size=8)
     count = Expression.parameter("param_2", index=1, data_type="int", size=4)

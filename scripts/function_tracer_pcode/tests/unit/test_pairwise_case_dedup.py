@@ -16,7 +16,8 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
     build_pair_query,
     extract_return_cases,
 )
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -790,6 +791,58 @@ def test_build_pair_query_rejects_width_mismatch_overlap_without_bridge_proof():
             lambda text: text,
             "(0,1)",
         )
+
+
+def test_pairwise_executor_returns_unknown_for_width_mismatch_without_overlap_query():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
+        return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.PARAMETER, name="param_1", size=4)),
+        return_type="uint",
+        return_type_obj=resolve_mock_data_type("uint"),
+    )
+
+    class _Strategy:
+        enable_solver_proven_rewrite_fallback = False
+        enable_normalization_fallback = False
+        _active_normalization_stats = {
+            "unknown_results": 0,
+            "return_width_bridge_missing": 0,
+        }
+
+        def _build_condition_only_query(self, *_args):
+            return "(set-logic QF_BV)\n(check-sat)"
+
+        def _solve_query_internal(self, *_args, **_kwargs):
+            return QueryResult(is_equivalent=None)
+
+        def _debug_print(self, _message):
+            pass
+
+    result = solve_query_twostage(
+        _Strategy(),
+        {"header_lines": [], "return_size1": 64, "return_size2": 32},
+        case1,
+        case2,
+        lambda text: text,
+        lambda text: text,
+        "(0,1)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.pair_stage == "return-width-mismatch"
+    assert result.blocking_reason == "return_width_bridge_missing"
+    assert _Strategy._active_normalization_stats["unknown_results"] == 1
+    assert _Strategy._active_normalization_stats["return_width_bridge_missing"] == 1
 
 
 def test_build_normalized_inequality_query_coerces_normalized_values_to_return_width():

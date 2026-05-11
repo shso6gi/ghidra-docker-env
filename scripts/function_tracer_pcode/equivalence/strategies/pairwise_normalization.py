@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Normalization fallback helpers for PairwiseStrategy."""
 
+from ..formula.returns import ReturnWidthMismatchError, require_equal_return_bit_widths
 from .pairwise_models import QueryResult
 
 
@@ -29,6 +30,23 @@ def try_normalization_equivalence(
     value1_orig = case1.value_expr
     value2_orig = case2.value_expr
     norm_settings = getattr(strategy, "normalization_settings", None)
+    try:
+        require_equal_return_bit_widths(
+            base_ctx.get("return_size1", 32),
+            base_ctx.get("return_size2", 32),
+            context="normalized pairwise value inequality",
+        )
+    except ReturnWidthMismatchError as exc:
+        strategy._debug_print(f"    Normalization fallback skipped: {exc}")
+        if normalization_stats is not None:
+            normalization_stats["unknown_results"] += 1
+            reason_id = getattr(exc, "reason_id", "return_width_bridge_missing")
+            normalization_stats[reason_id] = int(normalization_stats.get(reason_id, 0) or 0) + 1
+        result = QueryResult(is_equivalent=None)
+        result.pair_stage = "return-width-mismatch"
+        result.blocking_reason = getattr(exc, "reason_id", "return_width_bridge_missing")
+        result.blocking_detail = str(exc)
+        return result
 
     header_lines = base_ctx.get("header_lines", [])
     if norm_settings is not None and not norm_settings.enable_division_normalization:

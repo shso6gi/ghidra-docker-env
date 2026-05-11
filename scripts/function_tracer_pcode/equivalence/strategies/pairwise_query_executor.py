@@ -12,6 +12,14 @@ from ..formula.returns import (
 from .pairwise_models import QueryResult
 
 
+def _record_return_width_block(strategy, exc: ReturnWidthMismatchError) -> None:
+    stats = getattr(strategy, "_active_normalization_stats", None)
+    if stats is None:
+        return
+    reason_id = getattr(exc, "reason_id", "return_width_bridge_missing")
+    stats[reason_id] = int(stats.get(reason_id, 0) or 0) + 1
+
+
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
     timeout = strategy.per_query_timeout_hard if use_hard_timeout else strategy.per_query_timeout
@@ -117,9 +125,12 @@ def solve_query_twostage(
         strategy._debug_print(f"  Pair {pair_id} with-ineq skipped: {exc}")
         if getattr(strategy, "_active_normalization_stats", None) is not None:
             strategy._active_normalization_stats["unknown_results"] += 1
+        _record_return_width_block(strategy, exc)
         result = QueryResult(is_equivalent=None)
         result.last_query = cond_query
         result.pair_stage = "return-width-mismatch"
+        result.blocking_reason = getattr(exc, "reason_id", "return_width_bridge_missing")
+        result.blocking_detail = str(exc)
         return result
 
     full_query = strategy._build_pair_query(
