@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.model import ComparisonSurface, Expression, F
 _CROSS_SIDE_EXTENSION_SURFACE_EVIDENCE = {
     "source": RETURN_EXTENSION_SURFACE_SOURCE,
     "extension_surface_bit_width": 32,
-    "allow_return_width_sign_artifact": True,
+    "return_width_sign_artifact": True,
     "extension_surface_coercion": "equal_width_or_object_proven_extract",
     "extension_surface_extension_kind": "INT_ZEXT",
     "extension_surface_source_bit_widths": (32,),

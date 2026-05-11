@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.equivalence.formula.variable import (
 from scripts.function_tracer_pcode.equivalence.semantic_width import (
     align_return_value_extension_surfaces,
     normalize_analysis_semantic_width,
+    return_extension_surface_diagnostic_metadata,
     return_extension_surface_evidence_key,
 )
 from scripts.function_tracer_pcode.equivalence.param_semantics import (
@@ -900,7 +901,7 @@ def test_return_extension_surface_alignment_refuses_mixed_zext_sext_evidence():
     assert aligned_right.get_comparison_surface().explicit_bit_width == 64
 
 
-def test_return_extension_surface_evidence_key_requires_structured_source_widths():
+def test_return_extension_surface_metadata_is_diagnostic_not_semantic_key():
     valid_surface = ComparisonSurface(
         kind="return_value",
         explicit_bit_width=32,
@@ -908,7 +909,7 @@ def test_return_extension_surface_evidence_key_requires_structured_source_widths
         evidence={
             "source": "cross_side_return_extension_surface",
             "extension_surface_bit_width": 32,
-            "allow_return_width_sign_artifact": True,
+            "return_width_sign_artifact": True,
             "extension_surface_coercion": "equal_width_or_object_proven_extract",
             "extension_surface_extension_kind": "INT_ZEXT",
             "extension_surface_source_bit_widths": (32,),
@@ -926,14 +927,19 @@ def test_return_extension_surface_evidence_key_requires_structured_source_widths
         explicit_bit_width=64,
     )
 
-    assert return_extension_surface_evidence_key(valid_surface) == (
-        32,
-        "equal_width_or_object_proven_extract",
-        "INT_ZEXT",
-        (32,),
-    )
+    assert return_extension_surface_evidence_key(valid_surface) is None
     assert return_extension_surface_evidence_key(stale_surface) is None
     assert return_extension_surface_evidence_key(detached_surface) is None
+    assert return_extension_surface_diagnostic_metadata(valid_surface) == {
+        "source": "cross_side_return_extension_surface",
+        "surface_bits": 32,
+        "coercion": "equal_width_or_object_proven_extract",
+        "extension_kind": "INT_ZEXT",
+        "source_widths": (32,),
+        "return_width_sign_artifact": True,
+    }
+    assert return_extension_surface_diagnostic_metadata(stale_surface) is None
+    assert return_extension_surface_diagnostic_metadata(detached_surface) is None
 
 
 def test_return_extension_surface_alignment_refuses_wide_readonly_without_extension_op():

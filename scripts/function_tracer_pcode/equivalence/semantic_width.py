@@ -68,17 +68,17 @@ RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
 RETURN_EXTENSION_SURFACE_KINDS = frozenset({"INT_ZEXT", "INT_SEXT", "none"})
 
 
-def return_extension_surface_evidence_key(
+def return_extension_surface_diagnostic_metadata(
     comparison_surface,
-) -> Optional[Tuple[int, str, str, Tuple[int, ...]]]:
+) -> Optional[Dict[str, Any]]:
+    """Return sanitized extension-surface diagnostics without proof authority."""
+
     if getattr(comparison_surface, "kind", None) != "return_value":
         return None
     evidence = getattr(comparison_surface, "evidence", None)
     if not isinstance(evidence, dict):
         return None
     if evidence.get("source") != RETURN_EXTENSION_SURFACE_SOURCE:
-        return None
-    if evidence.get("allow_return_width_sign_artifact") is not True:
         return None
     try:
         surface_bits = int(evidence.get("extension_surface_bit_width"))
@@ -113,7 +113,25 @@ def return_extension_surface_evidence_key(
         return None
     if extension_kind == "none" and source_widths:
         return None
-    return surface_bits, coercion, extension_kind, source_widths
+    return {
+        "source": RETURN_EXTENSION_SURFACE_SOURCE,
+        "surface_bits": surface_bits,
+        "coercion": coercion,
+        "extension_kind": extension_kind,
+        "source_widths": source_widths,
+        "return_width_sign_artifact": bool(
+            evidence.get("return_width_sign_artifact")
+            or evidence.get("allow_return_width_sign_artifact")
+        ),
+    }
+
+
+def return_extension_surface_evidence_key(
+    comparison_surface,
+) -> Optional[Tuple[int, str, str, Tuple[int, ...]]]:
+    """Do not promote return-width sign-artifact metadata into semantic keys."""
+
+    return None
 
 
 class SemanticWidthNormalizer:
@@ -815,7 +833,7 @@ def _return_extension_surface_evidence(
     return {
         "source": RETURN_EXTENSION_SURFACE_SOURCE,
         "extension_surface_bit_width": int(candidate_bits),
-        "allow_return_width_sign_artifact": True,
+        "return_width_sign_artifact": True,
         "extension_surface_coercion": RETURN_EXTENSION_SURFACE_COERCION,
         "extension_surface_extension_kind": extension_kinds[0] if extension_kinds else "none",
         "extension_surface_source_bit_widths": source_widths,
