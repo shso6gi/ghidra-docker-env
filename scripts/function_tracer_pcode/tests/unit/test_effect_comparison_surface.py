@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBui
 from scripts.function_tracer_pcode.equivalence.formula.symbol_replace import (
     build_symbol_replacer,
 )
+from scripts.function_tracer_pcode.equivalence.formula.returns import get_return_size
 from scripts.function_tracer_pcode.equivalence.semantic_width import (
     normalize_analysis_semantic_width,
 )
@@ -172,8 +173,40 @@ def test_void_effect_analysis_exposes_memory_effect_comparison_surface():
     surface = analysis1.get_comparison_surface()
 
     assert surface.kind == "memory_effect"
-    assert analysis1.get_comparison_bit_width() == 40
+    assert analysis1.get_memory_effect_bit_width() == 40
+    with pytest.raises(ValueError, match="return_value solver width"):
+        analysis1.get_return_value_solver_bit_width()
+    with pytest.raises(ValueError, match="ambiguous"):
+        analysis1.get_comparison_bit_width()
     assert surface.use_sign_extension is False
+
+
+def test_return_value_solver_width_is_separate_from_memory_effect_width():
+    analysis = FunctionReturnAnalysis(
+        function_name="scalar_return",
+        entry_point="0x401020",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x401020",
+                conditions=[],
+                value=Expression.constant(7, size=4),
+            )
+        ],
+        return_type="int",
+        return_type_obj=resolve_mock_data_type("int"),
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=32,
+            type_name="int",
+            type_obj=resolve_mock_data_type("int"),
+        ),
+    )
+
+    assert analysis.get_return_value_solver_bit_width() == 32
+    assert get_return_size(analysis) == 32
+    with pytest.raises(ValueError, match="memory_effect width"):
+        analysis.get_memory_effect_bit_width()
 
 
 def test_memory_effect_keeps_synthetic_effect_width_when_surface_is_rederived():
@@ -189,7 +222,8 @@ def test_memory_effect_keeps_synthetic_effect_width_when_surface_is_rederived():
 
     assert surface.kind == "memory_effect"
     assert surface.explicit_bit_width == 40
-    assert analysis1.get_comparison_bit_width() == 40
+    assert analysis1.get_memory_effect_bit_width() == 40
+    assert get_return_size(analysis1) == 40
     assert surface.evidence["source"] == "effect_summary.synthetic_expr"
 
 
@@ -233,5 +267,5 @@ def test_semantic_width_normalization_preserves_memory_effect_surface():
     surface = normalized.get_comparison_surface()
 
     assert surface.kind == "memory_effect"
-    assert normalized.get_comparison_bit_width() == 40
+    assert normalized.get_memory_effect_bit_width() == 40
     assert surface.use_sign_extension is False

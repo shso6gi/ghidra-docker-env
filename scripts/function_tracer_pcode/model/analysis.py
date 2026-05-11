@@ -194,6 +194,9 @@ class ComparisonSurface:
 
     宣言上の return type と、実際に等価性比較へ流す値面を分離する。
     ``return_value`` は通常の戻り値、``memory_effect`` は void 関数の副作用要約を表す。
+    ``explicit_bit_width`` は surface-local な幅であり、用途別 API
+    (``get_return_value_solver_bit_width`` / ``get_memory_effect_bit_width``)
+    を通して解釈する。
     """
 
     kind: str
@@ -915,7 +918,7 @@ class FunctionReturnAnalysis:
                 return 0
         return 0
 
-    def _default_return_bit_width(self) -> int:
+    def _default_return_value_solver_bit_width(self) -> int:
         from .signature import get_declared_type_size_bits
 
         declared_bits = get_declared_type_size_bits(
@@ -992,16 +995,62 @@ class FunctionReturnAnalysis:
 
         return ComparisonSurface(
             kind="return_value",
-            explicit_bit_width=self._default_return_bit_width(),
+            explicit_bit_width=self._default_return_value_solver_bit_width(),
             type_name=self.return_type,
             type_obj=self.return_type_obj,
         )
 
-    def get_comparison_bit_width(self) -> int:
+    def _surface_explicit_bit_width(self, surface: ComparisonSurface) -> Optional[int]:
+        try:
+            bits = int(surface.explicit_bit_width or 0)
+        except (TypeError, ValueError):
+            return None
+        return bits if bits > 0 else None
+
+    def get_return_value_solver_bit_width(self) -> int:
+        """Bit-vector width for the real return-value solver surface."""
+
         surface = self.get_comparison_surface()
-        if surface.explicit_bit_width is not None and int(surface.explicit_bit_width) > 0:
-            return int(surface.explicit_bit_width)
-        return self._default_return_bit_width()
+        if surface.kind != "return_value":
+            raise ValueError(
+                "return_value solver width requested for non-return comparison surface: "
+                f"{surface.kind}"
+            )
+        explicit_bits = self._surface_explicit_bit_width(surface)
+        if explicit_bits is not None:
+            return explicit_bits
+        return self._default_return_value_solver_bit_width()
+
+    def get_memory_effect_bit_width(self) -> int:
+        """Bit-vector width of the synthetic memory-effect comparison value."""
+
+        surface = self.get_comparison_surface()
+        if surface.kind != "memory_effect":
+            raise ValueError(
+                "memory_effect width requested for non-memory comparison surface: "
+                f"{surface.kind}"
+            )
+        explicit_bits = self._surface_explicit_bit_width(surface)
+        if explicit_bits is not None:
+            return explicit_bits
+        derived = self._derive_void_effect_surface()
+        if derived is not None:
+            derived_bits = self._surface_explicit_bit_width(derived)
+            if derived_bits is not None:
+                return derived_bits
+        raise ValueError("memory_effect comparison surface has no positive effect width")
+
+    def get_comparison_bit_width(self, *, purpose: Optional[str] = None) -> int:
+        """Legacy compatibility guard for ambiguous comparison widths."""
+
+        if purpose == "return_value_solver":
+            return self.get_return_value_solver_bit_width()
+        if purpose == "memory_effect":
+            return self.get_memory_effect_bit_width()
+        raise ValueError(
+            "get_comparison_bit_width() is ambiguous; use "
+            "get_return_value_solver_bit_width() or get_memory_effect_bit_width()"
+        )
 
     def get_comparison_type_name(self) -> Optional[str]:
         surface = self.get_comparison_surface()

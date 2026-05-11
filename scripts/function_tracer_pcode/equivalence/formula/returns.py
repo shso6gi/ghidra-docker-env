@@ -58,10 +58,36 @@ def require_equal_return_bit_widths(
 
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
-    """return値のビット幅を取得する。"""
-    get_comparison_bit_width = getattr(analysis, "get_comparison_bit_width", None)
-    if callable(get_comparison_bit_width):
-        bits = int(get_comparison_bit_width() or 0)
+    """SMT return variable width for the active comparison surface."""
+    comparison_surface_getter = getattr(analysis, "get_comparison_surface", None)
+    comparison_surface = comparison_surface_getter() if callable(comparison_surface_getter) else None
+    surface_kind = getattr(comparison_surface, "kind", None)
+
+    if surface_kind == "memory_effect":
+        get_memory_effect_bit_width = getattr(analysis, "get_memory_effect_bit_width", None)
+        if callable(get_memory_effect_bit_width):
+            bits = int(get_memory_effect_bit_width() or 0)
+            if bits > 0:
+                return bits
+        explicit_bits = getattr(comparison_surface, "explicit_bit_width", None)
+        try:
+            bits = int(explicit_bits or 0)
+        except (TypeError, ValueError):
+            bits = 0
+        if bits > 0:
+            return bits
+
+    if surface_kind == "return_value":
+        get_return_value_solver_bit_width = getattr(analysis, "get_return_value_solver_bit_width", None)
+        if callable(get_return_value_solver_bit_width):
+            bits = int(get_return_value_solver_bit_width() or 0)
+            if bits > 0:
+                return bits
+        explicit_bits = getattr(comparison_surface, "explicit_bit_width", None)
+        try:
+            bits = int(explicit_bits or 0)
+        except (TypeError, ValueError):
+            bits = 0
         if bits > 0:
             return bits
 
