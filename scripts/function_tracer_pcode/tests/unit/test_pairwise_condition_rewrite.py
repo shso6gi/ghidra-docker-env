@@ -38,6 +38,10 @@ def _param(name: str) -> Expression:
     return Expression(ExpressionType.PARAMETER, name=name, size=8)
 
 
+def _indexed_param(name: str, index: int) -> Expression:
+    return Expression.parameter(name, index=index, size=8)
+
+
 def _const(value: int) -> Expression:
     return Expression(ExpressionType.CONSTANT, value=value, size=8)
 
@@ -106,7 +110,7 @@ def test_rewrite_analysis_returns_normalizes_condition_expressions():
     assert condition_expr.operands[0].operator == "INT_SREM"
 
 
-def test_summary_condition_equivalence_keeps_expression_width_semantic(monkeypatch):
+def test_summary_condition_equivalence_keeps_expression_width_semantic():
     cond32 = Condition(_binary("INT_SLESS", _sized_param("param_1", 4), _sized_const(0, 4)))
     cond64 = Condition(_binary("INT_SLESS", _sized_param("param_1", 8), _sized_const(0, 8)))
     ret32 = ReturnInfo(address="0x1001", value=_const(1), conditions=[cond32])
@@ -126,16 +130,8 @@ def test_summary_condition_equivalence_keeps_expression_width_semantic(monkeypat
         summary_conditions=[cond64],
     )
     strategy = PairwiseStrategy(FormulaBuilder(), Mock(), debug=False)
-    implication_calls = []
-
-    def _not_equivalent_by_smt(left, right):
-        implication_calls.append((left, right))
-        return False
-
-    monkeypatch.setattr(strategy, "_condition_implies", _not_equivalent_by_smt)
 
     assert strategy._cases_have_equivalent_summary_conditions(case32, case64) is False
-    assert implication_calls
 
 
 def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
@@ -186,10 +182,26 @@ def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
 def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions():
     rewriter = ExpressionRewriter(direction=ExpressionRewriter.NORMALIZE_TO_MODULO)
     analysis1 = _analysis(
-        [_signed_negative_condition(_signed_modulo_expansion(_param("param_1"), _param("param_2")), negated=True)]
+        [
+            _signed_negative_condition(
+                _signed_modulo_expansion(
+                    _indexed_param("param_1", 0),
+                    _indexed_param("param_2", 1),
+                ),
+                negated=True,
+            )
+        ]
     )
     analysis2 = _analysis(
-        [_signed_negative_condition(_binary("INT_SREM", _param("param_1"), _param("param_2")))]
+        [
+            _signed_negative_condition(
+                _binary(
+                    "INT_SREM",
+                    _indexed_param("param_1", 0),
+                    _indexed_param("param_2", 1),
+                )
+            )
+        ]
     )
 
     rewritten1, _ = rewrite_analysis_returns(analysis1, rewriter)
@@ -209,10 +221,12 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     result = strategy.check(rewritten1, rewritten2)
 
-    assert result.is_equivalent is True
+    assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+    assert "return_case_coverage_inconclusive" in rewritten1.analysis_notes
+    assert "return_case_coverage_inconclusive" in rewritten2.analysis_notes
     solver_runner.run_sequential.assert_not_called()
 
 
@@ -356,10 +370,12 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
+    assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+    assert "return_case_coverage_inconclusive" in analysis1.analysis_notes
+    assert "return_case_coverage_inconclusive" in analysis2.analysis_notes
 
 
 def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeypatch):

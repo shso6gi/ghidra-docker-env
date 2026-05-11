@@ -25,7 +25,10 @@ from scripts.function_tracer_pcode.model import (
 
 
 def _param(name: str) -> Expression:
-    return Expression.parameter(name, size=4, data_type="int")
+    index = -1
+    if name.startswith("param_") and name[6:].isdigit():
+        index = int(name[6:]) - 1
+    return Expression.parameter(name, index=index, size=4, data_type="int")
 
 
 def _const(value: int, size: int = 4) -> Expression:
@@ -223,10 +226,12 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
+    assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+    assert "return_case_coverage_inconclusive" in analysis1.analysis_notes
+    assert "return_case_coverage_inconclusive" in analysis2.analysis_notes
     strategy.solver_runner.run_sequential.assert_not_called()
 
 

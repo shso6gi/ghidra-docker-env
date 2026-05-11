@@ -5,7 +5,8 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List, Sequence
 from dataclasses import dataclass, field
 
-from ...model import FunctionReturnAnalysis
+from ...analysis.condition.smt_oracle import ConditionSMTOracle
+from ...model import Condition, Expression, FunctionReturnAnalysis
 from ...model import ExpressionType
 from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...smt import ParallelResult
@@ -137,6 +138,27 @@ class CheckStrategy(ABC):
             return "gap", f"{label} has no return cases after extraction"
         if any(not getattr(case, "conditions", None) for case in cases):
             return "covered", None
+        object_centric_status = self._return_cases_have_object_centric_total_coverage(
+            cases
+        )
+        if object_centric_status is True:
+            return "covered", None
+        if object_centric_status is False:
+            return (
+                "gap",
+                f"{label} object-centric return-case coverage check found uncovered region",
+            )
+        if object_centric_status is None:
+            case_conditions = [
+                cond
+                for case in (cases or ())
+                for cond in (getattr(case, "conditions", None) or ())
+            ]
+            if not ConditionSMTOracle.has_object_identity_support(case_conditions):
+                return (
+                    "inconclusive",
+                    f"{label} return-case object-centric coverage check was inconclusive",
+                )
         if not base_ctx.get("header_lines"):
             return "inconclusive", f"{label} return-case coverage query skipped: base context has no declarations"
         if any(self._case_conditions_contain_unresolved_expression(case) for case in cases):
@@ -161,6 +183,68 @@ class CheckStrategy(ABC):
         if result.is_equivalent is None:
             return "inconclusive", f"{label} return-case coverage query was inconclusive"
         return "covered", None
+
+    def _return_cases_have_object_centric_total_coverage(
+        self,
+        cases: Sequence[Any],
+    ) -> Optional[bool]:
+        if not cases:
+            return False
+        if any(not getattr(case, "conditions", None) for case in cases):
+            return True
+        smt_result = self._return_cases_have_smt_total_coverage(cases)
+        if smt_result is not None:
+            return smt_result
+        return None
+
+    def _return_cases_have_smt_total_coverage(
+        self,
+        cases: Sequence[Any],
+    ) -> Optional[bool]:
+        """Prove coverage from Condition objects without rendered-query plumbing.
+
+        A coverage gap exists iff every return case can be missed at once.
+        For a case with conditions c1..cn, the case is missed by
+        (not c1) or ... or (not cn).  If the conjunction of all case-miss
+        formulas is UNSAT, the return partition is total.
+        """
+
+        miss_conditions: List[Condition] = []
+        for case in cases or ():
+            conditions = list(getattr(case, "conditions", None) or [])
+            if not conditions:
+                return True
+            miss_expr = self._case_miss_expression(conditions)
+            if miss_expr is None:
+                return None
+            miss_conditions.append(Condition(miss_expr, False))
+        if not miss_conditions:
+            return False
+        return ConditionSMTOracle.conjunction_is_unsat(miss_conditions)
+
+    def _case_miss_expression(
+        self,
+        conditions: Sequence[Condition],
+    ) -> Optional[Expression]:
+        miss_terms = [self._negated_condition_expression(condition) for condition in conditions]
+        miss_terms = [term for term in miss_terms if term is not None]
+        if not miss_terms:
+            return None
+        result = miss_terms[0]
+        for term in miss_terms[1:]:
+            result = Expression.binary_op("BOOL_OR", result, term)
+        return result
+
+    def _negated_condition_expression(
+        self,
+        condition: Condition,
+    ) -> Optional[Expression]:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return None
+        if bool(getattr(condition, "negated", False)):
+            return expr
+        return Expression.unary_op("BOOL_NEGATE", expr)
 
     def _build_return_case_coverage_query(
         self,

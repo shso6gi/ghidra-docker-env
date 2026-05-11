@@ -201,41 +201,19 @@ class MonolithicStrategy(CheckStrategy):
                 analysis1,
                 analysis2,
             )
-            if final_is_equivalent is False:
-                hints1 = infer_parameter_semantics(analysis1)
-                hints2 = infer_parameter_semantics(analysis2)
-                normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
-                normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
-                base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
-                normalized1 = normalize_analysis_semantic_width(
-                    normalized1,
-                    hints1,
-                    base_ctx.get("extra_vars1", []),
+            coverage_unsafety_reasons = []
+            if final_is_equivalent in {True, False}:
+                coverage_unsafety_reasons = self._collect_monolithic_return_coverage_unsafety_reasons(
+                    analysis1,
+                    analysis2,
                 )
-                normalized2 = normalize_analysis_semantic_width(
-                    normalized2,
-                    hints2,
-                    base_ctx.get("extra_vars2", []),
+            sat_unsafety_reasons.extend(coverage_unsafety_reasons)
+            if final_is_equivalent is True and coverage_unsafety_reasons:
+                self._debug_print(
+                    "Monolithic UNSAT downgraded to UNKNOWN due to incomplete return coverage "
+                    f"({', '.join(coverage_unsafety_reasons)})"
                 )
-                cases1 = extract_return_cases(normalized1, self.normalization_settings)
-                cases2 = extract_return_cases(normalized2, self.normalization_settings)
-                replace1 = build_symbol_replacer(
-                    base_ctx["params1"],
-                    base_ctx.get("extra_vars1", []),
-                )
-                replace2 = build_symbol_replacer(
-                    base_ctx["params2"],
-                    base_ctx.get("extra_vars2", []),
-                )
-                sat_unsafety_reasons.extend(
-                    self._collect_return_coverage_unsafety_reasons(
-                        base_ctx,
-                        cases1,
-                        cases2,
-                        replace1,
-                        replace2,
-                    )
-                )
+                final_is_equivalent = None
             if final_is_equivalent is True and equivalence_blocking_reasons:
                 self._debug_print(
                     "Monolithic UNSAT downgraded to UNKNOWN due to incomplete effect analysis "

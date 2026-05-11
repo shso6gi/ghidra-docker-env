@@ -8,10 +8,6 @@ from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInf
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
     _build_model_validation_query,
-    _normalize_condition_smt,
-    _normalize_smt_expr_widths,
-    _parse_smt_expr,
-    _smt_expr_to_string,
     solve_query_twostage,
     validate_counterexample_globally,
     validate_counterexample_across_cases,
@@ -5370,7 +5366,7 @@ def test_counterexample_validation_rejects_ambiguous_sat_model():
     assert any("ambiguous" in message for message in strategy.messages)
 
 
-def test_model_validation_query_normalizes_width_mismatch_compare():
+def test_model_validation_query_keeps_raw_width_mismatch_compare():
     class _FakeCase:
         def get_conditions_smt(self, _param_replace_fn):
             return ["(bvslt x_1 (_ bv0 64))"]
@@ -5406,11 +5402,11 @@ def test_model_validation_query_normalizes_width_mismatch_compare():
         equality=False,
     )
 
-    assert "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in query
-    assert "(assert (bvslt x_1 (_ bv0 64)))" not in query
+    assert "(assert (bvslt x_1 (_ bv0 64)))" in query
+    assert "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" not in query
 
 
-def test_model_validation_query_normalizes_width_mismatch_value_equality():
+def test_model_validation_query_keeps_raw_width_mismatch_value_equality():
     class _FakeCase:
         def __init__(self, value):
             self.value = value
@@ -5449,11 +5445,11 @@ def test_model_validation_query_normalizes_width_mismatch_value_equality():
         equality=True,
     )
 
-    assert "(assert (= (bvand x_1 (_ bv4294967295 32)) (_ bv1 32)))" in query
-    assert "(bvand x_1 (_ bv4294967295 64))" not in query
+    assert "(assert (= (bvand x_1 (_ bv4294967295 64)) (_ bv1 32)))" in query
+    assert "(bvand x_1 (_ bv4294967295 32))" not in query
 
 
-def test_validate_counterexample_globally_handles_width_mismatch_compare_with_normalization():
+def test_validate_counterexample_globally_reports_inconclusive_for_raw_width_mismatch_condition():
     class _Solver:
         def __init__(self):
             self.queries = []
@@ -5471,10 +5467,6 @@ def test_validate_counterexample_globally_handles_width_mismatch_compare_with_no
                             error_message="parse error: unknown width mismatch",
                         )
                     ]
-                )
-            if "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in query:
-                return ParallelResult(
-                    results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 0xFFFFFFFF})]
                 )
             return ParallelResult(
                 results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 0xFFFFFFFF})]
@@ -5531,10 +5523,27 @@ def test_validate_counterexample_globally_handles_width_mismatch_compare_with_no
         counterexample_raw={"x_1": 0xFFFFFFFF, "x_2": 0},
     )
 
-    assert is_decisive
-    assert not any("Validation query (0,0):feasible returned UNKNOWN" in message for message in strategy.messages)
-    assert not any("Counterexample validation for pair (0,0) was inconclusive" in message for message in strategy.messages)
-    assert not any("(assert (bvslt x_1 (_ bv0 64)))" in q for q in strategy.solver_runner.queries)
+    assert not is_decisive
+    assert any(
+        "Counterexample validation for pair (0,0) was inconclusive" in message
+        for message in strategy.messages
+    )
+    assert any(
+        "Validation query (0,0):feasible returned UNKNOWN/TIMEOUT" in message
+        for message in strategy.messages
+    )
+    assert any(
+        "parse error: unknown width mismatch" in message
+        for message in strategy.messages
+    )
+    assert any(
+        "(assert (bvslt x_1 (_ bv0 64)))" in q
+        for q in strategy.solver_runner.queries
+    )
+    assert not any(
+        "(assert (bvslt ((_ sign_extend 32) x_1) (_ bv0 64)))" in q
+        for q in strategy.solver_runner.queries
+    )
 
 
 def test_validate_counterexample_globally_rejects_return_width_overlap_equality():
@@ -5598,47 +5607,3 @@ def test_validate_counterexample_globally_rejects_return_width_overlap_equality(
     assert any("return width mismatch" in message for message in strategy.messages)
     assert not any("extract 31 0" in query for query in strategy.solver_runner.queries)
 
-
-def test_parse_smt_expr_handles_indexed_identifier_syntax():
-    condition = "(bvslt ((_ sign_extend 32) x_1) ((_ extract 7 0) y_2))"
-    ast = _parse_smt_expr(condition)
-    assert ast == [
-        "bvslt",
-        [["_", "sign_extend", "32"], "x_1"],
-        [["_", "extract", "7", "0"], "y_2"],
-    ]
-    assert _smt_expr_to_string(ast) == condition
-
-
-def test_normalize_condition_smt_roundtrips_indexed_syntax():
-    condition = "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"
-    normalized = _normalize_condition_smt(condition, {"x_1": 32, "y_2": 64})
-    assert normalized == "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"
-
-
-def test_normalize_condition_smt_coerces_bv_binary_constant_widths():
-    condition = "(= (bvand param_2_2 (_ bv4294967295 64)) (_ bv1 32))"
-    normalized = _normalize_condition_smt(condition, {"param_2_2": 32})
-
-    assert normalized == "(= (bvand param_2_2 (_ bv4294967295 32)) (_ bv1 32))"
-
-
-def test_normalize_condition_smt_extends_bv_binary_symbol_widths_before_comparison():
-    condition = "(= (bvand x_1 y_2) (_ bv0 64))"
-    normalized = _normalize_condition_smt(condition, {"x_1": 32, "y_2": 64})
-
-    assert normalized == "(= (bvand ((_ zero_extend 32) x_1) y_2) (_ bv0 64))"
-
-
-def test_normalize_smt_expr_widths_coerces_bitvector_equality_operands():
-    equality = "(= (bvadd x_1 (_ bv1 32)) y_2)"
-    normalized = _normalize_smt_expr_widths(equality, {"x_1": 32, "y_2": 64})
-
-    assert normalized == "(= ((_ zero_extend 32) (bvadd x_1 (_ bv1 32))) y_2)"
-
-
-def test_normalize_smt_expr_widths_handles_value_binary_widths():
-    value_smt = "(bvadd ((_ sign_extend 32) x_1) (_ bv4294967295 32))"
-    normalized = _normalize_smt_expr_widths(value_smt, {"x_1": 32})
-
-    assert normalized == "(bvadd ((_ sign_extend 32) x_1) (_ bv4294967295 64))"

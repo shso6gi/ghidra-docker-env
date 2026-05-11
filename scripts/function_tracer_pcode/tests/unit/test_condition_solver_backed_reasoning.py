@@ -6,7 +6,8 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionSimplifier,
     ConditionSMTOracle,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, LocationBaseRef
+from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.model.render_smt import normalize_call_symbol_name
 from scripts.function_tracer_pcode.model.render_smt import expression_contains_unsupported_smt_ops
 
@@ -210,6 +211,99 @@ def test_solver_backed_script_sanitizes_call_symbols():
     assert usable is True
     assert script is not None
     assert normalize_call_symbol_name("call-foo*") in script
+
+
+def test_smt_oracle_keeps_distinct_params_from_same_name_distinct_if_different_runtime_refs():
+    p0 = Expression.parameter(
+        "count",
+        index=0,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("count", index=0),
+    )
+    p1 = Expression.parameter(
+        "count",
+        index=1,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("count", index=1),
+    )
+    cond0 = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
+    cond1 = Condition(Expression.binary_op("INT_NOTEQUAL", p1, _const(0)), False)
+
+    usable, script = ConditionSMTOracle._build_script([cond0, cond1])
+    assert usable is True
+    assert script is not None
+    assert ConditionSMTOracle.conjunction_is_unsat([cond0, cond1]) is False
+
+    declare_lines = [line for line in script.splitlines() if line.startswith("(declare-const ")]
+    names = []
+    for line in declare_lines:
+        parts = line.split()
+        if len(parts) >= 3:
+            names.append(parts[1])
+    assert len(set(names)) == len(names)
+
+
+def test_smt_oracle_declines_object_identity_unsafe_parameters():
+    p0 = Expression.parameter("count", index=-1, size=4)
+    cond = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
+    usable, script = ConditionSMTOracle._build_script([cond])
+    assert usable is False
+    assert script is None
+    assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
+
+
+def test_smt_oracle_reuses_rewritten_shared_expression_nodes():
+    p = Expression.parameter(
+        "count",
+        index=0,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("count", index=0),
+    )
+    shared_eq = Expression.binary_op("INT_EQUAL", p, _const(0))
+    shared_ne = Expression.binary_op("INT_NOTEQUAL", p, _const(0))
+    cond = Condition(Expression.binary_op("BOOL_AND", shared_eq, shared_ne), False)
+
+    usable, script = ConditionSMTOracle._build_script([cond])
+    assert usable is True
+    assert script is not None
+
+    declarations = [line for line in script.splitlines() if line.startswith("(declare-const ")]
+    declared_names = {line.split()[1] for line in declarations if len(line.split()) >= 3}
+    assert len(declared_names) == 1
+    assert "count" not in {name for name in declared_names}
+    assert any("objvar_" in name for name in declared_names)
+
+
+def test_smt_oracle_uses_storage_identity_key_for_parameter_without_index():
+    storage_info = StorageInfo(
+        is_register=False,
+        space_id=0,
+        offset=0x2000,
+        size=4,
+        size_bits=32,
+    )
+    p0 = Expression.parameter(
+        "count",
+        index=-1,
+        size=4,
+        storage_info=storage_info,
+    )
+    p1 = Expression.parameter(
+        "count",
+        index=-1,
+        size=4,
+        storage_info=storage_info,
+    )
+    cond = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
+    cond2 = Condition(Expression.binary_op("INT_NOTEQUAL", p1, _const(0)), False)
+
+    usable, script = ConditionSMTOracle._build_script([cond, cond2])
+    assert usable is True
+    assert script is not None
+
+    declarations = [line for line in script.splitlines() if line.startswith("(declare-const ")]
+    declared_names = [line.split()[1] for line in declarations if len(line.split()) >= 3]
+    assert len(set(declared_names)) == 1
 
 
 def test_object_centric_condition_basis_prunes_negated_compound_implied_by_atomic_branch_facts():

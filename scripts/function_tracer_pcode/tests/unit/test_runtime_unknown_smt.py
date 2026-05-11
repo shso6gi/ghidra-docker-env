@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.model import (
     DeferredCallRef,
     Expression,
     LocationBaseRef,
+    LoopVariableIdentityRef,
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
@@ -57,6 +58,18 @@ def test_expression_unknown_uses_object_centric_runtime_identity_for_smt():
     assert declarations == [(expr.to_smt(), 32)]
     assert expr.to_smt().startswith("rtunk_")
     assert expr.to_smt() != "unknown"
+
+
+def test_loop_variable_identity_uses_stable_key_for_unknown_smt_symbol():
+    runtime_ref = LoopVariableIdentityRef(
+        role="element_index",
+        varnode_key=(("op", "x"),),
+        binder_ordinal=0,
+    )
+    expr_left = Expression.unknown("loop_var", runtime_ref=runtime_ref)
+    expr_right = Expression.unknown("loop_var", runtime_ref=runtime_ref)
+
+    assert expr_left.to_smt() == expr_right.to_smt()
 
 
 def test_unresolved_parameter_runtime_unknowns_do_not_share_smt_identity():

@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ...model import Condition
 from ...model.structural import condition_key, key_contains_placeholder
 from ...model.render_smt import (
     collect_unknown_smt_declarations,
@@ -123,6 +124,7 @@ class ConditionSMTOracle:
         memory_widths = set()
         unknown_decls = set()
         call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
+        symbol_names: Dict[Tuple[Any, ...], str] = {}
 
         for condition in conditions:
             expr = getattr(condition, "expression", None)
@@ -137,16 +139,20 @@ class ConditionSMTOracle:
                 if expr_type is None or expr_kind is None:
                     continue
                 if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-                    symbol = cls._symbol_name(node)
-                    if not symbol:
+                    identity = cls._expression_identity_key(node)
+                    if identity is None:
                         return False, None
                     bit_width = max(1, int(expression_smt_bit_width(node) or 0))
                     if bit_width <= 0:
                         return False, None
-                    existing = var_widths.get(symbol)
+                    existing_symbol = symbol_names.get(identity)
+                    if existing_symbol is None:
+                        existing_symbol = f"objvar_{len(symbol_names)}"
+                        symbol_names[identity] = existing_symbol
+                    existing = var_widths.get(existing_symbol)
                     if existing is not None and existing != bit_width:
                         return False, None
-                    var_widths[symbol] = bit_width
+                    var_widths[existing_symbol] = bit_width
                 elif expr_type == expr_kind.MEMORY:
                     mem_bits = max(1, int(expression_smt_bit_width(node) or 0))
                     if mem_bits not in {8, 16, 32, 64}:
@@ -183,7 +189,7 @@ class ConditionSMTOracle:
             condition_expr = getattr(condition, "expression", None)
             if condition_expr is None:
                 return False, None
-            condition_smt = condition.to_smt()
+            condition_smt = cls._condition_to_smt(condition, symbol_names)
             if not expression_returns_bool(condition_expr):
                 bits = max(1, int(expression_smt_bit_width(condition_expr) or 0))
                 if bits <= 0:
@@ -198,21 +204,199 @@ class ConditionSMTOracle:
         expr_kind = getattr(expr_type, "__class__", None)
         if expr_type is None or expr_kind is None:
             return None
-        if expr_type == expr_kind.PARAMETER:
-            if getattr(expr, "name", None):
-                return expr.name
-            return f"param_{getattr(expr, 'value', -1)}"
-        if expr_type == expr_kind.VARIABLE:
-            return getattr(expr, "name", None) or "var"
+        if expr_type == expr_kind.CALL:
+            return normalize_call_symbol_name(getattr(expr, "name", None))
+        identity = cls._expression_identity_key(expr)
+        if identity is None:
+            return None
+        return str(identity)
+
+    @classmethod
+    def _expression_identity_key(cls, expr) -> Optional[Tuple[Any, ...]]:
+        expr_type = getattr(expr, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is None or expr_kind is None:
+            return None
+        if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            runtime_identity = cls._runtime_ref_identity(runtime_ref)
+            if runtime_identity is not None:
+                return (
+                    "runtime_ref",
+                    "parameter" if expr_type == expr_kind.PARAMETER else "variable",
+                    runtime_identity,
+                )
+            if expr_type == expr_kind.PARAMETER:
+                try:
+                    parameter_index = int(getattr(expr, "value", -1))
+                    if parameter_index >= 0:
+                        return ("parameter_index", parameter_index)
+                except (TypeError, ValueError):
+                    parameter_index = None
+                storage_info = getattr(expr, "storage_info", None)
+                storage_identity = getattr(storage_info, "storage_identity_key", None)
+                if storage_identity is not None:
+                    if callable(storage_identity):
+                        try:
+                            storage_identity = storage_identity()
+                        except Exception:
+                            storage_identity = None
+                    if storage_identity is None:
+                        return None
+                    return ("parameter_storage", storage_identity)
+            return None
         if expr_type == expr_kind.CALL:
             return normalize_call_symbol_name(getattr(expr, "name", None))
         return None
 
     @classmethod
+    def has_object_identity_support(cls, conditions: Sequence) -> bool:
+        """Return false when any PARAMETER/VARIABLE cannot be given a stable identity."""
+        try:
+            for condition in conditions or ():
+                expr = getattr(condition, "expression", None)
+                if expr is None:
+                    return False
+                for node in cls._iter_expression_nodes(expr):
+                    expr_type = getattr(node, "expr_type", None)
+                    expr_kind = getattr(expr_type, "__class__", None)
+                    if expr_type is None or expr_kind is None:
+                        continue
+                    if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
+                        if cls._expression_identity_key(node) is None:
+                            return False
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def _runtime_ref_identity(cls, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+        if runtime_ref is None:
+            return None
+        semantic_key = getattr(runtime_ref, "semantic_key", None)
+        if callable(semantic_key):
+            try:
+                identity = semantic_key()
+            except Exception:
+                identity = None
+            if identity is not None:
+                return ("semantic", identity)
+        stable_key = getattr(runtime_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                identity = stable_key()
+            except Exception:
+                identity = None
+            if identity is not None:
+                return ("stable", identity)
+        return None
+
+    @classmethod
+    def _condition_to_smt(
+        cls,
+        condition,
+        symbol_names: Dict[Tuple[Any, ...], str],
+    ) -> str:
+        expr = getattr(condition, "expression", None)
+        if expr is None:
+            return "false"
+        rewritten = cls._rewrite_expr_with_symbol_names(
+            expr,
+            symbol_names,
+        )
+        condition_smt = rewritten.to_smt()
+        if getattr(condition, "negated", False):
+            return f"(not {condition_smt})"
+        return condition_smt
+
+    @classmethod
+    def _rewrite_expr_with_symbol_names(
+        cls,
+        expr,
+        symbol_names: Dict[Tuple[Any, ...], str],
+        active: Optional[set[int]] = None,
+        memo: Optional[Dict[int, Any]] = None,
+    ):
+        if expr is None:
+            return expr
+        if active is None:
+            active = set()
+        if memo is None:
+            memo = {}
+        expr_id = id(expr)
+        if expr_id in memo:
+            return memo[expr_id]
+        if expr_id in active:
+            memo[expr_id] = expr
+            return expr
+        active.add(expr_id)
+
+        expr_type = getattr(expr, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is None or expr_kind is None:
+            memo[expr_id] = expr
+            return expr
+        if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
+            identity = cls._expression_identity_key(expr)
+            if identity is None:
+                memo[expr_id] = expr
+                return expr
+            symbol = symbol_names.get(identity)
+            if symbol is None:
+                memo[expr_id] = expr
+                return expr
+            rewritten_parameter = expr.clone_with(name=symbol)
+            memo[expr_id] = rewritten_parameter
+            return rewritten_parameter
+
+        cloned_operands = [
+                cls._rewrite_expr_with_symbol_names(
+                    operand,
+                    symbol_names,
+                    active,
+                    memo,
+                )
+                for operand in (getattr(expr, "operands", None) or [])
+            ]
+        cloned_value = None
+        if expr_type == expr_kind.PHI and getattr(expr, "value", None):
+            cloned_value = []
+            for cond, value in expr.value:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond is not None and cond_expr is not None:
+                    rewritten_cond = cls._rewrite_expr_with_symbol_names(
+                        cond_expr,
+                        symbol_names,
+                        active,
+                        memo,
+                    )
+                    cond = Condition(rewritten_cond, bool(getattr(cond, "negated", False)))
+                cloned_value.append(
+                    (
+                        cond,
+                        cls._rewrite_expr_with_symbol_names(
+                            value,
+                            symbol_names,
+                            active,
+                            memo,
+                        ),
+                    )
+                )
+            if cloned_value is not None:
+                cloned_value = tuple(cloned_value)
+        rewritten_expr = expr.clone_with(
+            operands=tuple(cloned_operands),
+            value=cloned_value if cloned_value is not None else expr.value,
+        )
+        memo[expr_id] = rewritten_expr
+        active.discard(expr_id)
+        return rewritten_expr
+
+    @classmethod
     def _collect_call_declaration(
         cls,
         node: Any,
-    ) -> Optional[Tuple[str, Tuple[int, ...], int]]:
+        ) -> Optional[Tuple[str, Tuple[int, ...], int]]:
         expr_type = getattr(node, "expr_type", None)
         expr_kind = getattr(expr_type, "__class__", None)
         if expr_type is None or expr_kind is None or expr_type != expr_kind.CALL:

@@ -120,7 +120,7 @@ def test_expression_to_smt_lowers_readonly_sum_as_declared_object_centric_functi
 def test_counted_loop_sum_lowers_to_exact_smt_without_uninterpreted_symbol():
     left = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -256,7 +256,7 @@ def test_counted_loop_sum_exact_smt_uses_unsigned_distance_for_signed_residue_re
 def test_counted_loop_sum_fallback_declares_uninterpreted_function():
     expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -281,7 +281,7 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_with_matching_signedness()
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -309,7 +309,7 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_with_matching_signedness()
     assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
 
 
-def test_pairwise_intrinsic_auxiliary_query_uses_symbol_replacer_names():
+def test_pairwise_intrinsic_auxiliary_query_refuses_unresolved_variable_symbol():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     count = Expression.parameter("count", index=0, size=4, data_type="int")
     aux_var = Expression.variable("__loop_acc", size=4)
@@ -327,20 +327,14 @@ def test_pairwise_intrinsic_auxiliary_query_uses_symbol_replacer_names():
         ],
     )
 
-    assert query is not None
-    assert "(declare-const count_aux (_ BitVec 32))" in query
-    assert "(declare-const __loop_acc_aux (_ BitVec 32))" in query
-    assert "count_aux" in query
-    assert "__loop_acc_aux" in query
-    assert " count)" not in query
-    assert " __loop_acc)" not in query
+    assert query is None
 
 
 def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_signedness_differs():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -352,7 +346,7 @@ def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_signedness_di
     )
     right_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="uint")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -372,7 +366,7 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_when_signedness_differs_bu
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     left_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="int")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="int")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -384,7 +378,7 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_when_signedness_differs_bu
     )
     right_expr = Expression.intrinsic(
         "COUNTED_LOOP_SUM",
-        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", size=4, data_type="uint")],
+        [_const(0, size=4), _const(0, size=4), Expression.parameter("count", index=0, size=4, data_type="uint")],
         size=4,
         runtime_ref=CountedLoopSummaryRef(
             induction_step=1,
@@ -396,14 +390,32 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_when_signedness_differs_bu
     )
     left_case = ReturnCase(
         0,
-        [Condition(Expression.binary_op("INT_SLESS", _const(0, size=4), _param("count", size=4)), False)],
+        [
+            Condition(
+                Expression.binary_op(
+                    "INT_SLESS",
+                    _const(0, size=4),
+                    Expression.parameter("count", index=0, size=4, data_type="int"),
+                ),
+                False,
+            )
+        ],
         left_expr,
         ReturnInfo("left", left_expr),
         parameters=[{"name": "count", "size": 4, "index": 0, "data_type": "int"}],
     )
     right_case = ReturnCase(
         0,
-        [Condition(Expression.binary_op("INT_SLESS", _param("count", size=4), _const(1, size=4)), True)],
+        [
+            Condition(
+                Expression.binary_op(
+                    "INT_SLESS",
+                    Expression.parameter("count", index=0, size=4, data_type="uint"),
+                    _const(1, size=4),
+                ),
+                True,
+            )
+        ],
         right_expr,
         ReturnInfo("right", right_expr),
         parameters=[{"name": "count", "size": 4, "index": 0, "data_type": "uint"}],
@@ -641,7 +653,7 @@ def test_readonly_sum_smt_declarations_share_method_b_seed_compensated_identity(
     def _loop_summary(start: int, seed_terms=()):
         return LoopSummaryRef(
             start_expr=Expression.constant(start, size=4),
-            limit_expr=Expression.parameter("count", size=4, data_type="int"),
+            limit_expr=Expression.parameter("count", index=1, size=4, data_type="int"),
             step_expr=Expression.constant(1, size=4),
             term_descriptor=LoopTermDescriptorRef(
                 kind="memory_load",
@@ -659,7 +671,10 @@ def test_readonly_sum_smt_declarations_share_method_b_seed_compensated_identity(
     def _expr(summary):
         return Expression.intrinsic(
             "READONLY_SUM",
-            [_param("base"), Expression.parameter("count", size=4, data_type="int")],
+            [
+                Expression.parameter("base", index=0, size=8, data_type="int *"),
+                Expression.parameter("count", index=1, size=4, data_type="int"),
+            ],
             size=4,
             runtime_ref=ReadonlyReductionRef(
                 reduction_kind="memory_sum",

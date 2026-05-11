@@ -321,6 +321,25 @@ def _coerce_bool_to_bitvec(expr, expr_smt: str, bits: int) -> str:
     return f"(ite {expr_smt} (_ bv1 {bits}) (_ bv0 {bits}))"
 
 
+def _coerce_expr_to_bool(expr, expr_smt: str) -> str:
+    """Bitvector-shaped boolean operands are normalized before BOOL_* SMT ops."""
+    if expression_returns_bool(expr):
+        return expr_smt
+
+    expr_type = getattr(expr, "expr_type", None)
+    expr_kind = getattr(expr_type, "__class__", None)
+    if expr_kind is not None and expr_type == expr_kind.CONSTANT:
+        try:
+            return "false" if int(getattr(expr, "value", 0) or 0) == 0 else "true"
+        except Exception:
+            return "false"
+
+    bits = expression_smt_bit_width(expr)
+    if bits <= 0:
+        bits = max(1, int(getattr(expr, "size", 0) or 1) * 8)
+    return f"(not (= {expr_smt} (_ bv0 {bits})))"
+
+
 def _coerce_smt_bitvec_width(
     expr_smt: str,
     source_bits: int,
@@ -507,6 +526,14 @@ def _iter_expression_nodes(expr) -> List[Any]:
 
 def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
     runtime_ref = getattr(expr, "runtime_ref", None)
+    semantic_key = getattr(runtime_ref, "semantic_key", None)
+    if callable(semantic_key):
+        try:
+            identity = semantic_key()
+        except Exception:
+            identity = None
+        if identity is not None:
+            return ("runtime_ref_semantic", identity)
     stable_key = getattr(runtime_ref, "stable_key", None)
     if callable(stable_key):
         try:
@@ -516,8 +543,8 @@ def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
         if identity is not None:
             return ("runtime_ref", identity)
     return (
-        "expression_unknown",
-        getattr(expr, "name", None),
+        "expression_unknown_instance",
+        id(expr),
         int(expression_smt_bit_width(expr) or 1),
     )
 
@@ -1065,6 +1092,14 @@ def _to_smt_internal(
                     right_smt = f"((_ {op} {target_bits - right_bits}) {right_smt})"
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
+
+        if expr.operator in {"BOOL_AND", "BOOL_OR", "BOOL_XOR"}:
+            op = expr._get_smt_operator(expr.operator)
+            return (
+                f"({op} "
+                f"{_coerce_expr_to_bool(left, left_smt)} "
+                f"{_coerce_expr_to_bool(right, right_smt)})"
+            )
 
         op = expr._get_smt_operator(expr.operator)
         return f"({op} {left_smt} {right_smt})"

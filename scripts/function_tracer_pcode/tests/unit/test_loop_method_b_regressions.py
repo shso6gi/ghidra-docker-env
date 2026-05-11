@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
@@ -140,6 +141,138 @@ def _readonly_sum_from_proof(proof: ReductionAccumulatorProof) -> Expression:
         runtime_ref=reduction_ref,
         opcode=READONLY_SUM_OPCODE,
     )
+
+
+def test_pairwise_object_condition_coverage_proves_total_binary_partition_without_base_context():
+    non_positive = _count_gt(0).negate()
+    positive = _count_gt(0)
+    analysis = _analysis(
+        "total_partition",
+        [
+            ReturnInfo(address="0x1000", value=_const(7), conditions=[non_positive]),
+            ReturnInfo(address="0x1004", value=_const(7), conditions=[positive]),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+
+    assert strategy._return_cases_have_object_centric_total_coverage(cases)
+
+
+def test_object_centric_coverage_falls_back_to_legacy_query_on_solver_inconclusive(monkeypatch):
+    p = Expression.parameter(
+        "count",
+        index=0,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("count", index=0),
+    )
+    analysis = _analysis(
+        "object_identity_safe_but_solver_inconclusive",
+        [ReturnInfo(address="0x1000", value=_const(7), conditions=[Condition(Expression.binary_op("INT_NOTEQUAL", p, _const(0)))])],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(return_value="(check-sat)")
+    strategy.solver_runner = Mock()
+    strategy.solver_runner.run_sequential = Mock(
+        return_value=Mock(is_equivalent=None, get_counterexample=Mock(return_value=None))
+    )
+    strategy.formula_builder = Mock()
+
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.analysis.condition.smt_oracle.ConditionSMTOracle.conjunction_is_unsat",
+        lambda conditions, cache_key=None: None,
+    )
+
+    status, detail = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": ["(set-logic QF_AUFBV)"],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert status == "inconclusive"
+    assert detail == "function1 return-case coverage query was inconclusive"
+    strategy._build_return_case_coverage_query.assert_called_once()
+    strategy.solver_runner.run_sequential.assert_called_once()
+
+
+def test_object_centric_identity_unsafe_keeps_object_coverage_path_inconclusive():
+    p = Expression.parameter("count", size=4)
+    analysis = _analysis(
+        "object_identity_unsafe",
+        [ReturnInfo(address="0x1000", value=_const(7), conditions=[Condition(Expression.binary_op("INT_NOTEQUAL", p, _const(0)))])],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(
+        side_effect=AssertionError("legacy coverage query must not be used when object identity is unsafe")
+    )
+
+    status, detail = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": ["(set-logic QF_AUFBV)"],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert status == "inconclusive"
+    assert detail == "function1 return-case object-centric coverage check was inconclusive"
+    strategy._build_return_case_coverage_query.assert_not_called()
+
+
+def test_object_centric_coverage_gap_is_used_directly():
+    analysis = _analysis(
+        "object_centric_gap",
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _const(0), _count_param()))],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(7),
+                conditions=[Condition(Expression.binary_op("INT_SLESS", _count_param(), _const(0)))],
+            ),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+    strategy._build_return_case_coverage_query = Mock(
+        side_effect=AssertionError("gap from object-centric oracle must short-circuit before legacy coverage")
+    )
+    status, detail = strategy._check_return_case_coverage_gap(
+        {
+            "header_lines": ["(set-logic QF_AUFBV)"],
+            "params1": [],
+            "params2": [],
+            "extra_vars1": [],
+            "extra_vars2": [],
+            "constrained_fragments": [],
+        },
+        cases,
+        lambda expr: expr.to_smt(),
+        "function1",
+    )
+
+    assert status == "gap"
+    assert detail == "function1 object-centric return-case coverage check found uncovered region"
+    strategy._build_return_case_coverage_query.assert_not_called()
 
 
 def _pure_counted_summary() -> LoopSummaryRef:
