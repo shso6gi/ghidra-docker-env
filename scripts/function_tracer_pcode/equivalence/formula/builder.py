@@ -30,7 +30,6 @@ from ..param_semantics import infer_parameter_semantics
 from ..semantic_width import (
     align_return_value_extension_surfaces,
     normalize_analysis_semantic_width,
-    return_extension_surface_evidence_key,
 )
 from .types import (
     ExtraVariableInfo,
@@ -355,23 +354,6 @@ class FormulaBuilder:
         if readonly_witness_axioms:
             lines.extend(readonly_witness_axioms)
 
-        active_return_bits = self._active_return_comparison_bits(analysis1, analysis2)
-        readonly_contract_axioms = self._build_readonly_reduction_contract_axioms_section(
-            (
-                (
-                    render_declaration_analysis1,
-                    self._merge_param_and_extra_vars(params1, extra_vars1),
-                ),
-                (
-                    render_declaration_analysis2,
-                    self._merge_param_and_extra_vars(params2, extra_vars2),
-                ),
-            ),
-            active_return_bits=active_return_bits,
-        )
-        if readonly_contract_axioms:
-            lines.extend(readonly_contract_axioms)
-
         semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
         if semantic_lines:
             lines.extend(semantic_lines)
@@ -637,10 +619,11 @@ class FormulaBuilder:
             if analysis is None:
                 continue
             symbol_name_mapping = build_symbol_name_mapping(param_infos)
-            for expr in self._iter_analysis_expressions(analysis):
+            for expr, case_guards in self._iter_analysis_expressions_with_guards(analysis):
                 for axiom in self._readonly_reduction_witness_axioms_for_expr(
                     expr,
                     symbol_name_mapping,
+                    case_guards=case_guards,
                 ):
                     if axiom in seen:
                         continue
@@ -658,39 +641,55 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
-    def _iter_analysis_expressions(self, analysis: FunctionReturnAnalysis):
-        def visit(expr):
+    def _iter_analysis_expressions_with_guards(self, analysis: FunctionReturnAnalysis):
+        def visit(expr, guards=()):
             if expr is None:
                 return
-            yield expr
+            guards = tuple(guard for guard in (guards or ()) if guard is not None)
+            yield expr, guards
             if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
                 for condition, value in expr.value:
                     if condition is not None:
-                        yield from visit(getattr(condition, "expression", None))
-                    yield from visit(value)
+                        yield from visit(getattr(condition, "expression", None), guards)
+                        yield from visit(value, guards + (condition,))
+                    else:
+                        yield from visit(value, guards)
                 return
             for operand in getattr(expr, "operands", []) or []:
-                yield from visit(operand)
+                yield from visit(operand, guards)
 
         def visit_conditions(conditions):
             for condition in conditions or []:
-                yield from visit(getattr(condition, "expression", None))
+                condition_guards = tuple(cond for cond in (conditions or ()) if cond is not None)
+                yield from visit(getattr(condition, "expression", None), condition_guards)
 
         for ret in getattr(analysis, "returns", []) or []:
-            yield from visit(getattr(ret, "value", None))
+            return_guards = tuple(
+                condition
+                for condition in (getattr(ret, "conditions", None) or ())
+                if condition is not None
+            )
+            yield from visit(getattr(ret, "value", None), return_guards)
             yield from visit_conditions(getattr(ret, "conditions", None))
 
         effect_summary = getattr(analysis, "effect_summary", None)
         if effect_summary is not None:
             yield from visit(getattr(effect_summary, "synthetic_expr", None))
             for effect in getattr(effect_summary, "effects", []) or []:
-                yield from visit(getattr(effect, "value", None))
+                effect_guards = tuple(
+                    condition
+                    for condition in (getattr(effect, "conditions", None) or ())
+                    if condition is not None
+                )
+                yield from visit(getattr(effect, "value", None), effect_guards)
                 yield from visit_conditions(getattr(effect, "conditions", None))
 
     def _readonly_reduction_witness_axioms_for_expr(
         self,
         expr,
         symbol_name_mapping,
+        *,
+        case_guards=(),
     ) -> List[str]:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.INTRINSIC:
             return []
@@ -715,6 +714,15 @@ class FormulaBuilder:
         count_smt = count_expr.to_smt(symbol_name_mapping=symbol_name_mapping)
         base_smt = base_expr.to_smt(symbol_name_mapping=symbol_name_mapping)
         base_addr_smt = self._coerce_smt_bitvec_width(base_smt, base_bits, 64)
+        proof_guards = tuple(getattr(proof, "guard_constraints", ()) or ())
+        loop_summary = getattr(reduction_ref, "loop_summary", None)
+        loop_guards = tuple(getattr(loop_summary, "guard_constraints", ()) or ()) if loop_summary is not None else ()
+        guard_terms = self._readonly_witness_guard_smt_terms(
+            tuple(case_guards or ()) + proof_guards + loop_guards,
+            symbol_name_mapping,
+        )
+        if guard_terms is None:
+            return []
 
         axioms: List[str] = []
         for count_value in self._readonly_reduction_witness_counts(reduction_ref, proof):
@@ -731,181 +739,63 @@ class FormulaBuilder:
             if value_smt is None:
                 continue
             count_literal = self._bv_literal(count_value, count_bits)
+            antecedent = self._readonly_witness_antecedent_smt(
+                count_guard=f"(= {count_smt} {count_literal})",
+                guard_terms=guard_terms,
+            )
             axioms.append(
-                f"(assert (=> (= {count_smt} {count_literal}) "
+                f"(assert (=> {antecedent} "
                 f"(= {function_application} {value_smt})))"
             )
         return axioms
 
-    def _build_readonly_reduction_contract_axioms_section(
+    def _readonly_witness_guard_smt_terms(
         self,
-        analysis_param_infos: Tuple[Tuple[FunctionReturnAnalysis, List[Any]], ...],
-        *,
-        active_return_bits: Optional[int] = None,
-    ) -> List[str]:
-        entries: List[Dict[str, Any]] = []
-        for analysis, param_infos in analysis_param_infos:
-            if analysis is None:
-                continue
-            symbol_name_mapping = build_symbol_name_mapping(param_infos)
-            comparison_surface = analysis.get_comparison_surface()
-            for expr in self._iter_analysis_expressions(analysis):
-                entry = self._readonly_reduction_contract_axiom_entry(
-                    expr,
-                    symbol_name_mapping,
-                    comparison_surface,
-                    active_return_bits=active_return_bits,
-                )
-                if entry is not None:
-                    entries.append(entry)
-
-        axioms: List[str] = []
-        seen = set()
-        for left_index, left in enumerate(entries):
-            for right in entries[left_index + 1 :]:
-                axiom = self._readonly_reduction_contract_axiom_for_entries(left, right)
-                if axiom is None or axiom in seen:
-                    continue
-                seen.add(axiom)
-                axioms.append(axiom)
-
-        if not axioms:
-            return []
-        lines: List[str] = []
-        lines.append("; " + "-" * 40)
-        lines.append("; Readonly reduction contract equality axioms")
-        lines.append("; Full-width READONLY_SUM contracts share the same object-centric term sequence")
-        lines.append("; " + "-" * 40)
-        lines.extend(axioms)
-        lines.append("")
-        return lines
-
-    def _readonly_reduction_contract_axiom_entry(
-        self,
-        expr,
+        guards,
         symbol_name_mapping,
-        comparison_surface=None,
-        *,
-        active_return_bits: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
-        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.INTRINSIC:
-            return None
-        reduction_ref = getattr(expr, "runtime_ref", None)
-        if not isinstance(reduction_ref, ReadonlyReductionRef):
-            return None
-        operands = list(getattr(expr, "operands", []) or [])
-        if len(operands) != 2:
-            return None
-        if not self._readonly_reduction_expr_operands_match_ref(expr, reduction_ref):
-            return None
-        result_bits = max(1, int(expression_smt_bit_width(expr) or 0))
-        if result_bits <= 0 or result_bits % 8 != 0:
-            return None
-        return {
-            "expr": expr,
-            "ref": reduction_ref,
-            "result_bits": result_bits,
-            "application": expr.to_smt(symbol_name_mapping=symbol_name_mapping),
-            "surface_key": self._readonly_contract_surface_key(comparison_surface),
-            "active_return_bits": self._readonly_contract_valid_projection_bits(
-                active_return_bits,
-                result_bits,
-            ),
-        }
+    ) -> Optional[Tuple[str, ...]]:
+        terms: List[str] = []
+        seen = set()
+        for guard in guards or ():
+            term = self._readonly_guard_to_smt(guard, symbol_name_mapping)
+            if term is None:
+                return None
+            if term in {"", "true"} or term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        return tuple(terms)
 
-    def _readonly_reduction_contract_axiom_for_entries(
+    def _readonly_guard_to_smt(
         self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
+        guard,
+        symbol_name_mapping,
     ) -> Optional[str]:
-        left_ref = left["ref"]
-        right_ref = right["ref"]
-        if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
-            return None
-        left_bits = int(left["result_bits"])
-        right_bits = int(right["result_bits"])
-        target_bits = self._readonly_contract_target_bits(left, right)
-        if target_bits <= 0 or target_bits % 8 != 0:
-            return None
-        target_size = target_bits // 8
-        left_key_fn = getattr(left_ref, "readonly_term_sequence_contract_key", None)
-        right_key_fn = getattr(right_ref, "readonly_term_sequence_contract_key", None)
-        if not callable(left_key_fn) or not callable(right_key_fn):
-            return None
-        try:
-            left_key = left_key_fn(result_size=target_size)
-            right_key = right_key_fn(result_size=target_size)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        if left_key is None or right_key is None or left_key != right_key:
-            return None
+        if guard is None:
+            return "true"
+        if isinstance(guard, bool):
+            return "true" if guard else "false"
+        to_smt = getattr(guard, "to_smt", None)
+        if callable(to_smt):
+            try:
+                return str(to_smt(symbol_name_mapping=symbol_name_mapping))
+            except (AttributeError, TypeError, ValueError):
+                return None
+        expression = getattr(guard, "expression", None)
+        if expression is not None:
+            return self._readonly_guard_to_smt(expression, symbol_name_mapping)
+        return None
 
-        left_value = self._coerce_smt_bitvec_width(
-            str(left["application"]),
-            left_bits,
-            target_bits,
-        )
-        right_value = self._coerce_smt_bitvec_width(
-            str(right["application"]),
-            right_bits,
-            target_bits,
-        )
-        if left_value == right_value:
-            return None
-        return f"(assert (= {left_value} {right_value}))"
-
-    def _readonly_contract_target_bits(
+    def _readonly_witness_antecedent_smt(
         self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-    ) -> int:
-        left_bits = int(left["result_bits"])
-        right_bits = int(right["result_bits"])
-        if left_bits != right_bits:
-            return 0
-        return left_bits
-
-    def _readonly_contract_valid_projection_bits(
-        self,
-        candidate_bits: Optional[int],
-        result_bits: int,
-    ) -> Optional[int]:
-        try:
-            bits = int(candidate_bits or 0)
-        except (TypeError, ValueError):
-            return None
-        if bits <= 0 or bits % 8 != 0:
-            return None
-        if bits > int(result_bits):
-            return None
-        return bits
-
-    def _active_return_comparison_bits(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-    ) -> Optional[int]:
-        try:
-            bits1 = int(self._get_return_size(analysis1) or 0)
-            bits2 = int(self._get_return_size(analysis2) or 0)
-        except (TypeError, ValueError):
-            return None
-        if bits1 <= 0 or bits2 <= 0 or bits1 != bits2:
-            return None
-        return bits1
-
-    def _readonly_contract_surface_key(self, comparison_surface) -> Optional[Tuple[Any, ...]]:
-        evidence_key = return_extension_surface_evidence_key(comparison_surface)
-        if evidence_key is None:
-            return None
-        surface_bits, coercion, extension_kind, source_widths = evidence_key
-        return (
-            "return_extension_surface",
-            surface_bits,
-            coercion,
-            extension_kind,
-            source_widths,
-        )
+        *,
+        count_guard: str,
+        guard_terms: Tuple[str, ...],
+    ) -> str:
+        terms = (count_guard,) + tuple(guard_terms or ())
+        if len(terms) == 1:
+            return terms[0]
+        return f"(and {' '.join(terms)})"
 
     def _readonly_reduction_expr_operands_match_ref(
         self,

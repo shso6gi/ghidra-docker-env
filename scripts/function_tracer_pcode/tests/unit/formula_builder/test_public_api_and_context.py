@@ -4,6 +4,11 @@
 from unittest.mock import patch
 
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.returns import (
+    _order_return_defs_by_specificity,
+    compare_readonly_summary_values_by_priority,
+)
+from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -14,6 +19,7 @@ from scripts.function_tracer_pcode.model import (
     LoopSummaryRef,
     LoopTermDescriptorRef,
     READONLY_SUM_OPCODE,
+    ReductionAccumulatorProof,
     ReadonlyReductionRef,
     ReturnInfo,
 )
@@ -71,6 +77,157 @@ def _readonly_loop_summary_expr() -> Expression:
         ),
         opcode=READONLY_SUM_OPCODE,
     )
+
+
+def _readonly_return_ordering_expr(
+    *,
+    base_name: str,
+    count_name: str = "count",
+    base_index=None,
+    count_index=None,
+    proof_backed: bool = False,
+) -> Expression:
+    base = Expression.parameter(
+        base_name,
+        index=int(base_index) if base_index is not None else -1,
+        data_type="int *",
+        size=8,
+    )
+    count = Expression.parameter(
+        count_name,
+        index=int(count_index) if count_index is not None else -1,
+        data_type="int",
+        size=4,
+    )
+    pointer_ref = LocationBaseRef.parameter(base_name, index=base_index)
+    proof = None
+    if proof_backed:
+        proof = ReductionAccumulatorProof(
+            reduction_kind="memory_sum",
+            pointer_base_ref=pointer_ref,
+            count_parameter_name=count_name,
+            count_parameter_index=count_index,
+            limit_expr=count,
+            result_size=4,
+            stride=4,
+            element_size=4,
+            return_region_value_proven=True,
+        )
+    return Expression.intrinsic(
+        "READONLY_SUM",
+        [base, count],
+        size=4,
+        runtime_ref=ReadonlyReductionRef(
+            reduction_kind="memory_sum",
+            pointer_base_ref=pointer_ref,
+            count_parameter_name=count_name,
+            count_parameter_index=count_index,
+            stride=4,
+            element_size=4,
+            result_size=4,
+            signed_counter=True,
+            accumulator_proof=proof,
+        ),
+        opcode=READONLY_SUM_OPCODE,
+    )
+
+
+def test_readonly_return_ordering_refuses_name_only_surface_identity():
+    proof_backed = _readonly_return_ordering_expr(
+        base_name="left_base",
+        count_name="count",
+        proof_backed=True,
+    )
+    summary_only = _readonly_return_ordering_expr(
+        base_name="right_base",
+        count_name="count",
+        proof_backed=False,
+    )
+
+    assert compare_readonly_summary_values_by_priority(
+        proof_backed,
+        [],
+        summary_only,
+        [],
+        return_size=32,
+    ) == 0
+
+
+def test_readonly_return_ordering_uses_indexed_surface_identity():
+    proof_backed = _readonly_return_ordering_expr(
+        base_name="left_base",
+        count_name="count",
+        base_index=0,
+        count_index=1,
+        proof_backed=True,
+    )
+    summary_only = _readonly_return_ordering_expr(
+        base_name="right_base",
+        count_name="count",
+        base_index=0,
+        count_index=1,
+        proof_backed=False,
+    )
+
+    assert compare_readonly_summary_values_by_priority(
+        proof_backed,
+        [],
+        summary_only,
+        [],
+        return_size=32,
+    ) == -1
+
+
+def test_readonly_return_ordering_does_not_let_broad_priority_shadow_specific_guard():
+    count_eq_one = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("count", index=1, data_type="int", size=4),
+            Expression.constant(1, size=4),
+        )
+    )
+    broad_proof = _readonly_return_ordering_expr(
+        base_name="base",
+        count_name="count",
+        base_index=0,
+        count_index=1,
+        proof_backed=True,
+    )
+    specific_summary = _readonly_return_ordering_expr(
+        base_name="base",
+        count_name="count",
+        base_index=0,
+        count_index=1,
+        proof_backed=False,
+    )
+
+    assert compare_readonly_summary_values_by_priority(
+        broad_proof,
+        [],
+        specific_summary,
+        [count_eq_one],
+        return_size=32,
+    ) == 0
+
+    ordered = _order_return_defs_by_specificity(
+        [
+            {
+                "index": 0,
+                "raw_value": broad_proof,
+                "raw_conditions": [],
+                "condition_set": ConditionSimplifier.build_constraint_set([]),
+            },
+            {
+                "index": 1,
+                "raw_value": specific_summary,
+                "raw_conditions": [count_eq_one],
+                "condition_set": ConditionSimplifier.build_constraint_set([count_eq_one]),
+            },
+        ],
+        return_size=32,
+    )
+
+    assert ordered[0]["index"] == 1
 
 
 class TestPublicAPIWrappers:
