@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from typing import Callable, Hashable, Iterable, List, Optional, Set, Dict, Tuple, Any
-from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation
+from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation, PcodeOpRef
 from ..model.intrinsics import resolve_pcode_intrinsic
 from ..analysis.condition import ConditionSimplifier, ConditionNormalizer
 from ..analysis.debug import summarize_expression, summarize_condition
@@ -37,6 +37,13 @@ from ..analysis.effect_summary import (
     should_attempt_root_post_state_collapse,
 )
 from ..analysis.memory_resolver import concretize_readonly_loads
+
+
+def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
+    ref = PcodeOpRef.from_pcode_op(pcode_op)
+    if ref is None:
+        return ("pcode_op", None, None, None, None, None)
+    return ref.stable_key()
 
 
 class ExpandedValue:
@@ -117,7 +124,7 @@ class ExpressionExpander:
         self.read_memory_value = read_memory_value
         self.image_base = image_base
         self.record_deferred_call = record_deferred_call
-        self._expanding_ops: Set[str] = set()
+        self._expanding_ops: Set[Tuple[Any, ...]] = set()
         self._debug_message_limit = 4000
         self._debug_message_count = 0
         self._debug_suppressed = False
@@ -366,7 +373,7 @@ class ExpressionExpander:
         depth: int
     ) -> List[ExpandedValue]:
         """MULTIEQUALを展開"""
-        op_key = self.tracer._get_stable_op_key(multiequal_op)
+        op_key = _pcode_op_stable_key(multiequal_op)
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular MULTIEQUAL detected: {op_key}", depth)

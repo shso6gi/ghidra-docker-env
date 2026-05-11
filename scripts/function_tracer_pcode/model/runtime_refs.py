@@ -449,6 +449,87 @@ class PcodeOpRef:
         except (IndexError, TypeError, ValueError):
             return None
 
+    @classmethod
+    def from_pcode_op(cls, pcode_op: Any) -> Optional["PcodeOpRef"]:
+        """Build a stable, object-derived reference for a concrete Ghidra P-code op."""
+        if pcode_op is None:
+            return None
+
+        address_offset = None
+        seq_time = None
+        seq_order = None
+        block_index = None
+        mnemonic = None
+        input_sizes = []
+        output_size = None
+
+        try:
+            mnemonic = pcode_op.getMnemonic()
+        except Exception:
+            mnemonic = None
+
+        try:
+            seq = pcode_op.getSeqnum()
+        except Exception:
+            seq = None
+        if seq is not None:
+            try:
+                target = seq.getTarget()
+                get_offset = getattr(target, "getOffset", None)
+                if callable(get_offset):
+                    address_offset = int(get_offset())
+            except Exception:
+                address_offset = None
+            try:
+                time = getattr(seq, "getTime", lambda: None)()
+                seq_time = None if time is None else int(time)
+            except Exception:
+                seq_time = None
+            try:
+                order = seq.getOrder()
+                seq_order = None if order is None else int(order)
+            except Exception:
+                seq_order = None
+
+        try:
+            parent = pcode_op.getParent()
+        except Exception:
+            parent = None
+        if parent is not None:
+            try:
+                block_index = int(parent.getIndex())
+            except Exception:
+                block_index = None
+
+        try:
+            num_inputs = int(pcode_op.getNumInputs())
+        except Exception:
+            num_inputs = 0
+        for input_index in range(max(0, num_inputs)):
+            try:
+                input_varnode = pcode_op.getInput(input_index)
+                input_size = int(input_varnode.getSize())
+            except Exception:
+                continue
+            if input_size > 0:
+                input_sizes.append(input_size)
+
+        try:
+            output_varnode = pcode_op.getOutput()
+            output_size = int(output_varnode.getSize()) if output_varnode is not None else None
+        except Exception:
+            output_size = None
+
+        return cls(
+            address_offset=address_offset,
+            seq_time=seq_time,
+            seq_order=seq_order,
+            block_index=block_index,
+            mnemonic=mnemonic,
+            input_sizes=tuple(input_sizes),
+            output_size=output_size,
+        )
+
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "pcode_op",

@@ -3147,7 +3147,7 @@ def test_repair_two_way_partition_conditions_preserves_existing_continue_conditi
     ]
 
 
-def test_stable_op_key_collapses_distinct_wrappers_for_same_logical_pcode():
+def test_pcode_op_ref_stable_key_collapses_distinct_wrappers_for_same_logical_pcode():
     tracer = object.__new__(PcodeTracer)
 
     class _FakeOp:
@@ -3166,8 +3166,13 @@ def test_stable_op_key_collapses_distinct_wrappers_for_same_logical_pcode():
 
     op1 = _FakeOp()
     op2 = _FakeOp()
+    ref1 = PcodeOpRef.from_pcode_op(op1)
+    ref2 = PcodeOpRef.from_pcode_op(op2)
 
-    assert tracer._get_stable_op_key(op1) == tracer._get_stable_op_key(op2)
+    assert ref1 is not None
+    assert ref2 is not None
+    assert ref1.stable_key() == ref2.stable_key()
+    assert not hasattr(tracer, "_get_" + "stable_op_key")
     assert tracer._get_op_key(op1) != tracer._get_op_key(op2)
 
 

@@ -118,9 +118,6 @@ class _FakeTracer:
         self.debug = False
         self.calls = 0
 
-    def _get_stable_op_key(self, op):
-        return op._stable_key
-
     def trace_varnode(self, varnode, depth=0, use_cache=False):
         self.calls += 1
         return Expression.variable(f"v_{varnode.getOffset()}", size=varnode.getSize())

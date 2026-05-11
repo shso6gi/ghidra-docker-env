@@ -2,11 +2,18 @@
 """PHI（MULTIEQUAL）の処理専用モジュール"""
 
 from itertools import product
-from typing import List, Optional, Set, Dict, Any, Hashable
-from ..model import Expression, Condition, ExpressionType
+from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
+from ..model import Expression, Condition, ExpressionType, PcodeOpRef
 from ..model.intrinsics import resolve_pcode_intrinsic
 from .debug import summarize_expression
 from .condition import ConditionSimplifier, ConditionNormalizer
+
+
+def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
+    ref = PcodeOpRef.from_pcode_op(pcode_op)
+    if ref is None:
+        return ("pcode_op", None, None, None, None, None)
+    return ref.stable_key()
 
 
 class ExpandedBranch:
@@ -54,7 +61,7 @@ class PhiHandler:
         self.tracer = tracer
         self.condition_tracker = condition_tracker
         self.debug = tracer.debug
-        self._expanding_ops: Set[str] = set()
+        self._expanding_ops: Set[Tuple[Any, ...]] = set()
         self._expansion_cache: Dict[tuple, List[ExpandedBranch]] = {}
         self._expansion_cache_limit = 2048
         self._debug_message_limit = 4000
@@ -84,7 +91,7 @@ class PhiHandler:
         return summarize_expression(expr, max_depth=max_depth)
 
     def _cache_key(self, multiequal_op, base_conditions: List[Condition]) -> tuple:
-        op_key = self.tracer._get_stable_op_key(multiequal_op)
+        op_key = _pcode_op_stable_key(multiequal_op)
         return (op_key, self._condition_signature(base_conditions))
 
     def _clone_branches(self, branches: List[ExpandedBranch]) -> List[ExpandedBranch]:
@@ -130,8 +137,8 @@ class PhiHandler:
             if input_def is multiequal_op:
                 return (True, "def_object_same")
             # keyが同じでもオブジェクトが異なれば別SSAバージョン
-            input_def_key = self.tracer._get_stable_op_key(input_def)
-            multiequal_key = self.tracer._get_stable_op_key(multiequal_op)
+            input_def_key = _pcode_op_stable_key(input_def)
+            multiequal_key = _pcode_op_stable_key(multiequal_op)
             if input_def_key == multiequal_key:
                 return (True, f"logical_self_ref_{input_def.getMnemonic()}")
             return (False, f"different_def_{input_def.getMnemonic()}")
@@ -160,7 +167,7 @@ class PhiHandler:
         if base_conditions is None:
             base_conditions = []
         
-        op_key = self.tracer._get_stable_op_key(multiequal_op)
+        op_key = _pcode_op_stable_key(multiequal_op)
         cache_key = self._cache_key(multiequal_op, base_conditions)
 
         cached = self._expansion_cache.get(cache_key)
@@ -193,7 +200,7 @@ class PhiHandler:
         self._debug_print("=" * 60, depth)
         self._debug_print("Expanding MULTIEQUAL", depth)
         
-        op_key = self.tracer._get_stable_op_key(multiequal_op)
+        op_key = _pcode_op_stable_key(multiequal_op)
         self._debug_print(f"MULTIEQUAL op_key: {op_key}", depth)
         
         output_varnode = multiequal_op.getOutput()
