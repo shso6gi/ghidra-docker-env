@@ -45,13 +45,17 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     _find_block_info_for_pcode_op,
     _recover_call_argument_expressions,
     _recover_call_argument_from_storage,
+    _merge_call_argument_evidence,
     _record_call_argument_evidence,
     _resolve_call_argument_expression,
     _normalize_call_argument_expression,
     _call_argument_semantic_rank,
     _call_arguments_width_safe_for_callee_analysis,
+    _call_evidence_callee_param_identities,
     _coerce_argument_to_callee_parameter,
+    _coerce_callee_parameter_ref,
     _find_matching_effect_value,
+    _parameter_base_ref_matches_descriptor,
     EffectSummary,
 )
 from scripts.function_tracer_pcode.model import (
@@ -85,10 +89,16 @@ def _param(
     is_signed: bool = True,
     index: int = 0,
     storage=None,
+    data_type: Optional[str] = None,
+    data_type_obj=None,
 ):
     result = {"name": name, "size": size, "is_signed": is_signed, "index": index}
     if storage is not None:
         result["storage"] = storage
+    if data_type is not None:
+        result["data_type"] = data_type
+    if data_type_obj is not None:
+        result["data_type_obj"] = data_type_obj
     return result
 
 
@@ -1085,7 +1095,7 @@ def test_substitute_location_accepts_register_alias_call_arguments():
 
     substituted = substitute_location(
         _loc("a", 0, 4),
-        ["a", "b"],
+        [{"name": "a", "index": 0}, {"name": "b", "index": 1}],
         call_args,
         [
             _param("param_1", size=8, is_signed=False, storage=_reg_storage("A0")),
@@ -1106,12 +1116,37 @@ def test_substitute_location_accepts_stack_local_call_arguments():
 
     substituted = substitute_location(
         _loc("out", 0, 4),
-        ["in", "out"],
+        [{"name": "in", "index": 0}, {"name": "out", "index": 1}],
         [Expression.parameter("param_1", 0, size=8), local_out],
         caller_params,
     )
 
     assert substituted == canonicalize_location(local_out, caller_params, size=4)
+
+
+def test_substitute_location_accepts_storage_only_callee_effect_base():
+    callee_storage = StorageInfo(**_reg_storage("a0", size_bytes=8))
+    callee_location = CanonicalLocation(
+        base_ref=LocationBaseRef.storage(
+            space_id=callee_storage.space_id,
+            space_name=callee_storage.space_name,
+            offset=callee_storage.offset,
+            size=callee_storage.size,
+            storage_identity_key=callee_storage.storage_identity_key(),
+        ),
+        offset=0,
+        size=4,
+    )
+    actual_dst = Expression.parameter("dst", 0, size=8, data_type="int *")
+
+    substituted = substitute_location(
+        callee_location,
+        [{"name": "callee_dst", "size": 8, "storage": _reg_storage("a0", size_bytes=8)}],
+        [actual_dst],
+        [_param("dst", size=8, index=0, data_type="int *")],
+    )
+
+    assert substituted == _loc("dst", 0, 4)
 
 
 def test_canonicalize_location_accepts_stack_pointer_relative_address_expression():
@@ -1833,14 +1868,14 @@ def test_recover_call_argument_from_storage_prefers_exact_register_match_for_poi
         def getSize(self):
             return self._size
 
+        def getDef(self):
+            return None
+
         def getAddress(self):
             return FakeAddress(self.storage.offset, self.storage.space_name)
 
         def getOffset(self):
             return self.storage.offset
-
-        def getDef(self):
-            return None
 
         def getHigh(self):
             return None
@@ -2612,6 +2647,126 @@ def test_partial_live_in_argument_allows_low_subpiece_callee_return_use():
     assert _call_arguments_width_safe_for_callee_analysis(callee_analysis, [arg]) is True
 
 
+def _summarize_partial_width_effect_call(effect_value: Expression) -> EffectSummary:
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("slot", 8),
+                FakeVarnode("arg", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+        def getSeqnum(self):
+            return None
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("callee")
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "slot":
+                return Expression.parameter("slot", 0, size=8)
+            if varnode.key == "arg":
+                return Expression.variable("arg_fragment", size=4).clone_with(
+                    call_argument_width_evidence=CallArgumentWidthEvidence(
+                        source_bits=32,
+                        target_bits=64,
+                    )
+                )
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    def direct_call_summary(_target_ref, _args):
+        return EffectSummary(
+            parameter_names=["slot", "arg"],
+            parameter_refs=[
+                LocationBaseRef.parameter("slot", index=0),
+                LocationBaseRef.parameter("arg", index=1),
+            ],
+            effects=[
+                StoreEffect(
+                    location=_loc("slot", 0, 4),
+                    value=effect_value,
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        )
+
+    return summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("slot", size=8, index=0, storage=_reg_storage("x0", register_name="x0")),
+        ],
+        direct_call_summary=direct_call_summary,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("slot", size=8, index=0, storage=_reg_storage("x0", register_name="x0")),
+            _param("arg", size=8, index=1, storage=_reg_storage("x1", register_name="x1")),
+        ],
+        debug=False,
+    )
+
+
+def test_partial_live_in_argument_allows_low_subpiece_callee_effect_use():
+    callee_arg = Expression.parameter("arg", 1, size=8)
+    low_piece = Expression.binary_op(
+        "SUBPIECE",
+        callee_arg,
+        Expression.constant(0, size=8),
+    )
+    low_piece.size = 4
+
+    summary = _summarize_partial_width_effect_call(low_piece)
+
+    assert summary.has_unsupported_call is False
+    assert len(summary.effects) == 1
+
+
+def test_partial_live_in_argument_rejects_full_width_callee_effect_use():
+    summary = _summarize_partial_width_effect_call(
+        Expression.parameter("arg", 1, size=8)
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+
+
 def test_coerce_argument_to_unknown_callee_param_preserves_fragment_width():
     arg = Expression.parameter("param_3", 2, size=4)
 
@@ -3161,6 +3316,85 @@ def test_incomplete_call_argument_evidence_is_not_applied_to_deferred_call():
     assert "effect_call_argument_evidence_incomplete" in analysis.analysis_notes
 
 
+def test_recoverable_partial_call_argument_evidence_does_not_become_incomplete_blocker():
+    pcode_ref = PcodeOpRef(address_offset=0x1008, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee"),
+            sequence=0,
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["param_1"],
+        effects=[],
+        call_argument_evidence={
+            pcode_ref.stable_key(): CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=CallTargetRef.from_name("callee"),
+                callee_param_identities=(("parameter", 0), ("parameter", 1)),
+                arguments=(Expression.parameter("param_1", 0, size=4),),
+                sources=("explicit_input",),
+                path_conditions=((),),
+                coverage_complete=False,
+                recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+                reason="argument_recovery_recoverable_partial",
+            )
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert deferred.arguments == []
+    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
+    assert "effect_call_argument_evidence" not in analysis.analysis_notes
+
+
+def test_tri_state_call_argument_evidence_merge_preserves_usable_evidence():
+    pcode_ref = PcodeOpRef(address_offset=0x1010, seq_time=2, seq_order=0, mnemonic="CALL")
+    arg0 = Expression.parameter("param_1", 0, size=4)
+    arg1 = Expression.parameter("param_2", 1, size=4)
+    complete = CallArgumentEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=CallTargetRef.from_name("callee"),
+        callee_param_identities=(("parameter", 0), ("parameter", 1)),
+        arguments=(arg0, arg1),
+        sources=("explicit_input", "explicit_input"),
+        path_conditions=((),),
+        coverage_complete=True,
+    )
+    recoverable_partial = CallArgumentEvidence(
+        pcode_op_ref=pcode_ref,
+        target_ref=CallTargetRef.from_name("callee"),
+        callee_param_identities=(("parameter", 0), ("parameter", 1)),
+        arguments=(arg0,),
+        sources=("explicit_input",),
+        path_conditions=((),),
+        coverage_complete=False,
+        recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+        reason="argument_recovery_recoverable_partial",
+    )
+
+    merged = _merge_call_argument_evidence(complete, recoverable_partial)
+    reverse_merged = _merge_call_argument_evidence(recoverable_partial, complete)
+
+    assert merged.is_usable() is True
+    assert merged.recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
+    assert merged.arguments == (arg0, arg1)
+    assert len(merged.path_conditions) == 2
+    assert reverse_merged.is_usable() is True
+    assert reverse_merged.arguments == (arg0, arg1)
+
+
 def test_zero_argument_call_evidence_is_usable_for_true_no_arg_callee():
     class FakeTracer:
         def __init__(self, ref):
@@ -3187,6 +3421,212 @@ def test_zero_argument_call_evidence_is_usable_for_true_no_arg_callee():
     assert evidence.is_usable() is True
     assert evidence.coverage_complete is True
     assert evidence.arguments == ()
+
+
+def test_callee_parameter_ref_refuses_positional_identity_without_index_or_storage():
+    assert _coerce_callee_parameter_ref({"name": "param_1"}, 0) is None
+    assert _coerce_callee_parameter_ref("param_1", 0) is None
+
+    explicit = _coerce_callee_parameter_ref({"name": "param_1", "index": 0}, 7)
+    assert explicit is not None
+    assert explicit.parameter_index == 0
+
+    storage_only = _coerce_callee_parameter_ref(
+        {"name": "param_1", "storage": _reg_storage("a0", size_bytes=8)},
+        7,
+    )
+    assert storage_only is not None
+    assert storage_only.is_storage()
+    assert storage_only.storage_identity_key[0] == "register_storage"
+
+
+def test_build_parameter_replacements_refuses_name_or_string_only_callee_params():
+    arg = Expression.parameter("arg_1", 0, size=4)
+
+    assert _build_parameter_replacements([{"name": "param_1"}], [arg]) == {}
+    assert _build_parameter_replacements(["param_1"], [arg]) == {}
+
+
+def test_build_parameter_replacements_accepts_storage_only_callee_identity():
+    arg = Expression.parameter("arg_1", 0, size=4)
+    replacements = _build_parameter_replacements(
+        [
+            {
+                "name": "param_1",
+                "size": 4,
+                "storage": _reg_storage("a0", size_bytes=4),
+            }
+        ],
+        [arg],
+    )
+
+    assert any(key and key[0] == "register_storage" for key in replacements)
+
+
+def test_call_evidence_callee_param_identities_reject_unproven_ordinals():
+    assert _call_evidence_callee_param_identities([{"name": "param_1"}]) == ()
+
+    storage_identity = _call_evidence_callee_param_identities(
+        [{"name": "param_1", "storage": _reg_storage("a0", size_bytes=8)}]
+    )
+    assert len(storage_identity) == 1
+    assert storage_identity[0][0][0] == "register_storage"
+
+
+def test_unresolved_target_call_argument_evidence_is_not_usable():
+    class FakeTracer:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def _make_pcode_op_ref(self, _op):
+            return self.ref
+
+    pcode_ref = PcodeOpRef(address_offset=0x1200, seq_time=3, seq_order=0, mnemonic="CALL")
+    evidence_map = {}
+
+    _record_call_argument_evidence(
+        evidence_map,
+        FakeTracer(pcode_ref),
+        object(),
+        CallTargetRef.unknown(),
+        [{"name": "param_1", "index": 0}],
+        [Expression.parameter("param_1", 0, size=4)],
+        [],
+        coverage_complete=True,
+    )
+
+    evidence = evidence_map[pcode_ref.stable_key()]
+    assert evidence.is_usable() is False
+    assert evidence.coverage_complete is False
+    assert evidence.arguments == ()
+    assert evidence.reason == "call_target_unresolved"
+
+
+def test_call_argument_evidence_target_match_requires_resolved_targets():
+    evidence = CallArgumentEvidence(
+        pcode_op_ref=PcodeOpRef(address_offset=0x1220, seq_time=5, seq_order=0, mnemonic="CALL"),
+        target_ref=None,
+        callee_param_identities=((("parameter", 0),),),
+        arguments=(Expression.parameter("param_1", 0, size=4),),
+        sources=("explicit_input",),
+        coverage_complete=True,
+    )
+
+    assert evidence.is_usable() is False
+    assert evidence.target_matches(CallTargetRef.from_name("callee")) is False
+
+
+def test_storage_location_base_matches_descriptor_storage_identity_key():
+    register_base = LocationBaseRef.storage(
+        space_id=0,
+        space_name="register",
+        offset=0x1234,
+        size=8,
+        display_hint="a0",
+    )
+    assert _parameter_base_ref_matches_descriptor(
+        register_base,
+        {
+            "name": "arg",
+            "storage": {
+                "is_register": True,
+                "space_name": "register",
+                "space_id": 0,
+                "offset": 0x1234,
+                "size": 8,
+                "size_bits": 64,
+                "register_offset": 0x1234,
+                "register_size": 8,
+                "register_size_bits": 64,
+                "base_register_offset": 0x1234,
+                "base_register_size": 8,
+                "base_register_size_bits": 64,
+                "bit_offset_in_base": 0,
+            },
+        },
+    )
+
+    memory_base = LocationBaseRef.storage(
+        space_id=1,
+        space_name="stack",
+        offset=0x30,
+        size=4,
+        display_hint="stack[0x30]",
+    )
+    assert _parameter_base_ref_matches_descriptor(
+        memory_base,
+        {"name": "stack_arg", "storage": _stack_storage(0x30, size_bytes=4)},
+    )
+
+    fragment_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        space_id=0,
+        offset=0x200,
+        size=4,
+        size_bits=32,
+        register_offset=0x200,
+        register_size=4,
+        register_size_bits=32,
+        base_register_offset=0x200,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=32,
+    )
+    fragment_base = LocationBaseRef.storage(
+        space_id=0,
+        space_name="register",
+        offset=0x200,
+        size=8,
+        storage_identity_key=fragment_storage.storage_identity_key(),
+        display_hint="a0_hi",
+    )
+    assert _parameter_base_ref_matches_descriptor(
+        fragment_base,
+        {"name": "a0_hi", "storage": fragment_storage},
+    )
+    coarse_base = LocationBaseRef.storage(
+        space_id=0,
+        space_name="register",
+        offset=0x200,
+        size=8,
+        display_hint="a0",
+    )
+    assert fragment_base != coarse_base
+
+
+def test_missing_callee_parameter_identity_keeps_call_evidence_incomplete():
+    class FakeTracer:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def _make_pcode_op_ref(self, _op):
+            return self.ref
+
+    pcode_ref = PcodeOpRef(address_offset=0x1210, seq_time=4, seq_order=0, mnemonic="CALL")
+    evidence_map = {}
+
+    _record_call_argument_evidence(
+        evidence_map,
+        FakeTracer(pcode_ref),
+        object(),
+        CallTargetRef.from_name("callee"),
+        [{"name": "param_1"}],
+        [Expression.parameter("param_1", 0, size=4)],
+        [],
+        coverage_complete=True,
+    )
+
+    evidence = evidence_map[pcode_ref.stable_key()]
+    assert evidence.is_usable() is False
+    assert evidence.coverage_complete is False
+    assert evidence.arguments == ()
+    assert evidence.reason == "callee_parameter_identity_unproven"
+
+
+def test_effect_summary_does_not_synthesize_parameter_refs_from_names():
+    summary = EffectSummary(parameter_names=["param_1"], effects=[])
+    assert summary.parameter_refs == []
 
 
 def test_storage_matches_parameter_rejects_superset_register_alias():
@@ -4278,6 +4718,10 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
         [_param("param_1", size=8, is_signed=False, index=0)],
         direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["value", "out"],
+            parameter_refs=[
+                LocationBaseRef.parameter("value", index=0),
+                LocationBaseRef.parameter("out", index=1),
+            ],
             effects=[
                 StoreEffect(
                     location=_loc("out", 0, 4),
@@ -5402,6 +5846,10 @@ def test_summarize_store_effects_propagates_phi_argument_branch_conditions_into_
         ],
         direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["ptr", "delta"],
+            parameter_refs=[
+                LocationBaseRef.parameter("ptr", index=0),
+                LocationBaseRef.parameter("delta", index=1),
+            ],
             effects=[
                 StoreEffect(
                     location=_loc("ptr", 0, 4),
@@ -5580,6 +6028,10 @@ def test_summarize_store_effects_reduces_phi_argument_and_path_conditions_under_
         ],
         direct_call_summary=lambda _target_ref, _args: EffectSummary(
             parameter_names=["ptr", "delta"],
+            parameter_refs=[
+                LocationBaseRef.parameter("ptr", index=0),
+                LocationBaseRef.parameter("delta", index=1),
+            ],
             effects=[
                 StoreEffect(
                     location=_loc("ptr", 0, 4),
@@ -5695,6 +6147,991 @@ def test_summarize_store_effects_captures_double_indirect_parameter_store():
         steps=(LocationStep("deref", 8),),
     )
     assert summary.effects[0].value.to_string() == "value"
+
+
+def test_summarize_store_effects_marks_store_block_incomplete_when_paths_unavailable():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeStoreOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                FakeVarnode("value", 4),
+            ]
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return []
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, use_cache=False):
+            raise AssertionError("path-incomplete store blocks must not be scanned")
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeStoreOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [_param("slot", size=8, is_signed=False, index=0)],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ("effect_summary_path_coverage_incomplete",)
+
+
+def test_summarize_store_effects_ignores_proven_unreachable_effect_block():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeStoreOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("space", 4),
+                FakeVarnode("addr", 8),
+                FakeVarnode("value", 4),
+            ]
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete_unreachable"
+        condition_paths = []
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def trace_varnode(self, _varnode, use_cache=False):
+            raise AssertionError("unreachable effect blocks must not be scanned")
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeStoreOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [_param("slot", size=8, is_signed=False, index=0)],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_allows_pathless_effect_free_explicit_call():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return []
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("effect_free")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 1, size=4)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
+            _param("rhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+        ],
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
+            parameter_names=["lhs", "rhs"],
+            effects=[],
+            has_unsupported_call=False,
+        ),
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("x0", size_bytes=4, register_name="w0")),
+            _param("rhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_unresolved_scalar_callback_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallIndOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 1, size=4)
+            return Expression.parameter("callback", 2, size=8)
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallIndOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0"), data_type="int"),
+            _param("rhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1"), data_type="int"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: None,
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_unresolved_pointer_callback_effect_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallIndOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("ptr", 8),
+            ]
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "ptr":
+                return Expression.parameter("ptr", 0, size=8)
+            return Expression.parameter("callback", 1, size=8)
+
+    ptr_param = _param(
+        "ptr",
+        size=8,
+        index=0,
+        storage=_reg_storage("x0", register_name="x0"),
+    )
+    ptr_param["data_type_obj"] = resolve_mock_data_type("int *")
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallIndOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [ptr_param],
+        direct_call_summary=lambda _target_ref, _args: None,
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def _summarize_unresolved_single_parameter_call(param: dict) -> EffectSummary:
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallIndOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("arg", max(1, int(param.get("size") or 8))),
+            ]
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "arg":
+                return Expression.parameter(param["name"], param["index"], size=param["size"])
+            return Expression.parameter("callback", 9, size=8)
+
+    return summarize_store_effects(
+        [FakeBlockInfo(FakeCallIndOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [param],
+        direct_call_summary=lambda _target_ref, _args: None,
+        debug=False,
+    )
+
+
+def test_summarize_store_effects_keeps_data_type_string_pointer_callback_unsupported():
+    summary = _summarize_unresolved_single_parameter_call(
+        _param(
+            "ptr",
+            size=8,
+            index=0,
+            storage=_reg_storage("x0", register_name="x0"),
+            data_type="int *",
+        )
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_undefined_address_sized_callback_unsupported():
+    summary = _summarize_unresolved_single_parameter_call(
+        _param(
+            "maybe_ptr",
+            size=8,
+            index=0,
+            storage=_reg_storage("x0", register_name="x0"),
+            data_type="undefined8",
+        )
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_missing_scalar_only_callee_summary_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("missing_scalar_helper")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 1, size=4)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="undefined8"),
+            _param("rhs", size=8, index=1, storage=_reg_storage("x1", register_name="x1"), data_type="undefined8"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: None,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0"), data_type="int"),
+            _param("rhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1"), data_type="int"),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_zero_arg_missing_callee_summary_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [FakeVarnode("target", 8)]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("missing_zero_arg_helper")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [],
+        direct_call_summary=lambda _target_ref, _args: None,
+        resolve_callee_parameters=lambda _target_ref: [],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_pointer_actual_to_address_sized_scalar_missing_summary_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("ptr", 8),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("missing_uintptr_helper")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "ptr":
+                return Expression.parameter("ptr", 0, data_type="int *", size=8)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("ptr", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="int *"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: None,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("as_int", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="ulong"),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_constant_actual_missing_summary_unsupported():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+        def getDef(self):
+            return None
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("literal", 8),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("missing_uintptr_helper")
+
+        def _get_storage_info_from_varnode(self, _varnode):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "literal":
+                return Expression.constant(0x1234, size=8)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("ptr", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="int *"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: None,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("as_int", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="ulong"),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_does_not_propagate_scalar_only_unsupported_callee():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("scalar_callback_wrapper")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 1, size=4)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=8, index=0, storage=_reg_storage("x0", register_name="x0"), data_type="undefined8"),
+            _param("rhs", size=8, index=1, storage=_reg_storage("x1", register_name="x1"), data_type="undefined8"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
+            parameter_names=["lhs", "rhs"],
+            effects=[],
+            has_unsupported_call=True,
+        ),
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0"), data_type="int"),
+            _param("rhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1"), data_type="int"),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == ()
+
+
+def test_recoverable_partial_call_summary_does_not_become_unsupported_blocker():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("effect_free_callee")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    captured_args = []
+
+    def direct_call_summary(_target_ref, args):
+        captured_args.append(tuple(args))
+        return EffectSummary(parameter_names=["lhs", "rhs"], effects=[])
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0")),
+        ],
+        direct_call_summary=direct_call_summary,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0")),
+            _param("rhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[_param("lhs", size=4, index=0)],
+        effect_summary=summary,
+    )
+
+    assert len(captured_args) == 1
+    assert len(captured_args[0]) == 1
+    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == ()
+    assert "unsupported_call_effect_summary" not in analysis.get_decisive_sat_unsafety_reasons()
+    assert "unsupported_call_effect_summary" not in analysis.get_equivalence_blocking_unsafety_reasons()
+
+
+def test_summarize_store_effects_rejects_nested_incomplete_effect_free_callee():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("incomplete_helper")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 0, size=4)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0"), data_type="int"),
+        ],
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
+            parameter_names=["lhs"],
+            effects=[],
+            has_unsupported_call=False,
+            incomplete_reasons=("effect_summary_path_coverage_incomplete",),
+        ),
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0"), data_type="int"),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_keeps_pathless_side_effect_call_incomplete():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("ptr", 8),
+            ]
+
+        def getMnemonic(self):
+            return "CALL"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeConditionTracker:
+        def get_all_valid_paths_to_block(self, _block):
+            return []
+
+    class FakeTracer:
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return CallTargetRef.from_name("writer")
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "ptr":
+                return Expression.parameter("ptr", 0, size=8)
+            return Expression.constant(0, max(1, varnode.getSize()))
+
+    call_op = FakeCallOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [_param("ptr", size=8, index=0, storage=_reg_storage("x0", register_name="x0"))],
+        direct_call_summary=lambda _target_ref, _args: EffectSummary(
+            parameter_names=["ptr"],
+            effects=[
+                StoreEffect(
+                    location=_loc("ptr", 0, 4),
+                    value=Expression.constant(7, 4),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+        ),
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("ptr", size=8, index=0, storage=_reg_storage("x0", register_name="x0")),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is True
+    assert summary.incomplete_reasons == ("effect_summary_path_coverage_incomplete",)
+
+
+def test_effect_summary_path_coverage_note_is_sat_unsafe():
+    analysis = FunctionReturnAnalysis(
+        function_name="path_incomplete_store",
+        entry_point="0x5000",
+        parameters=[],
+        returns=[
+            ReturnInfo(
+                address="0x5000",
+                value=Expression.constant(0, 4),
+                conditions=[],
+            )
+        ],
+        effect_summary=EffectSummary(
+            parameter_names=[],
+            effects=[],
+            has_unsupported_call=True,
+            incomplete_reasons=("effect_summary_path_coverage_incomplete",),
+        ),
+    )
+
+    reasons = analysis.get_decisive_sat_unsafety_reasons()
+    assert "effect_summary_path_coverage_incomplete" in reasons
+    assert "unsupported_call_effect_summary" in reasons
 
 
 def test_effect_summary_accepts_mul_by_one_wrapped_parameter_addresses():
@@ -11604,6 +13041,23 @@ def test_call_effect_summary_policy_rejects_unsupported_nested_calls():
             )
         ],
         has_unsupported_call=True,
+    )
+
+    assert not is_call_effect_summary_allowed(summary)
+
+
+def test_call_effect_summary_policy_rejects_incomplete_summary():
+    summary = EffectSummary(
+        parameter_names=["ptr"],
+        effects=[
+            StoreEffect(
+                location=_loc("ptr", 0, 4),
+                value=Expression.constant(1, 4),
+                conditions=[],
+                order_key=1,
+            )
+        ],
+        incomplete_reasons=("effect_summary_path_coverage_incomplete",),
     )
 
     assert not is_call_effect_summary_allowed(summary)

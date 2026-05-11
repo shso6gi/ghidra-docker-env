@@ -655,6 +655,7 @@ class ReturnAnalyzer:
         timeout: int = 60,
         active_functions: Optional[Set[Tuple[Any, ...]]] = None,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ) -> Optional[FunctionReturnAnalysis]:
          # デバッグフラグを ConditionSimplifier に伝播
         from .condition import ConditionSimplifier
@@ -665,9 +666,13 @@ class ReturnAnalyzer:
         normalized_bound_parameter_values = self._normalize_bound_parameter_values(
             bound_parameter_values,
         )
+        normalized_bound_parameter_storage_values = self._normalize_bound_parameter_storage_values(
+            bound_parameter_storage_values,
+        )
         analysis_scope_key = self._analysis_scope_key(
             current_function_ref,
             normalized_bound_parameter_values,
+            normalized_bound_parameter_storage_values,
         )
         cached_analysis = self._call_analysis_cache.get(analysis_scope_key)
         if cached_analysis is not None:
@@ -701,6 +706,7 @@ class ReturnAnalyzer:
         tracer = self._make_tracer(
             high_function,
             bound_parameter_values=normalized_bound_parameter_values,
+            bound_parameter_storage_values=normalized_bound_parameter_storage_values,
         )
         tracer.record_deferred_call = self._make_deferred_call_recorder(function)
         condition_tracker = ConditionTracker(tracer)
@@ -775,6 +781,7 @@ class ReturnAnalyzer:
                     parameters,
                     active_functions=active_functions,
                     bound_parameter_values=normalized_bound_parameter_values,
+                    bound_parameter_storage_values=normalized_bound_parameter_storage_values,
                 )
                 self._current_effect_summary = effect_summary
 
@@ -834,6 +841,12 @@ class ReturnAnalyzer:
             )
 
             for note in control_region_notes:
+                if note not in result.analysis_notes:
+                    result.analysis_notes.append(note)
+            effect_incomplete_reasons = getattr(effect_summary, "incomplete_reasons", ())
+            if not isinstance(effect_incomplete_reasons, (list, tuple, set, frozenset)):
+                effect_incomplete_reasons = ()
+            for note in effect_incomplete_reasons:
                 if note not in result.analysis_notes:
                     result.analysis_notes.append(note)
 
@@ -1753,8 +1766,14 @@ class ReturnAnalyzer:
             target_ref = self._coerce_runtime_target_ref(target)
             if target_ref is None:
                 return None
-            bound_parameter_values = self._bound_parameter_values_from_args(args)
-            scope_key = self._analysis_scope_key(target_ref, bound_parameter_values)
+            bound_parameter_values, bound_parameter_storage_values = (
+                self._bound_parameter_maps_for_target_args(target_ref, args)
+            )
+            scope_key = self._analysis_scope_key(
+                target_ref,
+                bound_parameter_values,
+                bound_parameter_storage_values,
+            )
             if (
                 current_function_ref is not None
                 and analysis.analysis_scope_key == scope_key
@@ -1806,12 +1825,20 @@ class ReturnAnalyzer:
             call_evidence = evidence.get(stable_key_fn())
             if call_evidence is None:
                 continue
+            target_matches = getattr(call_evidence, "target_matches", None)
+            target_match_ok = not callable(target_matches) or target_matches(getattr(info, "target_ref", None))
             is_usable = getattr(call_evidence, "is_usable", None)
             if not callable(is_usable) or not is_usable():
-                incomplete = True
+                is_blocker = True
+                is_incomplete_blocker = getattr(call_evidence, "is_incomplete_blocker", None)
+                if callable(is_incomplete_blocker):
+                    is_blocker = bool(is_incomplete_blocker())
+                if not target_match_ok:
+                    is_blocker = True
+                if is_blocker:
+                    incomplete = True
                 continue
-            target_matches = getattr(call_evidence, "target_matches", None)
-            if callable(target_matches) and not target_matches(getattr(info, "target_ref", None)):
+            if not target_match_ok:
                 incomplete = True
                 continue
             args = getattr(call_evidence, "arguments", ())
@@ -3836,22 +3863,83 @@ class ReturnAnalyzer:
             normalized[normalized_index] = self._clone_expression(expr)
         return normalized
 
-    def _bound_parameter_values_from_args(
+    def _normalize_bound_parameter_storage_values(
+        self,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]],
+    ) -> Dict[Tuple[Any, ...], Expression]:
+        normalized: Dict[Tuple[Any, ...], Expression] = {}
+        for key, expr in (bound_parameter_storage_values or {}).items():
+            if key is None or expr is None:
+                continue
+            try:
+                normalized_key = tuple(key)
+            except Exception:
+                continue
+            if not normalized_key:
+                continue
+            normalized[normalized_key] = self._clone_expression(expr)
+        return normalized
+
+    def _bound_parameter_values_from_call_args(
         self,
         args: Optional[Sequence[Expression]],
+        callee_parameters: Optional[Sequence[Dict]],
     ) -> Dict[int, Expression]:
-        return self._normalize_bound_parameter_values(
-            {
-                index: expr
-                for index, expr in enumerate(args or [])
-                if expr is not None
-            }
+        bound_by_identity: Dict[int, Expression] = {}
+        for ordinal, arg in enumerate(args or []):
+            if arg is None or callee_parameters is None or ordinal >= len(callee_parameters):
+                continue
+            callee_param = callee_parameters[ordinal] or {}
+            try:
+                parameter_index = int(callee_param.get("index"))
+            except Exception:
+                continue
+            if parameter_index < 0:
+                continue
+            bound_by_identity[parameter_index] = arg
+        return self._normalize_bound_parameter_values(bound_by_identity)
+
+    def _bound_parameter_storage_values_from_call_args(
+        self,
+        args: Optional[Sequence[Expression]],
+        callee_parameters: Optional[Sequence[Dict]],
+    ) -> Dict[Tuple[Any, ...], Expression]:
+        bound_by_storage: Dict[Tuple[Any, ...], Expression] = {}
+        for ordinal, arg in enumerate(args or []):
+            if arg is None or callee_parameters is None or ordinal >= len(callee_parameters):
+                continue
+            callee_param = callee_parameters[ordinal] or {}
+            storage_info = self._coerce_wrapper_storage_info(callee_param.get("storage"))
+            if storage_info is None:
+                continue
+            try:
+                storage_key = storage_info.storage_identity_key()
+            except Exception:
+                storage_key = None
+            if storage_key is None:
+                continue
+            bound_by_storage[tuple(storage_key)] = arg
+        return self._normalize_bound_parameter_storage_values(bound_by_storage)
+
+    def _bound_parameter_maps_for_target_args(
+        self,
+        target,
+        args: Optional[Sequence[Expression]],
+    ) -> Tuple[Dict[int, Expression], Dict[Tuple[Any, ...], Expression]]:
+        target_ref = self._coerce_runtime_target_ref(target)
+        if target_ref is None:
+            return {}, {}
+        callee_parameters = self._get_freshest_callee_parameters(target_ref)
+        return (
+            self._bound_parameter_values_from_call_args(args, callee_parameters),
+            self._bound_parameter_storage_values_from_call_args(args, callee_parameters),
         )
 
     def _analysis_scope_key(
         self,
         target,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ) -> Tuple[Any, ...]:
         target_ref = self._coerce_runtime_target_ref(target)
         if target_ref is None and target is not None:
@@ -3878,7 +3966,23 @@ class ReturnAnalyzer:
             )
             for index, expr in sorted(normalized_bound_parameter_values.items())
         )
-        return ("analysis_scope", target_key, bound_signature)
+        normalized_bound_parameter_storage_values = self._normalize_bound_parameter_storage_values(
+            bound_parameter_storage_values,
+        )
+        storage_bound_signature = tuple(
+            (
+                tuple(key),
+                ConditionNormalizer.expression_signature(
+                    expr,
+                    include_memory_read_order=False,
+                ),
+            )
+            for key, expr in sorted(
+                normalized_bound_parameter_storage_values.items(),
+                key=lambda item: repr(item[0]),
+            )
+        )
+        return ("analysis_scope", target_key, bound_signature, storage_bound_signature)
 
     def _target_active_key(self, target_ref: Optional[CallTargetRef]) -> Optional[Tuple[Any, ...]]:
         if target_ref is None:
@@ -4127,6 +4231,7 @@ class ReturnAnalyzer:
         high_function,
         *,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ) -> PcodeTracer:
         try:
             return PcodeTracer(
@@ -4134,6 +4239,7 @@ class ReturnAnalyzer:
                 high_function,
                 debug=self.debug,
                 bound_parameter_values=bound_parameter_values,
+                bound_parameter_storage_values=bound_parameter_storage_values,
             )
         except TypeError:
             return PcodeTracer(
@@ -4152,6 +4258,7 @@ class ReturnAnalyzer:
         active_functions: Set[Tuple[Any, ...]],
         *,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ):
         try:
             return self._build_effect_summary(
@@ -4162,6 +4269,7 @@ class ReturnAnalyzer:
                 parameters,
                 active_functions=active_functions,
                 bound_parameter_values=bound_parameter_values,
+                bound_parameter_storage_values=bound_parameter_storage_values,
             )
         except TypeError:
             return self._build_effect_summary(
@@ -4210,6 +4318,7 @@ class ReturnAnalyzer:
         parameters: List[Dict],
         active_functions: Set[Tuple[Any, ...]],
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ):
         function_cache_key = self._function_cache_key(function)
         if function_cache_key is None:
@@ -4218,6 +4327,7 @@ class ReturnAnalyzer:
         summary_cache_key = self._analysis_scope_key(
             function,
             bound_parameter_values,
+            bound_parameter_storage_values,
         )
         cached = self._effect_summary_cache.get(summary_cache_key)
         if cached is not None:
@@ -4233,9 +4343,19 @@ class ReturnAnalyzer:
             callee = self._resolve_target_function(target_ref)
             if callee is None:
                 return None
+            callee_parameters_for_binding = self._get_freshest_callee_parameters(target_ref)
+            callee_bound_parameter_values = self._bound_parameter_values_from_call_args(
+                args,
+                callee_parameters_for_binding,
+            )
+            callee_bound_parameter_storage_values = self._bound_parameter_storage_values_from_call_args(
+                args,
+                callee_parameters_for_binding,
+            )
             callee_scope_key = self._analysis_scope_key(
                 callee,
-                self._bound_parameter_values_from_args(args),
+                callee_bound_parameter_values,
+                callee_bound_parameter_storage_values,
             )
             if callee_scope_key is None:
                 return None
@@ -4251,10 +4371,23 @@ class ReturnAnalyzer:
             if callee_high is None:
                 return None
 
-            callee_bound_parameter_values = self._bound_parameter_values_from_args(args)
+            fresh_callee_parameters = self._collect_parameters(callee_high)
+            callee_parameters = self._choose_richer_parameter_descriptors(
+                callee_parameters_for_binding,
+                fresh_callee_parameters,
+            )
+            callee_bound_parameter_values = self._bound_parameter_values_from_call_args(
+                args,
+                callee_parameters,
+            )
+            callee_bound_parameter_storage_values = self._bound_parameter_storage_values_from_call_args(
+                args,
+                callee_parameters,
+            )
             callee_tracer = self._make_tracer(
                 callee_high,
                 bound_parameter_values=callee_bound_parameter_values,
+                bound_parameter_storage_values=callee_bound_parameter_storage_values,
             )
             callee_tracer.record_deferred_call = self._make_deferred_call_recorder(callee)
             callee_tracker = ConditionTracker(callee_tracer)
@@ -4264,7 +4397,6 @@ class ReturnAnalyzer:
             callee_phi_handler = PhiHandler(callee_tracer, callee_tracker)
             callee_tracer.phi_handler = callee_phi_handler
             callee_tracker.build()
-            callee_parameters = self._collect_parameters(callee_high)
             callee_function_cache_key = self._function_cache_key(callee)
             if callee_function_cache_key is not None:
                 self._effect_summary_parameter_cache[callee_function_cache_key] = list(callee_parameters)
@@ -4291,6 +4423,7 @@ class ReturnAnalyzer:
                 callee_parameters,
                 self._extend_active_functions(active_functions, target_ref),
                 bound_parameter_values=callee_bound_parameter_values,
+                bound_parameter_storage_values=callee_bound_parameter_storage_values,
             )
             return summary
 
@@ -4363,14 +4496,15 @@ class ReturnAnalyzer:
             self._debug_print(f"Call expansion skipped for '{target_label}': analysis unavailable")
             return None
 
-        if len(args) < len(analysis.parameters):
+        already_specialized = self._analysis_is_fully_argument_specialized(analysis)
+        if len(args) < len(analysis.parameters) and not already_specialized:
             self._debug_print(
                 f"Call expansion skipped for '{target_label}': "
                 f"expected {len(analysis.parameters)} args, got {len(args)}"
             )
             return None
 
-        specialized = self._specialize_call_analysis(analysis, args)
+        specialized = analysis if already_specialized else self._specialize_call_analysis(analysis, args)
         if specialized.deferred_calls:
             self._apply_bounded_call_refinement(
                 specialized,
@@ -4435,6 +4569,22 @@ class ReturnAnalyzer:
             )
             return None
         return expanded
+
+    def _analysis_is_fully_argument_specialized(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> bool:
+        if analysis is None:
+            return False
+        parameter_count = len(getattr(analysis, "parameters", ()) or ())
+        if parameter_count <= 0:
+            return False
+        scope_key = getattr(analysis, "analysis_scope_key", None)
+        if not isinstance(scope_key, tuple) or len(scope_key) < 4:
+            return False
+        bound_by_index = scope_key[2] if isinstance(scope_key[2], tuple) else ()
+        bound_by_storage = scope_key[3] if isinstance(scope_key[3], tuple) else ()
+        return bool(bound_by_index or bound_by_storage)
 
     def _decompile_function(self, function, timeout: int = 60):
         try:
@@ -4518,13 +4668,22 @@ class ReturnAnalyzer:
             self._local_target_cache[cache_key] = None
             return None
 
+        try:
+            local_parameters = self._collect_parameters(high_function)
+        except Exception:
+            local_parameters = []
+        bound_parameter_values = self._bound_parameter_values_from_call_args(
+            args,
+            local_parameters,
+        )
+        bound_parameter_storage_values = self._bound_parameter_storage_values_from_call_args(
+            args,
+            local_parameters,
+        )
         tracer = self._make_tracer(
             high_function,
-            bound_parameter_values={
-                index: self._clone_expression(arg)
-                for index, arg in enumerate(args or [])
-                if arg is not None
-            },
+            bound_parameter_values=bound_parameter_values,
+            bound_parameter_storage_values=bound_parameter_storage_values,
         )
         tracer.record_deferred_call = self._make_deferred_call_recorder(containing)
         expanded = self._expand_linear_code_target(addr, tracer, containing)
@@ -4574,7 +4733,9 @@ class ReturnAnalyzer:
                 "index": descriptor.index,
                 "size": descriptor.size_bytes,
                 "data_type": descriptor.data_type,
+                "data_type_obj": descriptor.data_type_obj,
                 "is_signed": descriptor.is_signed,
+                "storage": descriptor.storage_info,
                 **owner_scope,
             }
             for descriptor in getattr(tracer, "_parameter_descriptors", [])
@@ -5231,8 +5392,14 @@ class ReturnAnalyzer:
         if callee is None:
             return None
 
-        bound_parameter_values = self._bound_parameter_values_from_args(args)
-        cache_key = self._analysis_scope_key(callee, bound_parameter_values)
+        bound_parameter_values, bound_parameter_storage_values = (
+            self._bound_parameter_maps_for_target_args(target_ref, args)
+        )
+        cache_key = self._analysis_scope_key(
+            callee,
+            bound_parameter_values,
+            bound_parameter_storage_values,
+        )
         generic_cache_key = self._function_cache_key(callee)
         cached = self._call_analysis_cache.get(cache_key)
         if cached is not None and len(getattr(cached, "parameters", []) or []) >= minimum_param_count:
@@ -5243,17 +5410,18 @@ class ReturnAnalyzer:
             timeout=60,
             active_functions=self._extend_active_functions(active_functions, target_ref),
             bound_parameter_values=bound_parameter_values,
+            bound_parameter_storage_values=bound_parameter_storage_values,
         )
         if cached is None:
             self._call_analysis_cache[cache_key] = analysis
-            if generic_cache_key is not None and not bound_parameter_values:
+            if generic_cache_key is not None and not bound_parameter_values and not bound_parameter_storage_values:
                 self._call_analysis_cache[generic_cache_key] = analysis
             return analysis
         if analysis is None:
             return cached
         if len(getattr(analysis, "parameters", []) or []) >= len(getattr(cached, "parameters", []) or []):
             self._call_analysis_cache[cache_key] = analysis
-            if generic_cache_key is not None and not bound_parameter_values:
+            if generic_cache_key is not None and not bound_parameter_values and not bound_parameter_storage_values:
                 self._call_analysis_cache[generic_cache_key] = analysis
             return analysis
         return cached

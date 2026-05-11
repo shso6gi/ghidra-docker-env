@@ -700,8 +700,6 @@ class FormulaBuilder:
         proof = getattr(reduction_ref, "accumulator_proof", None)
         if proof is None:
             return []
-        if self._readonly_reduction_contract_key(reduction_ref, proof, expr) is None:
-            return []
         operands = list(getattr(expr, "operands", []) or [])
         if len(operands) != 2:
             return []
@@ -942,6 +940,13 @@ class FormulaBuilder:
                 return int(expr_index) == int(parameter_index)
             except (TypeError, ValueError):
                 return False
+        is_storage = getattr(pointer_ref, "is_storage", None)
+        if callable(is_storage) and is_storage():
+            ref_storage_key = getattr(pointer_ref, "storage_identity_key", None)
+            if ref_storage_key is None:
+                return False
+            expr_storage_key = self._expression_storage_identity_through_width_views(expr)
+            return expr_storage_key is not None and tuple(expr_storage_key) == tuple(ref_storage_key)
         return False
 
     def _readonly_count_operand_matches_ref(
@@ -949,6 +954,10 @@ class FormulaBuilder:
         expr,
         reduction_ref: ReadonlyReductionRef,
     ) -> bool:
+        count_storage_key = getattr(reduction_ref, "count_parameter_storage_identity_key", None)
+        if count_storage_key is not None:
+            expr_storage_key = self._expression_storage_identity_through_width_views(expr)
+            return expr_storage_key is not None and tuple(expr_storage_key) == tuple(count_storage_key)
         count_index = getattr(reduction_ref, "count_parameter_index", None)
         if count_index is None:
             return False
@@ -984,6 +993,37 @@ class FormulaBuilder:
                 try:
                     if int(getattr(operands[1], "value", 0) or 0) == 0:
                         return self._expression_parameter_index_through_width_views(operands[0])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _expression_storage_identity_through_width_views(self, expr) -> Optional[Tuple[Any, ...]]:
+        if expr is None:
+            return None
+        storage_info = getattr(expr, "storage_info", None)
+        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+        if callable(storage_key_fn):
+            try:
+                storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                storage_key = None
+            if storage_key is not None:
+                return tuple(storage_key)
+        if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operator", None) in {
+            "CAST",
+            "COPY",
+            "INT_ZEXT",
+            "INT_SEXT",
+        }:
+            operands = list(getattr(expr, "operands", []) or [])
+            if len(operands) == 1:
+                return self._expression_storage_identity_through_width_views(operands[0])
+        if getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP and getattr(expr, "operator", None) == "SUBPIECE":
+            operands = list(getattr(expr, "operands", []) or [])
+            if len(operands) == 2 and getattr(operands[1], "expr_type", None) == ExpressionType.CONSTANT:
+                try:
+                    if int(getattr(operands[1], "value", 0) or 0) == 0:
+                        return self._expression_storage_identity_through_width_views(operands[0])
                 except (TypeError, ValueError):
                     return None
         return None

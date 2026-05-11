@@ -17,7 +17,7 @@ from .signature import (
     parameters_without_runtime_objects,
 )
 from .call_target import CallTargetRef, coerce_call_target_ref
-from .runtime_refs import DeferredCallRef, UnknownValueRef
+from .runtime_refs import DeferredCallRef, PcodeOpRef, UnknownValueRef
 
 @dataclass
 class ReturnInfo:
@@ -29,9 +29,12 @@ class ReturnInfo:
     pcode_identity: Optional[str] = None
     pcode_order: Optional[int] = None
     pcode_time: Optional[int] = None
+    pcode_op_ref: Optional[PcodeOpRef] = None
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""
+        if self.pcode_op_ref is not None:
+            return repr(self.pcode_op_ref.stable_key())
         return self.pcode_identity or self.address
     
     def to_dict(self) -> Dict:
@@ -47,6 +50,8 @@ class ReturnInfo:
             result["pcode_order"] = self.pcode_order
         if self.pcode_time is not None:
             result["pcode_time"] = self.pcode_time
+        if self.pcode_op_ref is not None:
+            result["pcode_op_ref"] = self.pcode_op_ref.to_dict()
         return result
 
 
@@ -463,6 +468,7 @@ class FunctionReturnAnalysis:
     signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     comparison_surface: Optional[ComparisonSurface] = None
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
+    program_is_big_endian: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -506,6 +512,8 @@ class FunctionReturnAnalysis:
         }
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key
+        if self.program_is_big_endian is not None:
+            result["program_is_big_endian"] = bool(self.program_is_big_endian)
         
         if self.signedness_result:
             result["signedness"] = self.signedness_result.to_dict()
@@ -630,6 +638,102 @@ class FunctionReturnAnalysis:
                     return True
         return False
 
+    def _iter_expression_nodes(self, expr):
+        if expr is None:
+            return
+        yield expr
+        expr_type = getattr(expr, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_kind is not None and expr_type == expr_kind.PHI:
+            for cond, value in getattr(expr, "value", None) or []:
+                cond_expr = getattr(cond, "expression", None) if cond is not None else None
+                if cond_expr is not None:
+                    yield from self._iter_expression_nodes(cond_expr)
+                yield from self._iter_expression_nodes(value)
+            return
+        for operand in getattr(expr, "operands", None) or []:
+            yield from self._iter_expression_nodes(operand)
+
+    def _expression_has_effect_sensitive_raw_memory_read(self, expr, conditions) -> bool:
+        effect_summary = getattr(self, "effect_summary", None)
+        effects = getattr(effect_summary, "effects", None) if effect_summary is not None else None
+        if not effects:
+            return False
+
+        from ..analysis.effect_summary import (
+            canonicalize_expr_read_location,
+            expression_contains_post_state_reads,
+            lower_post_state_expression_for_smt_if_needed,
+            locations_match,
+        )
+        from ..analysis.condition.simplifier import ConditionSimplifier
+
+        scan_expr = expr
+        if expression_contains_post_state_reads(expr):
+            try:
+                lowered = lower_post_state_expression_for_smt_if_needed(
+                    expr,
+                    conditions,
+                    effects,
+                    self.parameters,
+                )
+            except Exception:
+                lowered = None
+            if lowered is not None:
+                scan_expr = lowered
+
+        for node in self._iter_expression_nodes(scan_expr):
+            expr_type = getattr(node, "expr_type", None)
+            expr_kind = getattr(expr_type, "__class__", None)
+            if expr_kind is None or expr_type != expr_kind.MEMORY:
+                continue
+            if expression_contains_post_state_reads(node):
+                continue
+            location = canonicalize_expr_read_location(node, self.parameters)
+            if location is None:
+                continue
+            try:
+                read_order_key = getattr(node, "read_order_key", None)
+                read_order_key = int(read_order_key) if read_order_key is not None else None
+            except Exception:
+                read_order_key = None
+            for effect in effects:
+                effect_location = getattr(effect, "location", None)
+                if effect_location is None:
+                    continue
+                if read_order_key is not None:
+                    try:
+                        effect_order_key = int(getattr(effect, "order_key", 0))
+                    except Exception:
+                        effect_order_key = 0
+                    if effect_order_key >= read_order_key:
+                        continue
+                combined_conditions = list(conditions or []) + list(getattr(effect, "conditions", None) or [])
+                if ConditionSimplifier.object_centric_is_contradiction(combined_conditions):
+                    continue
+                if not locations_match(
+                    location,
+                    effect_location,
+                    combined_conditions,
+                ):
+                    continue
+                return True
+        return False
+
+    def has_effect_sensitive_raw_memory_reads(self) -> bool:
+        """store effect と同じ object location を読む raw MEM が return/guard に残っているか。"""
+        for ret in self.returns:
+            if self._expression_has_effect_sensitive_raw_memory_read(ret.value, ret.conditions):
+                return True
+            for cond in ret.conditions:
+                cond_expr = getattr(cond, "expression", None)
+                if cond_expr is not None and self._expression_has_effect_sensitive_raw_memory_read(
+                    cond_expr,
+                    ret.conditions,
+                ):
+                    return True
+        return False
+
     def count_unconditional_returns(self) -> int:
         """条件なしの return 候補数を返す。"""
         return sum(1 for ret in self.returns if not ret.conditions)
@@ -641,6 +745,8 @@ class FunctionReturnAnalysis:
     def should_skip_monolithic_fallback(self) -> bool:
         """解析が不完全で monolithic fallback を避けるべきか。"""
         if "return_case_coverage_gap" in self.analysis_notes:
+            return True
+        if "return_case_coverage_inconclusive" in self.analysis_notes:
             return True
         if self.recovered_from_decompiler:
             return False
@@ -729,6 +835,8 @@ class FunctionReturnAnalysis:
             reasons.append("unresolved_return_value")
         if self.has_symbolic_post_state_reads():
             reasons.append("symbolic_post_state_reads")
+        if self.has_effect_sensitive_raw_memory_reads():
+            reasons.append("effect_sensitive_raw_memory_reads")
         if self.has_overlapping_unconditional_returns():
             reasons.append("overlapping_unconditional_returns")
         if self.incomplete_control_flow and not self.recovered_from_decompiler:
@@ -739,15 +847,55 @@ class FunctionReturnAnalysis:
             and getattr(effect_summary, "has_unsupported_call", False)
         ):
             reasons.append("unsupported_call_effect_summary")
+        if effect_summary is not None:
+            effect_incomplete_reasons = getattr(effect_summary, "incomplete_reasons", ())
+            if not isinstance(effect_incomplete_reasons, (list, tuple, set, frozenset)):
+                effect_incomplete_reasons = ()
+            for reason in effect_incomplete_reasons:
+                if reason not in reasons:
+                    reasons.append(reason)
 
         for note in self.analysis_notes:
             if note in {
                 "indirect_control_flow_unresolved",
                 "symbolic_post_state_reads",
                 "return_case_coverage_gap",
+                "return_case_coverage_inconclusive",
+                "effect_summary_path_coverage_incomplete",
+                "bounded_call_refinement_argument_alignment_failed",
+                "bounded_call_refinement_deferred_target_unresolved",
+                "bounded_call_refinement_return_summary_unusable",
+                "effect_call_argument_evidence_incomplete",
             } and note not in reasons:
                 reasons.append(note)
 
+        return reasons
+
+    def get_equivalence_blocking_unsafety_reasons(self) -> List[str]:
+        """
+        UNSAT を「等価の決め手」として扱うには危険な解析要因を列挙する。
+
+        return value が全ペア UNSAT でも、side-effect summary が不完全なら
+        モデル化されていない STORE/CALL 効果を等価証明から落としているため、
+        final EQUIVALENT にはしない。
+        """
+        reasons: List[str] = []
+        effect_summary = getattr(self, "effect_summary", None)
+        if effect_summary is not None:
+            if getattr(effect_summary, "has_unsupported_call", False):
+                reasons.append("unsupported_call_effect_summary")
+            effect_incomplete_reasons = getattr(effect_summary, "incomplete_reasons", ())
+            if not isinstance(effect_incomplete_reasons, (list, tuple, set, frozenset)):
+                effect_incomplete_reasons = ()
+            for reason in effect_incomplete_reasons:
+                if reason not in reasons:
+                    reasons.append(reason)
+
+        for note in self.analysis_notes:
+            if note in {
+                "effect_summary_path_coverage_incomplete",
+            } and note not in reasons:
+                reasons.append(note)
         return reasons
 
     def _expr_bit_width(self, expr) -> int:

@@ -217,8 +217,151 @@ def test_formula_builder_adds_readonly_reduction_finite_witness_axioms():
 
     assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in header_text
     assert "Readonly reduction finite witness axioms" in header_text
+    assert "Readonly reduction contract equality axioms" not in header_text
     assert "(=> (= param_2_1 (_ bv1 32))" in header_text
     assert "(select mem32 param_1_1)" in header_text
+
+
+def test_formula_builder_keeps_finite_witness_axioms_without_contract_key():
+    base = Expression.parameter("param_1", index=0, data_type="int *", size=8)
+    count = Expression.parameter("param_2", index=1, data_type="int", size=4)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("param_1", index=0),
+        count_parameter_name="param_2",
+        count_parameter_index=1,
+        limit_expr=Expression.variable("unresolved_limit_tmp", size=4),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+        ),
+        return_region_value_proven=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    assert reduction_ref.readonly_term_sequence_contract_key() is None
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [base, count],
+        size=4,
+        runtime_ref=reduction_ref,
+        opcode=READONLY_SUM_OPCODE,
+    )
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "int *", "index": 0},
+            {"name": "param_2", "size": 4, "data_type": "int", "index": 1},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=reduction_expr, conditions=[], branch_index=0)],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[
+            {"name": "param_1", "size": 8, "data_type": "int *", "index": 0},
+            {"name": "param_2", "size": 4, "data_type": "int", "index": 1},
+        ],
+        returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
+    )
+
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    header_text = "\n".join(base_ctx["header_lines"])
+
+    assert "Readonly reduction finite witness axioms" in header_text
+    assert "Readonly reduction contract equality axioms" not in header_text
+    assert "(=> (= param_2_1 (_ bv1 32))" in header_text
+    assert "(select mem32 param_1_1)" in header_text
+
+
+def test_formula_builder_readonly_witness_axioms_accept_storage_backed_operands():
+    base_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a0",
+        base_register_name="a0",
+        size=8,
+        size_bits=64,
+    )
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    base = Expression.parameter("renamed_base", data_type="int *", size=8, storage_info=base_storage)
+    count = Expression.parameter("renamed_count", data_type="int", size=4, storage_info=count_storage)
+    proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.storage(
+            space_id=0,
+            space_name="register",
+            offset=base_storage.base_register_offset,
+            size=8,
+            storage_identity_key=base_storage.storage_identity_key(),
+            display_hint="a0",
+        ),
+        count_parameter_name="renamed_count",
+        count_parameter_index=None,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+        limit_expr=count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        start_offset=0,
+        start_index=0,
+        index_step=1,
+        index_scale=4,
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+        ),
+        return_region_value_proven=True,
+    )
+    reduction_ref = proof.to_readonly_reduction_ref()
+    assert reduction_ref is not None
+    reduction_expr = Expression.intrinsic(
+        "READONLY_SUM",
+        [base, count],
+        size=4,
+        runtime_ref=reduction_ref,
+        opcode=READONLY_SUM_OPCODE,
+    )
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[
+            {"name": "renamed_base", "size": 8, "data_type": "int *", "storage": base_storage},
+            {"name": "renamed_count", "size": 4, "data_type": "int", "storage": count_storage},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=reduction_expr, conditions=[], branch_index=0)],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[
+            {"name": "renamed_base", "size": 8, "data_type": "int *", "storage": base_storage},
+            {"name": "renamed_count", "size": 4, "data_type": "int", "storage": count_storage},
+        ],
+        returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
+    )
+
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    header_text = "\n".join(base_ctx["header_lines"])
+
+    assert "Readonly reduction finite witness axioms" in header_text
+    assert "(=> (= renamed_count_1 (_ bv1 32))" in header_text
+    assert "(select mem32 renamed_base_1)" in header_text
 
 
 def test_formula_builder_refuses_readonly_witness_axioms_when_operands_do_not_match_ref():

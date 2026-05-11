@@ -1020,6 +1020,9 @@ class PairwiseStrategy(CheckStrategy):
         return None
 
     def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
+        storage_key = getattr(readonly_ref, "count_parameter_storage_identity_key", None)
+        if storage_key is not None:
+            return ("parameter_storage", tuple(storage_key))
         try:
             index = getattr(readonly_ref, "count_parameter_index", None)
             if index is not None and int(index) >= 0:
@@ -2438,6 +2441,17 @@ class PairwiseStrategy(CheckStrategy):
             except (TypeError, ValueError):
                 return False
             return False
+        proof_storage_key = getattr(accumulator_proof, "count_parameter_storage_identity_key", None)
+        if proof_storage_key is not None:
+            storage_info = getattr(expr, "storage_info", None)
+            storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+            if not callable(storage_key_fn):
+                return False
+            try:
+                expr_storage_key = storage_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                return False
+            return expr_storage_key is not None and tuple(expr_storage_key) == tuple(proof_storage_key)
         return False
 
     def _case_reduction_count_bit_width(

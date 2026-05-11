@@ -176,6 +176,23 @@ def test_void_effect_analysis_exposes_memory_effect_comparison_surface():
     assert surface.use_sign_extension is False
 
 
+def test_memory_effect_keeps_synthetic_effect_width_when_surface_is_rederived():
+    analysis1, _ = _equivalent_void_effect_analyses()
+    analysis1.comparison_surface = ComparisonSurface(
+        kind="memory_effect",
+        explicit_bit_width=0,
+        use_sign_extension=False,
+        evidence={"source": "legacy_surface_without_width"},
+    )
+
+    surface = analysis1.get_comparison_surface()
+
+    assert surface.kind == "memory_effect"
+    assert surface.explicit_bit_width == 40
+    assert analysis1.get_comparison_bit_width() == 40
+    assert surface.evidence["source"] == "effect_summary.synthetic_expr"
+
+
 def test_formula_builder_uses_effect_surface_width_for_void_effect_equivalence():
     analysis1, analysis2 = _equivalent_void_effect_analyses()
     builder = FormulaBuilder(debug=False, exclude_ub=False)

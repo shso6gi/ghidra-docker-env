@@ -6,6 +6,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     post_state_read_expression_for_location,
 )
+from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     CallTargetRef,
@@ -20,6 +21,7 @@ from scripts.function_tracer_pcode.model import (
     LoopSideEffectProfileRef,
     LoopSummaryRef,
     LoopTermDescriptorRef,
+    LoopVariableIdentityRef,
     PostStateReadRef,
     PostStateSnapshotRef,
     ReductionAccumulatorProof,
@@ -34,6 +36,7 @@ from scripts.function_tracer_pcode.model import (
     loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.equivalence.strategies import pairwise as pairwise_module
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import build_pair_query
 from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
@@ -190,6 +193,314 @@ def _readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
             loop_summary=loop_summary,
         ),
     )
+
+
+def test_parameter_location_semantic_key_requires_object_identity():
+    assert LocationBaseRef.parameter("base").semantic_key() is None
+    assert LocationBaseRef.parameter("base", index=0).semantic_key() == ("parameter", 0)
+
+
+def test_parameter_location_negative_index_is_unresolved_not_identity():
+    negative = LocationBaseRef.parameter("base", index=-1)
+    missing = LocationBaseRef.parameter("base")
+    indexed = LocationBaseRef.parameter("base", index=0)
+
+    assert negative.parameter_index is None
+    assert negative.semantic_key() is None
+    assert negative.stable_key() == missing.stable_key()
+    assert negative != missing
+    assert negative != indexed
+    assert negative.stable_key() != indexed.stable_key()
+
+
+def test_readonly_contract_refuses_name_only_parameter_identity():
+    indexed_count = Expression.parameter("count", index=1, data_type="int", size=4)
+    indexed_proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=1,
+        limit_expr=indexed_count,
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+        ),
+    )
+    name_only_proof = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base"),
+        count_parameter_name="count",
+        count_parameter_index=None,
+        limit_expr=Expression.parameter("count", data_type="int", size=4),
+        result_size=4,
+        stride=4,
+        element_size=4,
+        index_scale=4,
+        loop_body_witnesses=(
+            ReadonlyReductionWitness(
+                exact_count=1,
+                terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),),
+            ),
+        ),
+    )
+
+    assert indexed_proof.readonly_term_sequence_contract_key() is not None
+    assert name_only_proof.readonly_term_sequence_contract_key() is None
+
+
+def test_loop_summary_semantic_key_refuses_name_only_memory_base_identity():
+    summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(
+            kind="memory_load",
+            reduction_kind="sum",
+            location_base_ref=LocationBaseRef.parameter("base"),
+            start_offset=0,
+            stride=4,
+            element_size=4,
+            result_size=4,
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
+    )
+
+    assert summary.semantic_key() is None
+
+
+def test_readonly_reduction_semantic_key_refuses_name_only_count_identity():
+    loop_summary = _readonly_loop_summary(start=0)
+    ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=None,
+        stride=4,
+        element_size=4,
+        result_size=4,
+        signed_counter=True,
+        loop_summary=loop_summary,
+    )
+
+    assert ref.semantic_key() is None
+
+
+def test_pairwise_readonly_shortcut_requires_count_object_identity():
+    loop_summary = _readonly_loop_summary(start=0)
+    ref = ReadonlyReductionRef(
+        reduction_kind="memory_sum",
+        pointer_base_ref=LocationBaseRef.parameter("base", index=0),
+        count_parameter_name="count",
+        count_parameter_index=None,
+        stride=4,
+        element_size=4,
+        result_size=4,
+        signed_counter=True,
+        loop_summary=loop_summary,
+    )
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    decision = strategy._readonly_reduction_contract_shortcut_decision(
+        ref,
+        ref,
+        requires_guard_equivalence=False,
+        result_size=4,
+    )
+
+    assert strategy._readonly_count_identity_key(ref) is None
+    assert decision.equivalent is False
+    assert decision.reason == "readonly_contract_mismatch"
+
+
+def test_storage_backed_pointer_and_count_identity_participates_in_readonly_shortcut():
+    pointer_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a0",
+        base_register_name="a0",
+        size=8,
+        size_bits=64,
+    )
+    count_storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    pointer_ref = LocationBaseRef.storage(
+        space_id=0,
+        space_name="register",
+        offset=pointer_storage.base_register_offset,
+        size=8,
+        storage_identity_key=pointer_storage.storage_identity_key(),
+        display_hint="a0",
+    )
+    count_expr_left = Expression.parameter(
+        "renamed_count_left",
+        data_type="int",
+        size=4,
+        storage_info=count_storage,
+    )
+    count_expr_right = Expression.parameter(
+        "renamed_count_right",
+        data_type="int",
+        size=4,
+        storage_info=count_storage,
+    )
+    left_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=pointer_ref,
+        count_parameter_name="renamed_count_left",
+        count_parameter_index=None,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+        limit_expr=count_expr_left,
+        result_size=4,
+        stride=4,
+        element_size=4,
+    ).lower_to_readonly_reduction_ref()
+    right_ref = ReductionAccumulatorProof(
+        reduction_kind="memory_sum",
+        pointer_base_ref=pointer_ref,
+        count_parameter_name="renamed_count_right",
+        count_parameter_index=None,
+        count_parameter_storage_identity_key=count_storage.storage_identity_key(),
+        limit_expr=count_expr_right,
+        result_size=4,
+        stride=4,
+        element_size=4,
+    ).lower_to_readonly_reduction_ref()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert left_ref is not None
+    assert right_ref is not None
+    assert left_ref.semantic_key() == right_ref.semantic_key()
+    assert strategy._readonly_count_identity_key(left_ref) == (
+        "parameter_storage",
+        count_storage.storage_identity_key(),
+    )
+    decision = strategy._readonly_reduction_contract_shortcut_decision(
+        left_ref,
+        right_ref,
+        requires_guard_equivalence=False,
+        result_size=4,
+    )
+
+    assert decision.equivalent is True
+    assert decision.reason == "readonly_reduction_contract"
+
+
+def test_pairwise_parameter_identity_key_refuses_descriptor_name_fallback():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    name_only_expr = Expression.parameter("count", data_type="int", size=4)
+    indexed_expr = Expression.parameter("count", index=1, data_type="int", size=4)
+    storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="a1",
+        base_register_name="a1",
+        size=4,
+        size_bits=32,
+    )
+    storage_expr = Expression.parameter("stale_count", data_type="int", size=4, storage_info=storage)
+    parameters = [{"name": "count", "size": 4, "data_type": "int", "index": 1}]
+
+    assert strategy._parameter_object_identity_key(name_only_expr, parameters) is None
+    assert strategy._parameter_object_identity_key(indexed_expr, parameters) == ("parameter_index", 1, 32)
+    assert strategy._parameter_object_identity_key(storage_expr, parameters) == (
+        "parameter_storage",
+        storage.storage_identity_key(),
+        32,
+    )
+
+
+def test_pairwise_condition_symbols_do_not_alias_name_only_parameters():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    left_count = Expression.parameter("count", data_type="int", size=4)
+    right_count = Expression.parameter("count", data_type="int", size=4)
+    conditions = [
+        Condition(
+            Expression.binary_op("INT_EQUAL", left_count, Expression.constant(1, size=4)),
+            False,
+        ),
+        Condition(
+            Expression.binary_op("INT_EQUAL", right_count, Expression.constant(2, size=4)),
+            False,
+        ),
+    ]
+
+    rewritten = strategy._conditions_with_object_identity_parameter_symbols(
+        conditions,
+        [{"name": "count", "size": 4, "data_type": "int", "index": 1}],
+    )
+
+    left_symbol = rewritten[0].expression.operands[0].name
+    right_symbol = rewritten[1].expression.operands[0].name
+    assert left_symbol != right_symbol
+    assert ConditionSMTOracle.conjunction_is_unsat(rewritten) is not True
+
+
+def test_pairwise_materialized_readonly_term_refuses_unresolved_pointer_base(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    unresolved_base = LocationBaseRef.parameter("base")
+    load_expr = Expression.memory(
+        Expression.parameter("base", data_type="int *", size=8),
+        size=4,
+    )
+
+    monkeypatch.setattr(
+        pairwise_module,
+        "canonicalize_location",
+        lambda _addr_expr, _parameters, size=4: CanonicalLocation(
+            base_ref=unresolved_base,
+            offset=0,
+            size=size,
+        ),
+    )
+
+    descriptor = strategy._extract_readonly_reduction_term_descriptor(
+        load_expr,
+        [{"name": "base", "size": 8, "data_type": "int *"}],
+        unresolved_base,
+    )
+
+    assert unresolved_base.semantic_key() is None
+    assert descriptor is None
+
+
+def test_pairwise_materialized_readonly_term_accepts_indexed_pointer_base(monkeypatch):
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    indexed_base = LocationBaseRef.parameter("base", index=0)
+    load_expr = Expression.memory(
+        Expression.parameter("base", index=0, data_type="int *", size=8),
+        size=4,
+    )
+
+    monkeypatch.setattr(
+        pairwise_module,
+        "canonicalize_location",
+        lambda _addr_expr, _parameters, size=4: CanonicalLocation(
+            base_ref=indexed_base,
+            offset=0,
+            size=size,
+        ),
+    )
+
+    descriptor = strategy._extract_readonly_reduction_term_descriptor(
+        load_expr,
+        [{"name": "base", "size": 8, "data_type": "int *", "index": 0}],
+        indexed_base,
+    )
+
+    assert indexed_base.semantic_key() == ("parameter", 0)
+    assert descriptor == ReadonlyReductionTermRef(byte_offset=0, access_size=4)
 
 
 def test_reduction_accumulator_proof_lowers_to_readonly_reduction_ref_object_centrically():
@@ -1711,6 +2022,126 @@ def test_loop_summary_method_b_key_uses_parameter_semantics_not_owner_identity()
     assert compare_loop_summaries(left, right).status == "equivalent"
 
 
+def test_loop_summary_method_b_key_rejects_unresolved_variable_identity():
+    summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(Expression.variable("tmp", size=4),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+
+    assert loop_summary_method_b_key(summary) is None
+
+
+def test_loop_summary_method_b_key_uses_variable_storage_identity_not_name():
+    storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="r7",
+        base_register_name="r7",
+        size=4,
+        size_bits=32,
+    )
+    left = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(Expression.variable("tmp", size=4, storage_info=storage),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    right = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(Expression.variable("renamed_tmp", size=4, storage_info=storage),),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+
+    left_key = loop_summary_method_b_key(left)
+    right_key = loop_summary_method_b_key(right)
+    assert left_key is not None
+    assert left_key == right_key
+
+
+def _loop_bound_variable(
+    *,
+    role: str,
+    ordinal: int,
+    varnode_token: str,
+    name: str,
+) -> Expression:
+    return Expression.variable(
+        name,
+        size=4,
+        runtime_ref=LoopVariableIdentityRef(
+            role=role,
+            binder_ordinal=ordinal,
+            varnode_key=("test_varnode", varnode_token),
+        ),
+    )
+
+
+def test_loop_variable_identity_ref_has_no_standalone_semantic_key():
+    ref = LoopVariableIdentityRef(
+        role="state",
+        binder_ordinal=0,
+        varnode_key=("test_varnode", "state0"),
+    )
+
+    assert ref.semantic_key() is None
+    assert ref.stable_key() is not None
+
+
+def test_loop_summary_method_b_key_alpha_normalizes_loop_variable_binders():
+    left = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(
+            _loop_bound_variable(role="state", ordinal=0, varnode_token="left_state", name="left_state"),
+            _loop_bound_variable(role="state", ordinal=1, varnode_token="left_state_next", name="left_state_next"),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+    right = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(
+            _loop_bound_variable(role="state", ordinal=0, varnode_token="right_state", name="right_state"),
+            _loop_bound_variable(role="state", ordinal=1, varnode_token="right_state_next", name="right_state_next"),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+
+    left_key = loop_summary_method_b_key(left)
+    right_key = loop_summary_method_b_key(right)
+    assert left_key is not None
+    assert left_key == right_key
+
+
+def test_loop_summary_method_b_key_rejects_duplicate_loop_variable_binder_slots():
+    summary = LoopSummaryRef(
+        start_expr=Expression.constant(0, size=4),
+        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
+        step_expr=Expression.constant(1, size=4),
+        term_descriptor=LoopTermDescriptorRef(kind="affine_residue"),
+        seed_terms=(
+            _loop_bound_variable(role="state", ordinal=0, varnode_token="state_a", name="state_a"),
+            _loop_bound_variable(role="state", ordinal=0, varnode_token="state_b", name="state_b"),
+        ),
+        side_effect_profile=LoopSideEffectProfileRef(profile="pure"),
+    )
+
+    assert loop_summary_method_b_key(summary) is None
+
+
 def test_method_b_smt_identity_uses_loop_semantics_across_owner_scoped_binaries():
     left_base = LocationBaseRef.parameter(
         "base",
@@ -1977,7 +2408,11 @@ def test_storage_info_matches_base_register_by_name_when_numeric_offsets_differ(
 def test_post_state_symbolic_locations_bind_parameter_indices():
     parameters = [{"name": "trace", "index": 0, "size": 8}]
     expr = post_state_read_expression_for_location(
-        CanonicalLocation("trace", 4, 4),
+        CanonicalLocation(
+            base_ref=LocationBaseRef.parameter("trace", index=0),
+            offset=4,
+            size=4,
+        ),
         parameters,
         symbolic=True,
     )

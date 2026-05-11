@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 import re
-from typing import Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, overload
+from typing import Callable, ClassVar, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, overload
 
 from ..model import (
     AddressValueRef,
@@ -28,7 +28,12 @@ from ..model import (
     expression_key_or_identity,
     expression_key_safe,
 )
-from ..model.signature import get_declared_type_size_bytes, is_pointer_data_type, is_undefined_data_type
+from ..model.signature import (
+    get_declared_type_size_bytes,
+    is_integral_data_type,
+    is_pointer_data_type,
+    is_undefined_data_type,
+)
 from .condition import ConditionSimplifier
 from .condition.normalizer import ConditionNormalizer
 from .memory_resolver import concretize_readonly_loads
@@ -47,34 +52,50 @@ class EffectSummary:
     effects: List[StoreEffect]
     synthetic_expr: Optional[Expression] = None
     has_unsupported_call: bool = False
+    incomplete_reasons: Tuple[str, ...] = ()
     parameter_refs: List[LocationBaseRef] = field(default_factory=list)
     call_argument_evidence: Dict[Tuple[object, ...], "CallArgumentEvidence"] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))
         if self.parameter_refs:
             self.parameter_refs = [
-                _coerce_callee_parameter_ref(ref, index)
+                coerced
                 for index, ref in enumerate(self.parameter_refs)
+                for coerced in [_coerce_callee_parameter_ref(ref, index)]
+                if coerced is not None
             ]
         else:
-            self.parameter_refs = [
-                LocationBaseRef.parameter(name, index=index)
-                for index, name in enumerate(self.parameter_names)
+            self.parameter_refs = []
+        if self.parameter_refs:
+            self.effects = [
+                StoreEffect(
+                    location=_bind_location_to_parameter_refs(effect.location, self.parameter_refs),
+                    value=effect.value,
+                    conditions=list(effect.conditions or []),
+                    order_key=effect.order_key,
+                )
+                for effect in (self.effects or [])
             ]
-        self.effects = [
-            StoreEffect(
-                location=_bind_location_to_parameter_refs(effect.location, self.parameter_refs),
-                value=effect.value,
-                conditions=list(effect.conditions or []),
-                order_key=effect.order_key,
-            )
-            for effect in (self.effects or [])
-        ]
+        else:
+            self.effects = [
+                StoreEffect(
+                    location=effect.location,
+                    value=effect.value,
+                    conditions=list(effect.conditions or []),
+                    order_key=effect.order_key,
+                )
+                for effect in (self.effects or [])
+            ]
 
 
 @dataclass(frozen=True)
 class CallArgumentEvidence:
     """Path-covered call-site argument evidence keyed by a concrete P-code op."""
+
+    RECOVERY_COMPLETE: ClassVar[str] = "complete"
+    RECOVERY_RECOVERABLE_PARTIAL: ClassVar[str] = "recoverable_partial"
+    RECOVERY_INCONCLUSIVE: ClassVar[str] = "inconclusive"
 
     pcode_op_ref: object
     target_ref: Optional[CallTargetRef]
@@ -83,7 +104,16 @@ class CallArgumentEvidence:
     sources: Tuple[str, ...]
     path_conditions: Tuple[Tuple[Condition, ...], ...] = ()
     coverage_complete: bool = False
+    recovery_status: str = RECOVERY_COMPLETE
     reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        status = _normalize_call_argument_recovery_status(self.recovery_status)
+        if bool(self.coverage_complete):
+            status = self.RECOVERY_COMPLETE
+        elif status == self.RECOVERY_COMPLETE:
+            status = self.RECOVERY_INCONCLUSIVE
+        object.__setattr__(self, "recovery_status", status)
 
     def stable_key(self) -> Optional[Tuple[object, ...]]:
         stable_key = getattr(self.pcode_op_ref, "stable_key", None)
@@ -94,12 +124,25 @@ class CallArgumentEvidence:
     def is_usable(self) -> bool:
         return (
             bool(self.coverage_complete)
+            and _call_target_ref_is_resolved(self.target_ref)
+            and _callee_param_identities_are_object_proven(self.callee_param_identities)
             and len(self.arguments) == len(self.callee_param_identities)
         )
 
+    def is_recoverable_partial(self) -> bool:
+        return (
+            self.recovery_status == self.RECOVERY_RECOVERABLE_PARTIAL
+            and _call_target_ref_is_resolved(self.target_ref)
+            and _callee_param_identities_are_object_proven(self.callee_param_identities)
+            and 0 < len(self.arguments) <= len(self.callee_param_identities)
+        )
+
+    def is_incomplete_blocker(self) -> bool:
+        return not self.is_usable() and not self.is_recoverable_partial()
+
     def target_matches(self, target_ref: Optional[CallTargetRef]) -> bool:
-        if self.target_ref is None or target_ref is None:
-            return True
+        if not _call_target_ref_is_resolved(self.target_ref) or not _call_target_ref_is_resolved(target_ref):
+            return False
         return self.target_ref.stable_key() == target_ref.stable_key()
 
 
@@ -380,9 +423,13 @@ def _display_name_for_location_base(base_ref: LocationBaseRef) -> str:
     return base_ref.display_name()
 
 
-def _storage_base_ref(storage: Optional[StorageInfo]) -> Optional[LocationBaseRef]:
+def _storage_base_ref(
+    storage: Optional[StorageInfo],
+    *,
+    allow_register: bool = False,
+) -> Optional[LocationBaseRef]:
     storage = _coerce_storage_info(storage)
-    if storage is None or storage.is_register:
+    if storage is None or (storage.is_register and not allow_register):
         return None
     space_name = re.sub(r"[^0-9A-Za-z_]", "_", str(storage.space_name or "mem"))
     return LocationBaseRef.storage(
@@ -390,6 +437,7 @@ def _storage_base_ref(storage: Optional[StorageInfo]) -> Optional[LocationBaseRe
         space_name=space_name,
         offset=int(storage.offset),
         size=max(1, int(storage.size or 0)),
+        storage_identity_key=storage.storage_identity_key(),
         display_hint=f"{space_name}@{int(storage.offset)}:{max(1, int(storage.size or 0))}",
     )
 
@@ -685,12 +733,29 @@ def summarize_store_effects(
     parameter_names = _collect_named_parameter_names(parameters)
     effects: List[StoreEffect] = []
     has_unsupported_call = False
+    incomplete_reasons: Set[str] = set()
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
 
     for block_info in block_infos:
-        path_sets = condition_tracker.get_all_valid_paths_to_block(block_info)
-        if not path_sets:
-            path_sets = [[]]
+        coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
+        if coverage_status == "complete_unreachable":
+            continue
+        if coverage_status != "complete" or not path_sets:
+            if _block_has_path_incomplete_effects(
+                block_info,
+                tracer,
+                parameters,
+                direct_call_summary,
+                resolve_callee_parameters,
+            ):
+                has_unsupported_call = True
+                incomplete_reasons.add("effect_summary_path_coverage_incomplete")
+                if debug:
+                    print(
+                        "[EffectSummary] skip effect-sensitive block: "
+                        "path coverage unavailable"
+                    )
+            continue
 
         for op in block_info.pcode_ops:
             mnemonic = op.getMnemonic()
@@ -728,11 +793,6 @@ def summarize_store_effects(
             if mnemonic not in {"CALL", "CALLIND"} or direct_call_summary is None or op.getNumInputs() < 1:
                 continue
 
-            target_ref = _resolve_call_target_ref(tracer, op)
-            if target_ref is None:
-                has_unsupported_call = True
-                continue
-            target_label = target_ref.display_name()
             explicit_args = [
                 _normalize_call_argument_expression(
                     _resolve_call_argument_expression(op.getInput(i), tracer, parameters),
@@ -741,6 +801,16 @@ def summarize_store_effects(
                 )
                 for i in range(1, op.getNumInputs())
             ]
+            target_ref = _resolve_call_target_ref(tracer, op)
+            if target_ref is None:
+                has_unsupported_call = True
+                if debug:
+                    print(
+                        "[EffectSummary] skip unresolved call effect summary: "
+                        "target identity is unavailable"
+                    )
+                continue
+            target_label = target_ref.display_name()
             callee_parameters = (
                 list(resolve_callee_parameters(target_ref) or [])
                 if resolve_callee_parameters
@@ -759,9 +829,12 @@ def summarize_store_effects(
                     condition_tracker=condition_tracker,
                     current_conditions=normalized_path_conditions,
                 )
-                argument_coverage_complete = _call_argument_recovery_is_complete(
+                argument_recovery_status = _call_argument_recovery_status(
                     callee_parameters,
                     args,
+                )
+                argument_coverage_complete = (
+                    argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
                 )
                 _record_call_argument_evidence(
                     call_argument_evidence,
@@ -773,7 +846,16 @@ def summarize_store_effects(
                     normalized_path_conditions,
                     coverage_complete=argument_coverage_complete,
                     sources=_infer_call_argument_sources(args, explicit_args),
-                    reason=None if argument_coverage_complete else "argument_recovery_incomplete",
+                    reason=(
+                        None
+                        if argument_coverage_complete
+                        else (
+                            "argument_recovery_recoverable_partial"
+                            if argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+                            else "argument_recovery_incomplete"
+                        )
+                    ),
+                    recovery_status=argument_recovery_status,
                 )
                 if debug:
                     recovered_dump = ", ".join(arg.to_string() for arg in args)
@@ -784,26 +866,21 @@ def summarize_store_effects(
                         f"recovered=[{recovered_dump}]"
                     )
                 if callee_parameters and not argument_coverage_complete:
-                    has_unsupported_call = True
+                    if argument_recovery_status != CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL:
+                        has_unsupported_call = True
+                        if debug:
+                            print(
+                                "[EffectSummary] skip call effect summary: "
+                                f"target={target_label} recovered_args={len(args)} "
+                                f"callee_params={len(callee_parameters)}"
+                            )
+                        continue
                     if debug:
                         print(
-                            "[EffectSummary] skip call effect summary: "
+                            "[EffectSummary] continue with recoverable partial call arguments: "
                             f"target={target_label} recovered_args={len(args)} "
                             f"callee_params={len(callee_parameters)}"
                         )
-                    continue
-                if not _call_arguments_width_safe_for_effect_summary(
-                    direct_call_summary,
-                    callee_parameters,
-                    args,
-                ):
-                    has_unsupported_call = True
-                    if debug:
-                        print(
-                            "[EffectSummary] skip call effect summary: "
-                            f"target={target_label} partial-width argument has full-width effect use"
-                        )
-                    continue
                 path_reduced_args = [
                     _reduce_expression_under_conditions(arg, normalized_path_conditions)
                     for arg in args
@@ -821,10 +898,47 @@ def summarize_store_effects(
                     callee_summary = direct_call_summary(target_ref, variant_args)
                     if callee_summary is None:
                         has_unsupported_call = True
+                        if debug:
+                            print(
+                                "[EffectSummary] missing callee effect summary: "
+                                f"target={target_label}"
+                            )
+                        continue
+                    if not _call_arguments_width_safe_for_effect_summary(
+                        callee_summary,
+                        callee_parameters,
+                        variant_args,
+                    ):
+                        has_unsupported_call = True
+                        if debug:
+                            print(
+                                "[EffectSummary] skip call effect summary: "
+                                f"target={target_label} partial-width argument has full-width effect use"
+                            )
+                        continue
+                    callee_incomplete_reasons = _effect_summary_incomplete_reasons(callee_summary)
+                    if callee_incomplete_reasons:
+                        has_unsupported_call = True
+                        if debug:
+                            print(
+                                "[EffectSummary] skip incomplete callee effect summary: "
+                                f"target={target_label} reasons={callee_incomplete_reasons}"
+                            )
                         continue
                     if not callee_summary.effects:
                         if callee_summary.has_unsupported_call:
-                            has_unsupported_call = True
+                            if _call_arguments_may_expose_parameter_memory(
+                                variant_args,
+                                parameters,
+                                callee_parameters,
+                            ):
+                                has_unsupported_call = True
+                            elif debug:
+                                print(
+                                    "[EffectSummary] effect-free callee summary has only "
+                                    "parameter-memory-insensitive unsupported calls: "
+                                    f"target={target_label}"
+                                )
                         elif debug:
                             print(
                                 "[EffectSummary] effect-free callee summary: "
@@ -911,6 +1025,8 @@ def summarize_store_effects(
         effects=effects,
         synthetic_expr=synthetic_expr,
         has_unsupported_call=has_unsupported_call,
+        incomplete_reasons=tuple(sorted(incomplete_reasons)),
+        parameter_refs=_parameter_refs_from_descriptors(parameters),
         call_argument_evidence=dict(call_argument_evidence),
     )
 
@@ -927,6 +1043,7 @@ def _record_call_argument_evidence(
     coverage_complete: bool,
     sources: Optional[Sequence[str]] = None,
     reason: Optional[str] = None,
+    recovery_status: Optional[str] = None,
 ) -> None:
     make_ref = getattr(tracer, "_make_pcode_op_ref", None)
     if not callable(make_ref):
@@ -935,12 +1052,34 @@ def _record_call_argument_evidence(
     if ref is None:
         return
     key = ref.stable_key()
-    args_tuple = tuple(args or ()) if coverage_complete else ()
+    target_is_resolved = _call_target_ref_is_resolved(target_ref)
     param_identities = _call_evidence_callee_param_identities(callee_parameters)
+    identities_are_proven = (
+        len(param_identities) == len(callee_parameters or ())
+        and _callee_param_identities_are_object_proven(param_identities)
+    )
+    evidence_complete = bool(coverage_complete) and target_is_resolved and identities_are_proven
+    arity_complete = evidence_complete and len(args or ()) == len(param_identities)
+    requested_status = _normalize_call_argument_recovery_status(recovery_status)
+    if arity_complete:
+        status = CallArgumentEvidence.RECOVERY_COMPLETE
+    elif (
+        requested_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+        and target_is_resolved
+        and identities_are_proven
+        and 0 < len(args or ()) < len(param_identities)
+    ):
+        status = CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    else:
+        status = CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+    args_tuple = (
+        tuple(args or ())
+        if arity_complete or status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+        else ()
+    )
     source_tuple = tuple(sources or ()) if args_tuple else ()
     if len(source_tuple) != len(args_tuple):
         source_tuple = tuple("reaching_def" for _arg in args_tuple)
-    arity_complete = bool(coverage_complete) and len(args_tuple) == len(param_identities)
     new_evidence = CallArgumentEvidence(
         pcode_op_ref=ref,
         target_ref=target_ref,
@@ -949,7 +1088,22 @@ def _record_call_argument_evidence(
         sources=source_tuple,
         path_conditions=(tuple(path_conditions or ()),),
         coverage_complete=arity_complete,
-        reason=reason,
+        recovery_status=status,
+        reason=(
+            reason
+            or (
+                None
+                if arity_complete
+                else (
+                    "argument_recovery_recoverable_partial"
+                    if status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+                    else _call_argument_evidence_incomplete_reason(
+                        target_is_resolved,
+                        identities_are_proven,
+                    )
+                )
+            )
+        ),
     )
     previous = evidence.get(key)
     if previous is None:
@@ -963,11 +1117,14 @@ def _merge_call_argument_evidence(
     current: CallArgumentEvidence,
 ) -> CallArgumentEvidence:
     path_conditions = tuple(previous.path_conditions or ()) + tuple(current.path_conditions or ())
-    if (
-        previous.coverage_complete
-        and current.coverage_complete
-        and previous.target_matches(current.target_ref)
+    target_and_params_match = (
+        previous.target_matches(current.target_ref)
         and previous.callee_param_identities == current.callee_param_identities
+    )
+    if (
+        previous.is_usable()
+        and current.is_usable()
+        and target_and_params_match
         and len(previous.arguments) == len(current.arguments)
         and all(
             _expressions_equivalent(left, right)
@@ -982,8 +1139,21 @@ def _merge_call_argument_evidence(
             sources=previous.sources,
             path_conditions=path_conditions,
             coverage_complete=True,
+            recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
             reason=None,
         )
+    if target_and_params_match:
+        preserved = _preserve_complete_call_argument_evidence(previous, current, path_conditions)
+        if preserved is not None:
+            return preserved
+        if previous.is_recoverable_partial() and current.is_recoverable_partial():
+            merged_partial = _merge_recoverable_partial_call_argument_evidence(
+                previous,
+                current,
+                path_conditions,
+            )
+            if merged_partial is not None:
+                return merged_partial
     return CallArgumentEvidence(
         pcode_op_ref=previous.pcode_op_ref,
         target_ref=previous.target_ref or current.target_ref,
@@ -992,7 +1162,72 @@ def _merge_call_argument_evidence(
         sources=(),
         path_conditions=path_conditions,
         coverage_complete=False,
+        recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         reason=current.reason or previous.reason or "argument_evidence_path_conflict",
+    )
+
+
+def _preserve_complete_call_argument_evidence(
+    previous: CallArgumentEvidence,
+    current: CallArgumentEvidence,
+    path_conditions: Tuple[Tuple[Condition, ...], ...],
+) -> Optional[CallArgumentEvidence]:
+    if previous.is_usable() and current.is_recoverable_partial():
+        complete = previous
+        partial = current
+    elif current.is_usable() and previous.is_recoverable_partial():
+        complete = current
+        partial = previous
+    else:
+        return None
+    if not _call_argument_prefix_compatible(partial.arguments, complete.arguments):
+        return None
+    return CallArgumentEvidence(
+        pcode_op_ref=complete.pcode_op_ref,
+        target_ref=complete.target_ref,
+        callee_param_identities=complete.callee_param_identities,
+        arguments=complete.arguments,
+        sources=complete.sources,
+        path_conditions=path_conditions,
+        coverage_complete=True,
+        recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
+        reason=None,
+    )
+
+
+def _merge_recoverable_partial_call_argument_evidence(
+    previous: CallArgumentEvidence,
+    current: CallArgumentEvidence,
+    path_conditions: Tuple[Tuple[Condition, ...], ...],
+) -> Optional[CallArgumentEvidence]:
+    if _call_argument_prefix_compatible(previous.arguments, current.arguments):
+        kept = previous if len(previous.arguments) >= len(current.arguments) else current
+    elif _call_argument_prefix_compatible(current.arguments, previous.arguments):
+        kept = current if len(current.arguments) >= len(previous.arguments) else previous
+    else:
+        return None
+    return CallArgumentEvidence(
+        pcode_op_ref=kept.pcode_op_ref,
+        target_ref=kept.target_ref,
+        callee_param_identities=kept.callee_param_identities,
+        arguments=kept.arguments,
+        sources=kept.sources,
+        path_conditions=path_conditions,
+        coverage_complete=False,
+        recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+        reason=kept.reason or "argument_recovery_recoverable_partial",
+    )
+
+
+def _call_argument_prefix_compatible(
+    prefix: Sequence[Expression],
+    full: Sequence[Expression],
+) -> bool:
+    if len(prefix or ()) > len(full or ()):
+        return False
+    return all(
+        _expressions_equivalent(left, right)
+        for left, right in zip(prefix or (), full or ())
     )
 
 
@@ -1000,21 +1235,300 @@ def _call_evidence_callee_param_identities(
     callee_parameters: Sequence[Dict],
 ) -> Tuple[Tuple[object, ...], ...]:
     identities: List[Tuple[object, ...]] = []
-    for index, param_ref in enumerate(_coerce_callee_parameter_refs(callee_parameters)):
-        identity = _parameter_identity_key_from_base_ref(param_ref)
-        if identity is None:
-            identity = ("callee_parameter_ordinal", index)
-        identities.append(identity)
+    for param in callee_parameters or ():
+        param_keys = sorted(_parameter_identity_keys_from_descriptor(param), key=repr)
+        if not param_keys:
+            return ()
+        identities.append(tuple(param_keys))
     return tuple(identities)
+
+
+def _call_target_ref_is_resolved(target_ref: Optional[CallTargetRef]) -> bool:
+    if target_ref is None:
+        return False
+    is_unknown = getattr(target_ref, "is_unknown", None)
+    if callable(is_unknown):
+        try:
+            if is_unknown():
+                return False
+        except Exception:
+            return False
+    stable_key = getattr(target_ref, "stable_key", None)
+    if not callable(stable_key):
+        return False
+    try:
+        return stable_key() is not None
+    except Exception:
+        return False
+
+
+def _callee_param_identities_are_object_proven(
+    identities: Sequence[Tuple[object, ...]],
+) -> bool:
+    for identity in identities or ():
+        if not identity:
+            return False
+        if identity[0] == "callee_parameter_ordinal":
+            return False
+    return True
+
+
+def _call_argument_evidence_incomplete_reason(
+    target_is_resolved: bool,
+    identities_are_proven: bool,
+) -> str:
+    if not target_is_resolved:
+        return "call_target_unresolved"
+    if not identities_are_proven:
+        return "callee_parameter_identity_unproven"
+    return "argument_recovery_incomplete"
+
+
+def _normalize_call_argument_recovery_status(status: Optional[str]) -> str:
+    if status in {
+        CallArgumentEvidence.RECOVERY_COMPLETE,
+        CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
+        CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+    }:
+        return str(status)
+    return CallArgumentEvidence.RECOVERY_COMPLETE
 
 
 def _call_argument_recovery_is_complete(
     callee_parameters: Sequence[Dict],
     args: Sequence[Expression],
 ) -> bool:
+    return _call_argument_recovery_status(callee_parameters, args) == CallArgumentEvidence.RECOVERY_COMPLETE
+
+
+def _call_argument_recovery_status(
+    callee_parameters: Sequence[Dict],
+    args: Sequence[Expression],
+) -> str:
     if not callee_parameters:
+        return CallArgumentEvidence.RECOVERY_COMPLETE
+    recovered_count = len(args or ())
+    if recovered_count >= len(callee_parameters):
+        return CallArgumentEvidence.RECOVERY_COMPLETE
+    if recovered_count > 0:
+        return CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+    return CallArgumentEvidence.RECOVERY_INCONCLUSIVE
+
+
+def _call_arguments_may_expose_parameter_memory(
+    args: Sequence[Expression],
+    parameters: Sequence[Dict],
+    callee_parameters: Optional[Sequence[Dict]] = None,
+) -> bool:
+    return any(
+        _call_argument_may_expose_parameter_memory(
+            arg,
+            parameters,
+            callee_param=(
+                callee_parameters[index]
+                if callee_parameters is not None and index < len(callee_parameters)
+                else None
+            ),
+        )
+        for index, arg in enumerate(args or ())
+    )
+
+
+def _call_argument_may_expose_parameter_memory(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+    *,
+    callee_param: Optional[Dict] = None,
+) -> bool:
+    if expr is None:
         return True
-    return len(args or ()) >= len(callee_parameters)
+    if expr.expr_type == ExpressionType.UNKNOWN:
+        return True
+    if expr.expr_type == ExpressionType.PHI:
+        return any(
+            _call_argument_may_expose_parameter_memory(
+                value,
+                parameters,
+                callee_param=callee_param,
+            )
+            for _condition, value in (expr.value or ())
+        )
+    if _expression_may_be_parameter_memory_address(expr, parameters):
+        return True
+    if callee_param is not None and _parameter_descriptor_is_proven_non_pointer_scalar(callee_param):
+        return False
+    return False
+
+
+def _expression_may_be_parameter_memory_address(
+    expr: Optional[Expression],
+    parameters: Sequence[Dict],
+) -> bool:
+    if expr is None:
+        return False
+    if _expression_declares_pointer_type(expr):
+        return True
+    if _expression_is_wide_unknown_or_undefined(expr):
+        return True
+    parsed = _extract_location_root_and_steps(expr, parameters)
+    if parsed is None:
+        return False
+    base_ref, steps = parsed
+    if any(getattr(step, "kind", None) == "deref" for step in (steps or ())):
+        return False
+    for param in parameters or ():
+        if _parameter_base_ref_matches_descriptor(base_ref, param):
+            if _parameter_descriptor_looks_pointer(param):
+                return True
+            if _expression_is_non_address_sized_scalar_value(expr):
+                return False
+            return _parameter_descriptor_may_expose_parameter_memory(param)
+    return False
+
+
+def _expression_declares_pointer_type(expr: Expression) -> bool:
+    return _parameter_descriptor_looks_pointer(_parameter_descriptor_from_expression(expr))
+
+
+def _expression_is_wide_unknown_or_undefined(expr: Expression) -> bool:
+    if expr.expr_type not in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+        return False
+    descriptor = _parameter_descriptor_from_expression(expr)
+    if not _parameter_descriptor_is_address_sized_unknown(descriptor):
+        return False
+    try:
+        expr_size = int(getattr(expr, "size", 0) or 0)
+    except Exception:
+        expr_size = 0
+    return expr_size > 4
+
+
+def _expression_is_non_address_sized_scalar_value(expr: Expression) -> bool:
+    if _expression_declares_pointer_type(expr):
+        return False
+    try:
+        expr_size = int(getattr(expr, "size", 0) or 0)
+    except Exception:
+        expr_size = 0
+    return 0 < expr_size <= 4
+
+
+def _parameter_descriptor_from_expression(expr: Optional[Expression]) -> Dict:
+    if expr is None:
+        return {}
+    return {
+        "name": getattr(expr, "name", None),
+        "index": getattr(expr, "value", -1) if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER else -1,
+        "size": getattr(expr, "size", 0),
+        "data_type": getattr(expr, "data_type", None),
+        "data_type_obj": getattr(expr, "data_type_obj", None),
+        "storage": getattr(expr, "storage_info", None),
+    }
+
+
+def _block_has_effect_sensitive_ops(block_info) -> bool:
+    for op in getattr(block_info, "pcode_ops", []) or ():
+        try:
+            mnemonic = str(op.getMnemonic()).upper()
+        except Exception:
+            continue
+        if mnemonic in {"STORE", "CALL", "CALLIND"}:
+            return True
+    return False
+
+
+def _path_coverage_for_effect_block(condition_tracker, block_info) -> Tuple[str, List[List[Condition]]]:
+    coverage_fn = getattr(condition_tracker, "get_path_coverage_to_block", None)
+    if callable(coverage_fn):
+        try:
+            coverage = coverage_fn(block_info)
+        except Exception:
+            return "inconclusive", []
+        status = str(getattr(coverage, "status", "") or "")
+        condition_paths = getattr(coverage, "condition_paths", None)
+        if condition_paths is None:
+            condition_paths = getattr(coverage, "paths", None)
+        if condition_paths is None:
+            condition_paths = []
+        return status if status in {"complete", "complete_unreachable", "inconclusive"} else "inconclusive", list(condition_paths or [])
+
+    try:
+        path_sets = condition_tracker.get_all_valid_paths_to_block(block_info)
+    except Exception:
+        return "inconclusive", []
+    return ("complete", list(path_sets or [])) if path_sets else ("inconclusive", [])
+
+
+def _block_has_path_incomplete_effects(
+    block_info,
+    tracer,
+    parameters: Sequence[Dict],
+    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]],
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]],
+) -> bool:
+    for op in getattr(block_info, "pcode_ops", []) or ():
+        try:
+            mnemonic = str(op.getMnemonic()).upper()
+        except Exception:
+            continue
+        if mnemonic == "STORE":
+            return True
+        if mnemonic in {"CALL", "CALLIND"} and _call_op_requires_path_covered_effect_summary(
+            op,
+            tracer,
+            parameters,
+            direct_call_summary,
+            resolve_callee_parameters,
+        ):
+            return True
+    return False
+
+
+def _call_op_requires_path_covered_effect_summary(
+    op,
+    tracer,
+    parameters: Sequence[Dict],
+    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]],
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]],
+) -> bool:
+    if direct_call_summary is None:
+        return True
+    try:
+        if op.getNumInputs() < 1:
+            return True
+        explicit_args = [
+            _normalize_call_argument_expression(
+                _resolve_call_argument_expression(op.getInput(i), tracer, parameters),
+                i - 1,
+                parameters,
+            )
+            for i in range(1, op.getNumInputs())
+        ]
+        target_ref = _resolve_call_target_ref(tracer, op)
+        if target_ref is None:
+            return True
+        callee_parameters = (
+            list(resolve_callee_parameters(target_ref) or [])
+            if resolve_callee_parameters
+            else []
+        )
+        if callee_parameters and len(explicit_args) < len(callee_parameters):
+            return True
+        callee_summary = direct_call_summary(target_ref, explicit_args)
+        if callee_summary is None:
+            return True
+        if getattr(callee_summary, "has_unsupported_call", False):
+            return _call_arguments_may_expose_parameter_memory(
+                explicit_args,
+                parameters,
+                callee_parameters,
+            )
+        incomplete_reasons = getattr(callee_summary, "incomplete_reasons", ())
+        if isinstance(incomplete_reasons, (list, tuple, set, frozenset)) and incomplete_reasons:
+            return True
+        return bool(getattr(callee_summary, "effects", None))
+    except Exception:
+        return True
 
 
 def _infer_call_argument_sources(
@@ -1497,12 +2011,168 @@ def _should_prefer_explicit_call_argument(
 def _parameter_descriptor_looks_pointer(param: Optional[Dict]) -> bool:
     if not param:
         return False
+    type_name = _parameter_descriptor_type_name(param)
+    if _data_type_name_has_pointer_marker(type_name):
+        return True
     return bool(
         is_pointer_data_type(
             param.get("data_type_obj"),
-            None,
+            type_name,
         )
     )
+
+
+def _parameter_descriptor_may_expose_parameter_memory(param: Optional[Dict]) -> bool:
+    if not param:
+        return True
+    if _parameter_descriptor_looks_pointer(param):
+        return True
+    if _parameter_descriptor_is_proven_non_pointer_scalar(param):
+        return False
+    return _parameter_descriptor_is_address_sized_unknown(param)
+
+
+def _parameter_descriptor_is_proven_non_pointer_scalar(param: Optional[Dict]) -> bool:
+    if not param or _parameter_descriptor_looks_pointer(param):
+        return False
+    type_name = _parameter_descriptor_type_name(param)
+    data_type_obj = param.get("data_type_obj")
+    if data_type_obj is not None and is_integral_data_type(data_type_obj, type_name):
+        return True
+    return _data_type_name_is_explicit_scalar(type_name)
+
+
+def _parameter_descriptor_is_address_sized_unknown(param: Optional[Dict]) -> bool:
+    if not param:
+        return True
+    type_name = _parameter_descriptor_type_name(param)
+    data_type_obj = param.get("data_type_obj")
+    type_is_unknown = not type_name and data_type_obj is None
+    type_is_undefined = bool(
+        is_undefined_data_type(data_type_obj, type_name)
+        or _data_type_name_is_undefined(type_name)
+    )
+    if not (type_is_unknown or type_is_undefined):
+        return True
+    storage_size = _parameter_descriptor_storage_size_bytes(param)
+    if storage_size <= 0:
+        return True
+    return storage_size in {4, 8}
+
+
+def _parameter_descriptor_storage_size_bytes(param: Dict) -> int:
+    try:
+        param_size = int(param.get("size") or 0)
+    except Exception:
+        param_size = 0
+    if param_size > 0:
+        return param_size
+    storage = _coerce_storage_info(param.get("storage"))
+    if storage is not None:
+        try:
+            storage_size = int(storage.size or storage.register_size or 0)
+        except Exception:
+            storage_size = 0
+        if storage_size > 0:
+            return storage_size
+    declared_size = get_declared_type_size_bytes(
+        param.get("data_type_obj"),
+        _parameter_descriptor_type_name(param),
+        fallback_size=None,
+    )
+    try:
+        return int(declared_size or 0)
+    except Exception:
+        return 0
+
+
+def _parameter_descriptor_type_name(param: Optional[Dict]) -> Optional[str]:
+    if not param:
+        return None
+    for key in ("data_type", "type_name", "data_type_name"):
+        value = param.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalize_type_display_name(type_name: Optional[str]) -> str:
+    return " ".join(str(type_name or "").strip().lower().split())
+
+
+def _data_type_name_has_pointer_marker(type_name: Optional[str]) -> bool:
+    normalized = _normalize_type_display_name(type_name)
+    return bool(normalized and ("*" in normalized or " pointer" in normalized))
+
+
+def _data_type_name_is_undefined(type_name: Optional[str]) -> bool:
+    normalized = _normalize_type_display_name(type_name)
+    return bool(normalized and normalized.startswith("undefined"))
+
+
+def _data_type_name_is_explicit_scalar(type_name: Optional[str]) -> bool:
+    normalized = _normalize_type_display_name(type_name)
+    if not normalized:
+        return False
+    if _data_type_name_has_pointer_marker(normalized) or _data_type_name_is_undefined(normalized):
+        return False
+    for qualifier in ("const ", "volatile ", "restrict "):
+        while normalized.startswith(qualifier):
+            normalized = normalized[len(qualifier):].strip()
+    scalar_names = {
+        "bool",
+        "_bool",
+        "boolean",
+        "char",
+        "signed char",
+        "unsigned char",
+        "byte",
+        "sbyte",
+        "ubyte",
+        "uchar",
+        "short",
+        "short int",
+        "signed short",
+        "signed short int",
+        "unsigned short",
+        "unsigned short int",
+        "ushort",
+        "int",
+        "signed",
+        "signed int",
+        "unsigned",
+        "unsigned int",
+        "uint",
+        "long",
+        "long int",
+        "signed long",
+        "signed long int",
+        "unsigned long",
+        "unsigned long int",
+        "ulong",
+        "long long",
+        "long long int",
+        "signed long long",
+        "signed long long int",
+        "unsigned long long",
+        "unsigned long long int",
+        "longlong",
+        "ulonglong",
+        "size_t",
+        "ssize_t",
+        "int8_t",
+        "uint8_t",
+        "int16_t",
+        "uint16_t",
+        "int32_t",
+        "uint32_t",
+        "int64_t",
+        "uint64_t",
+        "float",
+        "double",
+        "long double",
+    }
+    return normalized in scalar_names or normalized.startswith("enum ")
 
 
 def _call_argument_semantic_rank(
@@ -2831,7 +3501,33 @@ def _storage_identity_key(storage: Optional[StorageInfo]) -> Optional[Tuple[obje
 def _parameter_identity_key_from_base_ref(
     base_ref: Optional[LocationBaseRef],
 ) -> Optional[Tuple[object, ...]]:
-    if base_ref is None or not base_ref.is_parameter():
+    if base_ref is None:
+        return None
+    if base_ref.is_storage():
+        storage_identity_key = getattr(base_ref, "storage_identity_key", None)
+        if storage_identity_key is not None:
+            return tuple(storage_identity_key)
+        size = max(1, int(base_ref.storage_size or 0))
+        space_name = str(base_ref.storage_space or "")
+        space_id = base_ref.storage_space_id
+        offset = int(base_ref.storage_offset or 0)
+        is_register = space_name.lower() == "register"
+        storage = StorageInfo(
+            is_register=is_register,
+            space_name=space_name,
+            space_id=space_id,
+            offset=offset,
+            size=size,
+            size_bits=size * 8,
+            register_offset=offset if is_register else 0,
+            register_size=size if is_register else 0,
+            register_size_bits=(size * 8) if is_register else 0,
+            base_register_offset=offset if is_register else 0,
+            base_register_size=size if is_register else 0,
+            base_register_size_bits=(size * 8) if is_register else 0,
+        )
+        return _storage_identity_key(storage)
+    if not base_ref.is_parameter():
         return None
     if base_ref.parameter_index is None:
         return None
@@ -2919,6 +3615,19 @@ def _parameter_descriptors_share_identity(left: Optional[Dict], right: Optional[
     )
 
 
+def _callee_parameter_identity_keys(
+    param: object,
+    param_ref: Optional[LocationBaseRef],
+) -> Set[Tuple[object, ...]]:
+    keys: Set[Tuple[object, ...]] = set()
+    ref_key = _parameter_identity_key_from_base_ref(param_ref)
+    if ref_key is not None:
+        keys.add(ref_key)
+    if isinstance(param, dict):
+        keys.update(_parameter_identity_keys_from_descriptor(param))
+    return keys
+
+
 def _parameter_base_ref_matches_descriptor(
     base_ref: Optional[LocationBaseRef],
     param: Optional[Dict],
@@ -2926,10 +3635,85 @@ def _parameter_base_ref_matches_descriptor(
     base_key = _parameter_identity_key_from_base_ref(base_ref)
     if base_key is None or not param:
         return False
-    return base_key in _parameter_identity_keys_from_descriptor(param)
+    if base_key in _parameter_identity_keys_from_descriptor(param):
+        return True
+    if base_ref is not None and base_ref.is_storage():
+        base_storage = _storage_info_from_base_ref(base_ref)
+        param_storage = _coerce_storage_info(param.get("storage"))
+        if base_storage is not None and param_storage is not None:
+            return _storage_matches_parameter(base_storage, param_storage)
+    return False
 
 
-def _coerce_callee_parameter_ref(param: object, index: int) -> LocationBaseRef:
+def _storage_info_from_base_ref(base_ref: Optional[LocationBaseRef]) -> Optional[StorageInfo]:
+    if base_ref is None or not base_ref.is_storage():
+        return None
+    storage_identity_key = getattr(base_ref, "storage_identity_key", None)
+    if storage_identity_key is not None:
+        parsed = _storage_info_from_identity_key(tuple(storage_identity_key))
+        if parsed is not None:
+            return parsed
+    size = max(1, int(base_ref.storage_size or 0))
+    space_name = str(base_ref.storage_space or "")
+    offset = int(base_ref.storage_offset or 0)
+    is_register = space_name.lower() == "register"
+    return StorageInfo(
+        is_register=is_register,
+        space_name=space_name,
+        space_id=base_ref.storage_space_id,
+        offset=offset,
+        size=size,
+        size_bits=size * 8,
+        register_offset=offset if is_register else 0,
+        register_size=size if is_register else 0,
+        register_size_bits=(size * 8) if is_register else 0,
+        base_register_offset=offset if is_register else 0,
+        base_register_size=size if is_register else 0,
+        base_register_size_bits=(size * 8) if is_register else 0,
+    )
+
+
+def _storage_info_from_identity_key(identity_key: Tuple[object, ...]) -> Optional[StorageInfo]:
+    try:
+        if not identity_key:
+            return None
+        if identity_key[0] == "register_storage" and len(identity_key) >= 6:
+            _tag, space_id, base_offset, base_bits, bit_offset, size_bits = identity_key[:6]
+            size_bits = int(size_bits)
+            base_bits = int(base_bits)
+            return StorageInfo(
+                is_register=True,
+                space_name="register",
+                space_id=int(space_id),
+                offset=int(base_offset),
+                size=max(1, (size_bits + 7) // 8),
+                size_bits=size_bits,
+                register_offset=int(base_offset),
+                register_size=max(1, (size_bits + 7) // 8),
+                register_size_bits=size_bits,
+                base_register_offset=int(base_offset),
+                base_register_size=max(1, (base_bits + 7) // 8),
+                base_register_size_bits=base_bits,
+                bit_offset_in_base=int(bit_offset),
+            )
+        if identity_key[0] == "memory_storage" and len(identity_key) >= 4:
+            _tag, space_id, offset, size = identity_key[:4]
+            size = max(1, int(size))
+            return StorageInfo(
+                is_register=False,
+                space_id=int(space_id),
+                offset=int(offset),
+                size=size,
+                size_bits=size * 8,
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _coerce_callee_parameter_ref(param: object, index: int) -> Optional[LocationBaseRef]:
+    if isinstance(param, LocationBaseRef) and param.is_storage():
+        return param
     if isinstance(param, LocationBaseRef) and param.is_parameter():
         normalized_index = _normalize_parameter_index(param.parameter_index)
         if normalized_index is not None:
@@ -2939,25 +3723,35 @@ def _coerce_callee_parameter_ref(param: object, index: int) -> LocationBaseRef:
                 owner_program_id=param.owner_program_id,
                 owner_entry_offset=param.owner_entry_offset,
             )
-        return LocationBaseRef.parameter(
-            param.parameter_name,
-            index=index,
-            owner_program_id=param.owner_program_id,
-            owner_entry_offset=param.owner_entry_offset,
-        )
+        return None
     if isinstance(param, dict):
-        return _parameter_base_ref(
-            name=param.get("name"),
-            index=param.get("index", index),
-            owner_program_id=param.get("owner_program_id"),
-            owner_entry_offset=param.get("owner_entry_offset"),
-        )
-    if isinstance(param, str):
-        return LocationBaseRef.parameter(param, index=index)
-    return LocationBaseRef.parameter(None, index=index)
+        normalized_index = _normalize_parameter_index(param.get("index"))
+        if normalized_index is not None:
+            return _parameter_base_ref(
+                name=param.get("name"),
+                index=normalized_index,
+                owner_program_id=param.get("owner_program_id"),
+                owner_entry_offset=param.get("owner_entry_offset"),
+            )
+        storage_ref = _storage_base_ref(param.get("storage"), allow_register=True)
+        if storage_ref is not None:
+            return storage_ref
+        return None
+    return None
 
 
-def _coerce_callee_parameter_refs(params: Sequence[object]) -> List[LocationBaseRef]:
+def _parameter_refs_from_descriptors(
+    parameters: Sequence[Dict],
+) -> List[LocationBaseRef]:
+    refs: List[LocationBaseRef] = []
+    for index, param in enumerate(parameters or []):
+        ref = _coerce_callee_parameter_ref(param, index)
+        if ref is not None:
+            refs.append(ref)
+    return refs
+
+
+def _coerce_callee_parameter_refs(params: Sequence[object]) -> List[Optional[LocationBaseRef]]:
     return [_coerce_callee_parameter_ref(param, index) for index, param in enumerate(params)]
 
 
@@ -3055,12 +3849,20 @@ def _build_parameter_replacements(
 ) -> Dict[Tuple[object, ...], Expression]:
     replacements: Dict[Tuple[object, ...], Expression] = {}
     for param, param_ref, arg in zip(callee_params, _coerce_callee_parameter_refs(callee_params), args):
-        key = _parameter_identity_key_from_base_ref(param_ref)
-        if key is not None:
+        identity_keys = _callee_parameter_identity_keys(param, param_ref)
+        if identity_keys:
             coerced_arg = _coerce_argument_to_callee_parameter(arg, param)
             if coerced_arg is not None:
-                replacements[key] = coerced_arg
-                param_index = _normalize_parameter_index(param_ref.parameter_index)
+                for key in identity_keys:
+                    replacements[key] = coerced_arg
+                key = _parameter_identity_key_from_base_ref(param_ref)
+                if key is not None:
+                    replacements[key] = coerced_arg
+                param_index = (
+                    _normalize_parameter_index(param_ref.parameter_index)
+                    if param_ref is not None and param_ref.is_parameter()
+                    else None
+                )
                 if param_index is not None:
                     replacements.setdefault(("parameter", param_index), coerced_arg)
     return replacements
@@ -3114,15 +3916,7 @@ def _bind_location_to_parameter_identity(
 ) -> CanonicalLocation:
     return _bind_location_to_parameter_refs(
         location,
-        [
-            _parameter_base_ref(
-                name=param.get("name"),
-                index=param.get("index"),
-                owner_program_id=param.get("owner_program_id"),
-                owner_entry_offset=param.get("owner_entry_offset"),
-            )
-            for param in (parameters or [])
-        ],
+        _parameter_refs_from_descriptors(parameters),
     )
 
 
@@ -3130,10 +3924,7 @@ def _normalize_effect_locations_for_parameters(
     effects: Sequence[StoreEffect],
     parameters: Sequence[Dict],
 ) -> List[StoreEffect]:
-    parameter_refs = [
-        _parameter_base_ref(name=param.get("name"), index=param.get("index"))
-        for param in (parameters or [])
-    ]
+    parameter_refs = _parameter_refs_from_descriptors(parameters)
     return [
         StoreEffect(
             location=_bind_location_to_parameter_refs(effect.location, parameter_refs),
@@ -3449,6 +4240,8 @@ def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
         return False
     if summary.has_unsupported_call:
         return False
+    if _effect_summary_incomplete_reasons(summary):
+        return False
     if not summary.effects:
         return False
 
@@ -3463,6 +4256,13 @@ def is_call_effect_summary_allowed(summary: EffectSummary) -> bool:
         return False
 
     return True
+
+
+def _effect_summary_incomplete_reasons(summary: Optional[EffectSummary]) -> Tuple[str, ...]:
+    reasons = getattr(summary, "incomplete_reasons", ()) if summary is not None else ()
+    if isinstance(reasons, (list, tuple, set, frozenset)):
+        return tuple(str(reason) for reason in reasons if reason)
+    return (str(reasons),) if reasons else ()
 
 
 def _expression_is_call_scope_safe(expr: Optional[Expression]) -> bool:
@@ -3535,19 +4335,13 @@ def substitute_location(
     call_args: Sequence[Expression],
     caller_params: Sequence[Dict],
 ) -> Optional[CanonicalLocation]:
-    if not location.base_ref.is_parameter():
+    if not (location.base_ref.is_parameter() or location.base_ref.is_storage()):
         return None
     callee_refs = _coerce_callee_parameter_refs(callee_params)
-    param_index = _normalize_parameter_index(location.base_ref.parameter_index)
-    if param_index is None or param_index >= len(callee_refs):
+    arg_index = _callee_argument_index_for_location_base(location.base_ref, callee_refs)
+    if arg_index is None or arg_index >= len(call_args):
         return None
-    if _parameter_identity_key_from_base_ref(callee_refs[param_index]) != _parameter_identity_key_from_base_ref(
-        location.base_ref
-    ):
-        return None
-    if param_index >= len(call_args):
-        return None
-    actual_addr = call_args[param_index]
+    actual_addr = call_args[arg_index]
     caller_location = canonicalize_location(actual_addr, caller_params, size=location.size)
     if caller_location is None:
         return None
@@ -3559,6 +4353,52 @@ def substitute_location(
             size=location.size,
             steps=tuple(composed_steps),
         )
+    )
+
+
+def _callee_argument_index_for_location_base(
+    location_base: Optional[LocationBaseRef],
+    callee_refs: Sequence[Optional[LocationBaseRef]],
+) -> Optional[int]:
+    if location_base is None:
+        return None
+    location_index = (
+        _normalize_parameter_index(location_base.parameter_index)
+        if location_base.is_parameter()
+        else None
+    )
+    if location_index is not None and location_index < len(callee_refs):
+        if _callee_location_base_matches_ref(location_base, callee_refs[location_index]):
+            return location_index
+    matches = [
+        index
+        for index, callee_ref in enumerate(callee_refs or [])
+        if _callee_location_base_matches_ref(location_base, callee_ref)
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _callee_location_base_matches_ref(
+    location_base: Optional[LocationBaseRef],
+    callee_ref: Optional[LocationBaseRef],
+) -> bool:
+    if location_base is None or callee_ref is None:
+        return False
+    location_key = _parameter_identity_key_from_base_ref(location_base)
+    callee_key = _parameter_identity_key_from_base_ref(callee_ref)
+    if location_key is not None and callee_key is not None and location_key == callee_key:
+        return True
+    if not (location_base.is_parameter() and callee_ref.is_parameter()):
+        return False
+    location_index = _normalize_parameter_index(location_base.parameter_index)
+    callee_index = _normalize_parameter_index(callee_ref.parameter_index)
+    if location_index is None or callee_index is None or location_index != callee_index:
+        return False
+    return (
+        (location_base.owner_program_id is None and location_base.owner_entry_offset is None)
+        or (callee_ref.owner_program_id is None and callee_ref.owner_entry_offset is None)
     )
 
 

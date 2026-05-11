@@ -83,11 +83,23 @@ class LocationBaseRef:
     storage_space: Optional[str] = None
     storage_offset: Optional[int] = None
     storage_size: Optional[int] = None
+    storage_identity_key: Optional[Tuple[Any, ...]] = None
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"parameter", "stack_frame", "storage"}:
             raise ValueError(f"Unsupported location base kind: {self.kind}")
+        if self.kind == "parameter":
+            normalized_index = None
+            if self.parameter_index is not None:
+                try:
+                    candidate = int(self.parameter_index)
+                except Exception:
+                    candidate = None
+                if candidate is not None and candidate >= 0:
+                    normalized_index = candidate
+            if normalized_index != self.parameter_index:
+                object.__setattr__(self, "parameter_index", normalized_index)
 
     @classmethod
     def parameter(
@@ -119,6 +131,7 @@ class LocationBaseRef:
         space_name: Optional[str],
         offset: int,
         size: int,
+        storage_identity_key: Optional[Tuple[Any, ...]] = None,
         display_hint: Optional[str] = None,
     ) -> "LocationBaseRef":
         return cls(
@@ -127,6 +140,7 @@ class LocationBaseRef:
             storage_space=space_name or None,
             storage_offset=int(offset),
             storage_size=max(1, int(size or 0)),
+            storage_identity_key=tuple(storage_identity_key) if storage_identity_key is not None else None,
             display_hint=display_hint,
         )
 
@@ -164,6 +178,12 @@ class LocationBaseRef:
             return False
         if self.is_stack_frame():
             return True
+        if self.storage_identity_key is not None or other.storage_identity_key is not None:
+            return (
+                self.storage_identity_key is not None
+                and other.storage_identity_key is not None
+                and self.storage_identity_key == other.storage_identity_key
+            )
         return (
             self.storage_space_id == other.storage_space_id
             and int(self.storage_offset or 0) == int(other.storage_offset or 0)
@@ -184,6 +204,8 @@ class LocationBaseRef:
             return ("parameter", None)
         if self.is_stack_frame():
             return ("stack_frame",)
+        if self.storage_identity_key is not None:
+            return ("storage_identity", self.storage_identity_key)
         return (
             "storage",
             self.storage_space_id,
@@ -192,7 +214,7 @@ class LocationBaseRef:
             int(self.storage_size or 0),
         )
 
-    def semantic_key(self) -> Tuple[Any, ...]:
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         """Program-independent identity for comparing function-local locations.
 
         ``stable_key`` intentionally distinguishes the same parameter position in
@@ -205,9 +227,11 @@ class LocationBaseRef:
         if self.is_parameter():
             if self.parameter_index is not None:
                 return ("parameter", int(self.parameter_index))
-            return ("parameter_name", self.parameter_name or None)
+            return None
         if self.is_stack_frame():
             return ("stack_frame",)
+        if self.storage_identity_key is not None:
+            return ("storage_identity", self.storage_identity_key)
         return (
             "storage",
             self.storage_space_id,
@@ -264,6 +288,8 @@ class LocationBaseRef:
             result["storage_offset"] = self.storage_offset
         if self.storage_size is not None:
             result["storage_size"] = self.storage_size
+        if self.storage_identity_key is not None:
+            result["storage_identity_key"] = self.storage_identity_key
         return result
 
 
@@ -398,6 +424,30 @@ class PcodeOpRef:
     seq_order: Optional[int] = None
     block_index: Optional[int] = None
     mnemonic: Optional[str] = None
+    input_sizes: Tuple[int, ...] = ()
+    output_size: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        normalized_input_sizes = []
+        for size in tuple(self.input_sizes or ()):
+            try:
+                int_size = int(size)
+            except (TypeError, ValueError):
+                continue
+            if int_size > 0:
+                normalized_input_sizes.append(int_size)
+        object.__setattr__(self, "input_sizes", tuple(normalized_input_sizes))
+        try:
+            output_size = int(self.output_size) if self.output_size is not None else None
+        except (TypeError, ValueError):
+            output_size = None
+        object.__setattr__(self, "output_size", output_size if output_size and output_size > 0 else None)
+
+    def input_size(self, index: int = 0) -> Optional[int]:
+        try:
+            return self.input_sizes[int(index)]
+        except (IndexError, TypeError, ValueError):
+            return None
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -417,6 +467,8 @@ class PcodeOpRef:
             "seq_order": self.seq_order,
             "block_index": self.block_index,
             "mnemonic": self.mnemonic,
+            "input_sizes": list(self.input_sizes),
+            "output_size": self.output_size,
         }
 
 
@@ -440,6 +492,59 @@ class PcodeBlockRef:
             "block_index": self.block_index,
             "start_address_offset": self.start_address_offset,
         }
+
+
+@dataclass(frozen=True)
+class LoopVariableIdentityRef:
+    """Object-derived identity for a synthetic loop placeholder variable."""
+
+    role: str
+    varnode_key: Tuple[Any, ...]
+    binder_ordinal: int = 0
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        return None
+
+    def binder_key(self) -> Tuple[Any, ...]:
+        return (
+            "loop_variable_binder",
+            self.role,
+            int(self.binder_ordinal),
+        )
+
+    def stable_key(self) -> Optional[Tuple[Any, ...]]:
+        if not self.varnode_key:
+            return None
+        return (
+            "loop_variable_identity",
+            self.role,
+            int(self.binder_ordinal),
+            self.varnode_key,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "loop_variable_identity",
+            "role": self.role,
+            "binder_ordinal": int(self.binder_ordinal),
+            "varnode_key": self.varnode_key,
+        }
+
+
+@dataclass(frozen=True)
+class _LoopVariableBindingContext:
+    """Per-summary alpha-renaming context for loop placeholder variables."""
+
+    stable_to_binder: Dict[Tuple[Any, ...], Tuple[Any, ...]]
+
+    def semantic_key_for(self, ref: LoopVariableIdentityRef) -> Optional[Tuple[Any, ...]]:
+        stable_key = ref.stable_key()
+        if stable_key is None:
+            return None
+        binder_key = self.stable_to_binder.get(stable_key)
+        if binder_key is None:
+            return None
+        return ("loop_bound_variable", binder_key)
 
 
 @dataclass(frozen=True)
@@ -633,7 +738,73 @@ def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
     return None
 
 
-def _loop_object_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+def _loop_variable_binding_context_from_values(
+    *values: Any,
+) -> Optional[_LoopVariableBindingContext]:
+    stable_to_binder: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+    binder_to_stable: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+    seen: set[int] = set()
+
+    def visit(item: Any) -> bool:
+        if item is None:
+            return True
+        item_id = id(item)
+        if item_id in seen:
+            return True
+        seen.add(item_id)
+
+        ref = item if isinstance(item, LoopVariableIdentityRef) else getattr(item, "runtime_ref", None)
+        if isinstance(ref, LoopVariableIdentityRef):
+            stable_key = ref.stable_key()
+            binder_key = ref.binder_key()
+            if stable_key is None:
+                return False
+            existing_stable = binder_to_stable.get(binder_key)
+            if existing_stable is not None and existing_stable != stable_key:
+                return False
+            existing_binder = stable_to_binder.get(stable_key)
+            if existing_binder is not None and existing_binder != binder_key:
+                return False
+            binder_to_stable[binder_key] = stable_key
+            stable_to_binder[stable_key] = binder_key
+
+        expr_type = getattr(getattr(item, "expr_type", None), "name", None)
+        if expr_type == "PHI":
+            for cond, branch_value in getattr(item, "value", None) or ():
+                if cond is not None and not visit(cond):
+                    return False
+                if not visit(branch_value):
+                    return False
+            return True
+
+        condition_expr = getattr(item, "expression", None)
+        if condition_expr is not None and not visit(condition_expr):
+            return False
+
+        for operand in getattr(item, "operands", None) or ():
+            if not visit(operand):
+                return False
+
+        if isinstance(item, dict):
+            for key, dict_value in item.items():
+                if not visit(key) or not visit(dict_value):
+                    return False
+        elif isinstance(item, (tuple, list)):
+            for child in item:
+                if not visit(child):
+                    return False
+        return True
+
+    for value in values:
+        if not visit(value):
+            return None
+    return _LoopVariableBindingContext(stable_to_binder=stable_to_binder)
+
+
+def _loop_object_semantic_key(
+    value: Any,
+    loop_variable_context: Optional[_LoopVariableBindingContext] = None,
+) -> Optional[Tuple[Any, ...]]:
     """Semantic key for proof-oriented loop comparison.
 
     This intentionally differs from ``_loop_object_key`` for objects whose
@@ -653,27 +824,32 @@ def _loop_object_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
     if isinstance(value, bytes):
         return ("bytes", value.hex())
     if isinstance(value, tuple):
-        item_keys = tuple(_loop_object_semantic_key(item) for item in value)
+        item_keys = tuple(_loop_object_semantic_key(item, loop_variable_context) for item in value)
         if any(item_key is None for item_key in item_keys):
             return None
         return ("tuple", item_keys)
     if isinstance(value, list):
-        item_keys = tuple(_loop_object_semantic_key(item) for item in value)
+        item_keys = tuple(_loop_object_semantic_key(item, loop_variable_context) for item in value)
         if any(item_key is None for item_key in item_keys):
             return None
         return ("list", item_keys)
     if isinstance(value, dict):
         items = []
         for key, item in value.items():
-            key_key = _loop_object_semantic_key(key)
-            item_key = _loop_object_semantic_key(item)
+            key_key = _loop_object_semantic_key(key, loop_variable_context)
+            item_key = _loop_object_semantic_key(item, loop_variable_context)
             if key_key is None or item_key is None:
                 return None
             items.append((key_key, item_key))
         items.sort()
         return ("dict", tuple(items))
 
-    expr_key = _loop_expression_semantic_key(value)
+    if isinstance(value, LoopVariableIdentityRef):
+        if loop_variable_context is None:
+            return None
+        return loop_variable_context.semantic_key_for(value)
+
+    expr_key = _loop_expression_semantic_key(value, loop_variable_context)
     if expr_key is not None:
         return ("expression", expr_key)
 
@@ -685,6 +861,18 @@ def _loop_object_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
             return None
         if key is not None:
             return ("semantic", key)
+        if isinstance(value, LocationBaseRef):
+            return None
+
+    storage_identity_key = getattr(value, "storage_identity_key", None)
+    if callable(storage_identity_key):
+        try:
+            key = storage_identity_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+        if key is None:
+            return None
+        return ("storage_identity", key)
 
     stable_key = getattr(value, "stable_key", None)
     if callable(stable_key):
@@ -698,7 +886,10 @@ def _loop_object_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
     return None
 
 
-def _loop_expression_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+def _loop_expression_semantic_key(
+    value: Any,
+    loop_variable_context: Optional[_LoopVariableBindingContext] = None,
+) -> Optional[Tuple[Any, ...]]:
     expr_type = getattr(value, "expr_type", None)
     expr_type_name = getattr(expr_type, "name", None)
     if expr_type_name is None:
@@ -717,16 +908,30 @@ def _loop_expression_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
                 return ("parameter", int(index), size)
         except (TypeError, ValueError):
             pass
-        return ("parameter_name", getattr(value, "name", None) or "", size)
+        storage = getattr(value, "storage_info", None)
+        storage_key = _loop_object_semantic_key(storage, loop_variable_context) if storage is not None else None
+        if storage is not None:
+            if storage_key is None:
+                return None
+            return ("parameter_storage", size, storage_key)
+        return None
     if expr_type_name == "VARIABLE":
         storage = getattr(value, "storage_info", None)
-        storage_key = _loop_object_semantic_key(storage) if storage is not None else None
-        if storage is not None and storage_key is None:
-            return None
-        return ("variable", getattr(value, "name", None) or "", size, storage_key)
+        storage_key = _loop_object_semantic_key(storage, loop_variable_context) if storage is not None else None
+        if storage is not None:
+            if storage_key is None:
+                return None
+            return ("variable_storage", size, storage_key)
+        runtime_ref = getattr(value, "runtime_ref", None)
+        runtime_key = _loop_object_semantic_key(runtime_ref, loop_variable_context) if runtime_ref is not None else None
+        if runtime_ref is not None:
+            if runtime_key is None:
+                return None
+            return ("variable_runtime", size, runtime_key)
+        return None
     if expr_type_name in {"UNARY_OP", "BINARY_OP", "INTRINSIC", "CALL"}:
         operand_keys = tuple(
-            _loop_object_semantic_key(operand)
+            _loop_object_semantic_key(operand, loop_variable_context)
             for operand in (getattr(value, "operands", None) or ())
         )
         if any(operand_key is None for operand_key in operand_keys):
@@ -742,8 +947,8 @@ def _loop_expression_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
         operands = getattr(value, "operands", None) or ()
         if not operands:
             return None
-        address_key = _loop_object_semantic_key(operands[0])
-        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None))
+        address_key = _loop_object_semantic_key(operands[0], loop_variable_context)
+        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None), loop_variable_context)
         if address_key is None:
             return None
         return ("memory", size, address_key, runtime_key)
@@ -756,18 +961,18 @@ def _loop_expression_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
                 condition_expr = getattr(condition, "expression", None)
                 condition_key = (
                     "condition",
-                    _loop_object_semantic_key(condition_expr),
+                    _loop_object_semantic_key(condition_expr, loop_variable_context),
                     bool(getattr(condition, "negated", False)),
                 )
                 if condition_key[1] is None:
                     return None
-            value_key = _loop_object_semantic_key(branch_value)
+            value_key = _loop_object_semantic_key(branch_value, loop_variable_context)
             if value_key is None:
                 return None
             branches.append((condition_key, value_key))
         return ("phi", size, tuple(branches))
     if expr_type_name == "UNKNOWN":
-        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None))
+        runtime_key = _loop_object_semantic_key(getattr(value, "runtime_ref", None), loop_variable_context)
         if runtime_key is not None:
             return ("unknown", size, runtime_key)
         return None
@@ -1050,12 +1255,15 @@ class LoopTermDescriptorRef:
             tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
         )
 
-    def semantic_key(self) -> Tuple[Any, ...]:
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        location_key = self.location_base_ref.semantic_key() if self.location_base_ref is not None else None
+        if self.location_base_ref is not None and location_key is None:
+            return None
         return (
             "loop_term_descriptor",
             self.kind,
             self.reduction_kind,
-            self.location_base_ref.semantic_key() if self.location_base_ref is not None else None,
+            location_key,
             int(self.start_offset),
             int(self.stride),
             int(self.element_size),
@@ -1390,6 +1598,17 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
 
     if summary is None:
         return None
+    seed_terms_for_binding = tuple(getattr(summary, "seed_terms", ()) or ())
+    binding_context = _loop_variable_binding_context_from_values(
+        getattr(summary, "start_expr", None),
+        getattr(summary, "limit_expr", None),
+        getattr(summary, "step_expr", None),
+        seed_terms_for_binding,
+        tuple(getattr(summary, "witnesses", ()) or ()),
+        tuple(getattr(summary, "guard_constraints", ()) or ()),
+    )
+    if binding_context is None:
+        return None
     requires_effect_proof = getattr(summary, "requires_effect_proof", None)
     if callable(requires_effect_proof) and requires_effect_proof():
         return None
@@ -1413,10 +1632,15 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         term_descriptor,
         loop_var_unit=getattr(summary, "loop_var_unit", None),
     )
+    if getattr(term_descriptor, "kind", None) == "memory_load" and term_key is None:
+        return None
     loop_var_unit_key = getattr(summary, "loop_var_unit", None)
     if term_key is not None and len(term_key) > 0 and term_key[0] == "scalar_memory_term_sequence":
         loop_var_unit_key = "scalar_element_index"
-    limit_key = _loop_summary_limit_semantic_key(getattr(summary, "limit_expr", None))
+    limit_key = _loop_summary_limit_semantic_key(
+        getattr(summary, "limit_expr", None),
+        binding_context,
+    )
     side_effect_key = summary.side_effect_profile.semantic_key()
     if limit_key is None or side_effect_key is None:
         return None
@@ -1439,14 +1663,14 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         expected_term = _loop_summary_term_at_index(summary, previous_index)
         if expected_term is None:
             break
-        expected_key = _loop_object_semantic_key(expected_term)
-        actual_key = _loop_object_semantic_key(remaining_seed_terms[-1])
+        expected_key = _loop_object_semantic_key(expected_term, binding_context)
+        actual_key = _loop_object_semantic_key(remaining_seed_terms[-1], binding_context)
         if expected_key is None or actual_key is None or expected_key != actual_key:
             break
         remaining_seed_terms.pop()
         canonical_start = previous_index
 
-    seed_keys = tuple(_loop_object_semantic_key(term) for term in remaining_seed_terms)
+    seed_keys = tuple(_loop_object_semantic_key(term, binding_context) for term in remaining_seed_terms)
     if any(seed_key is None for seed_key in seed_keys):
         return None
     return (
@@ -1465,6 +1689,55 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
     )
 
 
+def loop_summary_method_b_key_at_result_size(
+    summary: Optional[LoopSummaryRef],
+    result_size: int,
+) -> Optional[Tuple[Any, ...]]:
+    """Projected Method-B key for comparing a wider sum at a narrower width."""
+
+    if summary is None:
+        return None
+    try:
+        target_result_size = max(1, int(result_size))
+    except (TypeError, ValueError):
+        return None
+    term_descriptor = getattr(summary, "term_descriptor", None)
+    if term_descriptor is None:
+        return None
+    original_result_size = max(1, int(getattr(term_descriptor, "result_size", 0) or 0))
+    if target_result_size > original_result_size:
+        return None
+    if target_result_size == original_result_size:
+        return loop_summary_method_b_key(summary)
+    if getattr(term_descriptor, "kind", None) != "memory_load":
+        return None
+    if getattr(term_descriptor, "reduction_kind", "sum") not in {"sum", "memory_sum"}:
+        return None
+
+    lane_terms = tuple(getattr(term_descriptor, "lane_terms", ()) or ())
+    if lane_terms:
+        try:
+            if any(max(1, int(size or 0)) != target_result_size for _offset, size in lane_terms):
+                return None
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            element_size = max(1, int(getattr(term_descriptor, "element_size", 0) or 0))
+        except (TypeError, ValueError):
+            return None
+        if element_size != target_result_size:
+            return None
+
+    projected_descriptor = replace(term_descriptor, result_size=target_result_size)
+    projected_summary = replace(
+        summary,
+        term_descriptor=projected_descriptor,
+        constant_bias=_bias_key(int(getattr(summary, "constant_bias", 0) or 0), target_result_size)[1],
+    )
+    return loop_summary_method_b_key(projected_summary)
+
+
 def _loop_summary_int_constant(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
@@ -1479,7 +1752,10 @@ def _loop_summary_int_constant(value: Any) -> Optional[int]:
     return None
 
 
-def _loop_summary_limit_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
+def _loop_summary_limit_semantic_key(
+    value: Any,
+    loop_variable_context: Optional[_LoopVariableBindingContext] = None,
+) -> Optional[Tuple[Any, ...]]:
     expr_type = getattr(value, "expr_type", None)
     if getattr(expr_type, "name", None) == "PARAMETER":
         index = getattr(value, "value", None)
@@ -1488,8 +1764,14 @@ def _loop_summary_limit_semantic_key(value: Any) -> Optional[Tuple[Any, ...]]:
                 return ("loop_limit_parameter", int(index))
         except (TypeError, ValueError):
             pass
-        return ("loop_limit_parameter_name", getattr(value, "name", None) or "")
-    return _loop_object_semantic_key(value)
+        storage = getattr(value, "storage_info", None)
+        storage_key = _loop_object_semantic_key(storage, loop_variable_context) if storage is not None else None
+        if storage is not None:
+            if storage_key is None:
+                return None
+            return ("loop_limit_parameter_storage", storage_key)
+        return None
+    return _loop_object_semantic_key(value, loop_variable_context)
 
 
 def _loop_summary_term_descriptor_semantic_key(
@@ -1525,10 +1807,13 @@ def _loop_summary_scalar_memory_term_key(
         stride = int(getattr(term_descriptor, "stride", 0) or 0)
         if element_size <= 0 or stride <= 0 or element_size != result_size:
             return None
+        location_key = location_base_ref.semantic_key()
+        if location_key is None:
+            return None
         return (
             "scalar_memory_term_sequence",
             reduction_kind,
-            location_base_ref.semantic_key(),
+            location_key,
             start_offset,
             stride,
             element_size,
@@ -1567,10 +1852,13 @@ def _loop_summary_scalar_memory_term_key(
     expected_offsets = [offsets[0] + index * scalar_stride for index in range(len(offsets))]
     if offsets != expected_offsets:
         return None
+    location_key = location_base_ref.semantic_key()
+    if location_key is None:
+        return None
     return (
         "scalar_memory_term_sequence",
         reduction_kind,
-        location_base_ref.semantic_key(),
+        location_key,
         start_offset + offsets[0],
         scalar_stride,
         access_size,
@@ -1674,6 +1962,7 @@ class ReductionAccumulatorProof:
     result_size: int
     stride: int
     element_size: int
+    count_parameter_storage_identity_key: Optional[Tuple[Any, ...]] = None
     start_offset: int = 0
     start_index: int = 0
     index_step: int = 1
@@ -1712,6 +2001,12 @@ class ReductionAccumulatorProof:
             raise ValueError("ReductionAccumulatorProof requires a positive index_step")
         if self.seed_term_count is not None and int(self.seed_term_count) < 0:
             raise ValueError("ReductionAccumulatorProof requires a non-negative seed_term_count")
+        if self.count_parameter_storage_identity_key is not None:
+            object.__setattr__(
+                self,
+                "count_parameter_storage_identity_key",
+                tuple(self.count_parameter_storage_identity_key),
+            )
         object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
         lane_terms = tuple(
             sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
@@ -1749,6 +2044,7 @@ class ReductionAccumulatorProof:
             self.pointer_base_ref.stable_key(),
             self.count_parameter_name,
             None if self.count_parameter_index is None else int(self.count_parameter_index),
+            self.count_parameter_storage_identity_key,
             limit_key,
             max(1, int(self.result_size)),
             int(self.stride),
@@ -1783,11 +2079,221 @@ class ReductionAccumulatorProof:
             self.source,
         )
 
+    def readonly_term_sequence_specificity_score(self) -> int:
+        """Relative precision of the proven readonly term-sequence contract.
+
+        A higher score means the proof carries more object-level information
+        about non-zero starts, explicit seed terms, or scalarized vector lanes.
+        This is used only as an ordering tiebreaker between overlapping
+        readonly summaries that target the same base/count reduction surface.
+        """
+
+        try:
+            start_index = max(0, int(self.start_index))
+        except (TypeError, ValueError):
+            start_index = 0
+        seed_terms = tuple(self.seed_terms or ())
+        seed_term_count = self.seed_term_count
+        try:
+            implicit_seed_count = 0 if seed_term_count is None else max(0, int(seed_term_count))
+        except (TypeError, ValueError):
+            implicit_seed_count = 0
+        lane_terms = tuple(self.lane_terms or ())
+        return int(start_index) + len(seed_terms) + int(implicit_seed_count) + len(lane_terms)
+
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
-        loop_summary = self._pairwise_loop_summary_ref()
-        if loop_summary is None:
+        return self.readonly_term_sequence_contract_key()
+
+    def readonly_term_sequence_contract_key(
+        self,
+        *,
+        result_size: Optional[int] = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        """Semantic contract for a readonly scalar memory-term reduction.
+
+        The contract is deliberately proof-centric rather than surface-centric:
+        it is derived from the accumulator proof's base object, limit object,
+        scalarized term geometry, explicit seed terms, and side-effect profile.
+        A path-sensitive ``LoopSummaryRef`` may still be comparable through this
+        contract when the accumulator proof proves the readonly term sequence;
+        loops with writes, calls, escapes, or conditional side effects remain
+        proof-required and do not get a shortcut here.
+        """
+
+        target_result_size = self._readonly_contract_result_size(result_size)
+        if target_result_size is None:
             return None
-        return loop_summary.semantic_key()
+        if self.side_effect_profile.requires_effect_proof():
+            return None
+        pointer_key = self.pointer_base_ref.semantic_key()
+        limit_key = _loop_summary_limit_semantic_key(self.limit_expr)
+        side_effect_key = self.side_effect_profile.semantic_key()
+        if pointer_key is None or limit_key is None or side_effect_key is None:
+            return None
+        geometry = self._readonly_contract_scalar_geometry(target_result_size)
+        if geometry is None:
+            return None
+        term_start_offset, scalar_stride = geometry
+        seed_terms = self._readonly_contract_seed_terms(
+            target_result_size=target_result_size,
+            term_start_offset=term_start_offset,
+            scalar_stride=scalar_stride,
+        )
+        if seed_terms is None:
+            return None
+        canonical_start, remaining_seed_terms = self._readonly_contract_canonical_start_and_seed_terms(
+            seed_terms=seed_terms,
+            target_result_size=target_result_size,
+            term_start_offset=term_start_offset,
+            scalar_stride=scalar_stride,
+        )
+        seed_keys = tuple(term.stable_key() for term in remaining_seed_terms)
+        return (
+            "readonly_reduction_term_sequence_contract",
+            self.reduction_kind,
+            pointer_key,
+            limit_key,
+            max(1, int(target_result_size)),
+            int(canonical_start),
+            int(self.index_step),
+            int(term_start_offset),
+            int(scalar_stride),
+            bool(self.signed_counter),
+            seed_keys,
+            _bias_key(int(self.constant_bias), target_result_size),
+            side_effect_key,
+        )
+
+    def _readonly_contract_result_size(self, result_size: Optional[int]) -> Optional[int]:
+        proof_result_size = max(1, int(self.result_size or 0))
+        try:
+            target_result_size = proof_result_size if result_size is None else max(1, int(result_size))
+        except (TypeError, ValueError):
+            return None
+        if target_result_size > proof_result_size:
+            return None
+        if target_result_size < proof_result_size and self.reduction_kind not in {"sum", "memory_sum"}:
+            return None
+        return target_result_size
+
+    def _readonly_contract_scalar_geometry(
+        self,
+        target_result_size: int,
+    ) -> Optional[Tuple[int, int]]:
+        target_result_size = max(1, int(target_result_size))
+        start_index = int(self.start_index)
+        if start_index < 0:
+            return None
+        index_scale = int(self.index_scale or self.stride)
+        if index_scale <= 0:
+            return None
+        lane_terms = tuple(self.lane_terms or ())
+        if lane_terms:
+            scalar_lanes = self._readonly_contract_scalar_lane_terms(target_result_size)
+            if not scalar_lanes:
+                return None
+            first_lane_offset = int(scalar_lanes[0][0])
+            scalar_stride = target_result_size
+            term_start_offset = int(self.start_offset) + first_lane_offset - start_index * scalar_stride
+            return term_start_offset, scalar_stride
+        if max(1, int(self.element_size or 0)) != target_result_size:
+            return None
+        term_start_offset = int(self.start_offset) - start_index * index_scale
+        return term_start_offset, index_scale
+
+    def _readonly_contract_scalar_lane_terms(
+        self,
+        target_result_size: int,
+    ) -> Tuple[Tuple[int, int], ...]:
+        target_result_size = max(1, int(target_result_size))
+        normalized_lanes = tuple(
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+        )
+        if not normalized_lanes:
+            return ()
+        if int(self.index_step) != 1:
+            return ()
+        if not all(size == target_result_size for _offset, size in normalized_lanes):
+            return ()
+        offsets = [offset for offset, _size in normalized_lanes]
+        expected_offsets = [offsets[0] + index * target_result_size for index in range(len(offsets))]
+        if offsets != expected_offsets:
+            return ()
+        if int(self.index_scale or self.stride) != target_result_size * len(offsets):
+            return ()
+        return normalized_lanes
+
+    def _readonly_contract_seed_terms(
+        self,
+        *,
+        target_result_size: int,
+        term_start_offset: int,
+        scalar_stride: int,
+    ) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        target_result_size = max(1, int(target_result_size))
+        explicit_seed_terms = tuple(self.seed_terms or ())
+        if explicit_seed_terms:
+            normalized_terms = []
+            for term in explicit_seed_terms:
+                if max(1, int(getattr(term, "access_size", 0) or 0)) != target_result_size:
+                    return None
+                normalized_terms.append(
+                    ReadonlyReductionTermRef(
+                        byte_offset=int(getattr(term, "byte_offset")),
+                        access_size=target_result_size,
+                    )
+                )
+            return tuple(normalized_terms)
+        seed_term_count = self.seed_term_count
+        if seed_term_count is None:
+            return ()
+        try:
+            seed_count = int(seed_term_count)
+        except (TypeError, ValueError):
+            return None
+        if seed_count < 0 or seed_count > int(self.start_index):
+            return None
+        return tuple(
+            ReadonlyReductionTermRef(
+                byte_offset=int(term_start_offset) + index * int(scalar_stride),
+                access_size=target_result_size,
+            )
+            for index in range(seed_count)
+        )
+
+    def _readonly_contract_canonical_start_and_seed_terms(
+        self,
+        *,
+        seed_terms: Tuple[ReadonlyReductionTermRef, ...],
+        target_result_size: int,
+        term_start_offset: int,
+        scalar_stride: int,
+    ) -> Tuple[int, Tuple[ReadonlyReductionTermRef, ...]]:
+        canonical_start = int(self.start_index)
+        index_step = int(self.index_step)
+        remaining_seed_terms = sorted(
+            tuple(seed_terms or ()),
+            key=lambda term: (int(term.byte_offset), int(term.access_size)),
+        )
+        while remaining_seed_terms:
+            previous_index = canonical_start - index_step
+            if previous_index < 0:
+                break
+            expected_term = ReadonlyReductionTermRef(
+                byte_offset=int(term_start_offset) + previous_index * int(scalar_stride),
+                access_size=max(1, int(target_result_size)),
+            )
+            expected_key = expected_term.stable_key()
+            matching_index = None
+            for index, term in enumerate(remaining_seed_terms):
+                if term.stable_key() == expected_key:
+                    matching_index = index
+                    break
+            if matching_index is None:
+                break
+            remaining_seed_terms.pop(matching_index)
+            canonical_start = previous_index
+        return canonical_start, tuple(remaining_seed_terms)
 
     def trip_count_for_count_value(self, count_value: int) -> Optional[int]:
         if int(count_value) <= 0:
@@ -1940,12 +2446,14 @@ class ReductionAccumulatorProof:
         index_scale = int(self.index_scale or self.stride)
         if index_scale <= 0:
             return None
+        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
         selected = []
         for term in seed_terms:
             byte_offset = int(term.byte_offset)
-            if byte_offset % index_scale != 0:
+            logical_delta = byte_offset - term_start_offset
+            if logical_delta < 0 or logical_delta % index_scale != 0:
                 return None
-            logical_index = byte_offset // index_scale
+            logical_index = logical_delta // index_scale
             if logical_index < count_value:
                 selected.append(term)
         return tuple(selected)
@@ -2176,6 +2684,7 @@ class ReductionAccumulatorProof:
             pointer_base_ref=self.pointer_base_ref,
             count_parameter_name=self.count_parameter_name,
             count_parameter_index=self.count_parameter_index,
+            count_parameter_storage_identity_key=self.count_parameter_storage_identity_key,
             stride=int(self.stride),
             element_size=int(self.element_size),
             result_size=max(1, int(self.result_size)),
@@ -2304,6 +2813,7 @@ class ReductionAccumulatorProof:
             "pointer_base_ref": self.pointer_base_ref.to_dict(),
             "count_parameter_name": self.count_parameter_name,
             "count_parameter_index": self.count_parameter_index,
+            "count_parameter_storage_identity_key": self.count_parameter_storage_identity_key,
             "result_size": max(1, int(self.result_size)),
             "stride": int(self.stride),
             "element_size": int(self.element_size),
@@ -2353,6 +2863,7 @@ class ReadonlyReductionRef:
     pointer_base_ref: LocationBaseRef
     count_parameter_name: str
     count_parameter_index: Optional[int] = None
+    count_parameter_storage_identity_key: Optional[Tuple[Any, ...]] = None
     stride: int = 0
     element_size: int = 0
     result_size: int = 0
@@ -2369,6 +2880,12 @@ class ReadonlyReductionRef:
         ref_bias = _bias_key(int(self.constant_bias), result_size)[1]
         loop_summary = self.loop_summary
         accumulator_proof = self.accumulator_proof
+        if self.count_parameter_storage_identity_key is not None:
+            object.__setattr__(
+                self,
+                "count_parameter_storage_identity_key",
+                tuple(self.count_parameter_storage_identity_key),
+            )
         source_biases = []
         if loop_summary is not None:
             summary_result_size_raw = int(
@@ -2410,6 +2927,7 @@ class ReadonlyReductionRef:
             self.pointer_base_ref.stable_key(),
             self.count_parameter_name,
             None if self.count_parameter_index is None else int(self.count_parameter_index),
+            self.count_parameter_storage_identity_key,
             int(self.stride),
             int(self.element_size),
             int(self.result_size),
@@ -2431,35 +2949,71 @@ class ReadonlyReductionRef:
             f"bias={int(self.constant_bias)})"
         )
 
-    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+    def readonly_term_sequence_contract_key(
+        self,
+        *,
+        result_size: Optional[int] = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        ref_result_size = max(1, int(self.result_size or 0))
+        try:
+            target_result_size = ref_result_size if result_size is None else max(1, int(result_size))
+        except (TypeError, ValueError):
+            return None
+        if target_result_size > ref_result_size:
+            return None
         if self.accumulator_proof is not None:
-            proof_key = self.accumulator_proof.semantic_key()
-            if proof_key is not None:
-                pointer_identity = self.pointer_base_ref.semantic_key()
-                count_identity = (
-                    ("parameter", int(self.count_parameter_index))
-                    if self.count_parameter_index is not None
-                    else ("parameter_name", self.count_parameter_name)
+            proof_key_fn = getattr(self.accumulator_proof, "readonly_term_sequence_contract_key", None)
+            if callable(proof_key_fn):
+                try:
+                    proof_key = proof_key_fn(result_size=target_result_size)
+                except (AttributeError, TypeError, ValueError):
+                    proof_key = None
+                if proof_key is not None:
+                    return proof_key
+        if self.loop_summary is not None:
+            if result_size is not None and target_result_size != ref_result_size:
+                return loop_summary_method_b_key_at_result_size(
+                    self.loop_summary,
+                    target_result_size,
                 )
-                return (
-                    "readonly_reduction_proof_semantic",
-                    self.reduction_kind,
-                    pointer_identity,
-                    count_identity,
-                    max(1, int(self.result_size or 0)),
-                    _bias_key(int(self.constant_bias), self.result_size),
-                    proof_key,
-                )
+            loop_key_fn = getattr(self.loop_summary, "pairwise_semantic_key", None)
+            if callable(loop_key_fn):
+                try:
+                    loop_key = loop_key_fn()
+                except (AttributeError, TypeError, ValueError):
+                    loop_key = None
+                if loop_key is not None:
+                    return loop_key
+        return None
+
+    def semantic_key(self) -> Optional[Tuple[Any, ...]]:
+        proof_key = (
+            self.readonly_term_sequence_contract_key()
+            if self.accumulator_proof is not None
+            else None
+        )
+        if proof_key is not None:
+            pointer_identity = self.pointer_base_ref.semantic_key()
+            count_identity = self._count_parameter_semantic_identity()
+            if pointer_identity is None or count_identity is None:
+                return None
+            return (
+                "readonly_reduction_proof_semantic",
+                self.reduction_kind,
+                pointer_identity,
+                count_identity,
+                max(1, int(self.result_size or 0)),
+                _bias_key(int(self.constant_bias), self.result_size),
+                proof_key,
+            )
         if self.loop_summary is not None:
             loop_key = self.loop_summary.semantic_key()
             if loop_key is None:
                 return None
             pointer_identity = self.pointer_base_ref.semantic_key()
-            count_identity = (
-                ("parameter", int(self.count_parameter_index))
-                if self.count_parameter_index is not None
-                else ("parameter_name", self.count_parameter_name)
-            )
+            count_identity = self._count_parameter_semantic_identity()
+            if pointer_identity is None or count_identity is None:
+                return None
             return (
                 "readonly_reduction_loop_semantic",
                 self.reduction_kind,
@@ -2473,11 +3027,9 @@ class ReadonlyReductionRef:
         if witness_prefix is None:
             return None
         pointer_identity = self.pointer_base_ref.semantic_key()
-        count_identity = (
-            ("parameter", int(self.count_parameter_index))
-            if self.count_parameter_index is not None
-            else ("parameter_name", self.count_parameter_name)
-        )
+        count_identity = self._count_parameter_semantic_identity()
+        if pointer_identity is None or count_identity is None:
+            return None
         return (
             "readonly_reduction_semantic",
             self.reduction_kind,
@@ -2488,6 +3040,40 @@ class ReadonlyReductionRef:
             _bias_key(int(self.constant_bias), self.result_size),
             tuple(witness.stable_key() for witness in witness_prefix),
         )
+
+    def _count_parameter_semantic_identity(self) -> Optional[Tuple[Any, ...]]:
+        if self.count_parameter_storage_identity_key is not None:
+            return ("parameter_storage", self.count_parameter_storage_identity_key)
+        if self.count_parameter_index is None:
+            return None
+        try:
+            index = int(self.count_parameter_index)
+        except (TypeError, ValueError):
+            return None
+        if index < 0:
+            return None
+        return ("parameter", index)
+
+    def readonly_term_sequence_specificity_score(self) -> int:
+        """Relative precision of this readonly reduction contract."""
+
+        if self.accumulator_proof is not None:
+            score_fn = getattr(
+                self.accumulator_proof,
+                "readonly_term_sequence_specificity_score",
+                None,
+            )
+            if callable(score_fn):
+                try:
+                    return max(0, int(score_fn()))
+                except (TypeError, ValueError):
+                    return 0
+        witness_counts = {
+            int(witness.exact_count)
+            for witness in (self.semantic_witnesses or ())
+            if getattr(witness, "exact_count", None) is not None
+        }
+        return len(witness_counts)
 
     def _semantic_witness_prefix(
         self,
@@ -2531,6 +3117,7 @@ class ReadonlyReductionRef:
             "pointer_base_ref": self.pointer_base_ref.to_dict(),
             "count_parameter_name": self.count_parameter_name,
             "count_parameter_index": self.count_parameter_index,
+            "count_parameter_storage_identity_key": self.count_parameter_storage_identity_key,
             "stride": int(self.stride),
             "element_size": int(self.element_size),
             "result_size": int(self.result_size),
@@ -2751,13 +3338,22 @@ class StateTransitionLoopSummaryRef:
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
-        guard_key = _loop_object_semantic_key(self.state_guard)
-        transition_key = _loop_object_semantic_key(
-            self.transition_cases if self.transition_cases is not None else self.transition_expr
+        binding_context = _loop_variable_binding_context_from_values(
+            self.state_guard,
+            self.transition_cases if self.transition_cases is not None else self.transition_expr,
+            self.accumulator_init,
+            self.accumulator_delta,
         )
-        init_key = _loop_object_semantic_key(self.accumulator_init)
-        delta_key = _loop_object_semantic_key(self.accumulator_delta)
-        side_effect_key = self._scalar_side_effect_semantic_key()
+        if binding_context is None:
+            return None
+        guard_key = _loop_object_semantic_key(self.state_guard, binding_context)
+        transition_key = _loop_object_semantic_key(
+            self.transition_cases if self.transition_cases is not None else self.transition_expr,
+            binding_context,
+        )
+        init_key = _loop_object_semantic_key(self.accumulator_init, binding_context)
+        delta_key = _loop_object_semantic_key(self.accumulator_delta, binding_context)
+        side_effect_key = self._scalar_side_effect_semantic_key(binding_context)
         if (
             guard_key is None
             or transition_key is None
@@ -2778,7 +3374,10 @@ class StateTransitionLoopSummaryRef:
             self.source,
         )
 
-    def _scalar_side_effect_semantic_key(self) -> Optional[Tuple[Any, ...]]:
+    def _scalar_side_effect_semantic_key(
+        self,
+        binding_context: Optional[_LoopVariableBindingContext] = None,
+    ) -> Optional[Tuple[Any, ...]]:
         """Semantic effect key for state-transition summaries.
 
         Branch guards are part of ``state_guard`` and ``transition_cases`` for this
@@ -2787,11 +3386,11 @@ class StateTransitionLoopSummaryRef:
         """
 
         effect_keys = tuple(
-            _loop_object_semantic_key(effect)
+            _loop_object_semantic_key(effect, binding_context)
             for effect in getattr(self.side_effect_profile, "effect_descriptors", ()) or ()
         )
         context_keys = tuple(
-            _loop_object_semantic_key(effect)
+            _loop_object_semantic_key(effect, binding_context)
             for effect in getattr(self.side_effect_profile, "context_descriptors", ()) or ()
         )
         if any(effect_key is None for effect_key in effect_keys + context_keys):
