@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable
 from copy import deepcopy
 
 from ..loop_template_abstraction import prove_template_equivalence
+from ..formula.returns import ReturnWidthMismatchError, require_equal_return_bit_widths
 from ..normalize.context import NormalizationContext
 from ..normalize.core import normalize_expression
 from ..normalize.facts import extract_sign_facts
@@ -43,10 +44,18 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
         if base_result.is_equivalent is not None:
             return base_result
 
-        target_bits = min(
-            int(base_ctx.get("return_size1", case1.value_expr.get_bit_width()) or 0),
-            int(base_ctx.get("return_size2", case2.value_expr.get_bit_width()) or 0),
-        )
+        try:
+            target_bits = require_equal_return_bit_widths(
+                base_ctx.get("return_size1", case1.value_expr.get_bit_width()),
+                base_ctx.get("return_size2", case2.value_expr.get_bit_width()),
+                context="loop-template return value proof",
+            )
+        except ReturnWidthMismatchError as exc:
+            if self.debug:
+                self._debug_print(
+                    f"    Loop-template abstraction skipped for pair {pair_id}: {exc}"
+                )
+            return base_result
         if target_bits <= 0:
             return base_result
 

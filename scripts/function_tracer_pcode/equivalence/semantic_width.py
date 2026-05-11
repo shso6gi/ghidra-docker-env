@@ -4,11 +4,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from ..analysis.condition.simplifier import ConditionSimplifier
-from ..model import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
-from .param_semantics import ParameterSemanticHint, infer_parameter_semantics
+from ..model import (
+    ComparisonSurface,
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+    ReadonlyReductionRef,
+    ReturnInfo,
+    StorageInfo,
+)
+from ..model.render_smt import expression_smt_bit_width
+from .param_semantics import (
+    ParameterSemanticHint,
+    infer_parameter_semantics_by_identity,
+)
 
 
 SAFE_TRUNCATING_BINARY_OPS = frozenset(
@@ -48,6 +61,59 @@ UNSIGNED_COMPARE_REWRITE_MAP = {
     "INT_SLESSEQUAL": "INT_LESSEQUAL",
 }
 SIGNEDNESS_KINDS = frozenset({"signed", "unsigned"})
+RETURN_EXTENSION_SURFACE_CANDIDATE_BITS = (32, 16, 8)
+RETURN_VALUE_EXTENSION_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
+RETURN_EXTENSION_SURFACE_SOURCE = "cross_side_return_extension_surface"
+RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
+RETURN_EXTENSION_SURFACE_KINDS = frozenset({"INT_ZEXT", "INT_SEXT", "none"})
+
+
+def return_extension_surface_evidence_key(
+    comparison_surface,
+) -> Optional[Tuple[int, str, str, Tuple[int, ...]]]:
+    if getattr(comparison_surface, "kind", None) != "return_value":
+        return None
+    evidence = getattr(comparison_surface, "evidence", None)
+    if not isinstance(evidence, dict):
+        return None
+    if evidence.get("source") != RETURN_EXTENSION_SURFACE_SOURCE:
+        return None
+    if evidence.get("allow_return_width_sign_artifact") is not True:
+        return None
+    try:
+        surface_bits = int(evidence.get("extension_surface_bit_width"))
+    except (TypeError, ValueError):
+        return None
+    if surface_bits <= 0 or surface_bits % 8 != 0:
+        return None
+    try:
+        active_surface_bits = int(getattr(comparison_surface, "explicit_bit_width", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if active_surface_bits != surface_bits:
+        return None
+    coercion = evidence.get("extension_surface_coercion")
+    if coercion != RETURN_EXTENSION_SURFACE_COERCION:
+        return None
+    extension_kind = evidence.get("extension_surface_extension_kind")
+    if extension_kind not in RETURN_EXTENSION_SURFACE_KINDS:
+        return None
+    source_widths_value = evidence.get("extension_surface_source_bit_widths", ())
+    if source_widths_value is None:
+        source_widths_value = ()
+    if not isinstance(source_widths_value, (tuple, list, set)):
+        return None
+    try:
+        source_widths = tuple(sorted(int(width) for width in source_widths_value))
+    except (TypeError, ValueError):
+        return None
+    if any(width <= 0 or width > surface_bits for width in source_widths):
+        return None
+    if extension_kind in RETURN_VALUE_EXTENSION_OPS and not source_widths:
+        return None
+    if extension_kind == "none" and source_widths:
+        return None
+    return surface_bits, coercion, extension_kind, source_widths
 
 
 class SemanticWidthNormalizer:
@@ -55,10 +121,10 @@ class SemanticWidthNormalizer:
 
     def __init__(
         self,
-        hints_by_name: Dict[str, ParameterSemanticHint],
+        hints_by_identity: Dict[Tuple[object, ...], ParameterSemanticHint],
         fragment_infos_by_name: Optional[Dict[str, Any]] = None,
     ):
-        self.hints_by_name = hints_by_name
+        self.hints_by_identity = hints_by_identity
         self.fragment_infos_by_name = fragment_infos_by_name or {}
 
     def rewrite_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
@@ -442,8 +508,8 @@ class SemanticWidthNormalizer:
         return self._match_semantic_low_expr(expr)
 
     def _match_semantic_extension(self, expr: Expression):
-        if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-            hint = self.hints_by_name.get(expr.name)
+        if expr.expr_type == ExpressionType.PARAMETER:
+            hint = self._parameter_hint(expr)
             if hint is not None and expr.get_bit_width() > hint.narrow_bits:
                 semantic_signedness = (
                     hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
@@ -481,8 +547,8 @@ class SemanticWidthNormalizer:
         expr: Expression,
         expected_signedness: Optional[str],
     ):
-        if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-            hint = self.hints_by_name.get(expr.name)
+        if expr.expr_type == ExpressionType.PARAMETER:
+            hint = self._parameter_hint(expr)
             if hint is None:
                 bits = expr.get_bit_width()
                 if bits <= 32:
@@ -523,8 +589,8 @@ class SemanticWidthNormalizer:
             source, offset = expr.operands
             if offset.expr_type != ExpressionType.CONSTANT or int(offset.value) != 0:
                 return None
-            if source.expr_type == ExpressionType.PARAMETER and source.name:
-                hint = self.hints_by_name.get(source.name)
+            if source.expr_type == ExpressionType.PARAMETER:
+                hint = self._parameter_hint(source)
                 if hint is not None and expr.get_bit_width() == hint.narrow_bits:
                     semantic_signedness = (
                         hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
@@ -550,9 +616,9 @@ class SemanticWidthNormalizer:
             and len(expr.operands) == 2
         ):
             param_expr, const_expr = self._split_mask_expr(expr)
-            if param_expr is None or const_expr is None or not param_expr.name:
+            if param_expr is None or const_expr is None:
                 return None
-            hint = self.hints_by_name.get(param_expr.name)
+            hint = self._parameter_hint(param_expr)
             if hint is None or hint.narrow_bits >= param_expr.get_bit_width():
                 return None
             expected_mask = (1 << hint.narrow_bits) - 1
@@ -570,6 +636,22 @@ class SemanticWidthNormalizer:
                 "explicit_signedness": hint.signedness_source == "explicit",
             }
 
+        return None
+
+    def _parameter_hint(self, expr: Expression) -> Optional[ParameterSemanticHint]:
+        if expr.expr_type != ExpressionType.PARAMETER:
+            return None
+        try:
+            index = int(getattr(expr, "value", -1))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            hint = self.hints_by_identity.get(("parameter_index", index))
+            if hint is not None:
+                return hint
+        storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
+        if storage_key is not None:
+            return self.hints_by_identity.get(("parameter_storage", storage_key))
         return None
 
     def _split_mask_expr(self, expr: Expression):
@@ -639,18 +721,341 @@ def normalize_analysis_semantic_width(
 
     analysis = _synchronize_parameter_expression_metadata(analysis)
 
+    inferred_hints_by_identity = infer_parameter_semantics_by_identity(analysis)
     if hints is None:
-        hints = infer_parameter_semantics(analysis)
-
-    hints_by_name = _build_hints_by_name(analysis, hints)
+        hints_by_identity = inferred_hints_by_identity
+    else:
+        hints_by_identity = dict(inferred_hints_by_identity)
+        hints_by_identity.update(_build_hints_by_object_identity(analysis, hints))
     fragment_infos_by_name = _build_fragment_info_map(fragment_infos)
 
-    normalizer = SemanticWidthNormalizer(hints_by_name, fragment_infos_by_name)
+    normalizer = SemanticWidthNormalizer(hints_by_identity, fragment_infos_by_name)
     return _rewrite_analysis_expressions(
         analysis,
         normalizer.rewrite_expression,
         simplify_conditions=True,
     )
+
+
+def align_return_value_extension_surfaces(
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+) -> Tuple[FunctionReturnAnalysis, FunctionReturnAnalysis]:
+    """Align return comparison surfaces only from cross-side extension evidence."""
+
+    surface_alignment = _common_return_extension_surface_alignment(analysis1, analysis2)
+    if surface_alignment is None:
+        return analysis1, analysis2
+    target_bits, evidence = surface_alignment
+    return (
+        _with_return_extension_surface(analysis1, target_bits, evidence),
+        _with_return_extension_surface(analysis2, target_bits, evidence),
+    )
+
+
+def _common_return_extension_surface_alignment(
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+) -> Optional[Tuple[int, Dict[str, Any]]]:
+    surface1 = analysis1.get_comparison_surface()
+    surface2 = analysis2.get_comparison_surface()
+    if getattr(surface1, "kind", None) != "return_value" or getattr(surface2, "kind", None) != "return_value":
+        return None
+
+    bits1 = _positive_int(getattr(surface1, "explicit_bit_width", None))
+    bits2 = _positive_int(getattr(surface2, "explicit_bit_width", None))
+    if bits1 is None or bits2 is None:
+        return None
+    wide_bits = min(bits1, bits2)
+
+    for candidate_bits in RETURN_EXTENSION_SURFACE_CANDIDATE_BITS:
+        if candidate_bits > wide_bits or (candidate_bits == wide_bits and bits1 == bits2):
+            continue
+        profiles1 = _analysis_return_extension_surface_profiles(analysis1, candidate_bits)
+        profiles2 = _analysis_return_extension_surface_profiles(analysis2, candidate_bits)
+        if profiles1 is None or profiles2 is None:
+            continue
+        evidence = _return_extension_surface_evidence(candidate_bits, profiles1, profiles2)
+        if evidence is not None:
+            return candidate_bits, evidence
+    return None
+
+
+def _analysis_return_extension_surface_profiles(
+    analysis: FunctionReturnAnalysis,
+    candidate_bits: int,
+) -> Optional[Tuple[Tuple[str, int], ...]]:
+    profiles = []
+    for ret in list(getattr(analysis, "returns", None) or []):
+        compatible, ret_profiles = _return_expr_supports_extension_surface(
+            getattr(ret, "value", None),
+            candidate_bits,
+        )
+        if not compatible:
+            return None
+        profiles.extend(ret_profiles)
+    if not profiles:
+        return None
+    return tuple(sorted(set(profiles)))
+
+
+def _return_extension_surface_evidence(
+    candidate_bits: int,
+    profiles1: Tuple[Tuple[str, int], ...],
+    profiles2: Tuple[Tuple[str, int], ...],
+) -> Optional[Dict[str, Any]]:
+    all_profiles = tuple(sorted(set(tuple(profiles1) + tuple(profiles2))))
+    extension_profiles = tuple(profile for profile in all_profiles if profile[0] in RETURN_VALUE_EXTENSION_OPS)
+    if not extension_profiles:
+        return None
+    extension_kinds = tuple(sorted({profile[0] for profile in extension_profiles}))
+    if len(extension_kinds) > 1:
+        return None
+    source_widths = tuple(sorted({int(profile[1]) for profile in extension_profiles}))
+    return {
+        "source": RETURN_EXTENSION_SURFACE_SOURCE,
+        "extension_surface_bit_width": int(candidate_bits),
+        "allow_return_width_sign_artifact": True,
+        "extension_surface_coercion": RETURN_EXTENSION_SURFACE_COERCION,
+        "extension_surface_extension_kind": extension_kinds[0] if extension_kinds else "none",
+        "extension_surface_source_bit_widths": source_widths,
+    }
+
+
+def _return_expr_supports_extension_surface(
+    expr: Optional[Expression],
+    candidate_bits: int,
+) -> Tuple[bool, Tuple[Tuple[str, int], ...]]:
+    if expr is None:
+        return False, ()
+
+    expr_bits = _expression_bit_width(expr)
+    if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+        if expr_bits == candidate_bits:
+            return True, ()
+        return False, ()
+
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+        profiles = []
+        for _condition, value in tuple(getattr(expr, "value", ()) or ()):
+            compatible, branch_profiles = _return_expr_supports_extension_surface(value, candidate_bits)
+            if not compatible:
+                return False, ()
+            profiles.extend(branch_profiles)
+        return True, tuple(sorted(set(profiles)))
+
+    if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and getattr(expr, "operator", None) in RETURN_VALUE_EXTENSION_OPS:
+        operands = list(getattr(expr, "operands", None) or [])
+        if len(operands) != 1:
+            return False, ()
+        operand_bits = _expression_bit_width(operands[0])
+        if expr_bits >= candidate_bits and 0 < operand_bits <= candidate_bits:
+            return True, ((str(getattr(expr, "operator", "")).upper(), int(operand_bits)),)
+        return False, ()
+
+    if expr_bits == candidate_bits:
+        return True, (("EXACT_WIDTH", int(candidate_bits)),)
+    if 0 < expr_bits < candidate_bits:
+        return False, ()
+
+    readonly_evidence = _readonly_reduction_supports_extension_surface(expr, candidate_bits)
+    if readonly_evidence is not None:
+        return readonly_evidence
+
+    return False, ()
+
+
+def _readonly_reduction_supports_extension_surface(
+    expr: Expression,
+    candidate_bits: int,
+) -> Optional[Tuple[bool, Tuple[Tuple[str, int], ...]]]:
+    if getattr(expr, "expr_type", None) != ExpressionType.INTRINSIC:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if not isinstance(runtime_ref, ReadonlyReductionRef):
+        return None
+
+    expr_bits = _expression_bit_width(expr)
+    if expr_bits == candidate_bits:
+        return True, (("READONLY_EXACT_WIDTH", int(candidate_bits)),)
+    if expr_bits < candidate_bits:
+        return False, ()
+
+    proof = getattr(runtime_ref, "accumulator_proof", None)
+    if proof is None:
+        return False, ()
+    if not bool(getattr(proof, "return_region_value_proven", False)):
+        return False, ()
+    if not _readonly_reduction_terms_fit_surface(runtime_ref, candidate_bits):
+        return False, ()
+    profiles = _readonly_reduction_return_extension_profiles(
+        runtime_ref,
+        candidate_bits,
+        target_bits=expr_bits,
+    )
+    if not profiles:
+        return False, ()
+    return True, profiles
+
+
+def _readonly_reduction_terms_fit_surface(
+    runtime_ref: ReadonlyReductionRef,
+    candidate_bits: int,
+) -> bool:
+    candidate_size = max(1, candidate_bits // 8)
+    proof = getattr(runtime_ref, "accumulator_proof", None)
+    owners = (runtime_ref, proof, getattr(runtime_ref, "loop_summary", None))
+    for owner in owners:
+        if owner is None:
+            continue
+        for attr_name in ("element_size", "result_size"):
+            value = _positive_int(getattr(owner, attr_name, None))
+            if value is not None and value <= candidate_size:
+                return True
+        for attr_name in (
+            "seed_terms",
+            "lane_terms",
+            "loop_body_witnesses",
+            "exact_return_witnesses",
+            "semantic_witnesses",
+            "witnesses",
+        ):
+            if _readonly_term_container_fits_surface(getattr(owner, attr_name, None), candidate_size):
+                return True
+    return False
+
+
+def _readonly_term_container_fits_surface(value: Any, candidate_size: int) -> bool:
+    saw_term = False
+    for item in tuple(value or ()):
+        access_size = _positive_int(getattr(item, "access_size", None))
+        if access_size is not None:
+            if access_size > candidate_size:
+                return False
+            saw_term = True
+            continue
+        if isinstance(item, tuple) and len(item) >= 2:
+            tuple_size = _positive_int(item[1])
+            if tuple_size is not None:
+                if tuple_size > candidate_size:
+                    return False
+                saw_term = True
+                continue
+        terms = getattr(item, "terms", None)
+        if terms is not None:
+            nested_items = tuple(terms or ())
+            if not nested_items:
+                continue
+            if not _readonly_term_container_fits_surface(nested_items, candidate_size):
+                return False
+            saw_term = True
+    return saw_term
+
+
+def _readonly_reduction_return_extension_profiles(
+    runtime_ref: ReadonlyReductionRef,
+    candidate_bits: int,
+    *,
+    target_bits: int,
+) -> Tuple[Tuple[str, int], ...]:
+    profiles = []
+    proof = getattr(runtime_ref, "accumulator_proof", None)
+    for owner in (proof, getattr(runtime_ref, "loop_summary", None), runtime_ref):
+        for op_ref in tuple(getattr(owner, "return_value_op_refs", ()) or ()):
+            profile = _readonly_return_extension_profile_from_op_ref(
+                op_ref,
+                candidate_bits,
+                target_bits=target_bits,
+            )
+            if profile is not None:
+                profiles.append(profile)
+    return tuple(sorted(set(profiles)))
+
+
+def _readonly_return_extension_profile_from_op_ref(
+    op_ref: Any,
+    candidate_bits: int,
+    *,
+    target_bits: int,
+) -> Optional[Tuple[str, int]]:
+    mnemonic = str(getattr(op_ref, "mnemonic", "") or "").upper()
+    if mnemonic not in RETURN_VALUE_EXTENSION_OPS:
+        return None
+    input_size_fn = getattr(op_ref, "input_size", None)
+    if callable(input_size_fn):
+        source_size = _positive_int(input_size_fn(0))
+    else:
+        input_sizes = tuple(getattr(op_ref, "input_sizes", ()) or ())
+        source_size = _positive_int(input_sizes[0]) if input_sizes else None
+    if source_size is None:
+        return None
+    source_bits = int(source_size) * 8
+    if source_bits != int(candidate_bits):
+        return None
+    output_size = _positive_int(getattr(op_ref, "output_size", None))
+    if output_size is None:
+        return None
+    output_bits = int(output_size) * 8
+    if output_bits <= source_bits:
+        return None
+    if int(target_bits or 0) > 0 and output_bits < int(target_bits):
+        return None
+    return mnemonic, source_bits
+
+
+def _with_return_extension_surface(
+    analysis: FunctionReturnAnalysis,
+    target_bits: int,
+    alignment_evidence: Dict[str, Any],
+) -> FunctionReturnAnalysis:
+    surface = analysis.get_comparison_surface()
+    old_bits = _positive_int(getattr(surface, "explicit_bit_width", None))
+    if old_bits == target_bits:
+        return analysis
+
+    evidence = dict(getattr(surface, "evidence", None) or {})
+    evidence.update(alignment_evidence)
+    evidence.update(
+        {
+            "declared_bit_width": old_bits,
+            "extension_surface_bit_width": target_bits,
+        }
+    )
+    return replace(
+        analysis,
+        comparison_surface=ComparisonSurface(
+            kind="return_value",
+            explicit_bit_width=target_bits,
+            type_name=getattr(surface, "type_name", None),
+            type_obj=getattr(surface, "type_obj", None),
+            use_sign_extension=False,
+            evidence=evidence,
+        ),
+    )
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    try:
+        int_value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return int_value if int_value > 0 else None
+
+
+def _expression_bit_width(expr: Optional[Expression]) -> int:
+    if expr is None:
+        return 0
+    try:
+        return max(0, int(expression_smt_bit_width(expr) or 0))
+    except Exception:
+        pass
+    get_bit_width = getattr(expr, "get_bit_width", None)
+    if callable(get_bit_width):
+        try:
+            return max(0, int(get_bit_width() or 0))
+        except Exception:
+            return 0
+    return 0
 
 
 def _synchronize_parameter_expression_metadata(
@@ -660,23 +1065,28 @@ def _synchronize_parameter_expression_metadata(
     if not parameters:
         return analysis
 
-    params_by_name: Dict[str, Dict[str, Any]] = {}
     params_by_index: Dict[int, Dict[str, Any]] = {}
-    for fallback_index, param in enumerate(parameters):
+    params_by_storage_candidates: Dict[Tuple[object, ...], list[Dict[str, Any]]] = {}
+    for param in parameters:
         descriptor = dict(param)
-        name = descriptor.get("name")
-        if isinstance(name, str) and name:
-            params_by_name[name] = descriptor
-        index = descriptor.get("index", fallback_index)
+        index = descriptor.get("index")
         if isinstance(index, int) and index >= 0:
             params_by_index[index] = descriptor
+        storage_key = _storage_identity_key(descriptor.get("storage_info", descriptor.get("storage")))
+        if storage_key is not None:
+            params_by_storage_candidates.setdefault(storage_key, []).append(descriptor)
+    params_by_storage = {
+        storage_key: descriptors[0]
+        for storage_key, descriptors in params_by_storage_candidates.items()
+        if len(descriptors) == 1
+    }
 
     return _rewrite_analysis_expressions(
         analysis,
         lambda expr: _rewrite_parameter_expression_metadata(
             expr,
-            params_by_name,
             params_by_index,
+            params_by_storage,
         ),
         simplify_conditions=False,
     )
@@ -747,7 +1157,6 @@ def _rewrite_analysis_expressions(
         comparison_surface=rewritten_comparison_surface,
     )
 
-
 def _rewrite_conditions(
     conditions,
     rewrite_expr,
@@ -817,18 +1226,21 @@ def _rewrite_effect_summary_expressions(
 
 def _rewrite_parameter_expression_metadata(
     expr: Optional[Expression],
-    params_by_name: Dict[str, Dict[str, Any]],
     params_by_index: Dict[int, Dict[str, Any]],
+    params_by_storage: Dict[Tuple[object, ...], Dict[str, Any]],
 ) -> Optional[Expression]:
     if expr is None:
         return expr
 
     if expr.expr_type == ExpressionType.PARAMETER:
         descriptor = None
-        if expr.name:
-            descriptor = params_by_name.get(expr.name)
-        if descriptor is None and isinstance(expr.value, int) and expr.value >= 0:
+        has_index = isinstance(expr.value, int) and expr.value >= 0
+        if has_index:
             descriptor = params_by_index.get(expr.value)
+        else:
+            storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
+            if storage_key is not None:
+                descriptor = params_by_storage.get(storage_key)
         if descriptor is None:
             return expr
 
@@ -867,15 +1279,15 @@ def _rewrite_parameter_expression_metadata(
             if cond is not None:
                 new_cond_expr = _rewrite_parameter_expression_metadata(
                     cond.expression,
-                    params_by_name,
                     params_by_index,
+                    params_by_storage,
                 )
                 new_cond = Condition(new_cond_expr, cond.negated)
                 changed = changed or (new_cond_expr is not cond.expression)
             new_value = _rewrite_parameter_expression_metadata(
                 value,
-                params_by_name,
                 params_by_index,
+                params_by_storage,
             )
             changed = changed or (new_value is not value)
             branches.append((new_cond, new_value))
@@ -896,8 +1308,8 @@ def _rewrite_parameter_expression_metadata(
     new_operands = [
         _rewrite_parameter_expression_metadata(
             operand,
-            params_by_name,
             params_by_index,
+            params_by_storage,
         )
         for operand in operands
     ]
@@ -928,19 +1340,73 @@ def _rewrite_effect_summary(effect_summary, normalizer: SemanticWidthNormalizer)
     )
 
 
-def _build_hints_by_name(
+def _build_hints_by_object_identity(
     analysis: FunctionReturnAnalysis,
     hints: Dict[int, ParameterSemanticHint],
-) -> Dict[str, ParameterSemanticHint]:
-    hints_by_name: Dict[str, ParameterSemanticHint] = {}
-    for fallback_index, param in enumerate(analysis.parameters or []):
-        index = param.get("index", fallback_index)
+) -> Dict[Tuple[object, ...], ParameterSemanticHint]:
+    hints_by_identity: Dict[Tuple[object, ...], ParameterSemanticHint] = {}
+    for param in analysis.parameters or []:
+        try:
+            index = int(param.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
         hint = hints.get(index)
         if hint is None:
             continue
-        name = param.get("name", f"param_{fallback_index}")
-        hints_by_name[name] = hint
-    return hints_by_name
+        hints_by_identity[("parameter_index", index)] = hint
+        storage_key = _storage_identity_key(param.get("storage_info", param.get("storage")))
+        if storage_key is not None:
+            hints_by_identity[("parameter_storage", storage_key)] = hint
+    return hints_by_identity
+
+
+def _storage_identity_key(storage_info) -> Optional[Tuple[object, ...]]:
+    storage_info = _coerce_storage_info(storage_info)
+    if storage_info is None:
+        return None
+    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+    if not callable(storage_key_fn):
+        return None
+    try:
+        storage_key = storage_key_fn()
+    except (TypeError, ValueError):
+        return None
+    return storage_key if storage_key is not None else None
+
+
+def _coerce_storage_info(storage_info) -> Optional[StorageInfo]:
+    if storage_info is None:
+        return None
+    if isinstance(storage_info, StorageInfo):
+        return storage_info
+    if not isinstance(storage_info, dict):
+        return None
+    try:
+        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
+        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
+        return StorageInfo(
+            is_register=is_register,
+            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
+            space_id=storage_info.get("space_id"),
+            offset=int(storage_info.get("offset", 0) or 0),
+            size=int(storage_info.get("size", 0) or 0),
+            size_bits=int(storage_info.get("size_bits", 0) or 0),
+            register_name=storage_info.get("register_name"),
+            register_offset=storage_info.get("register_offset"),
+            register_size=storage_info.get("register_size"),
+            register_size_bits=storage_info.get("register_size_bits"),
+            base_register_name=storage_info.get("base_register_name"),
+            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
+            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
+            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
+            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
+            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
+            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
+        )
+    except Exception:
+        return None
 
 
 def _build_fragment_info_map(fragment_infos: Optional[Any]) -> Dict[str, Any]:

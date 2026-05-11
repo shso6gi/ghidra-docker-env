@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 from functools import cmp_to_key
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...analysis.effect_summary import (
     lower_post_state_expression_for_smt_if_needed,
 )
 from ...analysis.condition.simplifier import ConditionSimplifier
-from ...model import Expression, FunctionReturnAnalysis
+from ...model import Expression, FunctionReturnAnalysis, ReadonlyReductionRef
 from ...model.signature import (
     get_declared_type_size_bits,
     get_declared_type_signedness,
@@ -26,6 +26,35 @@ from ...model.render_smt import (
 from ...analysis.condition.normalizer import ConditionNormalizer
 from .params import build_symbol_name_mapping
 from .types import ParameterInfo
+
+
+class ReturnWidthMismatchError(ValueError):
+    """Raised when a proof would compare only overlapping return bits."""
+
+
+def require_equal_return_bit_widths(
+    return_size1: int,
+    return_size2: int,
+    *,
+    context: str = "return value comparison",
+) -> int:
+    """Return the common width, or reject an unbridged return-width mismatch."""
+    try:
+        bits1 = int(return_size1)
+        bits2 = int(return_size2)
+    except (TypeError, ValueError) as exc:
+        raise ReturnWidthMismatchError(
+            f"{context}: invalid return width ({return_size1!r} vs {return_size2!r})"
+        ) from exc
+    if bits1 <= 0 or bits2 <= 0:
+        raise ReturnWidthMismatchError(
+            f"{context}: invalid return width ({bits1} vs {bits2})"
+        )
+    if bits1 != bits2:
+        raise ReturnWidthMismatchError(
+            f"{context}: return width mismatch ({bits1} vs {bits2}); explicit bridge proof required"
+        )
+    return bits1
 
 
 def get_return_size(analysis: FunctionReturnAnalysis) -> int:
@@ -297,10 +326,158 @@ def _return_defs_require_relation(return_defs: List[Dict[str, object]]) -> bool:
     return False
 
 
+def _readonly_ref_from_return_def(
+    ret_def: Dict[str, object],
+) -> Optional[ReadonlyReductionRef]:
+    value = ret_def.get("raw_value")
+    return _readonly_ref_from_value(value)
+
+
+def _readonly_ref_from_value(value) -> Optional[ReadonlyReductionRef]:
+    runtime_ref = getattr(value, "runtime_ref", None)
+    if isinstance(runtime_ref, ReadonlyReductionRef):
+        return runtime_ref
+    return None
+
+
+def _readonly_ref_count_identity(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
+    identity_fn = getattr(ref, "_count_parameter_semantic_identity", None)
+    if callable(identity_fn):
+        try:
+            identity = identity_fn()
+        except (TypeError, ValueError):
+            identity = None
+        if identity is not None:
+            return identity
+    if ref.count_parameter_index is None:
+        return None
+    try:
+        index = int(ref.count_parameter_index)
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return ("parameter", index)
+
+
+def _readonly_ref_surface_key(ref: ReadonlyReductionRef) -> Optional[Tuple[object, ...]]:
+    pointer_key = ref.pointer_base_ref.semantic_key()
+    if pointer_key is None:
+        return None
+    count_identity = _readonly_ref_count_identity(ref)
+    if count_identity is None:
+        return None
+    return (
+        "readonly_reduction_surface",
+        str(ref.reduction_kind),
+        pointer_key,
+        count_identity,
+        max(1, int(ref.result_size or 0)),
+        bool(ref.signed_counter),
+        int(getattr(ref, "constant_bias", 0) or 0),
+    )
+
+
+def _readonly_ref_priority_key(
+    ref: ReadonlyReductionRef,
+    *,
+    return_size: int,
+) -> Tuple[int, int, int, int, int]:
+    contract_key = ref.readonly_term_sequence_contract_key(result_size=return_size)
+    has_contract = 1 if contract_key is not None else 0
+    proof = getattr(ref, "accumulator_proof", None)
+    has_proof = 1 if proof is not None else 0
+    return_region_proven = 1 if bool(getattr(proof, "return_region_value_proven", False)) else 0
+    score_fn = getattr(ref, "readonly_term_sequence_specificity_score", None)
+    try:
+        specificity = max(0, int(score_fn())) if callable(score_fn) else 0
+    except (TypeError, ValueError):
+        specificity = 0
+    witness_count = len(tuple(getattr(ref, "semantic_witnesses", ()) or ()))
+    if proof is not None:
+        witness_count += len(tuple(getattr(proof, "loop_body_witnesses", ()) or ()))
+        witness_count += len(tuple(getattr(proof, "exact_return_witnesses", ()) or ()))
+    return (
+        has_contract,
+        has_proof,
+        return_region_proven,
+        int(specificity),
+        int(witness_count),
+    )
+
+
+def _compare_readonly_summary_priority(
+    left: Dict[str, object],
+    right: Dict[str, object],
+    *,
+    return_size: int,
+) -> int:
+    return compare_readonly_summary_values_by_priority(
+        left.get("raw_value"),
+        left["raw_conditions"],
+        right.get("raw_value"),
+        right["raw_conditions"],
+        return_size=return_size,
+    )
+
+
+def compare_readonly_summary_values_by_priority(
+    left_value,
+    left_conditions,
+    right_value,
+    right_conditions,
+    *,
+    return_size: int,
+) -> int:
+    """Order overlapping readonly summaries by object-level proof precision.
+
+    Returns ``-1`` when the left value should shadow the right value, ``1`` for
+    the reverse, and ``0`` when normal condition ordering should decide.
+    """
+
+    left_ref = _readonly_ref_from_value(left_value)
+    right_ref = _readonly_ref_from_value(right_value)
+    if left_ref is None or right_ref is None:
+        return 0
+    left_surface = _readonly_ref_surface_key(left_ref)
+    right_surface = _readonly_ref_surface_key(right_ref)
+    if left_surface is None or left_surface != right_surface:
+        return 0
+    left_contract = left_ref.readonly_term_sequence_contract_key(result_size=return_size)
+    right_contract = right_ref.readonly_term_sequence_contract_key(result_size=return_size)
+    if left_contract is not None and left_contract == right_contract:
+        return 0
+    if ConditionSimplifier.object_centric_is_contradiction(
+        list(left_conditions or []) + list(right_conditions or [])
+    ):
+        return 0
+    left_set = ConditionSimplifier.build_constraint_set(left_conditions or [])
+    right_set = ConditionSimplifier.build_constraint_set(right_conditions or [])
+    left_implies_right = left_set.implies_all(right_conditions or [])
+    right_implies_left = right_set.implies_all(left_conditions or [])
+    left_priority = _readonly_ref_priority_key(left_ref, return_size=return_size)
+    right_priority = _readonly_ref_priority_key(right_ref, return_size=return_size)
+    if left_priority == right_priority:
+        return 0
+    if left_priority > right_priority:
+        return -1 if left_implies_right else 0
+    return 1 if right_implies_left else 0
+
+
 def _order_return_defs_by_specificity(
     return_defs: List[Dict[str, object]],
+    *,
+    return_size: int,
 ) -> List[Dict[str, object]]:
     def _compare(left: Dict[str, object], right: Dict[str, object]) -> int:
+        readonly_priority = _compare_readonly_summary_priority(
+            left,
+            right,
+            return_size=return_size,
+        )
+        if readonly_priority != 0:
+            return readonly_priority
+
         left_implies_right = left["condition_set"].implies_all(right["raw_conditions"])
         right_implies_left = right["condition_set"].implies_all(left["raw_conditions"])
         if left_implies_right and not right_implies_left:
@@ -402,13 +579,14 @@ def build_return_definition(
                 "index": len(return_defs),
                 "condition": cond_str,
                 "value": value_smt,
+                "raw_value": rendered_value,
                 "raw_conditions": raw_conditions,
                 "condition_set": condition_set,
                 "value_key": value_key,
             }
         )
 
-    ordered_return_defs = _order_return_defs_by_specificity(return_defs)
+    ordered_return_defs = _order_return_defs_by_specificity(return_defs, return_size=return_size)
     if _return_defs_require_relation(ordered_return_defs):
         return _build_relation_return_definition(
             ordered_return_defs,

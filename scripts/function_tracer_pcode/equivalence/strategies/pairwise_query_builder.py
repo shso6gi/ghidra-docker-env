@@ -15,6 +15,7 @@ from ..formula.returns import (
     compare_readonly_summary_values_by_priority,
     coerce_value_to_bitvec_width,
     get_return_size,
+    require_equal_return_bit_widths,
 )
 from .pairwise_models import ReturnCase
 
@@ -636,17 +637,10 @@ def _build_value_inequality_section(
         lines.append(note)
     lines.append("; " + "-" * 40)
 
-    if return_size1 == return_size2:
-        lines.append(f"(assert (not (= {value1_smt} {value2_smt})))")
-        return lines
-
-    overlap = min(return_size1, return_size2)
-    if return_size1 < return_size2:
-        lines.append(
-            f"(assert (not (= {value1_smt} ((_ extract {overlap - 1} 0) {value2_smt}))))"
-        )
-    else:
-        lines.append(
-            f"(assert (not (= ((_ extract {overlap - 1} 0) {value1_smt}) {value2_smt})))"
-        )
+    require_equal_return_bit_widths(
+        return_size1,
+        return_size2,
+        context=title.strip("; ").lower() or "pairwise return value comparison",
+    )
+    lines.append(f"(assert (not (= {value1_smt} {value2_smt})))")
     return lines

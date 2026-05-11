@@ -2,12 +2,11 @@
 """Pairwise戦略（分岐ペア分割方式・二段階チェック対応）"""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import time
 
 from ...model import (
     COUNTED_LOOP_SUM_OPCODE,
-    READONLY_SUM_OPCODE,
     Condition,
     CountedLoopSummaryRef,
     Expression,
@@ -60,8 +59,15 @@ from ..normalize import (
     are_structurally_equivalent,
     get_structural_summary,
 )
-from ..param_semantics import infer_parameter_semantics
-from ..semantic_width import normalize_analysis_semantic_width
+from ..param_semantics import (
+    infer_parameter_semantics,
+    parameter_identity_key_from_descriptor,
+    parameter_identity_key_from_expression,
+)
+from ..semantic_width import (
+    align_return_value_extension_surfaces,
+    normalize_analysis_semantic_width,
+)
 from ..debug_trace import NormalizationRuleApplication
 
 
@@ -82,6 +88,17 @@ class _ExactReadonlyReductionProof:
     count_value: int
     expected_terms: tuple[ReadonlyReductionTermRef, ...]
     evidence: str
+
+
+@dataclass(frozen=True)
+class _PendingLoopSummaryPair:
+    """Pair-local loop-summary proof deferred to the return-partition level."""
+
+    i: int
+    j: int
+    left_case: ReturnCase
+    right_case: ReturnCase
+    reason: str
 
 
 class PairwiseStrategy(CheckStrategy):
@@ -128,6 +145,10 @@ class PairwiseStrategy(CheckStrategy):
             analysis2,
             infer_parameter_semantics(analysis2),
         )
+        solver_analysis1, solver_analysis2 = align_return_value_extension_surfaces(
+            solver_analysis1,
+            solver_analysis2,
+        )
 
         base_ctx = self.formula_builder.build_base_context(
             solver_analysis1,
@@ -141,6 +162,10 @@ class PairwiseStrategy(CheckStrategy):
         )
         self._active_safety_checker = safety_checker
         sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
+            analysis1,
+            analysis2,
+        )
+        equivalence_blocking_reasons = self._collect_equivalence_blocking_unsafety_reasons(
             analysis1,
             analysis2,
         )
@@ -176,21 +201,26 @@ class PairwiseStrategy(CheckStrategy):
             symbol_replace_fn2,
             label="Case2",
         )
-        sat_unsafety_reasons.extend(
-            self._collect_return_coverage_unsafety_reasons(
-                base_ctx,
-                cases1,
-                cases2,
-                symbol_replace_fn1,
-                symbol_replace_fn2,
-            )
+        coverage_unsafety_reasons = self._collect_return_coverage_unsafety_reasons(
+            base_ctx,
+            cases1,
+            cases2,
+            symbol_replace_fn1,
+            symbol_replace_fn2,
         )
+        sat_unsafety_reasons.extend(coverage_unsafety_reasons)
         if "function1:return_coverage_gap" in sat_unsafety_reasons:
             if "return_case_coverage_gap" not in analysis1.analysis_notes:
                 analysis1.analysis_notes.append("return_case_coverage_gap")
         if "function2:return_coverage_gap" in sat_unsafety_reasons:
             if "return_case_coverage_gap" not in analysis2.analysis_notes:
                 analysis2.analysis_notes.append("return_case_coverage_gap")
+        if "function1:return_coverage_inconclusive" in sat_unsafety_reasons:
+            if "return_case_coverage_inconclusive" not in analysis1.analysis_notes:
+                analysis1.analysis_notes.append("return_case_coverage_inconclusive")
+        if "function2:return_coverage_inconclusive" in sat_unsafety_reasons:
+            if "return_case_coverage_inconclusive" not in analysis2.analysis_notes:
+                analysis2.analysis_notes.append("return_case_coverage_inconclusive")
         total_pairs = len(cases1) * len(cases2)
 
         self._debug_print("=" * 60)
@@ -227,6 +257,8 @@ class PairwiseStrategy(CheckStrategy):
         sat_pair_info = None
         counterexample_raw = None
         last_formula = None
+        resolved_pairs: set[tuple[int, int]] = set()
+        pending_loop_summary_pairs: List[_PendingLoopSummaryPair] = []
         all_normalization_rules = []
         normalization_stats = {
             "solver_proven_rewrite_attempts": 0,
@@ -246,6 +278,7 @@ class PairwiseStrategy(CheckStrategy):
                 pair_id = f"({i},{j})"
                 if self._cases_are_contradictory(case1, case2):
                     unsat_count += 1
+                    resolved_pairs.add((i, j))
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(
                             f"  Pair {pair_id}: CONTRADICTION PRECHECK -> UNSAT ({unsat_count}/{total_pairs})"
@@ -253,6 +286,7 @@ class PairwiseStrategy(CheckStrategy):
                     continue
                 if self._cases_have_equivalent_runtime_reductions(case1, case2):
                     unsat_count += 1
+                    resolved_pairs.add((i, j))
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(
                             f"  Pair {pair_id}: object-centric runtime summary match -> UNSAT "
@@ -261,6 +295,19 @@ class PairwiseStrategy(CheckStrategy):
                     continue
                 loop_fallback_reason = self._case_pair_loop_summary_safe_fallback_reason(case1, case2)
                 if loop_fallback_reason is not None:
+                    if self._case_pair_can_defer_loop_summary_proof(
+                        case1,
+                        case2,
+                        loop_fallback_reason,
+                    ):
+                        pending_loop_summary_pairs.append(
+                            _PendingLoopSummaryPair(i, j, case1, case2, loop_fallback_reason)
+                        )
+                        self._debug_print(
+                            f"  Pair {pair_id}: loop summary proof deferred to aggregate partition "
+                            f"({loop_fallback_reason})"
+                        )
+                        continue
                     unknown_count += 1
                     self._debug_print(
                         f"  Pair {pair_id}: loop summary requires semantic proof "
@@ -351,6 +398,7 @@ class PairwiseStrategy(CheckStrategy):
 
                 if result.is_equivalent is True:
                     unsat_count += 1
+                    resolved_pairs.add((i, j))
                     if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                         self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                     continue
@@ -361,6 +409,28 @@ class PairwiseStrategy(CheckStrategy):
             if sat_count > 0:
                 break
 
+        if sat_count == 0 and pending_loop_summary_pairs:
+            resolved_pending = self._resolve_pending_loop_summary_pairs_with_partition_proof(
+                pending_loop_summary_pairs,
+                cases1,
+                cases2,
+                resolved_pairs,
+            )
+            for pending in pending_loop_summary_pairs:
+                pair_id = f"({pending.i},{pending.j})"
+                if (pending.i, pending.j) in resolved_pending:
+                    unsat_count += 1
+                    resolved_pairs.add((pending.i, pending.j))
+                    self._debug_print(
+                        f"  Pair {pair_id}: aggregate return-partition proof -> UNSAT"
+                    )
+                else:
+                    unknown_count += 1
+                    self._debug_print(
+                        f"  Pair {pair_id}: loop summary requires semantic proof "
+                        f"({pending.reason}) -> UNKNOWN"
+                    )
+
         elapsed_time = time.time() - start_time
         if sat_count > 0:
             final_is_equiv = False
@@ -370,6 +440,14 @@ class PairwiseStrategy(CheckStrategy):
             final_is_equiv = None
             self._debug_print("=" * 60)
             self._debug_print(f"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)")
+        elif coverage_unsafety_reasons or equivalence_blocking_reasons:
+            final_is_equiv = None
+            self._debug_print("=" * 60)
+            blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
+            self._debug_print(
+                "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
+                f"{', '.join(blocking_reasons)})"
+            )
         elif unsat_count == total_pairs:
             final_is_equiv = True
             self._debug_print("=" * 60)
@@ -471,14 +549,9 @@ class PairwiseStrategy(CheckStrategy):
         summary_case: ReturnCase,
     ) -> Optional[_ExactReadonlyReductionProof]:
         summary_expr = summary_case.value_expr
-        if getattr(summary_expr, "expr_type", None) != ExpressionType.INTRINSIC:
+        summary_ref = getattr(summary_expr, "runtime_ref", None)
+        if not isinstance(summary_ref, ReadonlyReductionRef):
             return None
-        if (getattr(summary_expr, "name", None) or "") != "READONLY_SUM":
-            return None
-        summary_opcode = getattr(summary_expr, "opcode", None)
-        if summary_opcode is not None and summary_opcode != READONLY_SUM_OPCODE:
-            return None
-        summary_ref = getattr(summary_case.value_expr, "runtime_ref", None)
         accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
         if accumulator_proof is None or getattr(summary_ref, "loop_summary", None) is None:
             return None
@@ -497,6 +570,7 @@ class PairwiseStrategy(CheckStrategy):
             exact_case.value_expr,
             exact_case.parameters,
             getattr(accumulator_proof, "pointer_base_ref", None),
+            program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
         )
         if extracted is None:
             return None
@@ -606,13 +680,30 @@ class PairwiseStrategy(CheckStrategy):
             return False
         if left.expr_type != ExpressionType.INTRINSIC or right.expr_type != ExpressionType.INTRINSIC:
             return False
+        left_ref = getattr(left, "runtime_ref", None)
+        right_ref = getattr(right, "runtime_ref", None)
+        comparison_result_size = self._case_pair_comparison_result_size(left_case, right_case)
+        loop_contract_decision = self._runtime_loop_contract_shortcut_decision(
+            left_ref,
+            right_ref,
+            result_size=comparison_result_size,
+        )
+        if loop_contract_decision.equivalent:
+            if loop_contract_decision.requires_guard_equivalence and (
+                left_case is None
+                or right_case is None
+                or not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case)
+            ):
+                return False
+            return True
         if getattr(left, "opcode", None) != getattr(right, "opcode", None):
             return False
         if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
             return False
         shortcut_decision = self._runtime_refs_shortcut_decision(
-            getattr(left, "runtime_ref", None),
-            getattr(right, "runtime_ref", None),
+            left_ref,
+            right_ref,
+            result_size=comparison_result_size,
         )
         if not shortcut_decision.equivalent:
             if self._counted_loop_values_are_provably_equivalent(
@@ -626,7 +717,7 @@ class PairwiseStrategy(CheckStrategy):
         if shortcut_decision.requires_guard_equivalence and (
             left_case is None
             or right_case is None
-            or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
+            or not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case)
         ):
             return False
         if len(left.operands) != len(right.operands):
@@ -640,13 +731,38 @@ class PairwiseStrategy(CheckStrategy):
         decision = self._runtime_refs_shortcut_decision(left_ref, right_ref)
         return decision.equivalent, decision.requires_guard_equivalence
 
-    def _runtime_refs_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
+    def _runtime_refs_shortcut_decision(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        result_size: Optional[int] = None,
+    ) -> _RuntimeShortcutDecision:
         if left_ref is None or right_ref is None:
             return _RuntimeShortcutDecision(False, False, reason="missing_runtime_ref")
 
         left_loop_summary = getattr(left_ref, "loop_summary", None)
         right_loop_summary = getattr(right_ref, "loop_summary", None)
         if left_loop_summary is not None or right_loop_summary is not None:
+            if isinstance(left_ref, ReadonlyReductionRef) and isinstance(right_ref, ReadonlyReductionRef):
+                exact_readonly_decision = self._runtime_refs_exact_shortcut_decision(
+                    left_ref,
+                    right_ref,
+                    requires_guard_equivalence=(
+                        self._runtime_ref_has_guard_constraints(left_ref)
+                        or self._runtime_ref_has_guard_constraints(right_ref)
+                    ),
+                )
+                if exact_readonly_decision.equivalent:
+                    return exact_readonly_decision
+            readonly_decision = self._readonly_reduction_contract_shortcut_decision(
+                left_ref,
+                right_ref,
+                requires_guard_equivalence=True,
+                result_size=result_size,
+            )
+            if readonly_decision.equivalent:
+                return readonly_decision
             loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
             decisive = loop_result.is_equivalent()
             if decisive is not None:
@@ -661,13 +777,6 @@ class PairwiseStrategy(CheckStrategy):
                     True,
                     reason=f"loop_summary_{loop_result.status}",
                 )
-            readonly_decision = self._readonly_reduction_contract_shortcut_decision(
-                left_ref,
-                right_ref,
-                requires_guard_equivalence=True,
-            )
-            if readonly_decision.equivalent:
-                return readonly_decision
             exact_decision = self._runtime_refs_exact_shortcut_decision(
                 left_ref,
                 right_ref,
@@ -691,7 +800,7 @@ class PairwiseStrategy(CheckStrategy):
         exact_decision = self._runtime_refs_exact_shortcut_decision(
             left_ref,
             right_ref,
-            requires_guard_equivalence=False,
+            requires_guard_equivalence=self._runtime_refs_require_guard_equivalence(left_ref, right_ref),
         )
         if exact_decision.equivalent:
             return exact_decision
@@ -700,6 +809,63 @@ class PairwiseStrategy(CheckStrategy):
         if semantic_decision.equivalent:
             return semantic_decision
         return _RuntimeShortcutDecision(False, False, reason="no_shortcut")
+
+    def _runtime_loop_contract_shortcut_decision(
+        self,
+        left_ref,
+        right_ref,
+        *,
+        result_size: Optional[int] = None,
+    ) -> _RuntimeShortcutDecision:
+        left_loop_summary = getattr(left_ref, "loop_summary", None)
+        right_loop_summary = getattr(right_ref, "loop_summary", None)
+        if left_loop_summary is None and right_loop_summary is None:
+            return _RuntimeShortcutDecision(False, False, reason="not_loop_contract")
+        return self._runtime_refs_shortcut_decision(left_ref, right_ref, result_size=result_size)
+
+    def _runtime_refs_require_guard_equivalence(self, left_ref, right_ref) -> bool:
+        left_guard_fn = getattr(left_ref, "pairwise_requires_guard_equivalence", None)
+        right_guard_fn = getattr(right_ref, "pairwise_requires_guard_equivalence", None)
+        return bool(callable(left_guard_fn) and left_guard_fn()) or bool(
+            callable(right_guard_fn) and right_guard_fn()
+        )
+
+    def _runtime_ref_has_guard_constraints(self, runtime_ref) -> bool:
+        for owner in (
+            runtime_ref,
+            getattr(runtime_ref, "accumulator_proof", None),
+            getattr(runtime_ref, "loop_summary", None),
+        ):
+            if tuple(getattr(owner, "guard_constraints", ()) or ()):
+                return True
+        return False
+
+    def _case_pair_comparison_result_size(
+        self,
+        left_case: Optional[ReturnCase],
+        right_case: Optional[ReturnCase],
+    ) -> Optional[int]:
+        left_bits = self._case_comparison_bit_width(left_case)
+        right_bits = self._case_comparison_bit_width(right_case)
+        if left_bits is None or right_bits is None:
+            return None
+        if left_bits <= 0 or right_bits <= 0 or left_bits % 8 != 0 or right_bits % 8 != 0:
+            return None
+        if left_bits == right_bits:
+            return left_bits // 8
+        return None
+
+    def _case_comparison_bit_width(self, case: Optional[ReturnCase]) -> Optional[int]:
+        if case is None:
+            return None
+        surface = getattr(case, "comparison_surface", None)
+        bits = getattr(surface, "explicit_bit_width", None)
+        try:
+            if bits is not None and int(bits) > 0:
+                return int(bits)
+        except (TypeError, ValueError):
+            return None
+        return None
 
     def _runtime_refs_exact_shortcut_decision(
         self,
@@ -730,13 +896,12 @@ class PairwiseStrategy(CheckStrategy):
         right_ref,
         *,
         requires_guard_equivalence: bool,
+        result_size: Optional[int] = None,
     ) -> _RuntimeShortcutDecision:
         if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_type_mismatch")
         if getattr(left_ref, "loop_summary", None) is None or getattr(right_ref, "loop_summary", None) is None:
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_loop")
-        if getattr(left_ref, "accumulator_proof", None) is None or getattr(right_ref, "accumulator_proof", None) is None:
-            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_proof")
         left_loop_summary = getattr(left_ref, "loop_summary", None)
         right_loop_summary = getattr(right_ref, "loop_summary", None)
         left_profile = getattr(left_loop_summary, "side_effect_profile", None)
@@ -747,16 +912,18 @@ class PairwiseStrategy(CheckStrategy):
             getattr(right_loop_summary, "requires_effect_proof", lambda: True)()
         ):
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_effects_unproven")
-        if bool(getattr(left_loop_summary, "requires_path_proof", lambda: True)()) or bool(
-            getattr(right_loop_summary, "requires_path_proof", lambda: True)()
-        ):
-            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_paths_unproven")
 
         left_base_key = getattr(getattr(left_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
         right_base_key = getattr(getattr(right_ref, "pointer_base_ref", None), "semantic_key", lambda: None)()
         left_count_key = self._readonly_count_identity_key(left_ref)
         right_count_key = self._readonly_count_identity_key(right_ref)
-        result_size = max(1, int(getattr(left_ref, "result_size", 0) or 0))
+        effective_result_size = self._readonly_contract_effective_result_size(
+            left_ref,
+            right_ref,
+            result_size=result_size,
+        )
+        if effective_result_size is None:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_result_width_mismatch")
         if (
             getattr(left_ref, "reduction_kind", None) != getattr(right_ref, "reduction_kind", None)
             or left_base_key is None
@@ -765,12 +932,92 @@ class PairwiseStrategy(CheckStrategy):
             or left_count_key is None
             or right_count_key is None
             or left_count_key != right_count_key
-            or result_size != max(1, int(getattr(right_ref, "result_size", 0) or 0))
-            or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), result_size)
-            != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), result_size)
+            or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), effective_result_size)
+            != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), effective_result_size)
         ):
             return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_mismatch")
+        left_semantic_key = self._readonly_reduction_term_sequence_contract_key(
+            left_ref,
+            result_size=effective_result_size,
+        )
+        right_semantic_key = self._readonly_reduction_term_sequence_contract_key(
+            right_ref,
+            result_size=effective_result_size,
+        )
+        if left_semantic_key is None or right_semantic_key is None:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_missing_term_sequence")
+        if left_semantic_key != right_semantic_key:
+            return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_term_sequence_mismatch")
         return _RuntimeShortcutDecision(True, requires_guard_equivalence, reason="readonly_reduction_contract")
+
+    def _readonly_contract_effective_result_size(
+        self,
+        left_ref: ReadonlyReductionRef,
+        right_ref: ReadonlyReductionRef,
+        *,
+        result_size: Optional[int],
+    ) -> Optional[int]:
+        try:
+            left_result_size = max(1, int(getattr(left_ref, "result_size", 0) or 0))
+            right_result_size = max(1, int(getattr(right_ref, "result_size", 0) or 0))
+        except (TypeError, ValueError):
+            return None
+        if result_size is None:
+            return left_result_size if left_result_size == right_result_size else None
+        try:
+            target_result_size = max(1, int(result_size))
+        except (TypeError, ValueError):
+            return None
+        if target_result_size > left_result_size or target_result_size > right_result_size:
+            return None
+        return target_result_size
+
+    def _readonly_reduction_term_sequence_contract_key(
+        self,
+        readonly_ref: ReadonlyReductionRef,
+        *,
+        result_size: Optional[int] = None,
+    ) -> Optional[tuple]:
+        contract_key_fn = getattr(readonly_ref, "readonly_term_sequence_contract_key", None)
+        if callable(contract_key_fn):
+            try:
+                contract_key = contract_key_fn(result_size=result_size)
+            except (AttributeError, TypeError, ValueError):
+                contract_key = None
+            if contract_key is not None:
+                return contract_key
+        accumulator_proof = getattr(readonly_ref, "accumulator_proof", None)
+        if accumulator_proof is not None:
+            proof_key_fn = getattr(accumulator_proof, "readonly_term_sequence_contract_key", None)
+            if callable(proof_key_fn):
+                try:
+                    proof_key = proof_key_fn(result_size=result_size)
+                except (AttributeError, TypeError, ValueError):
+                    proof_key = None
+                if proof_key is not None:
+                    return proof_key
+        if result_size is not None:
+            try:
+                if max(1, int(result_size)) != max(1, int(getattr(readonly_ref, "result_size", 0) or 0)):
+                    return None
+            except (TypeError, ValueError):
+                return None
+        loop_summary = getattr(readonly_ref, "loop_summary", None)
+        loop_key_fn = getattr(loop_summary, "pairwise_semantic_key", None)
+        if callable(loop_key_fn):
+            try:
+                loop_key = loop_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                loop_key = None
+            if loop_key is not None:
+                return loop_key
+        semantic_key_fn = getattr(readonly_ref, "semantic_key", None)
+        if callable(semantic_key_fn):
+            try:
+                return semantic_key_fn()
+            except (AttributeError, TypeError, ValueError):
+                return None
+        return None
 
     def _readonly_count_identity_key(self, readonly_ref: ReadonlyReductionRef) -> Optional[tuple]:
         try:
@@ -779,8 +1026,7 @@ class PairwiseStrategy(CheckStrategy):
                 return ("parameter", int(index))
         except (TypeError, ValueError):
             pass
-        name = str(getattr(readonly_ref, "count_parameter_name", "") or "")
-        return ("parameter_name", name) if name else None
+        return None
 
     def _runtime_refs_semantic_shortcut_decision(self, left_ref, right_ref) -> _RuntimeShortcutDecision:
         left_semantic_key_fn = getattr(left_ref, "pairwise_semantic_key", None)
@@ -834,31 +1080,56 @@ class PairwiseStrategy(CheckStrategy):
         right_has_loop = self._expression_contains_loop_summary_runtime(right)
         if not left_has_loop and not right_has_loop:
             return None
+        if left_case is not None and right_case is not None and self._cases_have_equivalent_readonly_reduction_proof(
+            left_case,
+            right_case,
+        ):
+            return None
+        if left.expr_type == ExpressionType.INTRINSIC and right.expr_type == ExpressionType.INTRINSIC:
+            loop_contract_decision = self._runtime_loop_contract_shortcut_decision(
+                getattr(left, "runtime_ref", None),
+                getattr(right, "runtime_ref", None),
+                result_size=self._case_pair_comparison_result_size(left_case, right_case),
+            )
+            if loop_contract_decision.equivalent:
+                if loop_contract_decision.requires_guard_equivalence and (
+                    left_case is None
+                    or right_case is None
+                    or not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case)
+                ):
+                    return "loop_summary_guard_mismatch"
+                return None
+            if left_has_loop and right_has_loop and loop_contract_decision.reason != "not_loop_contract":
+                return loop_contract_decision.reason
         if left_has_loop != right_has_loop:
             return "loop_summary_shape_mismatch"
         if left.expr_type != right.expr_type:
             return "loop_summary_shape_mismatch"
 
         if left.expr_type == ExpressionType.INTRINSIC:
-            if getattr(left, "opcode", None) != getattr(right, "opcode", None):
-                return "loop_summary_intrinsic_mismatch"
-            if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
-                return "loop_summary_intrinsic_mismatch"
             left_ref = getattr(left, "runtime_ref", None)
             right_ref = getattr(right, "runtime_ref", None)
             if (
                 getattr(left_ref, "loop_summary", None) is not None
                 or getattr(right_ref, "loop_summary", None) is not None
             ):
-                decision = self._runtime_refs_shortcut_decision(left_ref, right_ref)
+                decision = self._runtime_refs_shortcut_decision(
+                    left_ref,
+                    right_ref,
+                    result_size=self._case_pair_comparison_result_size(left_case, right_case),
+                )
                 if not decision.equivalent:
                     return decision.reason
                 if decision.requires_guard_equivalence and (
                     left_case is None
                     or right_case is None
-                    or not self._cases_have_equivalent_summary_conditions(left_case, right_case)
+                    or not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case)
                 ):
                     return "loop_summary_guard_mismatch"
+            if getattr(left, "opcode", None) != getattr(right, "opcode", None):
+                return "loop_summary_intrinsic_mismatch"
+            if (getattr(left, "name", None) or "") != (getattr(right, "name", None) or ""):
+                return "loop_summary_intrinsic_mismatch"
             left_operands = list(getattr(left, "operands", []) or [])
             right_operands = list(getattr(right, "operands", []) or [])
             if len(left_operands) != len(right_operands):
@@ -940,10 +1211,18 @@ class PairwiseStrategy(CheckStrategy):
             for left_operand, right_operand in zip(left.operands, right.operands)
         ):
             return False
-        conditions = self._combined_summary_conditions(left_case, right_case)
-        parameters = self._collect_intrinsic_parameter_specs(left_case, right_case, left, right)
         if bool(getattr(left_ref, "signed_loop", False)) == bool(getattr(right_ref, "signed_loop", False)):
             return True
+        conditions = self._combined_summary_conditions(left_case, right_case)
+        parameters = self._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            left,
+            right,
+            *(condition.expression for condition in conditions or [] if condition is not None),
+        )
+        if parameters is None:
+            return False
         if self._counted_loop_signedness_difference_is_guarded(
             left,
             right,
@@ -1051,7 +1330,6 @@ class PairwiseStrategy(CheckStrategy):
         symbol_infos = self._build_auxiliary_parameter_infos(parameters)
         for symbol in symbol_infos:
             declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
-        render = build_symbol_replacer(symbol_infos, [])
 
         intrinsic_declarations: List[str] = []
         for item in [expr, *(condition.expression for condition in conditions or [] if condition is not None)]:
@@ -1060,12 +1338,17 @@ class PairwiseStrategy(CheckStrategy):
                     intrinsic_declarations.append(declaration)
         declarations.extend(intrinsic_declarations)
 
-        assertions = [
-            f"(assert {render(condition)})"
-            for condition in conditions or []
-            if condition is not None
-        ]
-        expr_smt = render(expr)
+        assertions = []
+        for condition in conditions or []:
+            if condition is None:
+                continue
+            rendered_condition = self._render_auxiliary_smt(condition, parameters)
+            if rendered_condition is None:
+                return None
+            assertions.append(f"(assert {rendered_condition})")
+        expr_smt = self._render_auxiliary_smt(expr, parameters)
+        if expr_smt is None:
+            return None
         assertions.append(f"(assert (= ((_ extract {width_bits - 1} {width_bits - 1}) {expr_smt}) #b1))")
         return "\n".join(declarations + assertions + ["(check-sat)"])
 
@@ -1085,53 +1368,53 @@ class PairwiseStrategy(CheckStrategy):
         left_case: ReturnCase,
         right_case: ReturnCase,
         *exprs: Expression,
-    ) -> List[Dict[str, Any]]:
-        specs: Dict[str, Dict[str, Any]] = {}
+    ) -> Optional[List[Dict[str, Any]]]:
+        specs: Dict[Tuple[object, ...], Dict[str, Any]] = {}
+        unresolved_symbol = False
+
+        def add_spec(identity: Optional[Tuple[object, ...]], candidate: Dict[str, Any]) -> None:
+            if identity is None:
+                return
+            size = max(1, int(candidate.get("size", 0) or 4))
+            existing = specs.get(identity)
+            if existing is None:
+                specs[identity] = {
+                    **candidate,
+                    "identity": identity,
+                    "size": size,
+                }
+                return
+            if int(existing.get("size", 0) or 0) < size:
+                existing.update(candidate)
+                existing["identity"] = identity
+                existing["size"] = size
+
         for case in (left_case, right_case):
             for parameter in list(getattr(case, "parameters", None) or []):
-                name = str(parameter.get("name") or "")
-                if not name:
-                    continue
-                size = max(1, int(parameter.get("size", 0) or 4))
                 candidate = dict(parameter)
-                candidate["name"] = name
-                candidate["size"] = size
-                existing = specs.get(name)
-                if existing is None or int(existing.get("size", 0) or 0) < size:
-                    specs[name] = candidate
+                candidate["name"] = str(parameter.get("name") or "")
+                add_spec(parameter_identity_key_from_descriptor(candidate), candidate)
 
         def visit(expr: Optional[Expression]) -> None:
+            nonlocal unresolved_symbol
             if expr is None:
                 return
             if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
-                name = str(getattr(expr, "name", None) or "")
-                if not name:
+                identity = parameter_identity_key_from_expression(expr)
+                if identity is None:
+                    unresolved_symbol = True
                     return
-                size = max(1, int(getattr(expr, "size", 0) or 4))
                 candidate = {
-                    "name": name,
+                    "name": str(getattr(expr, "name", None) or ""),
                     "index": int(getattr(expr, "value", -1) or -1),
-                    "size": size,
+                    "size": max(1, int(getattr(expr, "size", 0) or 4)),
                     "data_type": getattr(expr, "data_type", None),
+                    "storage_info": getattr(expr, "storage_info", None),
                 }
-                existing = specs.get(name)
-                if existing is None or int(existing.get("size", 0) or 0) < size:
-                    specs[name] = candidate
+                add_spec(identity, candidate)
                 return
             if getattr(expr, "expr_type", None) == ExpressionType.VARIABLE:
-                name = str(getattr(expr, "name", None) or "")
-                if not name:
-                    return
-                size = max(1, int(getattr(expr, "size", 0) or 4))
-                candidate = {
-                    "name": name,
-                    "index": -1,
-                    "size": size,
-                    "data_type": getattr(expr, "data_type", None),
-                }
-                existing = specs.get(name)
-                if existing is None or int(existing.get("size", 0) or 0) < size:
-                    specs[name] = candidate
+                unresolved_symbol = True
                 return
             if getattr(expr, "expr_type", None) == ExpressionType.PHI:
                 for cond, branch_value in getattr(expr, "value", None) or []:
@@ -1144,17 +1427,19 @@ class PairwiseStrategy(CheckStrategy):
 
         for expr in exprs:
             visit(expr)
+        if unresolved_symbol:
+            return None
 
         ordered = sorted(
             specs.values(),
             key=lambda item: (
-                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
-                item.get("name") or "",
+                self._auxiliary_identity_sort_key(item.get("identity")),
+                int(item.get("size", 0) or 0),
             ),
         )
-        for fallback_index, spec in enumerate(ordered):
-            if int(spec.get("index", -1)) < 0:
-                spec["index"] = fallback_index
+        for ordinal, spec in enumerate(ordered):
+            spec["aux_name"] = f"aux_param_{ordinal}"
+            spec["aux_index"] = ordinal
         return ordered
 
     def _prove_intrinsic_equivalence_under_conditions(
@@ -1183,7 +1468,6 @@ class PairwiseStrategy(CheckStrategy):
         symbol_infos = self._build_auxiliary_parameter_infos(parameters)
         for symbol in symbol_infos:
             declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
-        render = build_symbol_replacer(symbol_infos, [])
 
         intrinsic_declarations: List[str] = []
         for expr in (left, right):
@@ -1202,8 +1486,15 @@ class PairwiseStrategy(CheckStrategy):
         for condition in conditions or []:
             if condition is None:
                 continue
-            assertions.append(f"(assert {render(condition)})")
-        assertions.append(f"(assert (not (= {render(left)} {render(right)})))")
+            rendered_condition = self._render_auxiliary_smt(condition, parameters)
+            if rendered_condition is None:
+                return None
+            assertions.append(f"(assert {rendered_condition})")
+        left_smt = self._render_auxiliary_smt(left, parameters)
+        right_smt = self._render_auxiliary_smt(right, parameters)
+        if left_smt is None or right_smt is None:
+            return None
+        assertions.append(f"(assert (not (= {left_smt} {right_smt})))")
         return "\n".join(declarations + assertions + ["(check-sat)"])
 
     def _build_auxiliary_parameter_infos(
@@ -1211,28 +1502,142 @@ class PairwiseStrategy(CheckStrategy):
         symbol_specs: Sequence[Dict[str, Any]],
     ) -> List[ParameterInfo]:
         infos: List[ParameterInfo] = []
-        seen: set[str] = set()
         for spec in sorted(
             symbol_specs or [],
             key=lambda item: (
-                int(item.get("index", -1)) if int(item.get("index", -1)) >= 0 else 1_000_000,
-                item.get("name") or "",
+                self._auxiliary_identity_sort_key(item.get("identity")),
+                int(item.get("size", 0) or 0),
             ),
         ):
-            name = str(spec.get("name") or "")
-            if not name or name in seen:
+            aux_name = str(spec.get("aux_name") or "")
+            if not aux_name:
                 continue
-            seen.add(name)
             infos.append(
                 ParameterInfo(
-                    original_name=name,
-                    smt_name=f"{name}_aux",
+                    original_name=aux_name,
+                    smt_name=aux_name,
                     bit_width=max(1, int(spec.get("size", 0) or 4)) * 8,
-                    index=int(spec.get("index", -1) or -1),
+                    index=int(spec.get("aux_index", -1) or -1),
                     is_signed=bool(spec.get("is_signed", True)),
                 )
             )
         return infos
+
+    def _auxiliary_identity_sort_key(self, identity) -> Tuple[int, str]:
+        if not isinstance(identity, tuple) or not identity:
+            return (9, "")
+        kind = identity[0]
+        if kind == "parameter_index" and len(identity) >= 2:
+            try:
+                return (0, f"{int(identity[1]):08d}")
+            except (TypeError, ValueError):
+                return (0, repr(identity[1]))
+        if kind == "parameter_storage" and len(identity) >= 2:
+            return (1, repr(identity[1]))
+        return (8, repr(identity))
+
+    def _render_auxiliary_smt(
+        self,
+        node,
+        symbol_specs: Sequence[Dict[str, Any]],
+    ) -> Optional[str]:
+        identity_to_spec = {
+            spec.get("identity"): spec
+            for spec in symbol_specs or []
+            if spec.get("identity") is not None and spec.get("aux_name")
+        }
+        if isinstance(node, Condition):
+            cloned_expr = self._clone_auxiliary_expression_for_smt(
+                node.expression,
+                identity_to_spec,
+            )
+            if cloned_expr is None:
+                return None
+            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
+        if isinstance(node, Expression):
+            cloned_expr = self._clone_auxiliary_expression_for_smt(
+                node,
+                identity_to_spec,
+            )
+            return cloned_expr.to_smt() if cloned_expr is not None else None
+        return None
+
+    def _clone_auxiliary_expression_for_smt(
+        self,
+        expr: Optional[Expression],
+        identity_to_spec: Dict[Tuple[object, ...], Dict[str, Any]],
+    ) -> Optional[Expression]:
+        if expr is None:
+            return None
+        expr_type = getattr(expr, "expr_type", None)
+        if expr_type == ExpressionType.PARAMETER:
+            identity = parameter_identity_key_from_expression(expr)
+            if identity is None:
+                return None
+            symbol_spec = identity_to_spec.get(identity)
+            if symbol_spec is None:
+                return None
+            aux_name = str(symbol_spec.get("aux_name") or "")
+            if not aux_name:
+                return None
+            try:
+                occurrence_size = max(1, int(getattr(expr, "size", 0) or 4))
+                symbol_size = max(1, int(symbol_spec.get("size", 0) or occurrence_size))
+            except (TypeError, ValueError):
+                return None
+            if occurrence_size > symbol_size:
+                return None
+            aux_expr = expr.clone_with(
+                name=aux_name,
+                value=int(symbol_spec.get("aux_index", -1) or -1),
+                size=symbol_size,
+            )
+            if occurrence_size == symbol_size:
+                return aux_expr
+            return Expression(
+                ExpressionType.BINARY_OP,
+                operator="SUBPIECE",
+                operands=[
+                    aux_expr,
+                    Expression.constant(0, size=8),
+                ],
+                size=occurrence_size,
+            )
+        if expr_type == ExpressionType.VARIABLE:
+            return None
+        if expr_type == ExpressionType.PHI:
+            branches = []
+            for condition, value in getattr(expr, "value", None) or []:
+                cloned_condition = None
+                if condition is not None:
+                    cloned_condition_expr = self._clone_auxiliary_expression_for_smt(
+                        condition.expression,
+                        identity_to_spec,
+                    )
+                    if cloned_condition_expr is None:
+                        return None
+                    cloned_condition = Condition(
+                        cloned_condition_expr,
+                        bool(getattr(condition, "negated", False)),
+                    )
+                cloned_value = self._clone_auxiliary_expression_for_smt(value, identity_to_spec)
+                if cloned_value is None:
+                    return None
+                branches.append((cloned_condition, cloned_value))
+            return expr.clone_with(value=branches)
+        operands = getattr(expr, "operands", None) or []
+        if not operands:
+            return expr
+        cloned_operands = []
+        for operand in operands:
+            cloned_operand = self._clone_auxiliary_expression_for_smt(
+                operand,
+                identity_to_spec,
+            )
+            if cloned_operand is None:
+                return None
+            cloned_operands.append(cloned_operand)
+        return expr.clone_with(operands=cloned_operands)
 
     def _cases_have_equivalent_summary_conditions(
         self,
@@ -1243,25 +1648,296 @@ class PairwiseStrategy(CheckStrategy):
         right_conditions = right_case.summary_conditions if right_case.summary_conditions is not None else right_case.conditions
         left_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(left_conditions or []))
         right_normalized = ConditionSimplifier.simplify_conditions_object_centric(list(right_conditions or []))
-        if len(left_normalized) != len(right_normalized):
-            return False
         if not left_normalized and not right_normalized:
             return True
-        matched_right: set[int] = set()
-        for left_condition in left_normalized:
-            candidate_index: Optional[int] = None
-            for idx, right_condition in enumerate(right_normalized):
-                if idx in matched_right:
+        parameters = list(getattr(left_case, "parameters", None) or []) + list(
+            getattr(right_case, "parameters", None) or []
+        )
+        return self._condition_set_implies(
+            left_normalized,
+            right_normalized,
+            parameters,
+        ) and self._condition_set_implies(
+            right_normalized,
+            left_normalized,
+            parameters,
+        )
+
+    def _cases_have_pair_local_summary_guard_compatibility(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+    ) -> bool:
+        return self._cases_have_equivalent_summary_conditions(left_case, right_case)
+
+    def _case_pair_has_runtime_guard_coverage_or_equivalence(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+    ) -> bool:
+        if self._cases_have_pair_local_summary_guard_compatibility(left_case, right_case):
+            return True
+        return self._case_conditions_cover_runtime_summary_guards(
+            left_case,
+        ) and self._case_conditions_cover_runtime_summary_guards(
+            right_case,
+        )
+
+    def _case_conditions_cover_runtime_summary_guards(
+        self,
+        case: ReturnCase,
+    ) -> bool:
+        guards, complete = self._runtime_summary_guard_conditions_from_expression(case.value_expr)
+        if not complete:
+            return False
+        if not guards:
+            return False
+        return self._condition_set_implies(
+            list(getattr(case, "conditions", None) or []),
+            guards,
+            list(getattr(case, "parameters", None) or []),
+        )
+
+    def _runtime_summary_guard_conditions_from_expression(
+        self,
+        expr: Optional[Expression],
+    ) -> tuple[List[Condition], bool]:
+        guards: List[Condition] = []
+        seen: set[tuple] = set()
+        complete = True
+        for node in self._iter_expression_nodes(expr):
+            runtime_ref = getattr(node, "runtime_ref", None)
+            for owner in (
+                runtime_ref,
+                getattr(runtime_ref, "accumulator_proof", None),
+                getattr(runtime_ref, "loop_summary", None),
+            ):
+                for guard in tuple(getattr(owner, "guard_constraints", ()) or ()):
+                    if not isinstance(guard, Condition):
+                        complete = False
+                        continue
+                    key = guard.structural_key(budget=256)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    guards.append(guard)
+        return guards, complete
+
+    def _iter_expression_nodes(self, expr: Optional[Expression]):
+        if expr is None:
+            return
+        yield expr
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI:
+            for condition, value in getattr(expr, "value", None) or ():
+                if condition is not None:
+                    yield from self._iter_expression_nodes(getattr(condition, "expression", None))
+                yield from self._iter_expression_nodes(value)
+            return
+        for operand in getattr(expr, "operands", None) or ():
+            yield from self._iter_expression_nodes(operand)
+
+    def _case_pair_can_defer_loop_summary_proof(
+        self,
+        left_case: ReturnCase,
+        right_case: ReturnCase,
+        reason: str,
+    ) -> bool:
+        if reason != "loop_summary_guard_mismatch":
+            return False
+        return self._loop_summary_contracts_match_without_guard(
+            left_case.value_expr,
+            right_case.value_expr,
+        )
+
+    def _loop_summary_contracts_match_without_guard(
+        self,
+        left: Optional[Expression],
+        right: Optional[Expression],
+    ) -> bool:
+        if left is None or right is None:
+            return False
+        left_has_loop = self._expression_contains_loop_summary_runtime(left)
+        right_has_loop = self._expression_contains_loop_summary_runtime(right)
+        if not left_has_loop or not right_has_loop:
+            return False
+        if left.expr_type == ExpressionType.INTRINSIC and right.expr_type == ExpressionType.INTRINSIC:
+            decision = self._runtime_loop_contract_shortcut_decision(
+                getattr(left, "runtime_ref", None),
+                getattr(right, "runtime_ref", None),
+            )
+            if decision.equivalent and decision.requires_guard_equivalence:
+                return True
+        if left.expr_type != right.expr_type:
+            return False
+        left_operands = list(getattr(left, "operands", []) or [])
+        right_operands = list(getattr(right, "operands", []) or [])
+        if len(left_operands) != len(right_operands):
+            return False
+        return any(
+            self._loop_summary_contracts_match_without_guard(left_operand, right_operand)
+            for left_operand, right_operand in zip(left_operands, right_operands)
+        )
+
+    def _resolve_pending_loop_summary_pairs_with_partition_proof(
+        self,
+        pending_pairs: Sequence[_PendingLoopSummaryPair],
+        cases1: Sequence[ReturnCase],
+        cases2: Sequence[ReturnCase],
+        resolved_pairs: set[tuple[int, int]],
+    ) -> set[tuple[int, int]]:
+        resolved_pending: set[tuple[int, int]] = set()
+        progress = True
+        while progress:
+            progress = False
+            known_resolved = set(resolved_pairs) | resolved_pending
+            for pending in pending_pairs:
+                pair_key = (pending.i, pending.j)
+                if pair_key in resolved_pending:
                     continue
-                if not self._conditions_are_semantically_equivalent(left_condition, right_condition):
+                if not self._pending_loop_summary_pair_has_exact_delta_coverage(
+                    pending,
+                    cases1,
+                    cases2,
+                    known_resolved,
+                ):
                     continue
-                if candidate_index is not None:
+                resolved_pending.add(pair_key)
+                progress = True
+        return resolved_pending
+
+    def _pending_loop_summary_pair_has_exact_delta_coverage(
+        self,
+        pending: _PendingLoopSummaryPair,
+        cases1: Sequence[ReturnCase],
+        cases2: Sequence[ReturnCase],
+        resolved_pairs: set[tuple[int, int]],
+    ) -> bool:
+        left_cover_cases = [
+            cases1[left_index]
+            for left_index, _right_index in sorted(resolved_pairs)
+            if _right_index == pending.j
+            and left_index != pending.i
+            and 0 <= left_index < len(cases1)
+            and not self._expression_contains_loop_summary_runtime(cases1[left_index].value_expr)
+        ]
+        right_cover_cases = [
+            cases2[right_index]
+            for _left_index, right_index in sorted(resolved_pairs)
+            if _left_index == pending.i
+            and right_index != pending.j
+            and 0 <= right_index < len(cases2)
+            and not self._expression_contains_loop_summary_runtime(cases2[right_index].value_expr)
+        ]
+        return self._condition_delta_region_is_covered_by_cases(
+            self._case_summary_condition_basis(pending.left_case),
+            self._case_summary_condition_basis(pending.right_case),
+            right_cover_cases,
+            pending.left_case,
+            pending.right_case,
+        ) and self._condition_delta_region_is_covered_by_cases(
+            self._case_summary_condition_basis(pending.right_case),
+            self._case_summary_condition_basis(pending.left_case),
+            left_cover_cases,
+            pending.right_case,
+            pending.left_case,
+        )
+
+    def _condition_delta_region_is_covered_by_cases(
+        self,
+        domain_conditions: Sequence[Condition],
+        excluded_conditions: Sequence[Condition],
+        covering_cases: Sequence[ReturnCase],
+        domain_case: ReturnCase,
+        excluded_case: ReturnCase,
+    ) -> bool:
+        excluded_conjunction = Condition.combine_and(list(excluded_conditions or []))
+        if excluded_conjunction is None:
+            return True
+
+        proof_conditions: List[Condition] = list(domain_conditions or [])
+        proof_conditions.append(excluded_conjunction.negate())
+
+        covering_condition = self._case_union_condition(covering_cases)
+        if covering_condition is None:
+            return self._condition_region_is_unsat_for_cases(
+                proof_conditions,
+                [domain_case, excluded_case, *list(covering_cases or [])],
+            )
+        proof_conditions.append(covering_condition.negate())
+        return self._condition_region_is_unsat_for_cases(
+            proof_conditions,
+            [domain_case, excluded_case, *list(covering_cases or [])],
+        )
+
+    def _case_summary_condition_basis(self, case: ReturnCase) -> List[Condition]:
+        return list(case.summary_conditions if case.summary_conditions is not None else case.conditions)
+
+    def _case_union_condition(self, cases: Sequence[ReturnCase]) -> Optional[Condition]:
+        disjuncts = []
+        for case in cases or []:
+            case_conditions = list(getattr(case, "conditions", None) or [])
+            if not case_conditions:
+                return Condition(
+                    Expression.binary_op(
+                        "INT_EQUAL",
+                        Expression.constant(1, size=1),
+                        Expression.constant(1, size=1),
+                    )
+                )
+            conjunction = Condition.combine_and(case_conditions)
+            if conjunction is not None:
+                disjuncts.append(self._condition_as_bool_expression(conjunction))
+        if not disjuncts:
+            return None
+        union_expr = disjuncts[0]
+        for disjunct in disjuncts[1:]:
+            union_expr = Expression.binary_op("BOOL_OR", union_expr, disjunct)
+        return Condition(union_expr)
+
+    def _condition_as_bool_expression(self, condition: Condition) -> Expression:
+        if condition.negated:
+            return Expression.unary_op("BOOL_NEGATE", condition.expression)
+        return condition.expression
+
+    def _condition_region_is_unsat_for_cases(
+        self,
+        conditions: Sequence[Condition],
+        cases: Sequence[ReturnCase],
+    ) -> bool:
+        parameters: List[Dict[str, Any]] = []
+        for case in cases or []:
+            parameters.extend(list(getattr(case, "parameters", None) or []))
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            conditions,
+            parameters,
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+        if solver_result is not None:
+            return solver_result
+        return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
+
+    def _condition_set_implies(
+        self,
+        premises: Sequence[Condition],
+        conclusions: Sequence[Condition],
+        parameters: Sequence[Dict[str, Any]],
+    ) -> bool:
+        if not conclusions:
+            return True
+        for conclusion in conclusions or []:
+            implication_conditions = list(premises or []) + [conclusion.negate()]
+            identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+                implication_conditions,
+                parameters,
+            )
+            solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+            if solver_result is not None:
+                if not solver_result:
                     return False
-                candidate_index = idx
-            if candidate_index is None:
+                continue
+            if not ConditionSimplifier.object_centric_is_contradiction(identity_conditions):
                 return False
-            matched_right.add(candidate_index)
-        return len(matched_right) == len(right_normalized)
+        return True
 
     def _conditions_are_semantically_equivalent(
         self,
@@ -1297,19 +1973,13 @@ class PairwiseStrategy(CheckStrategy):
             return False
         count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
         count_index = getattr(accumulator_proof, "count_parameter_index", None)
-        if not count_name and count_index is None:
+        if count_index is None:
             return False
-        count_size = max(1, int(getattr(getattr(accumulator_proof, "limit_expr", None), "size", 0) or 0))
-        for case in (exact_case, summary_case):
-            for parameter in getattr(case, "parameters", None) or []:
-                if count_index is not None and parameter.get("index") is not None:
-                    try:
-                        if int(parameter.get("index")) == int(count_index):
-                            count_size = max(count_size, int(parameter.get("size", 0) or count_size))
-                    except (TypeError, ValueError):
-                        pass
-                elif count_name and parameter.get("name") == count_name:
-                    count_size = max(count_size, int(parameter.get("size", 0) or count_size))
+        count_bits = max(
+            self._case_reduction_count_bit_width(exact_case, accumulator_proof),
+            self._case_reduction_count_bit_width(summary_case, accumulator_proof),
+        )
+        count_size = max(1, (int(count_bits) + 7) // 8)
         count_expr = Expression.parameter(
             count_name or "count",
             index=int(count_index) if count_index is not None else -1,
@@ -1407,22 +2077,10 @@ class PairwiseStrategy(CheckStrategy):
             return None
         count_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
         count_index = getattr(accumulator_proof, "count_parameter_index", None)
-        if not count_name and count_index is None:
+        if count_index is None:
             return None
-        count_size = max(1, int(getattr(getattr(accumulator_proof, "limit_expr", None), "size", 0) or 0))
-        matched_parameter = None
-        for parameter in getattr(case, "parameters", None) or []:
-            if count_index is not None and parameter.get("index") is not None:
-                try:
-                    if int(parameter.get("index")) == int(count_index):
-                        matched_parameter = parameter
-                        break
-                except (TypeError, ValueError):
-                    pass
-            if matched_parameter is None and count_name and parameter.get("name") == count_name:
-                matched_parameter = parameter
-        if matched_parameter is not None:
-            count_size = max(count_size, int(matched_parameter.get("size", 0) or count_size))
+        count_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
+        count_size = max(1, (int(count_bits) + 7) // 8)
         count_expr = Expression.parameter(
             count_name or "count",
             index=int(count_index) if count_index is not None else -1,
@@ -1465,10 +2123,259 @@ class PairwiseStrategy(CheckStrategy):
             elif self._expression_is_full_reduction_count_view(right, case, accumulator_proof):
                 const_value = self._exact_reduction_count_constant(left)
             else:
-                continue
+                const_value = self._solve_reduction_count_affine_equality(
+                    left,
+                    self._exact_reduction_count_constant(right),
+                    operator,
+                    not condition_true,
+                    case,
+                    accumulator_proof,
+                )
+                if const_value is None:
+                    const_value = self._solve_reduction_count_affine_equality(
+                        right,
+                        self._exact_reduction_count_constant(left),
+                        operator,
+                        not condition_true,
+                        case,
+                        accumulator_proof,
+                    )
+                if const_value is None:
+                    const_value = self._solve_reduction_count_affine_equality_between_expressions(
+                        left,
+                        right,
+                        operator,
+                        not condition_true,
+                        case,
+                        accumulator_proof,
+                    )
+                if const_value is None:
+                    continue
             if const_value == int(exact_count):
                 return True
         return False
+
+    def _solve_reduction_count_affine_equality(
+        self,
+        expr: Optional[Expression],
+        other_const: Optional[int],
+        operator: Optional[str],
+        negated: bool,
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[int]:
+        if expr is None or other_const is None or operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return None
+        if operator == "INT_EQUAL" and negated:
+            return None
+        if operator == "INT_NOTEQUAL" and not negated:
+            return None
+        affine = self._extract_reduction_count_affine(expr, case, accumulator_proof)
+        if affine is None:
+            return None
+        coeff, bias = affine
+        if int(coeff) != 1:
+            return None
+        return int(other_const) - int(bias)
+
+    def _solve_reduction_count_affine_equality_between_expressions(
+        self,
+        left: Optional[Expression],
+        right: Optional[Expression],
+        operator: Optional[str],
+        negated: bool,
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[int]:
+        """Solve object-level equalities whose operands are affine in the reduction count.
+
+        Ghidra often emits exact finite tail guards as pointer equalities, for
+        example PTRADD(PTRADD(base, 3, 4), 1, 4) == PTRADD(base, count, 4).
+        Treating those as strings is brittle; instead we lower both sides to a
+        base-preserving byte-affine form derived from Expression/PTRADD objects.
+        """
+
+        if left is None or right is None or operator not in {"INT_EQUAL", "INT_NOTEQUAL"}:
+            return None
+        if operator == "INT_EQUAL" and negated:
+            return None
+        if operator == "INT_NOTEQUAL" and not negated:
+            return None
+
+        left_count_affine = self._extract_reduction_count_affine(left, case, accumulator_proof)
+        right_count_affine = self._extract_reduction_count_affine(right, case, accumulator_proof)
+        if left_count_affine is not None and right_count_affine is not None:
+            solved = self._solve_affine_equality(left_count_affine, right_count_affine)
+            if solved is not None:
+                return solved
+
+        left_addr_affine = self._extract_readonly_address_affine(left, case, accumulator_proof)
+        right_addr_affine = self._extract_readonly_address_affine(right, case, accumulator_proof)
+        if left_addr_affine is None or right_addr_affine is None:
+            return None
+        left_base, left_coeff, left_bias = left_addr_affine
+        right_base, right_coeff, right_bias = right_addr_affine
+        if left_base is None or right_base is None or left_base != right_base:
+            return None
+        return self._solve_affine_equality(
+            (int(left_coeff), int(left_bias)),
+            (int(right_coeff), int(right_bias)),
+        )
+
+    def _solve_affine_equality(
+        self,
+        left_affine: tuple[int, int],
+        right_affine: tuple[int, int],
+    ) -> Optional[int]:
+        left_coeff, left_bias = left_affine
+        right_coeff, right_bias = right_affine
+        coeff_delta = int(left_coeff) - int(right_coeff)
+        bias_delta = int(right_bias) - int(left_bias)
+        if coeff_delta == 0:
+            return None
+        if bias_delta % coeff_delta != 0:
+            return None
+        solved = bias_delta // coeff_delta
+        return int(solved) if solved > 0 else None
+
+    def _extract_readonly_address_affine(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[tuple[Optional[tuple], int, int]]:
+        """Return (base_identity, count_coeff_bytes, byte_bias) for address expressions."""
+
+        if expr is None:
+            return None
+        base_key = self._readonly_pointer_base_identity_key(expr, case, accumulator_proof)
+        if base_key is not None:
+            return base_key, 0, 0
+        if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+            const_value = self._exact_reduction_count_constant(expr)
+            return (None, 0, int(const_value)) if const_value is not None else None
+        if getattr(expr, "expr_type", None) == ExpressionType.INTRINSIC and getattr(expr, "name", None) == "PTRADD":
+            operands = list(getattr(expr, "operands", None) or [])
+            if len(operands) < 3:
+                return None
+            base_affine = self._extract_readonly_address_affine(operands[0], case, accumulator_proof)
+            index_affine = self._extract_reduction_count_affine(operands[1], case, accumulator_proof)
+            scale = self._exact_reduction_count_constant(operands[2])
+            if base_affine is None or index_affine is None or scale is None:
+                return None
+            base, base_coeff, base_bias = base_affine
+            index_coeff, index_bias = index_affine
+            return (
+                base,
+                int(base_coeff) + int(index_coeff) * int(scale),
+                int(base_bias) + int(index_bias) * int(scale),
+            )
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or len(getattr(expr, "operands", None) or []) != 2:
+            return None
+        operator = getattr(expr, "operator", None)
+        left = self._extract_readonly_address_affine(expr.operands[0], case, accumulator_proof)
+        right = self._extract_readonly_address_affine(expr.operands[1], case, accumulator_proof)
+        if operator == "INT_ADD" and left is not None and right is not None:
+            return self._combine_readonly_address_affine(left, right, subtract=False)
+        if operator == "INT_SUB" and left is not None and right is not None:
+            return self._combine_readonly_address_affine(left, right, subtract=True)
+        return None
+
+    def _combine_readonly_address_affine(
+        self,
+        left: tuple[Optional[tuple], int, int],
+        right: tuple[Optional[tuple], int, int],
+        *,
+        subtract: bool,
+    ) -> Optional[tuple[Optional[tuple], int, int]]:
+        left_base, left_coeff, left_bias = left
+        right_base, right_coeff, right_bias = right
+        if left_base is not None and right_base is not None:
+            if subtract and left_base == right_base:
+                base = None
+            else:
+                return None
+        else:
+            base = left_base if left_base is not None else right_base
+        sign = -1 if subtract else 1
+        return (
+            base,
+            int(left_coeff) + sign * int(right_coeff),
+            int(left_bias) + sign * int(right_bias),
+        )
+
+    def _readonly_pointer_base_identity_key(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[tuple]:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return None
+        pointer_ref = getattr(accumulator_proof, "pointer_base_ref", None)
+        proof_index = getattr(pointer_ref, "parameter_index", None)
+        expr_index = getattr(expr, "value", None)
+        if proof_index is not None:
+            try:
+                if expr_index is not None and int(expr_index) == int(proof_index):
+                    return ("parameter", int(proof_index))
+            except (TypeError, ValueError):
+                return None
+            return None
+        return None
+
+    def _extract_reduction_count_affine(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> Optional[tuple[int, int]]:
+        if expr is None:
+            return None
+        if self._expression_is_full_reduction_count_view(expr, case, accumulator_proof):
+            return 1, 0
+        if getattr(expr, "expr_type", None) == ExpressionType.CONSTANT:
+            value = self._exact_reduction_count_constant(expr)
+            return (0, int(value)) if value is not None else None
+        if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and len(getattr(expr, "operands", None) or []) == 1:
+            operator = getattr(expr, "operator", None)
+            if operator in {"INT_ZEXT", "INT_SEXT"}:
+                operand = expr.operands[0]
+                operand_bits = max(1, int(expression_smt_bit_width(operand) or 0))
+                if operand_bits != self._case_reduction_count_bit_width(case, accumulator_proof):
+                    return None
+                return self._extract_reduction_count_affine(operand, case, accumulator_proof)
+            if operator in {"CAST", "COPY"}:
+                operand = expr.operands[0]
+                expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+                operand_bits = max(1, int(expression_smt_bit_width(operand) or 0))
+                proof_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
+                if expr_bits != operand_bits or expr_bits != proof_bits:
+                    return None
+                return self._extract_reduction_count_affine(expr.operands[0], case, accumulator_proof)
+            if operator in {"INT_2COMP", "INT_NEGATE"}:
+                operand = self._extract_reduction_count_affine(expr.operands[0], case, accumulator_proof)
+                if operand is None:
+                    return None
+                return -int(operand[0]), -int(operand[1])
+            return None
+        if getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP or len(getattr(expr, "operands", None) or []) != 2:
+            return None
+        left = self._extract_reduction_count_affine(expr.operands[0], case, accumulator_proof)
+        right = self._extract_reduction_count_affine(expr.operands[1], case, accumulator_proof)
+        operator = getattr(expr, "operator", None)
+        if operator == "INT_ADD" and left is not None and right is not None:
+            return int(left[0]) + int(right[0]), int(left[1]) + int(right[1])
+        if operator == "INT_SUB" and left is not None and right is not None:
+            return int(left[0]) - int(right[0]), int(left[1]) - int(right[1])
+        if operator == "INT_MULT":
+            left_const = self._exact_reduction_count_constant(expr.operands[0])
+            right_const = self._exact_reduction_count_constant(expr.operands[1])
+            if left_const is not None and right is not None:
+                return int(left_const) * int(right[0]), int(left_const) * int(right[1])
+            if right_const is not None and left is not None:
+                return int(right_const) * int(left[0]), int(right_const) * int(left[1])
+        return None
 
     def _expression_is_full_reduction_count_view(
         self,
@@ -1480,48 +2387,192 @@ class PairwiseStrategy(CheckStrategy):
             return False
         if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
             expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
-            proof_bits = self._reduction_count_bit_width(accumulator_proof)
+            proof_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
             if expr_bits != proof_bits:
                 return False
-            expr_name = getattr(expr, "name", None)
-            expr_index = getattr(expr, "value", None)
-            proof_name = str(getattr(accumulator_proof, "count_parameter_name", None) or "")
-            proof_index = getattr(accumulator_proof, "count_parameter_index", None)
-            if proof_index is not None:
-                if expr_index is not None:
-                    try:
-                        return int(expr_index) == int(proof_index)
-                    except (TypeError, ValueError):
-                        return False
-                if expr_name:
-                    for parameter in getattr(case, "parameters", None) or []:
-                        if parameter.get("name") != expr_name:
-                            continue
-                        param_index = parameter.get("index")
-                        if param_index is None:
-                            return False
-                        try:
-                            return int(param_index) == int(proof_index)
-                        except (TypeError, ValueError):
-                            return False
+            return self._parameter_matches_reduction_count_identity(expr, case, accumulator_proof)
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+            and getattr(expr, "operator", None) == "SUBPIECE"
+            and len(getattr(expr, "operands", None) or []) == 2
+        ):
+            source, offset = expr.operands
+            if getattr(offset, "expr_type", None) != ExpressionType.CONSTANT:
                 return False
-            return bool(proof_name and expr_name == proof_name)
+            try:
+                if int(getattr(offset, "value", 0) or 0) != 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+            proof_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
+            if expr_bits != proof_bits:
+                return False
+            return self._parameter_matches_reduction_count_identity(source, case, accumulator_proof)
         if getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP and len(getattr(expr, "operands", None) or []) == 1:
             operator = getattr(expr, "operator", None)
             if operator in {"CAST", "COPY"}:
                 operand = expr.operands[0]
                 expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
                 operand_bits = max(1, int(expression_smt_bit_width(operand) or 0))
-                proof_bits = self._reduction_count_bit_width(accumulator_proof)
+                proof_bits = self._case_reduction_count_bit_width(case, accumulator_proof)
                 if expr_bits != operand_bits or expr_bits != proof_bits:
                     return False
                 return self._expression_is_full_reduction_count_view(operand, case, accumulator_proof)
             return False
         return False
 
+    def _parameter_matches_reduction_count_identity(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> bool:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.PARAMETER:
+            return False
+        expr_index = getattr(expr, "value", None)
+        proof_index = getattr(accumulator_proof, "count_parameter_index", None)
+        if proof_index is not None:
+            try:
+                return expr_index is not None and int(expr_index) == int(proof_index)
+            except (TypeError, ValueError):
+                return False
+            return False
+        return False
+
+    def _case_reduction_count_bit_width(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+    ) -> int:
+        proof_bits = self._reduction_count_bit_width(accumulator_proof)
+        count_index = getattr(accumulator_proof, "count_parameter_index", None)
+        for parameter in getattr(case, "parameters", None) or []:
+            matches = False
+            if count_index is not None and parameter.get("index") is not None:
+                try:
+                    matches = int(parameter.get("index")) == int(count_index)
+                except (TypeError, ValueError):
+                    matches = False
+            if not matches:
+                continue
+            try:
+                size = int(parameter.get("size", 0) or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size <= 0:
+                continue
+            candidate_bits = max(1, size * 8)
+            if candidate_bits == proof_bits or self._accumulator_proof_supports_count_bit_width(
+                case,
+                accumulator_proof,
+                candidate_bits,
+            ):
+                return candidate_bits
+        return proof_bits
+
     def _reduction_count_bit_width(self, accumulator_proof) -> int:
         limit_expr = getattr(accumulator_proof, "limit_expr", None)
         return max(1, int(expression_smt_bit_width(limit_expr) or 0))
+
+    def _accumulator_proof_supports_count_bit_width(
+        self,
+        case: ReturnCase,
+        accumulator_proof,
+        candidate_bits: int,
+    ) -> bool:
+        candidate_bits = max(1, int(candidate_bits))
+        proof_bits = self._reduction_count_bit_width(accumulator_proof)
+        if candidate_bits == proof_bits:
+            return True
+        if candidate_bits > proof_bits:
+            return False
+        for expr in self._accumulator_proof_count_surface_expressions(accumulator_proof):
+            if self._expression_contains_reduction_count_surface_at_width(
+                expr,
+                case,
+                accumulator_proof,
+                candidate_bits,
+            ):
+                return True
+        return False
+
+    def _accumulator_proof_count_surface_expressions(self, accumulator_proof):
+        limit_expr = getattr(accumulator_proof, "limit_expr", None)
+        if limit_expr is not None:
+            yield limit_expr
+        for condition in tuple(getattr(accumulator_proof, "guard_constraints", ()) or ()):
+            expr = getattr(condition, "expression", condition)
+            if expr is not None:
+                yield expr
+
+    def _expression_contains_reduction_count_surface_at_width(
+        self,
+        expr: Optional[Expression],
+        case: ReturnCase,
+        accumulator_proof,
+        width_bits: int,
+    ) -> bool:
+        if expr is None:
+            return False
+        expr_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+        if (
+            expr_bits == int(width_bits)
+            and self._parameter_matches_reduction_count_identity(expr, case, accumulator_proof)
+        ):
+            return True
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+            and getattr(expr, "operator", None) == "SUBPIECE"
+            and len(getattr(expr, "operands", None) or []) == 2
+        ):
+            source, offset = expr.operands
+            try:
+                offset_is_low = (
+                    getattr(offset, "expr_type", None) == ExpressionType.CONSTANT
+                    and int(getattr(offset, "value", 0) or 0) == 0
+                )
+            except (TypeError, ValueError):
+                offset_is_low = False
+            if (
+                offset_is_low
+                and expr_bits == int(width_bits)
+                and self._parameter_matches_reduction_count_identity(source, case, accumulator_proof)
+            ):
+                return True
+        if (
+            getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP
+            and getattr(expr, "operator", None) in {"CAST", "COPY"}
+            and len(getattr(expr, "operands", None) or []) == 1
+            and expr_bits == int(width_bits)
+            and self._parameter_matches_reduction_count_identity(expr.operands[0], case, accumulator_proof)
+        ):
+            return True
+        for operand in getattr(expr, "operands", None) or ():
+            if self._expression_contains_reduction_count_surface_at_width(
+                operand,
+                case,
+                accumulator_proof,
+                width_bits,
+            ):
+                return True
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+            for condition, value in expr.value:
+                if condition is not None and self._expression_contains_reduction_count_surface_at_width(
+                    getattr(condition, "expression", None),
+                    case,
+                    accumulator_proof,
+                    width_bits,
+                ):
+                    return True
+                if self._expression_contains_reduction_count_surface_at_width(
+                    value,
+                    case,
+                    accumulator_proof,
+                    width_bits,
+                ):
+                    return True
+        return False
 
     def _exact_reduction_count_constant(self, expr: Optional[Expression]) -> Optional[int]:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
@@ -1540,6 +2591,8 @@ class PairwiseStrategy(CheckStrategy):
 
         def parameter_symbol(expr: Expression) -> str:
             key = self._parameter_object_identity_key(expr, parameters)
+            if key is None:
+                key = self._opaque_parameter_object_identity_key(expr)
             symbol = symbol_by_identity.get(key)
             if symbol is None:
                 symbol = f"__phase3_param_{len(symbol_by_identity)}"
@@ -1576,7 +2629,7 @@ class PairwiseStrategy(CheckStrategy):
         self,
         expr: Expression,
         parameters: Sequence[Dict[str, Any]] = (),
-    ) -> tuple:
+    ) -> Optional[tuple]:
         size_bits = max(1, int(expression_smt_bit_width(expr) or getattr(expr, "get_bit_width", lambda: 0)() or 0))
         try:
             index = int(getattr(expr, "value", -1))
@@ -1590,67 +2643,25 @@ class PairwiseStrategy(CheckStrategy):
             storage_key = storage_key_fn()
             if storage_key is not None:
                 return ("parameter_storage", storage_key, size_bits)
-        descriptor = self._parameter_descriptor_for_identity(expr, parameters)
-        if descriptor is not None:
-            try:
-                descriptor_index = int(descriptor.get("index"))
-            except (TypeError, ValueError):
-                descriptor_index = -1
-            if descriptor_index >= 0:
-                return ("parameter_index", descriptor_index, size_bits)
-            descriptor_storage = descriptor.get("storage_info", descriptor.get("storage"))
-            descriptor_storage_key_fn = getattr(descriptor_storage, "storage_identity_key", None)
-            if callable(descriptor_storage_key_fn):
-                descriptor_storage_key = descriptor_storage_key_fn()
-                if descriptor_storage_key is not None:
-                    return ("parameter_storage", descriptor_storage_key, size_bits)
-        return ("parameter_name", str(getattr(expr, "name", "") or ""), size_bits)
+        return None
 
-    def _parameter_descriptor_for_identity(
-        self,
-        expr: Expression,
-        parameters: Sequence[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        name = str(getattr(expr, "name", "") or "")
-        if not name:
-            return None
-        matches = [
-            parameter
-            for parameter in parameters or ()
-            if str(parameter.get("name") or "") == name
-        ]
-        if not matches:
-            return None
-        unique_keys = {self._parameter_descriptor_identity_key(parameter) for parameter in matches}
-        if len(unique_keys) != 1:
-            return None
-        return matches[0]
-
-    def _parameter_descriptor_identity_key(self, parameter: Dict[str, Any]) -> tuple:
-        try:
-            index = int(parameter.get("index"))
-        except (TypeError, ValueError):
-            index = -1
-        if index >= 0:
-            return ("index", index, int(parameter.get("size", 0) or 0))
-        storage = parameter.get("storage_info", parameter.get("storage"))
-        storage_key_fn = getattr(storage, "storage_identity_key", None)
-        if callable(storage_key_fn):
-            storage_key = storage_key_fn()
-            if storage_key is not None:
-                return ("storage", storage_key, int(parameter.get("size", 0) or 0))
-        return ("name", str(parameter.get("name") or ""), int(parameter.get("size", 0) or 0))
+    def _opaque_parameter_object_identity_key(self, expr: Expression) -> tuple:
+        size_bits = max(1, int(expression_smt_bit_width(expr) or getattr(expr, "get_bit_width", lambda: 0)() or 0))
+        return ("unresolved_parameter_object", id(expr), size_bits)
 
     def _extract_readonly_reduction_terms_from_expression(
         self,
         expr: Optional[Expression],
         parameters: Sequence[Dict[str, Any]],
         pointer_base_ref,
+        *,
+        program_is_big_endian: Optional[bool] = None,
     ) -> Optional[tuple[ReadonlyReductionTermRef, ...]]:
         extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
             expr,
             parameters,
             pointer_base_ref,
+            program_is_big_endian=program_is_big_endian,
         )
         if extracted is None:
             return None
@@ -1664,6 +2675,8 @@ class PairwiseStrategy(CheckStrategy):
         expr: Optional[Expression],
         parameters: Sequence[Dict[str, Any]],
         pointer_base_ref,
+        *,
+        program_is_big_endian: Optional[bool] = None,
     ) -> Optional[tuple[tuple[ReadonlyReductionTermRef, ...], int]]:
         if expr is None or pointer_base_ref is None:
             return None
@@ -1682,6 +2695,7 @@ class PairwiseStrategy(CheckStrategy):
                 term,
                 parameters,
                 pointer_base_ref,
+                program_is_big_endian=program_is_big_endian,
             )
             if descriptor is None:
                 return None
@@ -1721,6 +2735,7 @@ class PairwiseStrategy(CheckStrategy):
         *,
         lsb_byte_offset: int = 0,
         narrowed_size: Optional[int] = None,
+        program_is_big_endian: Optional[bool] = None,
     ) -> Optional[ReadonlyReductionTermRef]:
         if expr is None:
             return None
@@ -1735,6 +2750,7 @@ class PairwiseStrategy(CheckStrategy):
                     pointer_base_ref,
                     lsb_byte_offset=lsb_byte_offset,
                     narrowed_size=narrowed_size,
+                    program_is_big_endian=program_is_big_endian,
                 )
 
         if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
@@ -1748,6 +2764,7 @@ class PairwiseStrategy(CheckStrategy):
                     pointer_base_ref,
                     lsb_byte_offset=lsb_byte_offset + int(byte_offset),
                     narrowed_size=max(1, int(expr.size or 0)),
+                    program_is_big_endian=program_is_big_endian,
                 )
             if expr.operator == "INT_RIGHT":
                 shift_bits = self._raw_constant_value(expr.operands[1])
@@ -1759,6 +2776,7 @@ class PairwiseStrategy(CheckStrategy):
                     pointer_base_ref,
                     lsb_byte_offset=lsb_byte_offset + (int(shift_bits) // 8),
                     narrowed_size=narrowed_size or max(1, int(expr.size or 0)),
+                    program_is_big_endian=program_is_big_endian,
                 )
             if expr.operator == "INT_AND":
                 mask_width = self._low_mask_width_bytes(expr.operands[0], expr.operands[1])
@@ -1773,6 +2791,7 @@ class PairwiseStrategy(CheckStrategy):
                         pointer_base_ref,
                         lsb_byte_offset=lsb_byte_offset,
                         narrowed_size=narrowed_size or mask_width,
+                        program_is_big_endian=program_is_big_endian,
                     )
 
         if expr.expr_type != ExpressionType.MEMORY or not expr.operands:
@@ -1781,19 +2800,23 @@ class PairwiseStrategy(CheckStrategy):
         access_size = max(1, int(narrowed_size or load_size))
         if lsb_byte_offset < 0 or access_size > load_size or lsb_byte_offset + access_size > load_size:
             return None
-        if int(lsb_byte_offset) != 0 or access_size != load_size:
+        if (int(lsb_byte_offset) != 0 or access_size != load_size) and program_is_big_endian is None:
             return None
         location = canonicalize_location(expr.operands[0], parameters, size=load_size)
         if location is None:
             return None
         base_ref = getattr(location, "base_ref", None)
-        if (
-            base_ref is None
-            or getattr(base_ref, "semantic_key", lambda: None)()
-            != getattr(pointer_base_ref, "semantic_key", lambda: None)()
-        ):
+        if base_ref is None:
             return None
-        return ReadonlyReductionTermRef(byte_offset=int(location.offset), access_size=access_size)
+        base_key = getattr(base_ref, "semantic_key", lambda: None)()
+        proof_base_key = getattr(pointer_base_ref, "semantic_key", lambda: None)()
+        if base_key is None or proof_base_key is None or base_key != proof_base_key:
+            return None
+        if program_is_big_endian is True:
+            byte_offset = int(location.offset) + (load_size - access_size - int(lsb_byte_offset))
+        else:
+            byte_offset = int(location.offset) + int(lsb_byte_offset)
+        return ReadonlyReductionTermRef(byte_offset=byte_offset, access_size=access_size)
 
     def _raw_constant_value(self, expr: Optional[Expression]) -> Optional[int]:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
@@ -2092,7 +3115,15 @@ class PairwiseStrategy(CheckStrategy):
         combined_conditions = list(case1.conditions) + list(case2.conditions)
         if not combined_conditions:
             return False
-        return ConditionSimplifier.object_centric_is_contradiction(combined_conditions)
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            combined_conditions,
+            list(getattr(case1, "parameters", None) or [])
+            + list(getattr(case2, "parameters", None) or []),
+        )
+        solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+        if solver_result is not None:
+            return solver_result
+        return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
 
     def _case_contains_unresolved_expression(
         self,

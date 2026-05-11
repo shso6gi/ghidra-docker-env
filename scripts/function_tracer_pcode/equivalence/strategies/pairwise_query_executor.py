@@ -5,7 +5,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...smt import SolverStatus
 from ..formula.returns import (
+    ReturnWidthMismatchError,
     expression_has_unresolved_value,
+    require_equal_return_bit_widths,
 )
 from .pairwise_models import QueryResult
 
@@ -103,6 +105,21 @@ def solve_query_twostage(
         result = QueryResult(is_equivalent=None)
         result.last_query = cond_query
         result.pair_stage = "with-ineq-skipped"
+        return result
+
+    try:
+        require_equal_return_bit_widths(
+            base_ctx.get("return_size1", 32),
+            base_ctx.get("return_size2", 32),
+            context="pairwise value inequality",
+        )
+    except ReturnWidthMismatchError as exc:
+        strategy._debug_print(f"  Pair {pair_id} with-ineq skipped: {exc}")
+        if getattr(strategy, "_active_normalization_stats", None) is not None:
+            strategy._active_normalization_stats["unknown_results"] += 1
+        result = QueryResult(is_equivalent=None)
+        result.last_query = cond_query
+        result.pair_stage = "return-width-mismatch"
         return result
 
     full_query = strategy._build_pair_query(
@@ -345,15 +362,19 @@ def _check_pair_equality_under_model(
     model_assertions: Sequence[str],
     pair_id: str,
 ) -> Optional[bool]:
-    query = _build_model_validation_query(
-        base_ctx,
-        case1,
-        case2,
-        param_replace_fn1,
-        param_replace_fn2,
-        model_assertions,
-        equality=True,
-    )
+    try:
+        query = _build_model_validation_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            model_assertions,
+            equality=True,
+        )
+    except ReturnWidthMismatchError as exc:
+        strategy._debug_print(f"  Equality re-check for pair {pair_id} blocked: {exc}")
+        return None
     result = _run_validation_query(strategy, query, f"{pair_id}:equal")
     if result is None:
         return None
@@ -433,12 +454,22 @@ def _build_model_validation_query(
         "",
     ]
     symbol_bit_widths = dict(_iter_declared_symbols(base_ctx))
+    value1_smt = _normalize_smt_expr_widths(value1_smt, symbol_bit_widths)
+    value2_smt = _normalize_smt_expr_widths(value2_smt, symbol_bit_widths)
     lines.extend(base_ctx["header_lines"])
     lines.extend(model_assertions)
     lines.extend(_build_case_assertions(case1, param_replace_fn1, symbol_bit_widths))
     lines.extend(_build_case_assertions(case2, param_replace_fn2, symbol_bit_widths))
     if equality:
-        lines.extend(_build_value_equality_assertions(value1_smt, value2_smt, return_size1, return_size2))
+        lines.extend(
+            _build_value_equality_assertions(
+                value1_smt,
+                value2_smt,
+                return_size1,
+                return_size2,
+                symbol_bit_widths=symbol_bit_widths,
+            )
+        )
     lines.append("(check-sat)")
     return "\n".join(lines)
 
@@ -456,16 +487,20 @@ def _build_case_assertions(
 
 
 def _normalize_condition_smt(cond_smt: str, symbol_bit_widths: Dict[str, int]) -> str:
+    return _normalize_smt_expr_widths(cond_smt, symbol_bit_widths)
+
+
+def _normalize_smt_expr_widths(expr_smt: str, symbol_bit_widths: Dict[str, int]) -> str:
     try:
-        ast = _parse_smt_expr(cond_smt)
+        ast = _parse_smt_expr(expr_smt)
     except ValueError:
-        return cond_smt
+        return expr_smt
 
     try:
         normalized = _normalize_smt_ast(ast, symbol_bit_widths)
         return _smt_expr_to_string(normalized)
     except Exception:
-        return cond_smt
+        return expr_smt
 
 
 def _parse_smt_expr(smt_expr: str):
@@ -527,6 +562,10 @@ def _normalize_smt_ast(ast, symbol_bit_widths: Dict[str, int]):
     args = [_normalize_smt_ast(arg, symbol_bit_widths) for arg in ast[1:]]
     if isinstance(op, str) and op in _SIGNED_COMPARISON_OPS | _UNSIGNED_COMPARISON_OPS:
         return _normalize_comparison_expression(op, args, symbol_bit_widths, signed=True if op in _SIGNED_COMPARISON_OPS else False)
+    if isinstance(op, str) and op in {"=", "distinct"}:
+        return _normalize_equality_expression(op, args, symbol_bit_widths)
+    if isinstance(op, str) and op in _BITVECTOR_BINARY_OPS:
+        return _normalize_bitvector_binary_expression(op, args, symbol_bit_widths)
     return [op, *args]
 
 
@@ -542,6 +581,30 @@ _UNSIGNED_COMPARISON_OPS = {
     "bvule",
     "bvugt",
     "bvuge",
+}
+
+_SIGNED_BITVECTOR_BINARY_OPS = {
+    "bvsdiv",
+    "bvsrem",
+}
+
+_BITVECTOR_BINARY_OPS = {
+    "bvand",
+    "bvor",
+    "bvxor",
+    "bvnand",
+    "bvnor",
+    "bvxnor",
+    "bvadd",
+    "bvsub",
+    "bvmul",
+    "bvudiv",
+    "bvsdiv",
+    "bvurem",
+    "bvsrem",
+    "bvshl",
+    "bvlshr",
+    "bvashr",
 }
 
 
@@ -564,11 +627,125 @@ def _normalize_comparison_expression(op: str, args, symbol_bit_widths: Dict[str,
     return [op, *normalized_args]
 
 
+def _normalize_equality_expression(op: str, args, symbol_bit_widths: Dict[str, int]):
+    if len(args) < 2:
+        return [op, *args]
+
+    widths = [_infer_smt_bit_width(arg, symbol_bit_widths) for arg in args]
+    if any(width is None for width in widths):
+        return [op, *args]
+    target_width = max(widths)
+    if target_width <= 0 or all(width == target_width for width in widths):
+        return [op, *args]
+
+    normalized_args = [
+        _coerce_smt_node_width(arg, width, target_width, signed=False)
+        for arg, width in zip(args, widths)
+    ]
+    return [op, *normalized_args]
+
+
+def _normalize_bitvector_binary_expression(op: str, args, symbol_bit_widths: Dict[str, int]):
+    if len(args) < 2:
+        return [op, *args]
+    left = args[0]
+    current = args[1]
+    rest = list(args[2:])
+    normalized = _normalize_bitvector_pair(
+        op,
+        left,
+        current,
+        symbol_bit_widths,
+    )
+    result = [normalized[0], normalized[1]]
+    for next_arg in rest:
+        result_width = _infer_smt_bit_width([op, *result], symbol_bit_widths)
+        next_width = _infer_smt_bit_width(next_arg, symbol_bit_widths)
+        if result_width is None or next_width is None:
+            result.append(next_arg)
+            continue
+        target_width = max(result_width, next_width)
+        signed = op in _SIGNED_BITVECTOR_BINARY_OPS
+        result_node = [op, *result]
+        result_node = _coerce_smt_node_width(
+            result_node,
+            result_width,
+            target_width,
+            signed=signed,
+        )
+        next_arg = _coerce_smt_node_width(
+            next_arg,
+            next_width,
+            target_width,
+            signed=signed,
+        )
+        result = [result_node, next_arg]
+    return [op, *result]
+
+
+def _normalize_bitvector_pair(op: str, left, right, symbol_bit_widths: Dict[str, int]):
+    left_width = _infer_smt_bit_width(left, symbol_bit_widths)
+    right_width = _infer_smt_bit_width(right, symbol_bit_widths)
+    if left_width is None or right_width is None:
+        return left, right
+    target_width = _preferred_bitvector_binary_width(left, right, left_width, right_width)
+    if target_width <= 0 or left_width == right_width:
+        return left, right
+    signed = op in _SIGNED_BITVECTOR_BINARY_OPS
+    return (
+        _coerce_smt_node_width(left, left_width, target_width, signed=signed),
+        _coerce_smt_node_width(right, right_width, target_width, signed=signed),
+    )
+
+
+def _coerce_smt_node_width(node, source_width: int, target_width: int, *, signed: bool):
+    if source_width <= 0 or target_width <= 0 or source_width == target_width:
+        return node
+    constant = _resize_smt_bv_constant(node, target_width)
+    if constant is not None:
+        return constant
+    if source_width < target_width:
+        return _extend_smt_node(node, target_width - source_width, signed=signed)
+    return [["_", "extract", str(target_width - 1), "0"], node]
+
+
+def _preferred_bitvector_binary_width(left, right, left_width: int, right_width: int) -> int:
+    if left_width == right_width:
+        return left_width
+    if _is_smt_bv_constant(left) and not _is_smt_bv_constant(right):
+        return right_width
+    if _is_smt_bv_constant(right) and not _is_smt_bv_constant(left):
+        return left_width
+    return max(left_width, right_width)
+
+
+def _is_smt_bv_constant(node) -> bool:
+    return (
+        isinstance(node, list)
+        and len(node) >= 3
+        and node[0] == "_"
+        and isinstance(node[1], str)
+        and node[1].startswith("bv")
+    )
+
+
 def _extend_smt_node(node, extend_bits: int, *, signed: bool):
     if extend_bits <= 0:
         return node
     ext_op = "sign_extend" if signed else "zero_extend"
     return [["_", ext_op, str(extend_bits)], node]
+
+
+def _resize_smt_bv_constant(node, target_width: int):
+    if not isinstance(node, list) or len(node) < 3 or node[0] != "_":
+        return None
+    value_token = node[1]
+    if not isinstance(value_token, str) or not value_token.startswith("bv"):
+        return None
+    value = _try_parse_int(value_token[2:])
+    if value is None:
+        return None
+    return ["_", f"bv{int(value) % (1 << target_width)}", str(target_width)]
 
 
 def _infer_smt_bit_width(node, symbol_bit_widths: Dict[str, int]):
@@ -670,18 +847,19 @@ def _build_value_equality_assertions(
     value2_smt: str,
     return_size1: int,
     return_size2: int,
+    *,
+    symbol_bit_widths: Optional[Dict[str, int]] = None,
 ) -> List[str]:
-    if return_size1 == return_size2:
-        return [f"(assert (= {value1_smt} {value2_smt}))"]
+    def _assert_equal(equality_smt: str) -> str:
+        normalized = _normalize_smt_expr_widths(equality_smt, symbol_bit_widths or {})
+        return f"(assert {normalized})"
 
-    overlap = min(return_size1, return_size2)
-    if return_size1 < return_size2:
-        return [
-            f"(assert (= {value1_smt} ((_ extract {overlap - 1} 0) {value2_smt})))"
-        ]
-    return [
-        f"(assert (= ((_ extract {overlap - 1} 0) {value1_smt}) {value2_smt}))"
-    ]
+    require_equal_return_bit_widths(
+        return_size1,
+        return_size2,
+        context="counterexample validation value equality",
+    )
+    return [_assert_equal(f"(= {value1_smt} {value2_smt})")]
 
 
 def _build_model_assertions(base_ctx: Dict[str, Any], counterexample_raw: Dict[str, Any]) -> List[str]:

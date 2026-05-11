@@ -592,6 +592,67 @@ def test_loop_template_strategy_proves_equivalence_after_normalization_unknown()
     assert result.is_equivalent is None
 
 
+def test_loop_template_strategy_rejects_mismatched_return_widths_before_template_proof() -> None:
+    p1 = _param("param_1")
+    lhs = _add(p1, _const(1))
+    rhs = _add(_const(1), p1)
+
+    class _DummyResult:
+        is_equivalent = None
+        results = []
+
+    class _DummyRunner:
+        def __init__(self) -> None:
+            self.timeout = 5
+
+        def run_sequential(self, _query: str) -> _DummyResult:
+            return _DummyResult()
+
+    strategy = LoopTemplatePairwiseStrategy(formula_builder=None, solver_runner=_DummyRunner(), debug=False)
+    strategy._active_normalization_stats = {
+        "timeout_fallback_attempts": 0,
+        "changed_pairs": 0,
+        "no_change_pairs": 0,
+        "unsat_results": 0,
+        "sat_results": 0,
+        "unknown_results": 0,
+    }
+    base_ctx = {
+        "header_lines": [],
+        "params1": [],
+        "params2": [],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 64,
+        "return_size2": 32,
+    }
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=lhs,
+        return_info=ReturnInfo(address="0x0", value=lhs, conditions=[]),
+        return_type="ulong",
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=rhs,
+        return_info=ReturnInfo(address="0x1", value=rhs, conditions=[]),
+        return_type="uint",
+    )
+
+    result = strategy._try_normalization_equivalence(
+        base_ctx,
+        case1,
+        case2,
+        lambda smt: smt,
+        lambda smt: smt,
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is None
+
+
 def test_checker_enables_loop_template_stage_for_pairwise_timeout_unknown() -> None:
     checker = EquivalenceChecker(
         strategy="pairwise",

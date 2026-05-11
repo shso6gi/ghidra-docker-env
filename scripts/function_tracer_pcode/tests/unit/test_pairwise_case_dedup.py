@@ -4,6 +4,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
@@ -41,6 +43,14 @@ def _param(name: str) -> Expression:
 
 def _const(value: int) -> Expression:
     return Expression(ExpressionType.CONSTANT, value=value, size=8)
+
+
+def _loc(name: str, offset: int, size: int) -> CanonicalLocation:
+    return CanonicalLocation(
+        base_ref=LocationBaseRef.parameter(name, index=0),
+        offset=offset,
+        size=size,
+    )
 
 
 def _neg(expr: Expression) -> Expression:
@@ -519,7 +529,7 @@ def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effe
     value_expr = Expression.binary_op(
         "INT_ADD",
         post_state_read_expression_for_location(
-            CanonicalLocation("trace", 0, 4),
+            _loc("trace", 0, 4),
             params,
             symbolic=True,
         ),
@@ -529,7 +539,7 @@ def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effe
                 "INT_ADD",
                 limit,
                 post_state_read_expression_for_location(
-                    CanonicalLocation("trace", 4, 4),
+                    _loc("trace", 4, 4),
                     params,
                     symbolic=True,
                 ),
@@ -539,19 +549,19 @@ def test_return_case_value_smt_lowers_nested_symbolic_post_state_reads_with_effe
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 0, 4),
+            location=_loc("trace", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), start),
             conditions=[trace_nonnull, loop_active, even_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("trace", 4, 4),
+            location=_loc("trace", 4, 4),
             value=Expression.binary_op(
                 "INT_SUB",
                 Expression.binary_op("INT_ADD", limit, Expression.memory(steps_addr, size=4)),
@@ -615,13 +625,13 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
     )
     effects = [
         StoreEffect(
-            location=CanonicalLocation("param_1", 0, 4),
+            location=_loc("param_1", 0, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(trace, size=4), _neg(start)),
             conditions=[trace_nonnull, loop_active, odd_iteration, final_iter],
             order_key=5,
         ),
         StoreEffect(
-            location=CanonicalLocation("param_1", 4, 4),
+            location=_loc("param_1", 4, 4),
             value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
@@ -657,7 +667,7 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
 def test_return_analyzer_collapses_complementary_symbolic_post_state_cases_when_values_match():
     params = [{"name": "trace", "index": 0, "size": 8}]
     symbolic_value = post_state_read_expression_for_location(
-        CanonicalLocation("trace", 0, 4),
+        _loc("trace", 0, 4),
         params,
         symbolic=True,
     )
@@ -751,6 +761,35 @@ def test_build_pair_query_coerces_case_values_to_return_width():
     )
 
     assert "(assert (not (= param_1 ((_ zero_extend 32) (_ bv2 32)))))" in query
+
+
+def test_build_pair_query_rejects_width_mismatch_overlap_without_bridge_proof():
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=8),
+        return_info=ReturnInfo(address="0x1001", value=Expression(ExpressionType.PARAMETER, name="param_1", size=8)),
+        return_type="ulong",
+        return_type_obj=resolve_mock_data_type("ulong"),
+    )
+    case2 = ReturnCase(
+        index=1,
+        conditions=[],
+        value_expr=Expression(ExpressionType.PARAMETER, name="param_1", size=4),
+        return_info=ReturnInfo(address="0x1002", value=Expression(ExpressionType.PARAMETER, name="param_1", size=4)),
+        return_type="uint",
+        return_type_obj=resolve_mock_data_type("uint"),
+    )
+
+    with pytest.raises(ValueError, match="return width mismatch|width mismatch"):
+        build_pair_query(
+            {"header_lines": [], "return_size1": 64, "return_size2": 32},
+            case1,
+            case2,
+            lambda text: text,
+            lambda text: text,
+            "(0,1)",
+        )
 
 
 def test_build_normalized_inequality_query_coerces_normalized_values_to_return_width():

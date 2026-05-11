@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
     _build_model_validation_query,
     _normalize_condition_smt,
+    _normalize_smt_expr_widths,
     _parse_smt_expr,
     _smt_expr_to_string,
     solve_query_twostage,
@@ -723,7 +724,7 @@ def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
     assert expanded[0].value.operands[0].to_string() == "(arg0 + 1)"
 
 
-def test_expression_expander_recovers_callee_aligned_call_arguments_before_resolution():
+def test_expression_expander_refuses_callee_aligned_call_arguments_without_object_evidence():
     class _FakeAddress:
         def __init__(self, offset):
             self._offset = offset
@@ -949,7 +950,7 @@ def test_expression_expander_recovers_callee_aligned_call_arguments_before_resol
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "7"
     assert captured["target"] == CallTargetRef.from_name("callee")
-    assert [arg.to_string() for arg in captured["args"]] == ["param_1", "param_2", "1"]
+    assert captured["args"] == []
 
 
 def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_table():
@@ -1111,7 +1112,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
     assert all(ev.conditions for ev in expanded)
 
 
-def test_expression_expander_records_recovered_args_for_deferred_call_fallback():
+def test_expression_expander_does_not_record_formal_storage_args_for_deferred_call_fallback():
     reg_a0 = {
         "register_name": "a0",
         "base_register_name": "a0",
@@ -1271,7 +1272,7 @@ def test_expression_expander_records_recovered_args_for_deferred_call_fallback()
 
     assert len(expanded) == 1
     assert recorded["call"][0] == CallTargetRef.from_name("callee")
-    assert recorded["call"][1] == ["param_1", "param_2", "param_3"]
+    assert recorded["call"][1] == []
     assert recorded["call"][2] == "4198400"
     assert expanded[0].value.to_string() == "call_out_of_scope:callee#0"
 
@@ -1654,6 +1655,49 @@ def test_return_analyzer_keeps_safe_call_summary_when_others_are_rejected():
     assert expanded is not None
     assert len(expanded) == 1
     assert expanded[0].value.value == 11
+
+
+def test_return_analyzer_does_not_rebind_argument_specialized_call_analysis():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    caller_a = _param_expr("caller_a", 1, size=4)
+    caller_b = _param_expr("caller_b", 2, size=4)
+    callee_analysis = FunctionReturnAnalysis(
+        function_name="callee",
+        entry_point="0x401000",
+        parameters=[
+            {"name": "x", "size": 4, "index": 0},
+            {"name": "y", "size": 4, "index": 1},
+            {"name": "free_caller_b", "size": 4, "index": 2},
+        ],
+        returns=[
+            ReturnInfo(
+                address="0x401010",
+                value=Expression.binary_op("INT_XOR", caller_a, caller_b),
+                conditions=[],
+                branch_index=0,
+            ),
+        ],
+        return_type="int",
+        analysis_scope_key=(
+            "analysis_scope",
+            ("function", "callee"),
+            ((0, ("bound", "caller_a")), (1, ("bound", "caller_b"))),
+            (),
+        ),
+    )
+
+    with patch.object(analyzer, "_get_or_analyze_call_target", return_value=callee_analysis):
+        expanded = analyzer._resolve_call_expansions(
+            CallTargetRef.from_name("callee"),
+            [caller_a, caller_b],
+            active_functions=set(),
+        )
+
+    assert expanded is not None
+    assert len(expanded) == 1
+    assert expanded[0].value.operator == "INT_XOR"
+    assert expanded[0].value.operands[0].name == "caller_a"
+    assert expanded[0].value.operands[1].name == "caller_b"
 
 
 def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
@@ -2593,7 +2637,7 @@ def test_return_analyzer_recovers_call_wrapper_from_pcode_block_paths():
     assert mock_recover.call_args_list[1].args[0] is call_else
 
 
-def test_return_analyzer_recovers_call_wrapper_when_some_paths_are_not_recoverable():
+def test_return_analyzer_rejects_call_wrapper_when_some_paths_are_not_recoverable():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     analysis = FunctionReturnAnalysis(
         function_name="ptr_select_path",
@@ -2670,8 +2714,8 @@ def test_return_analyzer_recovers_call_wrapper_when_some_paths_are_not_recoverab
                 set(),
             )
 
-    assert recovered == recovered_else
-    assert mock_terminal.call_count == 2
+    assert recovered is None
+    assert mock_terminal.call_count == 1
 
 
 def test_return_analyzer_recovers_switch_like_returns_from_branchind_targets():
@@ -3542,8 +3586,20 @@ def test_return_analyzer_specializes_higher_order_wrapper_from_object_targets():
         entry_point="0x402000",
         parameters=[
             {"name": "param_1", "size": 8, "data_type": "code *", "index": 0},
-            {"name": "param_2", "size": 4, "data_type": "undefined4", "index": 1},
-            {"name": "param_3", "size": 4, "data_type": "undefined4", "index": 2},
+            {
+                "name": "param_2",
+                "size": 4,
+                "data_type": "undefined4",
+                "index": 1,
+                "storage": {"is_register": True, "register_name": "r1", "size": 4, "size_bits": 32},
+            },
+            {
+                "name": "param_3",
+                "size": 4,
+                "data_type": "undefined4",
+                "index": 2,
+                "storage": {"is_register": True, "register_name": "r2", "size": 4, "size_bits": 32},
+            },
         ],
         returns=[
             ReturnInfo(
@@ -3610,8 +3666,18 @@ def test_return_analyzer_specializes_higher_order_wrapper_from_object_targets():
                 function_name="ptr_op_add",
                 entry_point="0x401100",
                 parameters=[
-                    {"name": "a", "size": 4, "index": 0},
-                    {"name": "b", "size": 4, "index": 1},
+                    {
+                        "name": "a",
+                        "size": 4,
+                        "index": 0,
+                        "storage": {"is_register": True, "register_name": "r1", "size": 4, "size_bits": 32},
+                    },
+                    {
+                        "name": "b",
+                        "size": 4,
+                        "index": 1,
+                        "storage": {"is_register": True, "register_name": "r2", "size": 4, "size_bits": 32},
+                    },
                 ],
                 returns=[
                     ReturnInfo(
@@ -3632,8 +3698,18 @@ def test_return_analyzer_specializes_higher_order_wrapper_from_object_targets():
                 function_name="ptr_op_xor",
                 entry_point="0x401200",
                 parameters=[
-                    {"name": "a", "size": 4, "index": 0},
-                    {"name": "b", "size": 4, "index": 1},
+                    {
+                        "name": "a",
+                        "size": 4,
+                        "index": 0,
+                        "storage": {"is_register": True, "register_name": "r1", "size": 4, "size_bits": 32},
+                    },
+                    {
+                        "name": "b",
+                        "size": 4,
+                        "index": 1,
+                        "storage": {"is_register": True, "register_name": "r2", "size": 4, "size_bits": 32},
+                    },
                 ],
                 returns=[
                     ReturnInfo(
@@ -5334,6 +5410,49 @@ def test_model_validation_query_normalizes_width_mismatch_compare():
     assert "(assert (bvslt x_1 (_ bv0 64)))" not in query
 
 
+def test_model_validation_query_normalizes_width_mismatch_value_equality():
+    class _FakeCase:
+        def __init__(self, value):
+            self.value = value
+
+        def get_conditions_smt(self, _param_replace_fn):
+            return []
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return self.value
+
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+    query = _build_model_validation_query(
+        base_ctx,
+        _FakeCase("(bvand x_1 (_ bv4294967295 64))"),
+        _FakeCase("(_ bv1 32)"),
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        model_assertions=[],
+        equality=True,
+    )
+
+    assert "(assert (= (bvand x_1 (_ bv4294967295 32)) (_ bv1 32)))" in query
+    assert "(bvand x_1 (_ bv4294967295 64))" not in query
+
+
 def test_validate_counterexample_globally_handles_width_mismatch_compare_with_normalization():
     class _Solver:
         def __init__(self):
@@ -5418,6 +5537,68 @@ def test_validate_counterexample_globally_handles_width_mismatch_compare_with_no
     assert not any("(assert (bvslt x_1 (_ bv0 64)))" in q for q in strategy.solver_runner.queries)
 
 
+def test_validate_counterexample_globally_rejects_return_width_overlap_equality():
+    class _Solver:
+        def __init__(self):
+            self.queries = []
+
+        def run_sequential(self, query):
+            self.queries.append(query)
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 1, "x_2": 1})])
+
+    class _Strategy:
+        def __init__(self):
+            self.solver_runner = _Solver()
+            self.per_query_timeout = 5
+            self.messages = []
+
+        def _debug_print(self, message: str):
+            self.messages.append(message)
+
+    class _FakeCase:
+        def __init__(self, value):
+            self.value = value
+
+        def get_conditions_smt(self, _param_replace_fn):
+            return []
+
+        def should_sign_extend_value(self) -> bool:
+            return False
+
+        def get_value_smt(self, *_args, **_kwargs):
+            return self.value
+
+    strategy = _Strategy()
+    params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=64, index=0)]
+    params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
+    base_ctx = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 64))",
+            "(declare-const x_2 (_ BitVec 32))",
+        ],
+        "params1": params1,
+        "params2": params2,
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "return_size1": 64,
+        "return_size2": 32,
+    }
+
+    is_decisive = validate_counterexample_globally(
+        strategy,
+        base_ctx,
+        [_FakeCase("x_1")],
+        [_FakeCase("x_2")],
+        param_replace_fn1=None,
+        param_replace_fn2=None,
+        counterexample_raw={"x_1": 1, "x_2": 1},
+    )
+
+    assert not is_decisive
+    assert any("return width mismatch" in message for message in strategy.messages)
+    assert not any("extract 31 0" in query for query in strategy.solver_runner.queries)
+
+
 def test_parse_smt_expr_handles_indexed_identifier_syntax():
     condition = "(bvslt ((_ sign_extend 32) x_1) ((_ extract 7 0) y_2))"
     ast = _parse_smt_expr(condition)
@@ -5433,3 +5614,31 @@ def test_normalize_condition_smt_roundtrips_indexed_syntax():
     condition = "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"
     normalized = _normalize_condition_smt(condition, {"x_1": 32, "y_2": 64})
     assert normalized == "(bvslt ((_ zero_extend 32) x_1) (_ bv0 64))"
+
+
+def test_normalize_condition_smt_coerces_bv_binary_constant_widths():
+    condition = "(= (bvand param_2_2 (_ bv4294967295 64)) (_ bv1 32))"
+    normalized = _normalize_condition_smt(condition, {"param_2_2": 32})
+
+    assert normalized == "(= (bvand param_2_2 (_ bv4294967295 32)) (_ bv1 32))"
+
+
+def test_normalize_condition_smt_extends_bv_binary_symbol_widths_before_comparison():
+    condition = "(= (bvand x_1 y_2) (_ bv0 64))"
+    normalized = _normalize_condition_smt(condition, {"x_1": 32, "y_2": 64})
+
+    assert normalized == "(= (bvand ((_ zero_extend 32) x_1) y_2) (_ bv0 64))"
+
+
+def test_normalize_smt_expr_widths_coerces_bitvector_equality_operands():
+    equality = "(= (bvadd x_1 (_ bv1 32)) y_2)"
+    normalized = _normalize_smt_expr_widths(equality, {"x_1": 32, "y_2": 64})
+
+    assert normalized == "(= ((_ zero_extend 32) (bvadd x_1 (_ bv1 32))) y_2)"
+
+
+def test_normalize_smt_expr_widths_handles_value_binary_widths():
+    value_smt = "(bvadd ((_ sign_extend 32) x_1) (_ bv4294967295 32))"
+    normalized = _normalize_smt_expr_widths(value_smt, {"x_1": 32})
+
+    assert normalized == "(bvadd ((_ sign_extend 32) x_1) (_ bv4294967295 64))"
