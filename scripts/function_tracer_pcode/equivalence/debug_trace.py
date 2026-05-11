@@ -5,6 +5,12 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+from .unknown_reason import (
+    UnknownReasonRecord,
+    coerce_unknown_reason_records,
+    summarize_unknown_reason_counts,
+)
+
 
 class TransitionReason(Enum):
     """Phase/Stage遷移理由"""
@@ -107,8 +113,12 @@ class Attempt:
     counterexample: Optional[Dict[str, Any]] = None
     pairwise_decisive: Optional[PairwiseDecisiveInfo] = None
     normalization_rules: List[NormalizationRuleApplication] = field(default_factory=list)
+    unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
     mips64_abi_constraints: Optional[Dict[str, Any]] = None
     elapsed_time: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -133,6 +143,7 @@ class Attempt:
             "counterexample": self.counterexample,
             "pairwise_decisive": self.pairwise_decisive.to_dict() if self.pairwise_decisive else None,
             "normalization_rules": [rule.to_dict() for rule in self.normalization_rules],
+            "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
             "mips64_abi_constraints": self.mips64_abi_constraints,
             "elapsed_time": self.elapsed_time,
         }
@@ -276,12 +287,18 @@ class DebugTrace:
         return "\n".join(lines)
     
     def to_dict(self) -> Dict[str, Any]:
+        all_unknown_reasons = [
+            reason
+            for attempt in self.attempts
+            for reason in getattr(attempt, "unknown_reasons", []) or []
+        ]
         return {
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "planned_phases": self.planned_phases,
             "known_phases": self.known_phases,
             "used_phases": self.get_used_phases(),
             "phase_usage": self.get_phase_usage(),
+            "unknown_reason_counts": summarize_unknown_reason_counts(all_unknown_reasons),
             "final_result": self.final_result,
             "total_time": self.total_time,
             "error_message": self.error_message,

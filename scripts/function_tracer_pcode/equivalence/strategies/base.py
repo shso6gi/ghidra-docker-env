@@ -10,6 +10,7 @@ from ...model import Condition, Expression, FunctionReturnAnalysis
 from ...model import ExpressionType
 from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...smt import ParallelResult
+from ..unknown_reason import UnknownReasonRecord, coerce_unknown_reason_records
 
 
 @dataclass
@@ -32,6 +33,10 @@ class StrategyResult:
     sat_pair_info: Optional[Dict[str, Any]] = None  # (i, j, conditions, values)
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
     pairwise_debug_stats: Optional[Dict[str, int]] = None
+    unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
 
 
 class CheckStrategy(ABC):

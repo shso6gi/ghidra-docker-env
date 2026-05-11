@@ -12,6 +12,7 @@ from .debug_trace import (
 )
 from .result import EquivalenceResult, RewriteInfo
 from .typing.fixer import TypeFixResult
+from .unknown_reason import coerce_unknown_reason_records
 from ..smt import ParallelResult
 
 
@@ -61,7 +62,8 @@ def record_attempt(
     pairwise_decisive: Optional[PairwiseDecisiveInfo],
     normalization_rules: Optional[List[Any]],
     mips64_abi_constraints: Optional[Dict[str, Any]],
-    elapsed_time: float
+    elapsed_time: float,
+    unknown_reasons: Optional[List[Any]] = None,
 ) -> None:
     """Attempt を追加する"""
     attempt = Attempt(
@@ -86,6 +88,7 @@ def record_attempt(
         counterexample=counterexample,
         pairwise_decisive=pairwise_decisive,
         normalization_rules=normalization_rules or [],
+        unknown_reasons=list(coerce_unknown_reason_records(unknown_reasons)),
         mips64_abi_constraints=mips64_abi_constraints,
         elapsed_time=elapsed_time,
     )
@@ -132,6 +135,7 @@ def record_attempt_from_result(
         normalization_rules=normalization_rules,
         mips64_abi_constraints=mips64_abi_dict,
         elapsed_time=result.total_time,
+        unknown_reasons=list(result.unknown_reasons),
     )
 
 

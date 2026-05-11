@@ -36,7 +36,11 @@ def try_solver_proven_rewrite_equivalence(
     changed1 = _expr_signature(rewritten_expr1) != _expr_signature(case1.value_expr)
     changed2 = _expr_signature(rewritten_expr2) != _expr_signature(case2.value_expr)
     if not changed1 and not changed2:
-        return QueryResult(is_equivalent=None)
+        result = QueryResult(is_equivalent=None)
+        result.pair_stage = "rewrite-no-change"
+        result.blocking_reason = "solver_proven_rewrite_no_change"
+        result.blocking_detail = "solver-proven rewrite produced no candidate rewrite"
+        return result
 
     if changed1:
         if not _prove_rewrite(
@@ -48,7 +52,11 @@ def try_solver_proven_rewrite_equivalence(
             pair_id,
             label="rewrite-proof-1",
         ):
-            return QueryResult(is_equivalent=None)
+            result = QueryResult(is_equivalent=None)
+            result.pair_stage = "rewrite-proof-1"
+            result.blocking_reason = "solver_proven_rewrite_proof_failed"
+            result.blocking_detail = "left rewrite candidate could not be proven equivalent"
+            return result
     else:
         rewritten_expr1 = case1.value_expr
 
@@ -62,7 +70,11 @@ def try_solver_proven_rewrite_equivalence(
             pair_id,
             label="rewrite-proof-2",
         ):
-            return QueryResult(is_equivalent=None)
+            result = QueryResult(is_equivalent=None)
+            result.pair_stage = "rewrite-proof-2"
+            result.blocking_reason = "solver_proven_rewrite_proof_failed"
+            result.blocking_detail = "right rewrite candidate could not be proven equivalent"
+            return result
     else:
         rewritten_expr2 = case2.value_expr
 

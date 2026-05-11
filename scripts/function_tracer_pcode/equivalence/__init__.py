@@ -15,6 +15,15 @@ from .phases.handler import PhaseHandler, PhaseContext
 from .counterexample import CounterexampleFormatter, FormattedCounterexample
 from .formula import FormulaBuilder, ParameterFragmentInfo
 from .strategies import CheckStrategy, MonolithicStrategy, PairwiseStrategy
+from .unknown_reason import (
+    UnknownAggregationUnit,
+    UnknownDecisionEffect,
+    UnknownReasonClass,
+    UnknownReasonId,
+    UnknownReasonRecord,
+    UnknownReasonScope,
+    UnknownRecoveryProofKind,
+)
 
 __all__ = [
     # メインクラス
@@ -54,4 +63,11 @@ __all__ = [
     'CheckStrategy',
     'MonolithicStrategy',
     'PairwiseStrategy',
+    "UnknownAggregationUnit",
+    "UnknownDecisionEffect",
+    "UnknownReasonClass",
+    "UnknownReasonId",
+    "UnknownReasonRecord",
+    "UnknownReasonScope",
+    "UnknownRecoveryProofKind",
 ]

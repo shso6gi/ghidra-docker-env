@@ -240,6 +240,9 @@ def try_normalization_equivalence(
             normalization_stats["unknown_results"] += 1
         result = QueryResult(is_equivalent=None)
         result.normalization_rules = normalization_rules
+        result.pair_stage = "norm-no-change"
+        result.blocking_reason = "normalization_no_change"
+        result.blocking_detail = "normalization fallback applied no semantic rewrite"
         return result
 
     if normalization_stats is not None:

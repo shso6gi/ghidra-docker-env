@@ -10,6 +10,7 @@ from .counterexample import FormattedCounterexample
 from .typing.fixer import TypeFixResult
 from ..transform.rewrite.rules import RewriteResult
 from .debug_trace import DebugTrace  # 新規追加
+from .unknown_reason import UnknownReasonRecord, coerce_unknown_reason_records
 
 
 @dataclass
@@ -82,12 +83,16 @@ class EquivalenceResult:
     mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
     pairwise_stats: Optional[Dict[str, int]] = None
     pairwise_debug_stats: Optional[Dict[str, int]] = None
+    unknown_reasons: List[UnknownReasonRecord] = field(default_factory=list)
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
     debug_trace: Optional[DebugTrace] = None
     
     # ★ 新規追加: 正規化ルール適用履歴
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
+
+    def __post_init__(self) -> None:
+        self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -144,6 +149,7 @@ class EquivalenceResult:
             "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
             "pairwise_stats": self.pairwise_stats,
             "pairwise_debug_stats": self.pairwise_debug_stats,
+            "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
@@ -236,6 +242,19 @@ class EquivalenceResult:
                     unknown=stats.get("unknown_results", 0),
                 )
             )
+
+        if self.unknown_reasons:
+            lines.append("")
+            lines.append("UNKNOWN Reasons:")
+            for reason in self.unknown_reasons[:10]:
+                scope = reason.pair_or_case or reason.stage or reason.reason_scope
+                recovery = reason.recovery_proof_kind
+                lines.append(
+                    f"  {reason.reason_id}: class={reason.reason_class}, "
+                    f"effect={reason.decision_effect}, scope={scope}, recovery={recovery}"
+                )
+            if len(self.unknown_reasons) > 10:
+                lines.append(f"  ... ({len(self.unknown_reasons) - 10} more)")
                 
         lines.append("")
         

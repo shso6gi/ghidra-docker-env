@@ -25,6 +25,7 @@ from .debug_trace import DebugTrace, PairwiseDecisiveInfo
 from .attempts import get_transition_reason, record_attempt, record_attempt_from_result
 from .recursive_abstraction import abstract_recursive_calls  # type: ignore[import-not-found]
 from .workflow import run_check_from_binaries
+from .unknown_reason import make_unknown_reason
 
 
 # ============================================================================
@@ -474,7 +475,22 @@ class EquivalenceChecker:
                 function2_signature_hypotheses=list(analysis2.signature_hypotheses),
                 constrained_fragments=[],
                 rewrite_info=rewrite_info,
-                mips64_abi_constraints=abi_constraints
+                mips64_abi_constraints=abi_constraints,
+                unknown_reasons=(
+                    [
+                        make_unknown_reason(
+                            "solver_unknown_timeout",
+                            stage="ABI_RETRY",
+                            evidence_refs=(
+                                str(parallel_result.results[0].status.name)
+                                if parallel_result.results
+                                else "no_solver_result",
+                            ),
+                        )
+                    ]
+                    if parallel_result.is_equivalent is None
+                    else []
+                ),
             )
 
         except ReturnWidthMismatchError as e:
@@ -504,6 +520,14 @@ class EquivalenceChecker:
                 rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
                 pairwise_debug_stats={reason_id: 1},
+                unknown_reasons=[
+                    make_unknown_reason(
+                        reason_id,
+                        stage="ABI_RETRY",
+                        evidence_refs=(str(e),),
+                        detail=str(e),
+                    )
+                ],
             )
         
         except Exception as e:
@@ -885,6 +909,7 @@ class EquivalenceChecker:
                     'error_pairs': strategy_result.error_pairs,
                 } if strategy_result.total_pairs > 0 else None,
                 pairwise_debug_stats=strategy_result.pairwise_debug_stats,
+                unknown_reasons=strategy_result.unknown_reasons,
                 sat_pair_info=strategy_result.sat_pair_info,
                 normalization_rules=strategy_result.normalization_rules
             )

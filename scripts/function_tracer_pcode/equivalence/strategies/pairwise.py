@@ -70,6 +70,7 @@ from ..semantic_width import (
     normalize_analysis_semantic_width,
 )
 from ..debug_trace import NormalizationRuleApplication
+from ..unknown_reason import UnknownReasonId, make_unknown_reason
 
 
 @dataclass(frozen=True)
@@ -273,6 +274,7 @@ class PairwiseStrategy(CheckStrategy):
             "unknown_results": 0,
             "return_width_bridge_missing": 0,
         }
+        unknown_reasons = []
         self._active_normalization_stats = normalization_stats
 
         for i, case1 in enumerate(cases1):
@@ -311,6 +313,15 @@ class PairwiseStrategy(CheckStrategy):
                         )
                         continue
                     unknown_count += 1
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+                            stage="S_PAIRWISE",
+                            pair_or_case=pair_id,
+                            evidence_refs=(loop_fallback_reason,),
+                            detail=loop_fallback_reason,
+                        )
+                    )
                     self._debug_print(
                         f"  Pair {pair_id}: loop summary requires semantic proof "
                         f"({loop_fallback_reason}) -> UNKNOWN"
@@ -332,6 +343,14 @@ class PairwiseStrategy(CheckStrategy):
                     query_label=f"{pair_id}:case2",
                 ):
                     unknown_count += 1
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            UnknownReasonId.UNRESOLVED_EXPRESSION,
+                            stage="S_PAIRWISE",
+                            pair_or_case=pair_id,
+                            evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
+                        )
+                    )
                     self._debug_print(
                         f"  Pair {pair_id}: unresolved expression detected -> UNKNOWN"
                     )
@@ -354,6 +373,15 @@ class PairwiseStrategy(CheckStrategy):
                 if result.is_equivalent is False:
                     if sat_unsafety_reasons:
                         unknown_count += 1
+                        unknown_reasons.append(
+                            make_unknown_reason(
+                                UnknownReasonId.SAT_UNSAFETY,
+                                stage="S_PAIRWISE",
+                                pair_or_case=pair_id,
+                                evidence_refs=tuple(sat_unsafety_reasons),
+                                detail=", ".join(sat_unsafety_reasons),
+                            )
+                        )
                         self._debug_print(
                             "  Pair "
                             f"{pair_id}: SAT downgraded to UNKNOWN due to unsafe analysis "
@@ -373,6 +401,14 @@ class PairwiseStrategy(CheckStrategy):
                     )
                     if not is_decisive:
                         unknown_count += 1
+                        unknown_reasons.append(
+                            make_unknown_reason(
+                                UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+                                stage="S_PAIRWISE",
+                                pair_or_case=pair_id,
+                                evidence_refs=(result.pair_stage or "unknown",),
+                            )
+                        )
                         self._debug_print(
                             f"  Pair {pair_id}: SAT counterexample was ambiguous -> downgraded to UNKNOWN"
                         )
@@ -406,6 +442,15 @@ class PairwiseStrategy(CheckStrategy):
                     continue
 
                 unknown_count += 1
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        result.blocking_reason or UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+                        stage="S_PAIRWISE",
+                        pair_or_case=pair_id,
+                        evidence_refs=(result.pair_stage or "unknown", result.blocking_detail),
+                        detail=result.blocking_detail,
+                    )
+                )
                 self._debug_print(f"  Pair {pair_id}: final result UNKNOWN/TIMEOUT")
 
             if sat_count > 0:
@@ -428,6 +473,15 @@ class PairwiseStrategy(CheckStrategy):
                     )
                 else:
                     unknown_count += 1
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+                            stage="S_PAIRWISE",
+                            pair_or_case=pair_id,
+                            evidence_refs=(pending.reason,),
+                            detail=pending.reason,
+                        )
+                    )
                     self._debug_print(
                         f"  Pair {pair_id}: loop summary requires semantic proof "
                         f"({pending.reason}) -> UNKNOWN"
@@ -446,6 +500,20 @@ class PairwiseStrategy(CheckStrategy):
             final_is_equiv = None
             self._debug_print("=" * 60)
             blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
+            for blocking_reason in blocking_reasons:
+                typed_reason_id = (
+                    blocking_reason
+                    if "return_coverage_" in blocking_reason
+                    else UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+                )
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        typed_reason_id,
+                        stage="S_PAIRWISE",
+                        evidence_refs=(blocking_reason,),
+                        detail=blocking_reason,
+                    )
+                )
             self._debug_print(
                 "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
                 f"{', '.join(blocking_reasons)})"
@@ -457,6 +525,13 @@ class PairwiseStrategy(CheckStrategy):
         else:
             final_is_equiv = None
             error_count = total_pairs - unsat_count - sat_count - unknown_count
+            unknown_reasons.append(
+                make_unknown_reason(
+                    UnknownReasonId.UNEXPECTED_PAIRWISE_STATE,
+                    stage="S_PAIRWISE",
+                    evidence_refs=(f"errors={error_count}",),
+                )
+            )
             self._debug_print("=" * 60)
             self._debug_print(f"Result: UNKNOWN (unexpected state, errors={error_count})")
 
@@ -490,6 +565,7 @@ class PairwiseStrategy(CheckStrategy):
                 sat_pair_info=sat_pair_info,
                 normalization_rules=all_normalization_rules,
                 pairwise_debug_stats=normalization_stats,
+                unknown_reasons=unknown_reasons,
             )
         finally:
             self._active_safety_checker = None
@@ -3537,6 +3613,12 @@ class PairwiseStrategy(CheckStrategy):
             sat_pairs=0,
             unknown_pairs=0,
             error_pairs=0,
+            unknown_reasons=[
+                make_unknown_reason(
+                    UnknownReasonId.EMPTY_RETURN_CASES,
+                    stage="S_PAIRWISE",
+                )
+            ],
         )
 
     def _debug_symbol_mapping(self, base_ctx: Dict[str, Any]) -> None:

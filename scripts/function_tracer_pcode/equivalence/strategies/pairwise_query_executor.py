@@ -113,6 +113,8 @@ def solve_query_twostage(
         result = QueryResult(is_equivalent=None)
         result.last_query = cond_query
         result.pair_stage = "with-ineq-skipped"
+        result.blocking_reason = "unresolved_value_expression"
+        result.blocking_detail = "value expression contains UNKNOWN or unsupported SMT operation"
         return result
 
     try:
@@ -172,6 +174,10 @@ def solve_query_twostage(
             if getattr(strategy, "_active_normalization_stats", None) is not None:
                 strategy._active_normalization_stats["solver_proven_rewrite_successes"] += 1
             return rewrite_result
+        if getattr(rewrite_result, "blocking_reason", None):
+            stage2_result.blocking_reason = rewrite_result.blocking_reason
+            stage2_result.blocking_detail = rewrite_result.blocking_detail
+            stage2_result.pair_stage = rewrite_result.pair_stage or stage2_result.pair_stage
         if getattr(strategy, "_active_normalization_stats", None) is not None:
             strategy._active_normalization_stats["solver_proven_rewrite_failures"] += 1
 
@@ -197,6 +203,10 @@ def solve_query_twostage(
             norm_result.last_query = full_query
             norm_result.pair_stage = "norm-ineq"
             return norm_result
+        if getattr(norm_result, "blocking_reason", None):
+            stage2_result.blocking_reason = norm_result.blocking_reason
+            stage2_result.blocking_detail = norm_result.blocking_detail
+            stage2_result.pair_stage = norm_result.pair_stage or stage2_result.pair_stage
 
     return stage2_result
 

@@ -12,6 +12,7 @@ from ..formula.returns import ReturnWidthMismatchError
 from ..normalize import NormalizationSettings
 from ..param_semantics import infer_parameter_semantics
 from ..semantic_width import align_return_value_extension_surfaces, normalize_analysis_semantic_width
+from ..unknown_reason import UnknownReasonId, make_unknown_reason
 from .base import CheckStrategy, StrategyResult
 from .pairwise_query_builder import extract_return_cases
 from .pairwise_query_executor import validate_counterexample_globally
@@ -193,6 +194,7 @@ class MonolithicStrategy(CheckStrategy):
                 counterexample_raw = parallel_result.get_counterexample()
 
             final_is_equivalent = parallel_result.is_equivalent
+            unknown_reasons = []
             sat_unsafety_reasons = self._collect_decisive_sat_unsafety_reasons(
                 analysis1,
                 analysis2,
@@ -209,18 +211,44 @@ class MonolithicStrategy(CheckStrategy):
                 )
             sat_unsafety_reasons.extend(coverage_unsafety_reasons)
             if final_is_equivalent is True and coverage_unsafety_reasons:
+                for reason in coverage_unsafety_reasons:
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            reason,
+                            stage="S_MONOLITHIC_FALLBACK",
+                            evidence_refs=(reason,),
+                            detail=reason,
+                        )
+                    )
                 self._debug_print(
                     "Monolithic UNSAT downgraded to UNKNOWN due to incomplete return coverage "
                     f"({', '.join(coverage_unsafety_reasons)})"
                 )
                 final_is_equivalent = None
             if final_is_equivalent is True and equivalence_blocking_reasons:
+                for reason in equivalence_blocking_reasons:
+                    unknown_reasons.append(
+                        make_unknown_reason(
+                            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+                            stage="S_MONOLITHIC_FALLBACK",
+                            evidence_refs=(reason,),
+                            detail=reason,
+                        )
+                    )
                 self._debug_print(
                     "Monolithic UNSAT downgraded to UNKNOWN due to incomplete effect analysis "
                     f"({', '.join(equivalence_blocking_reasons)})"
                 )
                 final_is_equivalent = None
             if final_is_equivalent is False and sat_unsafety_reasons:
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        UnknownReasonId.SAT_UNSAFETY,
+                        stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=tuple(sat_unsafety_reasons),
+                        detail=", ".join(sat_unsafety_reasons),
+                    )
+                )
                 self._debug_print(
                     "Monolithic SAT downgraded to UNKNOWN due to unsafe analysis summary "
                     f"({', '.join(sat_unsafety_reasons)})"
@@ -232,11 +260,24 @@ class MonolithicStrategy(CheckStrategy):
                 analysis2,
                 counterexample_raw,
             ):
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
+                        stage="S_MONOLITHIC_FALLBACK",
+                    )
+                )
                 self._debug_print(
                     "Monolithic SAT downgraded to UNKNOWN after global counterexample validation"
                 )
                 final_is_equivalent = None
                 counterexample_raw = None
+            elif final_is_equivalent is None and not unknown_reasons:
+                unknown_reasons.append(
+                    make_unknown_reason(
+                        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+                        stage="S_MONOLITHIC_FALLBACK",
+                    )
+                )
             
             return StrategyResult(
                 is_equivalent=final_is_equivalent,
@@ -245,7 +286,8 @@ class MonolithicStrategy(CheckStrategy):
                 counterexample_raw=counterexample_raw,
                 return_var1=return_var1,
                 return_var2=return_var2,
-                constrained_fragments=constrained_fragments
+                constrained_fragments=constrained_fragments,
+                unknown_reasons=unknown_reasons,
             )
         
         except ReturnWidthMismatchError as e:
@@ -260,6 +302,14 @@ class MonolithicStrategy(CheckStrategy):
                 return_var2=None,
                 constrained_fragments=[],
                 pairwise_debug_stats={reason_id: 1},
+                unknown_reasons=[
+                    make_unknown_reason(
+                        reason_id,
+                        stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=(str(e),),
+                        detail=str(e),
+                    )
+                ],
             )
 
         except Exception as e:
@@ -275,5 +325,13 @@ class MonolithicStrategy(CheckStrategy):
                 counterexample_raw=None,
                 return_var1=None,
                 return_var2=None,
-                constrained_fragments=[]
+                constrained_fragments=[],
+                unknown_reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.STRATEGY_EXCEPTION,
+                        stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=(str(e),),
+                        detail=str(e),
+                    )
+                ],
             )

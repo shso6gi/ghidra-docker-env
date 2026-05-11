@@ -167,3 +167,5 @@ class QueryResult:
         self.last_query: Optional[str] = None
         self.normalization_rules: List = []
         self.pair_stage: Optional[str] = None
+        self.blocking_reason: Optional[str] = None
+        self.blocking_detail: Optional[str] = None
