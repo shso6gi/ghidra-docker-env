@@ -1822,7 +1822,7 @@ def test_method_b_smt_identity_uses_seed_compensated_loop_summary():
     )
 
 
-def test_loop_side_effect_stable_key_ignores_function_context_descriptors():
+def test_loop_side_effect_stable_key_distinguishes_function_context_descriptors():
     base_profile = LoopSideEffectProfileRef(
         profile="pure",
         context_memory_writes=True,
@@ -1850,7 +1850,34 @@ def test_loop_side_effect_stable_key_ignores_function_context_descriptors():
         ),
     )
 
-    assert base_profile.stable_key() == other_context_profile.stable_key()
+    assert base_profile.stable_key() is not None
+    assert other_context_profile.stable_key() is not None
+    assert base_profile.stable_key() != other_context_profile.stable_key()
+
+
+def test_loop_side_effect_profile_requires_effect_proof_for_context_level_unsafety():
+    pure_profile_with_context = LoopSideEffectProfileRef(
+        profile="pure",
+        context_memory_writes=True,
+        context_descriptors=(
+            LoopBodyEffectRef(
+                kind="memory_write",
+                source="function_effect_summary",
+                scope="function",
+                location="outside",
+                value_expr=1,
+            ),
+        ),
+    )
+    effect_aware_profile = LoopSideEffectProfileRef(
+        profile="effect_aware",
+        memory_reads=True,
+    )
+    read_only_pure_profile = LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True)
+
+    assert pure_profile_with_context.requires_effect_proof() is True
+    assert effect_aware_profile.requires_effect_proof() is True
+    assert read_only_pure_profile.requires_effect_proof() is False
 
 
 def test_effect_aware_loop_summary_disables_exact_and_smt_shortcuts():

@@ -1153,7 +1153,10 @@ class LoopSideEffectProfileRef:
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         effect_keys = tuple(effect.stable_key() for effect in self.effect_descriptors)
+        context_effect_keys = tuple(effect.stable_key() for effect in self.context_descriptors)
         if any(effect_key is None for effect_key in effect_keys):
+            return None
+        if any(effect_key is None for effect_key in context_effect_keys):
             return None
         return (
             "loop_side_effect_profile",
@@ -1163,14 +1166,22 @@ class LoopSideEffectProfileRef:
             bool(self.calls),
             bool(self.escapes),
             bool(self.conditional_guards),
+            bool(self.context_memory_writes),
+            bool(self.context_calls),
+            bool(self.context_escapes),
+            bool(self.context_conditional_guards),
             int(self.effect_count),
             int(self.guard_count),
             effect_keys,
+            context_effect_keys,
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         effect_keys = tuple(effect.semantic_key() for effect in self.effect_descriptors)
+        context_effect_keys = tuple(effect.semantic_key() for effect in self.context_descriptors)
         if any(effect_key is None for effect_key in effect_keys):
+            return None
+        if any(effect_key is None for effect_key in context_effect_keys):
             return None
         return (
             "loop_side_effect_profile",
@@ -1180,17 +1191,30 @@ class LoopSideEffectProfileRef:
             bool(self.calls),
             bool(self.escapes),
             bool(self.conditional_guards),
+            bool(self.context_memory_writes),
+            bool(self.context_calls),
+            bool(self.context_escapes),
+            bool(self.context_conditional_guards),
             int(self.effect_count),
             int(self.guard_count),
             effect_keys,
+            context_effect_keys,
         )
 
     def requires_effect_proof(self) -> bool:
+        profile = (self.profile or "").lower()
+        if profile not in {"pure", "pure_memory_read"}:
+            return True
         return bool(
             self.memory_writes
             or self.calls
             or self.escapes
             or self.conditional_guards
+            or self.context_memory_writes
+            or self.context_calls
+            or self.context_escapes
+            or self.context_conditional_guards
+            or self.context_descriptors
         )
 
     def to_dict(self) -> Dict[str, Any]:

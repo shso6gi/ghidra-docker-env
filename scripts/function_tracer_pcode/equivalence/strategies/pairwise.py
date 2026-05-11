@@ -271,6 +271,7 @@ class PairwiseStrategy(CheckStrategy):
             "unsat_results": 0,
             "sat_results": 0,
             "unknown_results": 0,
+            "return_width_bridge_missing": 0,
         }
         self._active_normalization_stats = normalization_stats
 
@@ -1301,7 +1302,7 @@ class PairwiseStrategy(CheckStrategy):
         if (
             getattr(left_ref, "loop_summary", None) is not None
             or getattr(right_ref, "loop_summary", None) is not None
-        ) and not self._cases_have_equivalent_summary_conditions(left_case, right_case):
+        ) and not self._case_pair_has_runtime_guard_coverage_or_equivalence(left_case, right_case):
             return False
         if not self._counted_loop_refs_match_ignoring_signedness(left_ref, right_ref):
             return False
@@ -1767,15 +1768,31 @@ class PairwiseStrategy(CheckStrategy):
         left_case: ReturnCase,
         right_case: ReturnCase,
     ) -> bool:
-        return self._cases_have_equivalent_summary_conditions(left_case, right_case)
+        if not self._cases_have_equivalent_summary_conditions(left_case, right_case):
+            return False
+        return self._case_conditions_cover_runtime_summary_guards(
+            left_case,
+        ) and self._case_conditions_cover_runtime_summary_guards(right_case)
 
     def _case_pair_has_runtime_guard_coverage_or_equivalence(
         self,
         left_case: ReturnCase,
         right_case: ReturnCase,
     ) -> bool:
+        left_guards, left_complete = self._runtime_summary_guard_conditions_from_expression(
+            left_case.value_expr,
+        )
+        right_guards, right_complete = self._runtime_summary_guard_conditions_from_expression(
+            right_case.value_expr,
+        )
+        if not left_complete or not right_complete:
+            return False
+        if not left_guards and not right_guards:
+            return self._cases_have_equivalent_summary_conditions(left_case, right_case)
         if self._cases_have_pair_local_summary_guard_compatibility(left_case, right_case):
             return True
+        if not left_guards or not right_guards:
+            return False
         return self._case_conditions_cover_runtime_summary_guards(
             left_case,
         ) and self._case_conditions_cover_runtime_summary_guards(

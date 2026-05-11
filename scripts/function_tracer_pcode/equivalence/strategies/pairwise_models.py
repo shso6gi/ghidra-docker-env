@@ -28,6 +28,7 @@ class ReturnCase:
         effect_summary=None,
         comparison_surface=None,
         summary_conditions: Optional[List[Condition]] = None,
+        program_is_big_endian: Optional[bool] = None,
     ):
         self.index = index
         self.conditions = list(conditions or [])
@@ -41,6 +42,7 @@ class ReturnCase:
         self.parameters = parameters or []
         self.effect_summary = effect_summary
         self.comparison_surface = comparison_surface
+        self.program_is_big_endian = program_is_big_endian
         self.conditions_smt: Optional[List[str]] = None
         self._value_smt_cache: Dict[tuple, str] = {}
 
