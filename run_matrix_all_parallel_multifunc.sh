@@ -485,119 +485,35 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     shopt -u nullglob
 
     {
-        echo "--- Results for $TARGET_FUNC ---"
-        echo "  Total pairs     : ${#FUNC_LOG_FILES[@]}"
-        echo "  Elapsed wall time: $(format_duration "$func_elapsed_seconds")"
-        echo "  Equivalent     : ${#EQ_PAIRS[@]}"
-        echo "  Not equivalent : ${#NON_EQ_PAIRS[@]}"
-        echo "  Error          : ${#ERROR_PAIRS[@]}"
-        echo "  Unknown        : ${#UNKNOWN_PAIRS[@]}"
-        echo "  Timeout        : ${#TIMEOUT_PAIRS[@]}"
-
-        print_log_time_summary_block "  " "${FUNC_LOG_FILES[@]}"
-        print_phase_usage_summary_block "  " "${FUNC_LOG_FILES[@]}"
-        print_pairwise_normalization_summary_block "  " "${FUNC_LOG_FILES[@]}"
-
-        print_unknown_validation_summary_block "  " "${FUNC_LOG_FILES[@]}"
-        print_unknown_validation_diff_block "  " "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}" "${FUNC_LOG_FILES[@]}"
-        if (( ${#NON_EQ_PAIRS[@]} > 0 )); then
-            echo ""
-            echo "  NOT EQUIVALENT pairs:"
-            for pair in "${NON_EQ_PAIRS[@]}"; do
-                echo "    - $pair"
-            done
+        FUNCTION_SUMMARY_ARGS=(
+            --function-summary
+            --function-name "$TARGET_FUNC"
+            --elapsed-seconds "$func_elapsed_seconds"
+        )
+        if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+            FUNCTION_SUMMARY_ARGS+=(--before-dir "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}")
         fi
-
-        if (( ${#ERROR_PAIRS[@]} > 0 )); then
-            echo ""
-            echo "  ERROR pairs:"
-            for pair in "${ERROR_PAIRS[@]}"; do
-                echo "    - $pair"
-            done
-        fi
-
-        if (( ${#UNKNOWN_PAIRS[@]} > 0 )); then
-            echo ""
-            echo "  UNKNOWN pairs:"
-            for pair in "${UNKNOWN_PAIRS[@]}"; do
-                echo "    - $pair"
-            done
-        fi
-
-        if (( ${#TIMEOUT_PAIRS[@]} > 0 )); then
-            echo ""
-            echo "  TIMEOUT pairs:"
-            for pair in "${TIMEOUT_PAIRS[@]}"; do
-                echo "    - $pair"
-            done
-        fi
-
-        if (( ${#NON_EQ_PAIRS[@]} == 0 && ${#ERROR_PAIRS[@]} == 0 && ${#UNKNOWN_PAIRS[@]} == 0 && ${#TIMEOUT_PAIRS[@]} == 0 )); then
-            echo ""
-            echo "  ✓ All compared pairs are EQUIVALENT."
-        fi
-
-        echo ""
+        python3 -m scripts.function_tracer_pcode.validation.result_summary \
+            "${FUNCTION_SUMMARY_ARGS[@]}" \
+            "${FUNC_LOG_FILES[@]}"
     } | tee "$RESULT_FILE"
 
 done
 
 # ---------------------- 全体サマリー ----------------------
-# 全体サマリーの保存先
 SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
 mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
 
 {
-    echo "============================================================"
-    echo "  All functions processed: ${#TARGET_FUNCS[@]} function(s)"
-    echo "============================================================"
+    OVERALL_SUMMARY_ARGS=(--overall-summary)
+    if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+        OVERALL_SUMMARY_ARGS+=(--before-dir "$VALIDATION_BEFORE_DIR")
+    fi
     for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
-        OUTPUT_DIR="${OUTPUT_BASE_DIR}/${TARGET_FUNC}"
-        shopt -s nullglob
-        FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
-        shopt -u nullglob
-
-        eq_count=0
-        non_eq_count=0
-        error_count=0
-        unknown_count=0
-        timeout_count=0
-        total_logs=${#FUNC_LOG_FILES[@]}
-
-        for LOG_FILE in "${FUNC_LOG_FILES[@]}"; do
-            case "$(classify_log_result "$LOG_FILE")" in
-                EQ)
-                    eq_count=$((eq_count + 1))
-                    ;;
-                NOT_EQ)
-                    non_eq_count=$((non_eq_count + 1))
-                    ;;
-                ERROR)
-                    error_count=$((error_count + 1))
-                    ;;
-                TIMEOUT)
-                    timeout_count=$((timeout_count + 1))
-                    ;;
-                *)
-                    unknown_count=$((unknown_count + 1))
-                    ;;
-            esac
-        done
-
-        printf "  %-30s : TOTAL=%3d, EQ=%3d, NOT_EQ=%3d, ERROR=%3d, UNKNOWN=%3d, TIMEOUT=%3d, WALL=%s\n" \
-            "$TARGET_FUNC" "$total_logs" "$eq_count" "$non_eq_count" "$error_count" "$unknown_count" "$timeout_count" \
-            "$(format_duration "${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")"
+        OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")
     done
-    echo ""
-    echo "  Function Timing Summary:"
-    for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
-        printf "    %-28s %s\n" "$TARGET_FUNC" "$(format_duration "${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")"
-    done
-    print_log_time_summary_block "  " "${ALL_LOG_FILES[@]}"
-    print_phase_usage_summary_block "  " "${ALL_LOG_FILES[@]}"
-    print_pairwise_normalization_summary_block "  " "${ALL_LOG_FILES[@]}"
-    print_unknown_validation_summary_block "  " "${ALL_LOG_FILES[@]}"
-    print_unknown_validation_diff_block "  " "$VALIDATION_BEFORE_DIR" "${ALL_LOG_FILES[@]}"
-    echo "============================================================"
+    python3 -m scripts.function_tracer_pcode.validation.result_summary \
+        "${OVERALL_SUMMARY_ARGS[@]}" \
+        "${ALL_LOG_FILES[@]}"
 } | tee "$SUMMARY_FILE"

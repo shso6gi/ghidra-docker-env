@@ -127,6 +127,33 @@ class PcodeTracer:
         
         self._collect_debug_info()
 
+    def _get_op_order_key(self, pcode_op) -> Optional[int]:
+        """Return a comparable intra-address P-code op order, if available.
+
+        This is intentionally narrower than ``PcodeOpRef.stable_key()``. Memory
+        read ordering and live-in checks need a monotonic integer order for
+        comparisons, not a structural identity tuple.
+        """
+        if pcode_op is None:
+            return None
+        seqnum = getattr(pcode_op, "getSeqnum", lambda: None)()
+        if seqnum is not None:
+            order = getattr(seqnum, "getOrder", lambda: None)()
+            coerced = self._coerce_op_order_value(order)
+            if coerced is not None:
+                return coerced
+        order = getattr(pcode_op, "getOrder", lambda: None)()
+        return self._coerce_op_order_value(order)
+
+    @staticmethod
+    def _coerce_op_order_value(value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _record_deferred_call(
         self,
         target_ref: CallTargetRef,
