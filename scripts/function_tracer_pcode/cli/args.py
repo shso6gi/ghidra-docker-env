@@ -116,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="出力ファイルパス",
     )
     parser.add_argument(
+        "--emit-result-json",
+        action="store_true",
+        help="等価性判定結果の機械可読JSONをログへ追記する",
+    )
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",

@@ -2,6 +2,7 @@
 """Equivalence-mode CLI helpers."""
 
 import sys
+import json
 import tempfile
 from pathlib import Path
 
@@ -168,6 +169,17 @@ def run_equivalence_check(args):
         show_phase_usage=args.debug,
     )
     output_result(output_content, args.output, args.quiet)
+
+    if _get_bool_arg("emit_result_json", False):
+        json_payload = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+        json_content = "\n".join(
+            (
+                "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
+                json_payload,
+                "=== EQUIVALENCE_RESULT_JSON_END ===",
+            )
+        )
+        output_result(json_content, args.output, args.quiet)
 
     if args.save_formula and result.smt_formula:
         if not args.quiet:

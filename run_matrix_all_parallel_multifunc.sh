@@ -14,6 +14,7 @@ TARGET_FUNCS=(
 OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/arithmetic_long_test"
 BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test"
 PARALLEL_JOBS=${PARALLEL_JOBS:-10}  # 同時実行数。環境変数で上書き可能
+VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -81,7 +82,7 @@ run_pair() {
 
     python3 -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
-        -f "$TARGET_FUNC" -d \
+        -f "$TARGET_FUNC" -d --emit-result-json \
         > "$LOG_FILE" 2>&1
     local ec=$?
 
@@ -340,6 +341,40 @@ print_pairwise_normalization_summary_block() {
     printf "%s  LOGS=%3d | ATTEMPTS=%3d, CHANGED=%3d, NO_CHANGE=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d\n" \
         "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
+print_unknown_validation_summary_block() {
+    local indent="$1"
+    shift
+    local -a log_files=("$@")
+
+    if (( ${#log_files[@]} == 0 )); then
+        return 0
+    fi
+
+    echo ""
+    python3 -m scripts.function_tracer_pcode.validation.unknown_reason_summary \
+        --summary \
+        --indent "$indent" \
+        "${log_files[@]}" || true
+}
+
+print_unknown_validation_diff_block() {
+    local indent="$1"
+    local before_dir="$2"
+    shift 2
+    local -a log_files=("$@")
+
+    if [[ -z "$before_dir" || ! -d "$before_dir" || ${#log_files[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    python3 -m scripts.function_tracer_pcode.validation.unknown_reason_summary \
+        --diff \
+        --before-dir "$before_dir" \
+        --indent "$indent" \
+        "${log_files[@]}" || true
+}
+
 
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
@@ -463,6 +498,8 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
         print_phase_usage_summary_block "  " "${FUNC_LOG_FILES[@]}"
         print_pairwise_normalization_summary_block "  " "${FUNC_LOG_FILES[@]}"
 
+        print_unknown_validation_summary_block "  " "${FUNC_LOG_FILES[@]}"
+        print_unknown_validation_diff_block "  " "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}" "${FUNC_LOG_FILES[@]}"
         if (( ${#NON_EQ_PAIRS[@]} > 0 )); then
             echo ""
             echo "  NOT EQUIVALENT pairs:"
@@ -560,5 +597,7 @@ mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sor
     print_log_time_summary_block "  " "${ALL_LOG_FILES[@]}"
     print_phase_usage_summary_block "  " "${ALL_LOG_FILES[@]}"
     print_pairwise_normalization_summary_block "  " "${ALL_LOG_FILES[@]}"
+    print_unknown_validation_summary_block "  " "${ALL_LOG_FILES[@]}"
+    print_unknown_validation_diff_block "  " "$VALIDATION_BEFORE_DIR" "${ALL_LOG_FILES[@]}"
     echo "============================================================"
 } | tee "$SUMMARY_FILE"

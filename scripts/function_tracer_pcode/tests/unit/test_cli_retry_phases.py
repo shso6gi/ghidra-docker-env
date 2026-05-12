@@ -43,6 +43,21 @@ def test_no_retry_phases_option():
         assert retry_with_type_fix == False
 
 
+def test_emit_result_json_option_defaults_off_and_can_be_enabled():
+    """--emit-result-json は通常ログ互換のため opt-in。"""
+    from function_tracer_pcode.cli.main import parse_arguments
+
+    base_args = ['--equiv', 'binary1', 'binary2', '-f', 'test_func']
+
+    with patch.object(sys, 'argv', ['main.py'] + base_args):
+        args = parse_arguments()
+        assert args.emit_result_json is False
+
+    with patch.object(sys, 'argv', ['main.py'] + base_args + ['--emit-result-json']):
+        args = parse_arguments()
+        assert args.emit_result_json is True
+
+
 def test_help_does_not_contain_retry_with_int():
     """help メッセージに --retry-with-int が含まれていないことを確認"""
     from function_tracer_pcode.cli.main import parse_arguments
