@@ -386,6 +386,7 @@ def rewrite_analysis_returns(
         deferred_calls=dict(analysis.deferred_calls),
         effect_summary=analysis.effect_summary,
         comparison_surface=analysis.comparison_surface,
+        program_is_big_endian=analysis.program_is_big_endian,
     )
     
     return new_analysis, rewrite_results

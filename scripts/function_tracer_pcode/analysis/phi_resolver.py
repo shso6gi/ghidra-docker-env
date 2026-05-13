@@ -387,7 +387,7 @@ class PhiHandler:
             # 入力がMULTIEQUALを持つかチェック
             input_def = input_varnode.getDef() if input_varnode else None
             if input_def and input_def.getMnemonic() == "MULTIEQUAL":
-                expanded = self.expand_multiequal(input_def, [], depth)
+                expanded = self.expand_multiequal(input_def, conditions, depth)
                 has_phi = True
             else:
                 # 通常のトレース（キャッシュなし）

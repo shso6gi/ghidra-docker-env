@@ -11,9 +11,11 @@ through legacy shortcuts.
 from dataclasses import replace
 from unittest.mock import Mock
 
+from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
+from scripts.function_tracer_pcode.equivalence.unknown_reason import UnknownReasonId
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
@@ -111,6 +113,14 @@ def _ptradd_guard_eq_count(value: int) -> Condition:
 
 def _count_gt(value: int) -> Condition:
     return Condition(Expression.binary_op("INT_SLESS", _const(value), _count_param()))
+
+
+def _base_eq_zero() -> Condition:
+    return Condition(Expression.binary_op("INT_EQUAL", _base_param(), Expression.constant(0, size=8)))
+
+
+def _base_ne_zero() -> Condition:
+    return Condition(Expression.binary_op("INT_NOTEQUAL", _base_param(), Expression.constant(0, size=8)))
 
 
 def _term(byte_offset: int) -> ReadonlyReductionTermRef:
@@ -342,6 +352,65 @@ def test_pairwise_object_condition_coverage_proves_total_binary_partition_withou
         [
             ReturnInfo(address="0x1000", value=_const(7), conditions=[non_positive]),
             ReturnInfo(address="0x1004", value=_const(7), conditions=[positive]),
+        ],
+    )
+    cases = extract_return_cases(analysis)
+    strategy = _pairwise_strategy()
+
+    assert strategy._return_cases_have_object_centric_total_coverage(cases)
+
+
+def test_pairwise_coverage_uses_parameter_index_before_fragment_runtime_refs():
+    class FragmentRuntimeRef:
+        def __init__(self, name: str):
+            self.name = name
+
+        def stable_key(self):
+            return ("fragment", self.name)
+
+    count_from_guard_a = Expression.parameter(
+        "count",
+        index=1,
+        data_type="int",
+        size=4,
+        runtime_ref=FragmentRuntimeRef("guard_a"),
+    )
+    count_from_guard_b = Expression.parameter(
+        "count",
+        index=1,
+        data_type="int",
+        size=4,
+        runtime_ref=FragmentRuntimeRef("guard_b"),
+    )
+    analysis = _analysis(
+        "fragmented_parameter_identity_partition",
+        [
+            ReturnInfo(
+                address="0x1000",
+                value=_const(7),
+                conditions=[
+                    Condition(
+                        Expression.binary_op(
+                            "INT_SLESS",
+                            Expression.constant(0, size=4),
+                            count_from_guard_a,
+                        )
+                    )
+                ],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=_const(7),
+                conditions=[
+                    Condition(
+                        Expression.binary_op(
+                            "INT_SLESS",
+                            count_from_guard_b,
+                            Expression.constant(1, size=4),
+                        )
+                    )
+                ],
+            ),
         ],
     )
     cases = extract_return_cases(analysis)
@@ -624,6 +693,33 @@ def _pairwise_strategy() -> PairwiseStrategy:
     return strategy
 
 
+def _shared_input_base_context() -> dict:
+    return {
+        "header_lines": [
+            "(set-logic QF_BV)",
+            "(declare-const base_1 (_ BitVec 64))",
+            "(declare-const count_1 (_ BitVec 32))",
+            "(declare-const base_2 (_ BitVec 64))",
+            "(declare-const count_2 (_ BitVec 32))",
+            "(assert (= base_1 base_2))",
+            "(assert (= count_1 count_2))",
+        ],
+        "params1": [
+            ParameterInfo("base", "base_1", 64, 0, is_signed=False),
+            ParameterInfo("count", "count_1", 32, 1, is_signed=True),
+        ],
+        "params2": [
+            ParameterInfo("base", "base_2", 64, 0, is_signed=False),
+            ParameterInfo("count", "count_2", 32, 1, is_signed=True),
+        ],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+
 def test_ptr_sum_window_branch_fixture_uses_method_b_for_n_1_2_3_and_ge_4():
     full = _readonly_sum(_readonly_summary(start=0, guard_constraints=("0 < count",)))
     tail = _readonly_sum(
@@ -661,6 +757,34 @@ def test_readonly_runtime_shortcut_requires_case_guard_equivalence():
     assert result.is_equivalent is None
     assert result.sat_pairs == 0
     assert result.unknown_pairs == 1
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_loop_shape_mismatch_unreachable_under_shared_inputs_is_not_unknown():
+    summary_value = _readonly_sum(_readonly_summary(start=0))
+    constant_value = Expression.constant(0xFFFFFECA, size=4)
+    strategy = _pairwise_strategy()
+    strategy.formula_builder.build_base_context.return_value = _shared_input_base_context()
+
+    result = strategy.check(
+        _analysis(
+            "summary_nonzero_base",
+            [ReturnInfo(address="0x1100", value=summary_value, conditions=[_base_ne_zero(), _count_gt(0)])],
+        ),
+        _analysis(
+            "constant_zero_base",
+            [ReturnInfo(address="0x1200", value=constant_value, conditions=[_base_eq_zero()])],
+        ),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    assert all(
+        reason.reason_id != UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
+        for reason in result.unknown_reasons
+    )
     strategy.solver_runner.run_sequential.assert_not_called()
 
 
@@ -916,6 +1040,90 @@ def test_exact_prefix_return_matches_storage_backed_count_identity():
     )
 
     assert _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
+
+
+def test_exact_prefix_return_matches_loop_summary_without_accumulator_proof():
+    exact = _sum_expr(
+        _load_term_expr(0),
+        _load_term_expr(1),
+        _load_term_expr(2),
+        _load_term_expr(3),
+    )
+    summary = _readonly_sum(
+        _readonly_summary(
+            start=3,
+            seed_terms=(_term(0), _term(4), _term(8)),
+        )
+    )
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis("exact_count4", [ReturnInfo(address="0x1300", value=exact, conditions=[_eq_count(4)])]),
+        _analysis("summary_count4", [ReturnInfo(address="0x1400", value=summary, conditions=[_eq_count(4)])]),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_exact_prefix_return_does_not_close_path_sensitive_loop_summary_without_proof():
+    exact = _sum_expr(
+        _load_term_expr(0),
+        _load_term_expr(1),
+        _load_term_expr(2),
+        _load_term_expr(3),
+    )
+    path_sensitive_summary = replace(
+        _readonly_summary(
+            start=3,
+            seed_terms=(_term(0), _term(4), _term(8)),
+        ),
+        cases=(
+            LoopCaseRef(
+                path_conditions=("path_split",),
+                body_effect=LoopBodyEffectRef(
+                    kind="accumulator_update",
+                    value_expr=("accumulator", "plus", "term"),
+                ),
+                term_expr=("term",),
+            ),
+        ),
+    )
+    summary = _readonly_sum(path_sensitive_summary)
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis("exact_count4", [ReturnInfo(address="0x1310", value=exact, conditions=[_eq_count(4)])]),
+        _analysis("path_sensitive_summary_count4", [ReturnInfo(address="0x1410", value=summary, conditions=[_eq_count(4)])]),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
+    strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_readonly_identity_mismatch_emits_typed_recovery_reason():
+    left = _readonly_sum(_readonly_summary(start=0))
+    right = _readonly_sum_from_ref(replace(left.runtime_ref, count_parameter_index=2))
+    strategy = _pairwise_strategy()
+
+    result = strategy.check(
+        _analysis("readonly_left", [ReturnInfo(address="0x1500", value=left, conditions=[])]),
+        _analysis("readonly_right", [ReturnInfo(address="0x1600", value=right, conditions=[])]),
+    )
+
+    assert result.is_equivalent is None
+    assert result.total_pairs == 1
+    assert result.unknown_pairs == 1
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING.value
+    assert result.unknown_reasons[0].recovery_proof_obligations
+    strategy.solver_runner.run_sequential.assert_not_called()
 
 
 def test_exact_prefix_return_matches_wide_abi_summary_count_by_active_parameter_width():

@@ -17,6 +17,7 @@ from .unknown_reason_summary import (
     extract_result_payloads_from_logs,
     extract_result_payloads_from_text,
     format_validation_unknown_diff,
+    format_validation_unknown_diff_unavailable,
     format_validation_unknown_summary,
     summarize_validation_unknowns,
 )
@@ -211,17 +212,20 @@ def format_function_results_summary(
         lines.append("  ✓ All compared pairs are EQUIVALENT.")
     if include_unknown_reason_summary:
         payloads = _payloads_from_records(aggregate.records)
+        unknown_summary = summarize_validation_unknowns(payloads)
         lines.append("")
-        lines.append(format_validation_unknown_summary(summarize_validation_unknowns(payloads), indent="  "))
+        lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
+        lines.append("")
         if before_log_paths:
             before_payloads = extract_result_payloads_from_logs(before_log_paths)
-            lines.append("")
             lines.append(
                 format_validation_unknown_diff(
                     compare_validation_unknowns(before_payloads, payloads),
                     indent="  ",
                 )
             )
+        else:
+            lines.append(format_validation_unknown_diff_unavailable(unknown_summary, indent="  "))
     lines.append("")
     return "\n".join(lines)
 
@@ -267,17 +271,20 @@ def format_overall_results_summary(
         )
     )
     payloads = _payloads_from_records(summary.overall.records)
+    unknown_summary = summarize_validation_unknowns(payloads)
     lines.append("")
-    lines.append(format_validation_unknown_summary(summarize_validation_unknowns(payloads), indent="  "))
+    lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
+    lines.append("")
     if before_log_paths:
         before_payloads = extract_result_payloads_from_logs(before_log_paths)
-        lines.append("")
         lines.append(
             format_validation_unknown_diff(
                 compare_validation_unknowns(before_payloads, payloads),
                 indent="  ",
             )
         )
+    else:
+        lines.append(format_validation_unknown_diff_unavailable(unknown_summary, indent="  "))
     lines.append("============================================================")
     return "\n".join(lines)
 
@@ -316,6 +323,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--elapsed-seconds", type=float, default=None)
     parser.add_argument("--before-dir", default=None)
     parser.add_argument(
+        "--require-before-dir",
+        action="store_true",
+        help="fail instead of emitting baseline-unavailable delta sections",
+    )
+    parser.add_argument(
         "--function-wall-time",
         action="append",
         default=None,
@@ -328,6 +340,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         aggregate = aggregate_validation_logs(args.logs)
         function_name = args.function_name or _single_function_name(aggregate.records) or "(unknown)"
         before_logs = sorted(Path(args.before_dir).glob("*.log")) if args.before_dir else ()
+        _require_before_logs(before_logs, args.require_before_dir)
         print(
             format_function_results_summary(
                 function_name,
@@ -341,6 +354,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     overall = aggregate_validation_logs_by_function(args.logs)
     assert_aggregation_invariant(overall)
     before_logs = sorted(Path(args.before_dir).glob("*/*.log")) if args.before_dir else ()
+    _require_before_logs(before_logs, args.require_before_dir)
     print(
         format_overall_results_summary(
             overall,
@@ -349,6 +363,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     )
     return 0
+
+
+def _require_before_logs(before_logs: Sequence[Any], require_before_dir: bool) -> None:
+    if require_before_dir and not before_logs:
+        raise SystemExit(
+            "--require-before-dir requires --before-dir with baseline *.log files"
+        )
 
 
 def _format_count_lines(indent: str, aggregate: ValidationResultAggregate) -> Tuple[str, ...]:

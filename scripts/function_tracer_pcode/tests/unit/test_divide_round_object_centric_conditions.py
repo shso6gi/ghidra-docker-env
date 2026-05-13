@@ -22,7 +22,8 @@ from scripts.function_tracer_pcode.model import (
 
 
 def _param(name: str) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=8)
+    parameter_index = {"param_1": 0, "param_2": 1}.get(name, -1)
+    return Expression.parameter(name, index=parameter_index, size=8)
 
 
 def _const(value: int) -> Expression:

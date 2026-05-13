@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """FormulaBuilder の ABI・追加 assertion まわりのテスト。"""
 
+import pytest
+
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.equivalence.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.equivalence.formula.params import (
     build_fragment_backed_parameter_constraint,
 )
@@ -111,31 +114,23 @@ class TestABIConstraints:
         assert "param1_1" in constraints_text
         assert "(= param1_2 ((_ zero_extend 32) ((_ extract 31 0) param1_1)))" in constraints_text
 
-    def test_build_with_abi_constraints_uses_new_api(self):
+    def test_build_with_abi_constraints_blocks_unbridged_return_width_mismatch(self):
         builder = FormulaBuilder(debug=False)
         analysis1 = _analysis("func1", "x", 8)
         analysis2 = _analysis("func2", "y", 4)
         abi_constraints = {"x_1": ("signed", 32)}
 
-        formula = builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
+        section = builder.build_abi_assertion_section(abi_constraints, "_1", "_2")
+        section_text = "\n".join(section)
+        assert "MIPS64 ABI constraints" in section_text
+        assert "sign_extend" in section_text
+        assert "x_1" in section_text
+        assert "x_2" in section_text
 
-        assert "MIPS64 ABI constraints" in formula
-        assert "sign_extend" in formula
-        assert "x_1" in formula
-        assert "y_2" in formula
+        with pytest.raises(ReturnWidthMismatchError) as exc_info:
+            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
 
-        lines = formula.split("\n")
-        check_sat_index = -1
-        abi_constraint_index = -1
-        for i, line in enumerate(lines):
-            if "(check-sat)" in line:
-                check_sat_index = i
-            if "MIPS64 ABI constraints" in line:
-                abi_constraint_index = i
-
-        assert check_sat_index >= 0
-        assert abi_constraint_index >= 0
-        assert abi_constraint_index < check_sat_index
+        assert exc_info.value.reason_id == "return_width_bridge_missing"
 
     def test_build_abi_assertion_section(self):
         builder = FormulaBuilder(debug=False)
@@ -199,21 +194,24 @@ class TestABIConstraints:
         assert "((_ extract 31 0) x_2)" in text
         assert "((_ sign_extend 32) ((_ extract 31 0) x_2))" in text
 
-    def test_build_with_abi_constraints_wrapper_consistency(self):
+    def test_build_with_abi_constraints_wrapper_consistency_for_width_mismatch_block(self):
         builder = FormulaBuilder(debug=False)
         analysis1 = _analysis("func1", "param0", 8)
         analysis2 = _analysis("func2", "param0", 4)
         abi_constraints = {"param0_1": ("signed", 32)}
 
-        formula_wrapper = builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
         section = builder.build_abi_assertion_section(abi_constraints, "_1", "_2")
-        formula_direct = builder.build_equivalence_formula_extended(
-            analysis1,
-            analysis2,
-            extra_assertions=section,
-        ).formula
+        with pytest.raises(ReturnWidthMismatchError) as wrapper_exc:
+            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
+        with pytest.raises(ReturnWidthMismatchError) as direct_exc:
+            builder.build_equivalence_formula_extended(
+                analysis1,
+                analysis2,
+                extra_assertions=section,
+            )
 
-        assert formula_wrapper == formula_direct
+        assert wrapper_exc.value.reason_id == direct_exc.value.reason_id
+        assert str(wrapper_exc.value) == str(direct_exc.value)
 
     def test_semantic_width_constraints_are_emitted_for_narrowed_same_width_parameters(self):
         builder = FormulaBuilder(debug=False)
@@ -221,7 +219,7 @@ class TestABIConstraints:
             ExpressionType.BINARY_OP,
             operator="SUBPIECE",
             operands=[
-                Expression(ExpressionType.PARAMETER, name="x", size=8),
+                Expression(ExpressionType.PARAMETER, name="x", value=0, size=8),
                 Expression(ExpressionType.CONSTANT, value=0, size=8),
             ],
             size=4,

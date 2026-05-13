@@ -92,6 +92,7 @@ def run_equivalence_check(args):
     pairwise_timeout = getattr(args, "pairwise_timeout", 5)
     pairwise_timeout_hard = getattr(args, "pairwise_timeout_hard", 30)
     pairwise_save_unknown = getattr(args, "pairwise_save_unknown", False)
+    pairwise_unknown_dir = getattr(args, "pairwise_unknown_dir", None)
     normalization_mode = _get_choice_arg("normalize_mode", {"off", "safe", "full"}, "safe")
     enable_fact_normalization = _get_bool_arg("enable_fact_normalization", False)
     enable_template_abstraction = _get_bool_arg("enable_template_abstraction", False)
@@ -106,6 +107,7 @@ def run_equivalence_check(args):
         pairwise_timeout=pairwise_timeout,
         pairwise_timeout_hard=pairwise_timeout_hard,
         pairwise_save_unknown=pairwise_save_unknown,
+        pairwise_unknown_dir=pairwise_unknown_dir,
         normalization_mode=normalization_mode,
         enable_fact_normalization=enable_fact_normalization,
         enable_template_abstraction=enable_template_abstraction,

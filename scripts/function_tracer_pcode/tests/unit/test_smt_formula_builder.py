@@ -409,37 +409,17 @@ class TestCheckerABIRetryIntegration:
             assert "MIPS64 ABI constraints" in extra_text, \
                 "extra_assertions should contain ABI section header"
             
-            # ★ 追加: run_parallel() が呼ばれたことを確認
-            assert mock_solver.called, "run_parallel should be called (debug=False)"
+            # return width bridge proof がない ABI 制約だけでは solver へ進まない。
+            assert not mock_solver.called, "run_parallel should not be called without a return-width bridge proof"
         
         # 結果検証
-        assert result.is_equivalent is True
-        assert result.smt_formula is not None
-        
-        # 生成された SMT 式に ABI 制約が含まれることを確認
-        assert "MIPS64 ABI constraints" in result.smt_formula
-        assert "x_1" in result.smt_formula
-        assert "x_2" in result.smt_formula
-        assert "sign_extend" in result.smt_formula
-        
-        # (check-sat) の前にABI制約があることを確認
-        lines = result.smt_formula.split('\n')
-        check_sat_index = -1
-        abi_section_index = -1
-        
-        for i, line in enumerate(lines):
-            if '(check-sat)' in line:
-                check_sat_index = i
-            if 'MIPS64 ABI constraints' in line:
-                abi_section_index = i
-        
-        assert check_sat_index >= 0
-        assert abi_section_index >= 0
-        assert abi_section_index < check_sat_index, \
-            "ABI constraints should be before (check-sat)"
+        assert result.is_equivalent is None
+        assert result.error_message is None
+        assert result.smt_formula is None
+        assert result.pairwise_debug_stats == {"return_width_bridge_missing": 1}
+        assert result.mips64_abi_constraints == abi_constraints
         
         print("\n[TEST] _retry_with_abi_constraints uses correct FormulaBuilder path")
         print(f"  - build_abi_assertion_section called: {spy_section.call_count} time(s)")
         print(f"  - build_equivalence_formula_extended called with extra_assertions")
-        print(f"  - run_parallel called (debug=False mode)")
-
+        print(f"  - run_parallel blocked until a return-width bridge proof exists")

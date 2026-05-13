@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
-from ..model import Expression, ExpressionType, FunctionReturnAnalysis
+from ..model import Expression, ExpressionType, FunctionReturnAnalysis, StorageInfo
 from ..model.signature import get_declared_type_signedness
 
 
@@ -25,24 +25,46 @@ class ParameterSemanticHint:
     signedness_source: str = "explicit"
 
 
+ParameterIdentityKey = Tuple[object, ...]
+
+
+def _empty_evidence_entry() -> Dict[str, Any]:
+    return {
+        "narrow_bits": set(),
+        "signed_score": 0,
+        "unsigned_score": 0,
+        "direct_signed_score": 0,
+        "direct_unsigned_score": 0,
+        "blocked_compare_signedness": False,
+    }
+
+
 def infer_parameter_semantics(
     analysis: FunctionReturnAnalysis,
 ) -> Dict[int, ParameterSemanticHint]:
-    """Infer per-parameter semantic-width hints from return/condition expressions."""
-    params_by_name: Dict[str, Dict[str, Any]] = {}
-    for fallback_index, param in enumerate(analysis.parameters or []):
-        name = param.get("name", f"param_{fallback_index}")
-        params_by_name[name] = {
-            "index": param.get("index", fallback_index),
-            "declared_bits": _get_declared_bits(param),
-            "declared_signedness": _get_declared_signedness(param),
-        }
+    """Infer per-parameter semantic-width hints from object-level usage evidence."""
+    hints, _ = _infer_parameter_semantics_object_keyed(analysis)
+    return hints
 
-    evidence: Dict[str, Dict[str, Any]] = {}
-    for param_name, meta in params_by_name.items():
-        storage_bits = _get_storage_bits(meta, analysis)
+
+def infer_parameter_semantics_by_identity(
+    analysis: FunctionReturnAnalysis,
+) -> Dict[ParameterIdentityKey, ParameterSemanticHint]:
+    """Infer semantic-width hints keyed by explicit parameter/storage identity."""
+    _, hints_by_identity = _infer_parameter_semantics_object_keyed(analysis)
+    return hints_by_identity
+
+
+def _infer_parameter_semantics_object_keyed(
+    analysis: FunctionReturnAnalysis,
+) -> Tuple[Dict[int, ParameterSemanticHint], Dict[ParameterIdentityKey, ParameterSemanticHint]]:
+    params_by_identity = _build_parameter_metadata_by_identity(analysis)
+
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]] = {}
+    for identity, meta in params_by_identity.items():
+        storage_bits = _get_storage_bits(meta)
         if storage_bits is not None:
-            _record_width_evidence(evidence, param_name, storage_bits)
+            _record_width_evidence(evidence, identity, storage_bits)
 
     for ret_info in analysis.returns or []:
         if ret_info.value is not None:
@@ -52,52 +74,44 @@ def infer_parameter_semantics(
             if expr is not None:
                 _collect_from_expression(expr, evidence)
 
+    evidence_by_index: Dict[int, Dict[str, Any]] = {}
+    identities_by_index: Dict[int, Set[ParameterIdentityKey]] = {}
+    metadata_by_index: Dict[int, Dict[str, Any]] = {}
     hints: Dict[int, ParameterSemanticHint] = {}
-    for param_name, param_evidence in evidence.items():
-        meta = params_by_name.get(param_name)
+    hints_by_identity: Dict[ParameterIdentityKey, ParameterSemanticHint] = {}
+    for identity, param_evidence in evidence.items():
+        meta = params_by_identity.get(identity)
         if meta is None:
             continue
-
-        narrow_bits = _resolve_narrow_bits(param_evidence, meta["declared_bits"])
-        signedness, signedness_source = _resolve_signedness(
+        index = meta["index"]
+        if index is None:
+            hint = _semantic_hint_from_evidence(param_evidence, meta)
+            if hint is not None:
+                hints_by_identity[identity] = hint
+                for descriptor_identity in meta.get("identities", set()):
+                    hints_by_identity.setdefault(descriptor_identity, hint)
+            continue
+        metadata_by_index[index] = meta
+        identities_by_index.setdefault(index, set()).add(identity)
+        _merge_evidence_entries(
+            evidence_by_index.setdefault(index, _empty_evidence_entry()),
             param_evidence,
-            meta["declared_signedness"],
-        )
-        if signedness is None:
-            continue
-        assert signedness_source is not None
-
-        if narrow_bits is not None and 0 < int(narrow_bits) < int(meta["declared_bits"]):
-            direct_signedness_state = _resolve_direct_signedness(param_evidence)
-            if direct_signedness_state == "conflict":
-                signedness = "unknown"
-                signedness_source = "width_only"
-            elif direct_signedness_state in {"signed", "unsigned"}:
-                signedness = direct_signedness_state
-                signedness_source = "explicit"
-            else:
-                signedness = "unknown"
-                signedness_source = "width_only"
-
-        if not _should_emit_hint(
-            param_evidence=param_evidence,
-            narrow_bits=narrow_bits,
-            declared_bits=meta["declared_bits"],
-            signedness=signedness,
-            signedness_source=signedness_source,
-            declared_signedness=meta["declared_signedness"],
-        ):
-            continue
-
-        emitted_bits = narrow_bits or meta["declared_bits"]
-
-        hints[meta["index"]] = ParameterSemanticHint(
-            narrow_bits=emitted_bits,
-            signedness=signedness,
-            signedness_source=signedness_source,
         )
 
-    return hints
+    for index, param_evidence in evidence_by_index.items():
+        meta = metadata_by_index.get(index)
+        if meta is None:
+            continue
+        hint = _semantic_hint_from_evidence(param_evidence, meta)
+        if hint is None:
+            continue
+        hints[index] = hint
+        for identity in identities_by_index.get(index, set()):
+            hints_by_identity[identity] = hint
+        for identity in meta.get("identities", set()):
+            hints_by_identity.setdefault(identity, hint)
+
+    return hints, hints_by_identity
 
 
 def hints_by_name(
@@ -105,15 +119,26 @@ def hints_by_name(
 ) -> Dict[str, Tuple[str, int]]:
     """Return semantic hints keyed by parameter name for existing consumers."""
     by_index = infer_parameter_semantics(analysis)
-    result: Dict[str, Tuple[str, int]] = {}
-    for fallback_index, param in enumerate(analysis.parameters or []):
-        index = param.get("index", fallback_index)
+    unique_names = _globally_unique_parameter_names(analysis.parameters or [])
+    candidates: Dict[str, list[Tuple[str, int]]] = {}
+    for param in analysis.parameters or []:
+        index = _normalize_parameter_index(param.get("index"))
+        if index is None:
+            continue
         hint = by_index.get(index)
         if hint is None:
             continue
-        name = param.get("name", f"param_{fallback_index}")
-        result[name] = (hint.signedness, hint.narrow_bits)
-    return result
+        name = param.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if name not in unique_names:
+            continue
+        candidates.setdefault(name, []).append((hint.signedness, hint.narrow_bits))
+    return {
+        name: values[0]
+        for name, values in candidates.items()
+        if len(values) == 1
+    }
 
 
 def hint_objects_by_name(
@@ -121,46 +146,93 @@ def hint_objects_by_name(
 ) -> Dict[str, ParameterSemanticHint]:
     """Return semantic hint objects keyed by parameter name."""
     by_index = infer_parameter_semantics(analysis)
-    result: Dict[str, ParameterSemanticHint] = {}
-    for fallback_index, param in enumerate(analysis.parameters or []):
-        index = param.get("index", fallback_index)
+    unique_names = _globally_unique_parameter_names(analysis.parameters or [])
+    candidates: Dict[str, list[ParameterSemanticHint]] = {}
+    for param in analysis.parameters or []:
+        index = _normalize_parameter_index(param.get("index"))
+        if index is None:
+            continue
         hint = by_index.get(index)
         if hint is None:
             continue
-        name = param.get("name", f"param_{fallback_index}")
-        result[name] = hint
-    return result
+        name = param.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if name not in unique_names:
+            continue
+        candidates.setdefault(name, []).append(hint)
+    return {
+        name: values[0]
+        for name, values in candidates.items()
+        if len(values) == 1
+    }
+
+
+def _globally_unique_parameter_names(parameters: Iterable[Dict[str, Any]]) -> Set[str]:
+    counts: Dict[str, int] = {}
+    for param in parameters or []:
+        name = param.get("name")
+        if isinstance(name, str) and name:
+            counts[name] = counts.get(name, 0) + 1
+    return {name for name, count in counts.items() if count == 1}
+
+
+def hint_objects_by_identity(
+    analysis: FunctionReturnAnalysis,
+) -> Dict[ParameterIdentityKey, ParameterSemanticHint]:
+    """Return semantic hint objects keyed by explicit parameter/storage identity."""
+    return infer_parameter_semantics_by_identity(analysis)
+
+
+def parameter_identity_key_from_descriptor(
+    param: Dict[str, Any],
+) -> Optional[ParameterIdentityKey]:
+    """Return the canonical object identity for a parameter descriptor."""
+    index = _normalize_parameter_index(param.get("index"))
+    if index is not None:
+        return ("parameter_index", index)
+    storage_key = _storage_identity_key(param.get("storage_info", param.get("storage")))
+    if storage_key is not None:
+        return ("parameter_storage", storage_key)
+    return None
+
+
+def parameter_identity_key_from_expression(
+    expr: Expression,
+) -> Optional[ParameterIdentityKey]:
+    """Return the canonical object identity for a parameter expression."""
+    return _parameter_identity_key_from_expression(expr)
 
 
 def _collect_from_expression(
     expr: Expression,
-    evidence: Dict[str, Dict[str, Any]],
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
 ) -> None:
     if expr is None:
         return
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         operand = expr.operands[0]
-        ref = _extract_param_reference(operand)
-        if ref is not None:
-            param_name, narrow_bits = ref
-            if narrow_bits is not None:
-                _record_width_evidence(evidence, param_name, narrow_bits)
+        refs = _extract_param_reference(operand)
+        if refs is not None:
+            for identity, narrow_bits in refs.items():
+                if narrow_bits is not None:
+                    _record_width_evidence(evidence, identity, narrow_bits)
                 if expr.operator == "INT_SEXT":
-                    _record_signedness_evidence(evidence, param_name, signed_score=3)
+                    _record_signedness_evidence(evidence, identity, signed_score=3)
 
     elif expr.expr_type == ExpressionType.BINARY_OP:
         if expr.operator == "SUBPIECE":
-            ref = _extract_subpiece_reference(expr)
-            if ref is not None:
-                param_name, narrow_bits = ref
-                _record_width_evidence(evidence, param_name, narrow_bits)
+            refs = _extract_subpiece_reference(expr)
+            if refs is not None:
+                for identity, narrow_bits in refs.items():
+                    _record_width_evidence(evidence, identity, narrow_bits)
 
         elif expr.operator == "INT_AND":
-            ref = _extract_masked_param_reference(expr)
-            if ref is not None:
-                param_name, narrow_bits = ref
-                _record_width_evidence(evidence, param_name, narrow_bits)
+            refs = _extract_masked_param_reference(expr)
+            if refs is not None:
+                for identity, narrow_bits in refs.items():
+                    _record_width_evidence(evidence, identity, narrow_bits)
 
         elif expr.operator in SIGNED_COMPARE_OPS | UNSIGNED_COMPARE_OPS:
             _record_compare_signedness(expr, evidence)
@@ -178,7 +250,7 @@ def _collect_from_expression(
 
 def _record_compare_signedness(
     expr: Expression,
-    evidence: Dict[str, Dict[str, Any]],
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
 ) -> None:
     if len(expr.operands) != 2:
         return
@@ -217,8 +289,8 @@ def _record_compare_signedness(
 
 
 def _record_compare_refs(
-    refs: Dict[str, Optional[int]],
-    evidence: Dict[str, Dict[str, Any]],
+    refs: Dict[ParameterIdentityKey, Optional[int]],
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
     score_key: str,
     *,
     compare_expr: Expression,
@@ -226,12 +298,12 @@ def _record_compare_refs(
     direct_operand: bool,
 ) -> None:
     signed_bonus = _signed_boundary_bonus(compare_expr, other_operand)
-    for param_name, narrow_bits in refs.items():
+    for identity, narrow_bits in refs.items():
         if narrow_bits is not None:
-            _record_width_evidence(evidence, param_name, narrow_bits)
+            _record_width_evidence(evidence, identity, narrow_bits)
         _record_signedness_evidence(
             evidence,
-            param_name,
+            identity,
             signed_score=(2 + signed_bonus) if score_key == "signed_score" else 0,
             unsigned_score=2 if score_key == "unsigned_score" else 0,
             direct_operand=direct_operand,
@@ -262,15 +334,16 @@ def _supports_signedness_inference(expr: Expression) -> bool:
 
 def _collect_compare_signedness_references(
     expr: Expression,
-) -> Optional[Dict[str, Optional[int]]]:
+) -> Optional[Dict[ParameterIdentityKey, Optional[int]]]:
     """Collect parameter refs whose compare signedness can be attributed directly.
 
     Unlike the general collector, this intentionally does not cross explicit
     extension/cast nodes. Compare opcode signedness for ``SEXT/ZEXT(param)`` is
     evidence about the widened temporary, not about the leaf parameter object.
     """
-    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-        return {expr.name: None}
+    if expr.expr_type == ExpressionType.PARAMETER:
+        identity = _parameter_identity_key_from_expression(expr)
+        return {identity: None} if identity is not None else None
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         return None
@@ -279,22 +352,15 @@ def _collect_compare_signedness_references(
         return None
 
     if expr.operator == "SUBPIECE":
-        ref = _extract_subpiece_reference(expr)
-        if ref is None:
-            return None
-        param_name, narrow_bits = ref
-        return {param_name: narrow_bits}
+        return _extract_subpiece_reference(expr)
 
     if expr.operator == "INT_AND":
-        ref = _extract_masked_param_reference(expr)
-        if ref is not None:
-            param_name, narrow_bits = ref
-            return {param_name: narrow_bits}
+        return _extract_masked_param_reference(expr)
 
     if expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
         return None
 
-    merged: Dict[str, Optional[int]] = {}
+    merged: Dict[ParameterIdentityKey, Optional[int]] = {}
     for operand in expr.operands:
         if operand.expr_type == ExpressionType.CONSTANT:
             continue
@@ -308,7 +374,7 @@ def _collect_compare_signedness_references(
 
 def _collect_blocked_compare_signedness_references(
     expr: Expression,
-) -> Optional[Dict[str, Optional[int]]]:
+) -> Optional[Dict[ParameterIdentityKey, Optional[int]]]:
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         if expr.operator in TRANSPARENT_UNARY_OPS:
             return _collect_param_references(expr.operands[0])
@@ -317,7 +383,7 @@ def _collect_blocked_compare_signedness_references(
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
         return None
 
-    merged: Dict[str, Optional[int]] = {}
+    merged: Dict[ParameterIdentityKey, Optional[int]] = {}
     for operand in expr.operands:
         if operand.expr_type == ExpressionType.CONSTANT:
             continue
@@ -329,15 +395,16 @@ def _collect_blocked_compare_signedness_references(
 
 def _collect_param_references(
     expr: Expression,
-) -> Optional[Dict[str, Optional[int]]]:
+) -> Optional[Dict[ParameterIdentityKey, Optional[int]]]:
     """Collect parameter references from signedness-safe expression shapes.
 
     The collector is intentionally conservative: it only walks through operators
     whose comparison signedness can be meaningfully propagated to their leaf
     parameters without assuming arithmetic identities.
     """
-    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-        return {expr.name: None}
+    if expr.expr_type == ExpressionType.PARAMETER:
+        identity = _parameter_identity_key_from_expression(expr)
+        return {identity: None} if identity is not None else None
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         if expr.operator in TRANSPARENT_UNARY_OPS:
@@ -348,22 +415,15 @@ def _collect_param_references(
         return None
 
     if expr.operator == "SUBPIECE":
-        ref = _extract_subpiece_reference(expr)
-        if ref is None:
-            return None
-        param_name, narrow_bits = ref
-        return {param_name: narrow_bits}
+        return _extract_subpiece_reference(expr)
 
     if expr.operator == "INT_AND":
-        ref = _extract_masked_param_reference(expr)
-        if ref is not None:
-            param_name, narrow_bits = ref
-            return {param_name: narrow_bits}
+        return _extract_masked_param_reference(expr)
 
     if expr.operator not in SIGNEDNESS_PROPAGATING_BINARY_OPS:
         return None
 
-    merged: Dict[str, Optional[int]] = {}
+    merged: Dict[ParameterIdentityKey, Optional[int]] = {}
     for operand in expr.operands:
         if operand.expr_type == ExpressionType.CONSTANT:
             continue
@@ -376,24 +436,25 @@ def _collect_param_references(
 
 
 def _merge_param_reference_maps(
-    merged: Dict[str, Optional[int]],
-    refs: Dict[str, Optional[int]],
+    merged: Dict[ParameterIdentityKey, Optional[int]],
+    refs: Dict[ParameterIdentityKey, Optional[int]],
 ) -> None:
-    for param_name, narrow_bits in refs.items():
-        current = merged.get(param_name)
+    for identity, narrow_bits in refs.items():
+        current = merged.get(identity)
         if current is None:
-            merged[param_name] = narrow_bits
+            merged[identity] = narrow_bits
             continue
         if narrow_bits is None:
             continue
-        merged[param_name] = min(current, narrow_bits) if current is not None else narrow_bits
+        merged[identity] = min(current, narrow_bits) if current is not None else narrow_bits
 
 
 def _extract_param_reference(
     expr: Expression,
-) -> Optional[Tuple[str, Optional[int]]]:
-    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-        return expr.name, None
+) -> Optional[Dict[ParameterIdentityKey, Optional[int]]]:
+    if expr.expr_type == ExpressionType.PARAMETER:
+        identity = _parameter_identity_key_from_expression(expr)
+        return {identity: None} if identity is not None else None
 
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         if expr.operator in TRANSPARENT_UNARY_OPS:
@@ -409,8 +470,8 @@ def _extract_param_reference(
 
 
 def _is_direct_param_compare_operand(expr: Expression) -> bool:
-    if expr.expr_type == ExpressionType.PARAMETER and expr.name:
-        return True
+    if expr.expr_type == ExpressionType.PARAMETER:
+        return _parameter_identity_key_from_expression(expr) is not None
     if expr.expr_type == ExpressionType.BINARY_OP:
         if expr.operator == "SUBPIECE":
             return _extract_subpiece_reference(expr) is not None
@@ -421,7 +482,7 @@ def _is_direct_param_compare_operand(expr: Expression) -> bool:
 
 def _extract_subpiece_reference(
     expr: Expression,
-) -> Optional[Tuple[str, int]]:
+) -> Optional[Dict[ParameterIdentityKey, int]]:
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "SUBPIECE":
         return None
     if len(expr.operands) != 2:
@@ -435,13 +496,12 @@ def _extract_subpiece_reference(
     if source_ref is None:
         return None
 
-    param_name, _ = source_ref
-    return param_name, expr.get_bit_width()
+    return {identity: expr.get_bit_width() for identity in source_ref}
 
 
 def _extract_masked_param_reference(
     expr: Expression,
-) -> Optional[Tuple[str, int]]:
+) -> Optional[Dict[ParameterIdentityKey, int]]:
     if expr.expr_type != ExpressionType.BINARY_OP or expr.operator != "INT_AND":
         return None
     if len(expr.operands) != 2:
@@ -463,8 +523,7 @@ def _extract_masked_param_reference(
     if ref is None:
         return None
 
-    param_name, _ = ref
-    return param_name, mask_bits
+    return {identity: mask_bits for identity in ref}
 
 
 def _mask_to_narrow_bits(value: Any) -> Optional[int]:
@@ -477,44 +536,24 @@ def _mask_to_narrow_bits(value: Any) -> Optional[int]:
 
 
 def _record_width_evidence(
-    evidence: Dict[str, Dict[str, Any]],
-    param_name: str,
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
+    identity: ParameterIdentityKey,
     narrow_bits: int,
 ) -> None:
-    entry = evidence.setdefault(
-        param_name,
-        {
-            "narrow_bits": set(),
-            "signed_score": 0,
-            "unsigned_score": 0,
-            "direct_signed_score": 0,
-            "direct_unsigned_score": 0,
-            "blocked_compare_signedness": False,
-        },
-    )
+    entry = evidence.setdefault(identity, _empty_evidence_entry())
     if int(narrow_bits) > 0:
         entry["narrow_bits"].add(int(narrow_bits))
 
 
 def _record_signedness_evidence(
-    evidence: Dict[str, Dict[str, Any]],
-    param_name: str,
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
+    identity: ParameterIdentityKey,
     *,
     signed_score: int = 0,
     unsigned_score: int = 0,
     direct_operand: bool = False,
 ) -> None:
-    entry = evidence.setdefault(
-        param_name,
-        {
-            "narrow_bits": set(),
-            "signed_score": 0,
-            "unsigned_score": 0,
-            "direct_signed_score": 0,
-            "direct_unsigned_score": 0,
-            "blocked_compare_signedness": False,
-        },
-    )
+    entry = evidence.setdefault(identity, _empty_evidence_entry())
     entry["signed_score"] += signed_score
     entry["unsigned_score"] += unsigned_score
     if direct_operand:
@@ -523,21 +562,11 @@ def _record_signedness_evidence(
 
 
 def _record_blocked_compare_signedness(
-    evidence: Dict[str, Dict[str, Any]],
-    refs: Dict[str, Optional[int]],
+    evidence: Dict[ParameterIdentityKey, Dict[str, Any]],
+    refs: Dict[ParameterIdentityKey, Optional[int]],
 ) -> None:
-    for param_name, narrow_bits in refs.items():
-        entry = evidence.setdefault(
-            param_name,
-            {
-                "narrow_bits": set(),
-                "signed_score": 0,
-                "unsigned_score": 0,
-                "direct_signed_score": 0,
-                "direct_unsigned_score": 0,
-                "blocked_compare_signedness": False,
-            },
-        )
+    for identity, narrow_bits in refs.items():
+        entry = evidence.setdefault(identity, _empty_evidence_entry())
         entry["blocked_compare_signedness"] = True
         if narrow_bits is not None:
             entry["narrow_bits"].add(int(narrow_bits))
@@ -553,6 +582,58 @@ def _resolve_narrow_bits(
     if not candidates:
         return None
     return candidates[0]
+
+
+def _semantic_hint_from_evidence(
+    param_evidence: Dict[str, Any],
+    meta: Dict[str, Any],
+) -> Optional[ParameterSemanticHint]:
+    narrow_bits = _resolve_narrow_bits(param_evidence, meta["declared_bits"])
+    signedness, signedness_source = _resolve_signedness(
+        param_evidence,
+        meta["declared_signedness"],
+    )
+    if signedness is None:
+        return None
+    assert signedness_source is not None
+
+    if narrow_bits is not None and 0 < int(narrow_bits) < int(meta["declared_bits"]):
+        direct_signedness_state = _resolve_direct_signedness(param_evidence)
+        if direct_signedness_state == "conflict":
+            signedness = "unknown"
+            signedness_source = "width_only"
+        elif direct_signedness_state in {"signed", "unsigned"}:
+            signedness = direct_signedness_state
+            signedness_source = "explicit"
+        else:
+            signedness = "unknown"
+            signedness_source = "width_only"
+
+    if not _should_emit_hint(
+        param_evidence=param_evidence,
+        narrow_bits=narrow_bits,
+        declared_bits=meta["declared_bits"],
+        signedness=signedness,
+        signedness_source=signedness_source,
+        declared_signedness=meta["declared_signedness"],
+    ):
+        return None
+
+    return ParameterSemanticHint(
+        narrow_bits=narrow_bits or meta["declared_bits"],
+        signedness=signedness,
+        signedness_source=signedness_source,
+    )
+
+
+def _merge_evidence_entries(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    target.setdefault("narrow_bits", set()).update(source.get("narrow_bits", set()))
+    for key in ("signed_score", "unsigned_score", "direct_signed_score", "direct_unsigned_score"):
+        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+    target["blocked_compare_signedness"] = bool(
+        target.get("blocked_compare_signedness", False)
+        or source.get("blocked_compare_signedness", False)
+    )
 
 
 def _resolve_signedness(
@@ -634,36 +715,15 @@ def _get_declared_bits(param: Dict[str, Any]) -> int:
 
 def _get_storage_bits(
     param_meta: Dict[str, Any],
-    analysis: FunctionReturnAnalysis,
 ) -> Optional[int]:
-    param_index = param_meta.get("index")
-    if not isinstance(param_index, int) or param_index < 0:
+    storage = _coerce_storage_info(param_meta.get("storage"))
+    if storage is None:
         return None
-
-    parameters = list(analysis.parameters or [])
-    for fallback_index, param in enumerate(parameters):
-        index = param.get("index", fallback_index)
-        if index != param_index:
-            continue
-        storage = param.get("storage")
-        if not isinstance(storage, dict):
-            return None
-        size_bits = storage.get("size_bits")
-        if size_bits is None:
-            size_bytes = storage.get("size")
-            if size_bytes is not None:
-                try:
-                    size_bits = int(size_bytes) * 8
-                except Exception:
-                    size_bits = None
-        try:
-            resolved = int(size_bits) if size_bits is not None else None
-        except Exception:
-            resolved = None
-        if resolved is None or resolved <= 0:
-            return None
-        return resolved
-    return None
+    try:
+        size_bits = int(storage.size_bits or (storage.size * 8) or 0)
+    except Exception:
+        return None
+    return size_bits if size_bits > 0 else None
 
 
 def _get_declared_signedness(param: Dict[str, Any]) -> Optional[str]:
@@ -679,3 +739,114 @@ def _get_declared_signedness(param: Dict[str, Any]) -> Optional[str]:
         fallback_signed=True,
     )
     return "signed" if signed else "unsigned"
+
+
+def _build_parameter_metadata_by_identity(
+    analysis: FunctionReturnAnalysis,
+) -> Dict[ParameterIdentityKey, Dict[str, Any]]:
+    grouped: Dict[ParameterIdentityKey, list[Dict[str, Any]]] = {}
+    for param in analysis.parameters or []:
+        index = _normalize_parameter_index(param.get("index"))
+        descriptor = dict(param)
+        if index is not None:
+            descriptor["index"] = index
+        meta = {
+            "index": index,
+            "declared_bits": _get_declared_bits(descriptor),
+            "declared_signedness": _get_declared_signedness(descriptor),
+            "storage": descriptor.get("storage_info", descriptor.get("storage")),
+            "identities": set(),
+        }
+        identities = _parameter_identity_keys_from_descriptor(descriptor)
+        if not identities:
+            continue
+        meta["identities"] = set(identities)
+        for identity in identities:
+            grouped.setdefault(identity, []).append(meta)
+
+    result: Dict[ParameterIdentityKey, Dict[str, Any]] = {}
+    for identity, metas in grouped.items():
+        indexed_metas = [meta for meta in metas if meta["index"] is not None]
+        if indexed_metas:
+            indexes = {meta["index"] for meta in indexed_metas}
+            if len(indexes) != 1:
+                continue
+            result[identity] = indexed_metas[0]
+            continue
+        if len(metas) != 1:
+            continue
+        result[identity] = metas[0]
+    return result
+
+
+def _parameter_identity_keys_from_descriptor(
+    param: Dict[str, Any],
+) -> Set[ParameterIdentityKey]:
+    identities: Set[ParameterIdentityKey] = set()
+    index = _normalize_parameter_index(param.get("index"))
+    if index is not None:
+        identities.add(("parameter_index", index))
+    storage_key = _storage_identity_key(param.get("storage_info", param.get("storage")))
+    if storage_key is not None:
+        identities.add(("parameter_storage", storage_key))
+    return identities
+
+
+def _parameter_identity_key_from_expression(
+    expr: Expression,
+) -> Optional[ParameterIdentityKey]:
+    index = _normalize_parameter_index(getattr(expr, "value", None))
+    if index is not None:
+        return ("parameter_index", index)
+    storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
+    if storage_key is not None:
+        return ("parameter_storage", storage_key)
+    return None
+
+
+def _normalize_parameter_index(value: Any) -> Optional[int]:
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
+
+
+def _storage_identity_key(storage: Optional[object]) -> Optional[Tuple[object, ...]]:
+    storage_info = _coerce_storage_info(storage)
+    if storage_info is None:
+        return None
+    return storage_info.storage_identity_key()
+
+
+def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
+    if storage is None:
+        return None
+    if isinstance(storage, StorageInfo):
+        return storage
+    if not isinstance(storage, dict):
+        return None
+    try:
+        kind = str(storage.get("kind", "") or storage.get("space_name", "") or "").lower()
+        is_register = bool(storage.get("is_register", False)) or kind == "register"
+        return StorageInfo(
+            is_register=is_register,
+            space_name=str(storage.get("space_name") or ("register" if is_register else "")),
+            space_id=storage.get("space_id"),
+            offset=int(storage.get("offset", 0) or 0),
+            size=int(storage.get("size", 0) or 0),
+            size_bits=int(storage.get("size_bits", 0) or 0),
+            register_name=storage.get("register_name"),
+            register_offset=storage.get("register_offset"),
+            register_size=storage.get("register_size"),
+            register_size_bits=storage.get("register_size_bits"),
+            base_register_name=storage.get("base_register_name"),
+            base_register_offset=int(storage.get("base_register_offset", 0) or 0),
+            base_register_size=int(storage.get("base_register_size", 0) or 0),
+            base_register_size_bits=int(storage.get("base_register_size_bits", 0) or 0),
+            bit_offset_in_base=int(storage.get("bit_offset_in_base", 0) or 0),
+            is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
+            is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
+        )
+    except Exception:
+        return None

@@ -52,7 +52,33 @@ from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
 def _param(name: str = "param_1", size: int = 4) -> Expression:
-    return Expression.parameter(name, index=0, data_type="int", size=size)
+    index = 0
+    if name.startswith("param_"):
+        try:
+            index = max(0, int(name.split("_", 1)[1]) - 1)
+        except ValueError:
+            index = 0
+    return Expression.parameter(name, index=index, data_type="int", size=size)
+
+
+def test_condition_implication_keeps_named_parameters_with_placeholder_indices_distinct():
+    param_2_placeholder = Expression.parameter("param_2", index=0, data_type="int", size=4)
+    param_3_placeholder = Expression.parameter("param_3", index=0, data_type="int", size=4)
+    less_condition = _cond("INT_SLESS", param_2_placeholder, param_3_placeholder)
+    parity_condition = _cond(
+        "INT_EQUAL",
+        Expression.binary_op("INT_AND", param_2_placeholder, _const(1)),
+        _const(0),
+    )
+
+    assert ConditionSimplifier._condition_is_implied(
+        parity_condition,
+        [less_condition],
+        prefer_solver=True,
+    ) is False
+    assert [condition.to_string() for condition in ConditionSimplifier.simplify_conditions_object_centric(
+        [less_condition, parity_condition]
+    )] == ["(param_2 < param_3)", "((param_2 & 1) == 0)"]
 
 
 def _readonly_accumulator_proof(
@@ -957,6 +983,20 @@ def test_counted_loop_accumulator_extraction_assigns_distinct_binder_ordinals():
         for accumulator in accumulators
     )
     assert ordinals == [0, 1]
+    ordinal_by_output = {
+        accumulator.phi_output._name: int(accumulator.placeholder.runtime_ref.binder_ordinal)
+        for accumulator in accumulators
+    }
+    reversed_accumulators = summarizer._match_counted_loop_accumulators(
+        [iv_phi_op, acc_b_phi_op, acc_a_phi_op],
+        induction,
+        body,
+    )
+    reversed_ordinal_by_output = {
+        accumulator.phi_output._name: int(accumulator.placeholder.runtime_ref.binder_ordinal)
+        for accumulator in reversed_accumulators
+    }
+    assert reversed_ordinal_by_output == ordinal_by_output
 
     loop_summary = LoopSummaryRef(
         start_expr=_const(0),

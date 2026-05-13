@@ -2583,11 +2583,10 @@ class StructuralRecurrenceSummarizer:
                     break
             if all_backedges_resolved:
                 candidates.append(accumulator)
-        candidates = self._assign_counted_loop_accumulator_binder_ordinals(candidates)
         candidates.sort(
-            key=lambda candidate: self._counted_loop_accumulator_priority(candidate),
-            reverse=True,
+            key=lambda candidate: self._counted_loop_accumulator_order_key(candidate),
         )
+        candidates = self._assign_counted_loop_accumulator_binder_ordinals(candidates)
         return candidates
 
     def _assign_counted_loop_accumulator_binder_ordinals(
@@ -2645,6 +2644,35 @@ class StructuralRecurrenceSummarizer:
             1 if self._varnode_reaches_return(phi_output) else 0,
             output_size,
             init_const,
+        )
+
+    def _counted_loop_accumulator_order_key(
+        self,
+        accumulator: CountedLoopAccumulator,
+    ) -> Tuple[int, int, int, str]:
+        priority = self._counted_loop_accumulator_priority(accumulator)
+        stable_key = self._counted_loop_accumulator_stable_key(accumulator)
+        return (
+            -int(priority[0]),
+            -int(priority[1]),
+            -int(priority[2]),
+            repr(stable_key),
+        )
+
+    def _counted_loop_accumulator_stable_key(
+        self,
+        accumulator: CountedLoopAccumulator,
+    ) -> Tuple[Any, ...]:
+        op_ref = self._make_pcode_op_ref(accumulator.phi_op)
+        op_key = op_ref.stable_key() if op_ref is not None else None
+        output_key = self._varnode_cache_key(accumulator.phi_output)
+        member_keys = tuple(self._varnode_cache_key(member) for member in accumulator.member_outputs)
+        update_key = self._varnode_cache_key(accumulator.update_varnode)
+        return (
+            op_key,
+            output_key,
+            member_keys,
+            update_key,
         )
 
     def _counted_loop_model_priority(

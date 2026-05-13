@@ -45,6 +45,8 @@ class UnknownValidationSummary:
     unknown_by_reason_scope: Dict[str, int] = field(default_factory=dict)
     proof_backlog_by_reason: Dict[str, int] = field(default_factory=dict)
     proof_backlog_by_proof_kind: Dict[str, int] = field(default_factory=dict)
+    proof_backlog_by_recovery_action: Dict[str, int] = field(default_factory=dict)
+    proof_backlog_by_action_status: Dict[str, int] = field(default_factory=dict)
     operational_unknown_by_reason: Dict[str, int] = field(default_factory=dict)
     operational_unknown_by_class: Dict[str, int] = field(default_factory=dict)
 
@@ -58,6 +60,8 @@ class UnknownValidationSummary:
             "unknown_by_reason_scope": dict(self.unknown_by_reason_scope),
             "proof_backlog_by_reason": dict(self.proof_backlog_by_reason),
             "proof_backlog_by_proof_kind": dict(self.proof_backlog_by_proof_kind),
+            "proof_backlog_by_recovery_action": dict(self.proof_backlog_by_recovery_action),
+            "proof_backlog_by_action_status": dict(self.proof_backlog_by_action_status),
             "operational_unknown_by_reason": dict(self.operational_unknown_by_reason),
             "operational_unknown_by_class": dict(self.operational_unknown_by_class),
         }
@@ -74,6 +78,8 @@ class UnknownValidationDiff:
     unknown_by_reason_scope_delta: Dict[str, int]
     proof_backlog_by_reason_delta: Dict[str, int]
     proof_backlog_by_proof_kind_delta: Dict[str, int]
+    proof_backlog_by_recovery_action_delta: Dict[str, int]
+    proof_backlog_by_action_status_delta: Dict[str, int]
     operational_unknown_by_reason_delta: Dict[str, int]
     operational_unknown_by_class_delta: Dict[str, int]
 
@@ -88,6 +94,8 @@ class UnknownValidationDiff:
             "unknown_by_reason_scope_delta": dict(self.unknown_by_reason_scope_delta),
             "proof_backlog_by_reason_delta": dict(self.proof_backlog_by_reason_delta),
             "proof_backlog_by_proof_kind_delta": dict(self.proof_backlog_by_proof_kind_delta),
+            "proof_backlog_by_recovery_action_delta": dict(self.proof_backlog_by_recovery_action_delta),
+            "proof_backlog_by_action_status_delta": dict(self.proof_backlog_by_action_status_delta),
             "operational_unknown_by_reason_delta": dict(self.operational_unknown_by_reason_delta),
             "operational_unknown_by_class_delta": dict(self.operational_unknown_by_class_delta),
         }
@@ -107,6 +115,8 @@ def summarize_validation_unknowns(
     unknown_by_reason_scope: Dict[str, int] = {}
     proof_backlog_by_reason: Dict[str, int] = {}
     proof_backlog_by_proof_kind: Dict[str, int] = {}
+    proof_backlog_by_recovery_action: Dict[str, int] = {}
+    proof_backlog_by_action_status: Dict[str, int] = {}
     operational_unknown_by_reason: Dict[str, int] = {}
     operational_unknown_by_class: Dict[str, int] = {}
 
@@ -140,6 +150,8 @@ def summarize_validation_unknowns(
                 _inc(proof_backlog_by_reason, record.reason_id)
                 for action in build_unknown_recovery_actions((record,)):
                     _inc(proof_backlog_by_proof_kind, action.proof_kind)
+                    _inc(proof_backlog_by_recovery_action, _recovery_action_key(action))
+                    _inc(proof_backlog_by_action_status, action.status)
             else:
                 _inc(operational_unknown_by_reason, record.reason_id)
                 _inc(operational_unknown_by_class, record.reason_class)
@@ -153,6 +165,8 @@ def summarize_validation_unknowns(
         unknown_by_reason_scope=unknown_by_reason_scope,
         proof_backlog_by_reason=proof_backlog_by_reason,
         proof_backlog_by_proof_kind=proof_backlog_by_proof_kind,
+        proof_backlog_by_recovery_action=proof_backlog_by_recovery_action,
+        proof_backlog_by_action_status=proof_backlog_by_action_status,
         operational_unknown_by_reason=operational_unknown_by_reason,
         operational_unknown_by_class=operational_unknown_by_class,
     )
@@ -187,6 +201,14 @@ def compare_validation_unknowns(
         proof_backlog_by_proof_kind_delta=_diff_counts(
             before.proof_backlog_by_proof_kind,
             after.proof_backlog_by_proof_kind,
+        ),
+        proof_backlog_by_recovery_action_delta=_diff_counts(
+            before.proof_backlog_by_recovery_action,
+            after.proof_backlog_by_recovery_action,
+        ),
+        proof_backlog_by_action_status_delta=_diff_counts(
+            before.proof_backlog_by_action_status,
+            after.proof_backlog_by_action_status,
         ),
         operational_unknown_by_reason_delta=_diff_counts(
             before.operational_unknown_by_reason,
@@ -228,6 +250,18 @@ def format_validation_unknown_summary(
         lines,
         "Proof backlog by proof_kind",
         summary.proof_backlog_by_proof_kind,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by recovery_action",
+        summary.proof_backlog_by_recovery_action,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by action_status",
+        summary.proof_backlog_by_action_status,
         indent,
     )
     _append_count_block(
@@ -276,6 +310,18 @@ def format_validation_unknown_diff(
     )
     _append_count_block(
         lines,
+        "Proof backlog by recovery_action delta",
+        diff.proof_backlog_by_recovery_action_delta,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by action_status delta",
+        diff.proof_backlog_by_action_status_delta,
+        indent,
+    )
+    _append_count_block(
+        lines,
         "Operational UNKNOWN by reason delta",
         diff.operational_unknown_by_reason_delta,
         indent,
@@ -285,6 +331,84 @@ def format_validation_unknown_diff(
         "Operational UNKNOWN by class delta",
         diff.operational_unknown_by_class_delta,
         indent,
+    )
+    return "\n".join(lines)
+
+
+def format_validation_unknown_diff_unavailable(
+    summary: UnknownValidationSummary,
+    *,
+    indent: str = "",
+    baseline_hint: str = "--before-dir or VALIDATION_BEFORE_DIR",
+) -> str:
+    lines = [
+        f"{indent}UNKNOWN validation before/after delta:",
+        f"{indent}  Baseline: unavailable; set {baseline_hint} to enable deltas.",
+        f"{indent}  Current unknown results: {summary.unknown_results}",
+        f"{indent}  Current unknown units  : {summary.unknown_units}",
+    ]
+    _append_count_block(
+        lines,
+        "UNKNOWN by reason delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "UNKNOWN by decision_effect delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "UNKNOWN by reason_scope delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by reason delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by proof_kind delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by recovery_action delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Proof backlog by action_status delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Operational UNKNOWN by reason delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Operational UNKNOWN by class delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
     )
     return "\n".join(lines)
 
@@ -457,6 +581,18 @@ def _inc(counts: Dict[str, int], key: Any, amount: int = 1) -> None:
     counts[text_key] = int(counts.get(text_key, 0) or 0) + int(amount)
 
 
+def _recovery_action_key(action: Any) -> str:
+    return " | ".join(
+        str(value)
+        for value in (
+            getattr(action, "reason_id", "unknown"),
+            getattr(action, "proof_kind", "none"),
+            getattr(action, "proof_stage", "unspecified"),
+            getattr(action, "status", "unspecified"),
+        )
+    )
+
+
 def _diff_counts(before: Mapping[str, int], after: Mapping[str, int]) -> Dict[str, int]:
     keys = set(before.keys()) | set(after.keys())
     return {
@@ -471,10 +607,12 @@ def _append_count_block(
     title: str,
     counts: Mapping[str, int],
     indent: str,
+    *,
+    empty_label: str = "(none)",
 ) -> None:
     lines.append(f"{indent}  {title}:")
     if not counts:
-        lines.append(f"{indent}    (none)")
+        lines.append(f"{indent}    {empty_label}")
         return
     for key in sorted(counts):
         lines.append(f"{indent}    - {key}: {counts[key]}")

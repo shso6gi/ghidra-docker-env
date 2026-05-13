@@ -15,6 +15,7 @@ from ..model import (
     ExpressionType,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
+    ReadonlyReductionRef,
 )
 
 
@@ -51,6 +52,9 @@ def _collect_memory_bit_widths_from_expr(expr: Optional[Expression], widths: set
 
     if expr.expr_type == ExpressionType.MEMORY:
         widths.add(expr.get_bit_width())
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if isinstance(runtime_ref, ReadonlyReductionRef):
+        _collect_readonly_reduction_memory_widths(runtime_ref, widths)
 
     for operand in getattr(expr, "operands", ()) or ():
         _collect_memory_bit_widths_from_expr(operand, widths)
@@ -60,6 +64,45 @@ def _collect_memory_bit_widths_from_expr(expr: Optional[Expression], widths: set
             if cond is not None and hasattr(cond, "expression"):
                 _collect_memory_bit_widths_from_expr(cond.expression, widths)
             _collect_memory_bit_widths_from_expr(value, widths)
+
+
+def _collect_readonly_reduction_memory_widths(
+    reduction_ref: ReadonlyReductionRef,
+    widths: set,
+) -> None:
+    for source in (
+        reduction_ref,
+        getattr(reduction_ref, "loop_summary", None),
+        getattr(reduction_ref, "accumulator_proof", None),
+        getattr(getattr(reduction_ref, "loop_summary", None), "term_descriptor", None),
+    ):
+        if source is None:
+            continue
+        for attr in ("element_size", "result_size"):
+            try:
+                size = int(getattr(source, attr, 0) or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                widths.add(size * 8)
+
+    for terms in (
+        getattr(reduction_ref, "semantic_witnesses", ()) or (),
+        getattr(getattr(reduction_ref, "accumulator_proof", None), "seed_terms", ()) or (),
+        getattr(getattr(reduction_ref, "accumulator_proof", None), "loop_body_witnesses", ()) or (),
+        getattr(getattr(reduction_ref, "accumulator_proof", None), "exact_return_witnesses", ()) or (),
+    ):
+        for item in terms:
+            nested_terms = getattr(item, "terms", None)
+            if nested_terms is None:
+                nested_terms = (item,)
+            for term in nested_terms or ():
+                try:
+                    access_size = int(getattr(term, "access_size", 0) or 0)
+                except (TypeError, ValueError):
+                    access_size = 0
+                if access_size > 0:
+                    widths.add(access_size * 8)
 
 
 def concretize_readonly_loads(

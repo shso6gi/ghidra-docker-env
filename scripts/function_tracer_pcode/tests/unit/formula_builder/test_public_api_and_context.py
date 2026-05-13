@@ -364,17 +364,17 @@ class TestBooleanReturnNormalization:
     def test_boolean_return_expression_is_coerced_to_bitvec(self):
         builder = FormulaBuilder(debug=False)
         analysis1 = FunctionReturnAnalysis(
-            function_name="func_int",
+            function_name="func_bool_constant",
             entry_point="0x00401000",
             parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
             returns=[
                 ReturnInfo(
                     address="0x00401000",
                     conditions=[],
-                    value=Expression(ExpressionType.CONSTANT, value=0, size=4),
+                    value=Expression(ExpressionType.CONSTANT, value=0, size=1),
                 )
             ],
-            return_type="int",
+            return_type="bool",
         )
         analysis2 = FunctionReturnAnalysis(
             function_name="func_bool",

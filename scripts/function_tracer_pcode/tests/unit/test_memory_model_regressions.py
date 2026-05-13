@@ -3447,7 +3447,8 @@ def test_complete_call_argument_evidence_is_applied_to_deferred_call_and_marked_
 
     ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
 
-    assert deferred.arguments == [Expression.parameter("param_1", 0, size=4)]
+    assert len(deferred.arguments) == 1
+    assert deferred.arguments[0].to_dict() == Expression.parameter("param_1", 0, size=4).to_dict()
     assert deferred.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
     assert deferred.call_argument_recovery_reason is None
     assert "effect_call_argument_evidence" in analysis.analysis_notes
@@ -10195,9 +10196,6 @@ def test_expression_expander_keeps_multiequal_location_leaf_when_outer_update_re
 
         def _get_op_order_key(self, _op):
             return 10
-
-        def _get_stable_op_key(self, op):
-            return f"fake-op-{id(op)}"
 
     expander = ExpressionExpander(
         FakeTracer(),

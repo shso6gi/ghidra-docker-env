@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """条件分岐の追跡"""
 
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Any
 from ...model import Expression, Condition
 from .normalizer import ConditionNormalizer
@@ -46,6 +47,27 @@ class BasicBlockInfo:
     
     def __repr__(self):
         return f"BasicBlockInfo(index={self.index}, start={self.start})"
+
+
+@dataclass(frozen=True)
+class PathCoverageResult:
+    """Coverage state for paths from function entry to a target block."""
+
+    status: str
+    block_paths: List[tuple[list[BasicBlockInfo], list[Condition]]]
+
+    @property
+    def condition_paths(self) -> List[List[Condition]]:
+        return [conditions for _blocks, conditions in self.block_paths]
+
+    def is_complete(self) -> bool:
+        return self.status == "complete"
+
+    def is_complete_unreachable(self) -> bool:
+        return self.status == "complete_unreachable"
+
+    def is_inconclusive(self) -> bool:
+        return self.status == "inconclusive"
 
 
 class ConditionTracker:
@@ -489,6 +511,68 @@ class ConditionTracker:
         )
         self._valid_block_paths_cache[cache_key] = self._clone_block_paths(filtered)
         return self._clone_block_paths(filtered)
+
+    def get_path_coverage_to_block(
+        self,
+        target_block: BasicBlockInfo,
+        limit_paths: Optional[int] = None,
+    ) -> PathCoverageResult:
+        """Return tri-state path coverage for a target block.
+
+        ``complete`` means every returned path is non-contradictory under the
+        path filter. ``complete_unreachable`` means CFG/path exploration proved
+        no valid path reaches the block. ``inconclusive`` means coverage could
+        not be established, e.g. CFG metadata is absent or path expansion hit a
+        resource limit.
+        """
+        from .simplifier import ConditionSimplifier
+
+        if limit_paths is None:
+            limit_paths = self.MAX_VALID_PATHS
+
+        if self.entry_block is None:
+            return PathCoverageResult("inconclusive", [])
+
+        if target_block.index == self.entry_block.index:
+            return PathCoverageResult("complete", [([self.entry_block], [])])
+
+        all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]] = []
+        self._find_block_paths_with_conditions(
+            current=self.entry_block,
+            target=target_block,
+            current_blocks=[self.entry_block],
+            current_conditions=[],
+            all_paths=all_paths,
+            visited=set(),
+        )
+        if not all_paths:
+            return PathCoverageResult("complete_unreachable", [])
+
+        valid_paths: List[tuple[list[BasicBlockInfo], list[Condition]]] = []
+        inconclusive = False
+        for blocks, conditions in all_paths:
+            if ConditionSimplifier.is_contradiction(conditions):
+                continue
+            if len(conditions) > self.MAX_CONDITIONS_PER_PATH:
+                inconclusive = True
+                continue
+            valid_paths.append((blocks, conditions))
+
+        if not valid_paths:
+            return PathCoverageResult(
+                "inconclusive" if inconclusive else "complete_unreachable",
+                [],
+            )
+
+        valid_paths = sorted(valid_paths, key=lambda entry: (len(entry[1]), len(entry[0])))
+        if len(valid_paths) > limit_paths:
+            inconclusive = True
+            valid_paths = valid_paths[:limit_paths]
+
+        return PathCoverageResult(
+            "inconclusive" if inconclusive else "complete",
+            self._clone_block_paths(valid_paths),
+        )
     
     def _find_paths_with_conditions(
         self,

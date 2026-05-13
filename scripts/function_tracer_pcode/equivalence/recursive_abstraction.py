@@ -367,6 +367,7 @@ def _rewrite_analysis_with_abstract_calls(
         deferred_calls=dict(analysis.deferred_calls),
         effect_summary=analysis.effect_summary,
         comparison_surface=analysis.comparison_surface,
+        program_is_big_endian=analysis.program_is_big_endian,
     )
 
     existing_indices = {

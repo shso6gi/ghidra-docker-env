@@ -12,7 +12,12 @@ from ...model.signature import (
     is_unsigned_data_type,
     resolve_integer_type_spec,
 )
-from ..param_semantics import ParameterSemanticHint, hint_objects_by_name
+from ..param_semantics import (
+    ParameterIdentityKey,
+    ParameterSemanticHint,
+    hint_objects_by_identity,
+    parameter_identity_key_from_descriptor,
+)
 
 
 class MIPS64Handler:
@@ -58,7 +63,7 @@ class MIPS64Handler:
           MIPS64側だけが 64bit のまま残っている場合に修正
         """
         override_map: Dict[int, ResolvedTypeSpec] = {}
-        other_hints = hint_objects_by_name(other_analysis)
+        other_hints = hint_objects_by_identity(other_analysis)
         
         for i, (mips_param, other_param) in enumerate(
             zip(mips64_analysis.parameters, other_analysis.parameters)
@@ -101,7 +106,7 @@ class MIPS64Handler:
                 override_map[i] = semantic_override
                 self._debug_print(
                     f"Param {i}: {mips_type} (MIPS64) vs semantic hint "
-                    f"{other_hints.get(other_param.get('name', f'param_{i}'))} (other) "
+                    f"{other_hints.get(parameter_identity_key_from_descriptor(other_param))} (other) "
                     f"-> override to {semantic_override.type_name}"
                 )
         
@@ -112,7 +117,7 @@ class MIPS64Handler:
         index: int,
         mips_param: Dict[str, Any],
         other_param: Dict[str, Any],
-        other_hints: Dict[str, ParameterSemanticHint],
+        other_hints: Dict[ParameterIdentityKey, ParameterSemanticHint],
         *,
         program: Any = None,
     ) -> Optional[ResolvedTypeSpec]:
@@ -121,8 +126,10 @@ class MIPS64Handler:
         if mips_bits <= 32:
             return None
 
-        other_name = other_param.get("name", f"param_{index}")
-        hint = other_hints.get(other_name)
+        other_identity = parameter_identity_key_from_descriptor(other_param)
+        if other_identity is None:
+            return None
+        hint = other_hints.get(other_identity)
         if hint is None:
             return None
         if hint.narrow_bits >= mips_bits:
@@ -245,8 +252,8 @@ class MIPS64Handler:
             
             # ケース2: 同一幅（64bit vs 64bit）でも拡張パターンあり
             elif size1 == 8 and size2 == 8:
-                pattern1 = usage1.get(param_name_1)
-                pattern2 = usage2.get(param_name_2)
+                pattern1 = usage1.get(parameter_identity_key_from_descriptor(p1))
+                pattern2 = usage2.get(parameter_identity_key_from_descriptor(p2))
                 
                 if pattern1 and not pattern2:
                     # function1が拡張、function2が直接使用 → function2に制約
@@ -294,8 +301,8 @@ class MIPS64Handler:
         is_mips64_1: bool,
         is_mips64_2: bool,
         counterexample: Dict[str, Any],
-        usage1: Dict[str, ParameterSemanticHint],
-        usage2: Dict[str, ParameterSemanticHint],
+        usage1: Dict[ParameterIdentityKey, ParameterSemanticHint],
+        usage2: Dict[ParameterIdentityKey, ParameterSemanticHint],
     ) -> Optional[Tuple[str, str, int]]:
         """幅不一致のパラメータについて偽反例をチェック"""
         if size1 == 8 and size2 == 4:
@@ -347,14 +354,14 @@ class MIPS64Handler:
     def _analyze_parameter_usage(
         self,
         analysis: FunctionReturnAnalysis
-    ) -> Dict[str, ParameterSemanticHint]:
+    ) -> Dict[ParameterIdentityKey, ParameterSemanticHint]:
         """
         関数の式からパラメータの使用パターンを分析
         
         Returns:
-            param_name -> semantic hint のマップ
+            parameter/storage identity -> semantic hint のマップ
         """
-        return hint_objects_by_name(analysis)
+        return hint_objects_by_identity(analysis)
     
     def _detect_extension_patterns(
         self,
@@ -567,11 +574,15 @@ class MIPS64Handler:
         """幅不一致時に使う signedness を、明示的な usage 証拠優先で決める。"""
         usage_signedness = []
 
-        pattern1 = self._coerce_semantic_hint(usage1.get(param_name_1))
+        pattern1 = self._coerce_semantic_hint(
+            usage1.get(parameter_identity_key_from_descriptor(p1))
+        )
         if pattern1 is not None and pattern1.signedness_source == "explicit":
             usage_signedness.append(pattern1.signedness)
 
-        pattern2 = self._coerce_semantic_hint(usage2.get(param_name_2))
+        pattern2 = self._coerce_semantic_hint(
+            usage2.get(parameter_identity_key_from_descriptor(p2))
+        )
         if pattern2 is not None and pattern2.signedness_source == "explicit":
             usage_signedness.append(pattern2.signedness)
 

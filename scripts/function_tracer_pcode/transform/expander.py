@@ -2,6 +2,7 @@
 """式木全体のPHI展開モジュール（網羅性改善版）"""
 
 from dataclasses import dataclass
+import inspect
 from typing import Callable, Hashable, Iterable, List, Optional, Set, Dict, Tuple, Any
 from ..model import Expression, Condition, ExpressionType, StorageInfo, CallTargetRef, UnknownValueRef, CanonicalLocation, PcodeOpRef
 from ..model.intrinsics import resolve_pcode_intrinsic
@@ -82,6 +83,23 @@ class MultiequalBranchObservation:
     observed_location: Optional[CanonicalLocation]
 
 
+def _callable_accepts_positional_args(fn: Callable, count: int) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    positional_count = 0
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            positional_count += 1
+    return positional_count >= count
+
+
 class ExpressionExpander:
     """
     式木全体を展開し、PHIノードを解決する
@@ -111,7 +129,7 @@ class ExpressionExpander:
         read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
         image_base: Optional[int] = None,
         record_deferred_call: Optional[
-            Callable[[CallTargetRef, List[Expression], Optional[Expression]], Any]
+            Callable[[CallTargetRef, List[Expression], Optional[Expression], object], Any]
         ] = None,
     ):
         self.tracer = tracer
@@ -124,6 +142,10 @@ class ExpressionExpander:
         self.read_memory_value = read_memory_value
         self.image_base = image_base
         self.record_deferred_call = record_deferred_call
+        self._record_deferred_call_accepts_pcode_ref = (
+            record_deferred_call is not None
+            and _callable_accepts_positional_args(record_deferred_call, 4)
+        )
         self._expanding_ops: Set[Tuple[Any, ...]] = set()
         self._debug_message_limit = 4000
         self._debug_message_count = 0
@@ -165,6 +187,19 @@ class ExpressionExpander:
         if not self._debug_available():
             return
         self._debug_print(f"{label}{self._debug_expr_summary(expr)}", indent)
+
+    def _record_deferred_call(
+        self,
+        target_ref: CallTargetRef,
+        args: List[Expression],
+        call_target_expr: Optional[Expression],
+        pcode_op_ref,
+    ):
+        if self.record_deferred_call is None:
+            return None
+        if self._record_deferred_call_accepts_pcode_ref:
+            return self.record_deferred_call(target_ref, args, call_target_expr, pcode_op_ref)
+        return self.record_deferred_call(target_ref, args, call_target_expr)
 
     def _normalize_expansion_conditions(
         self,
@@ -1850,21 +1885,20 @@ class ExpressionExpander:
                     record_target_ref,
                     explicit_args,
                 )
-                try:
-                    deferred_unknown = self.record_deferred_call(
-                        record_target_ref,
-                        deferred_args,
-                        deferred_target_expr,
-                    )
-                    if isinstance(deferred_unknown, str):
-                        deferred_unknown_label = deferred_unknown
-                    else:
-                        deferred_unknown_ref = deferred_unknown
-                        if hasattr(deferred_unknown, "display_name"):
-                            deferred_unknown_label = deferred_unknown.display_name()
-                except Exception:
-                    deferred_unknown_ref = None
-                    deferred_unknown_label = None
+                make_ref = getattr(self.tracer, "_make_pcode_op_ref", None)
+                pcode_op_ref = make_ref(pcode_op) if callable(make_ref) else None
+                deferred_unknown = self._record_deferred_call(
+                    record_target_ref,
+                    deferred_args,
+                    deferred_target_expr,
+                    pcode_op_ref,
+                )
+                if isinstance(deferred_unknown, str):
+                    deferred_unknown_label = deferred_unknown
+                else:
+                    deferred_unknown_ref = deferred_unknown
+                    if hasattr(deferred_unknown, "display_name"):
+                        deferred_unknown_label = deferred_unknown.display_name()
             self.tracer.emit_unknown_event(
                 reason="call_out_of_scope",
                 varnode=pcode_op.getOutput(),
@@ -2032,21 +2066,20 @@ class ExpressionExpander:
                     fallback_target,
                     recovered_seed_args,
                 )
-            try:
-                deferred_unknown = self.record_deferred_call(
-                    fallback_target,
-                    deferred_args,
-                    deferred_target_expr,
-                )
-                if isinstance(deferred_unknown, str):
-                    deferred_unknown_label = deferred_unknown
-                else:
-                    deferred_unknown_ref = deferred_unknown
-                    if hasattr(deferred_unknown, "display_name"):
-                        deferred_unknown_label = deferred_unknown.display_name()
-            except Exception:
-                deferred_unknown_ref = None
-                deferred_unknown_label = None
+            make_ref = getattr(self.tracer, "_make_pcode_op_ref", None)
+            pcode_op_ref = make_ref(pcode_op) if callable(make_ref) else None
+            deferred_unknown = self._record_deferred_call(
+                fallback_target,
+                deferred_args,
+                deferred_target_expr,
+                pcode_op_ref,
+            )
+            if isinstance(deferred_unknown, str):
+                deferred_unknown_label = deferred_unknown
+            else:
+                deferred_unknown_ref = deferred_unknown
+                if hasattr(deferred_unknown, "display_name"):
+                    deferred_unknown_label = deferred_unknown.display_name()
         self.tracer.emit_unknown_event(
             reason="call_out_of_scope",
             varnode=pcode_op.getOutput(),

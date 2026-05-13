@@ -17,6 +17,7 @@ from ...model import (
     StorageInfo,
     compare_loop_summaries,
 )
+from ...model.runtime_refs import _loop_summary_term_at_index
 from ...analysis.effect_summary import canonicalize_location
 from ...model.render_smt import (
     collect_intrinsic_smt_declarations,
@@ -90,6 +91,81 @@ class _ExactReadonlyReductionProof:
     count_value: int
     expected_terms: tuple[ReadonlyReductionTermRef, ...]
     evidence: str
+
+
+@dataclass(frozen=True)
+class _ReadonlyLoopSummaryProofAdapter:
+    """Narrow proof adapter for exact-return checks against a loop summary."""
+
+    pointer_base_ref: Any
+    count_parameter_name: str
+    count_parameter_index: Optional[int]
+    count_parameter_storage_identity_key: Optional[Tuple[Any, ...]]
+    limit_expr: Any
+    result_size: int
+    loop_summary: Any
+
+    @property
+    def start_index(self) -> int:
+        return self._int_constant(getattr(self.loop_summary, "start_expr", None), default=0)
+
+    @property
+    def index_step(self) -> int:
+        return max(1, self._int_constant(getattr(self.loop_summary, "step_expr", None), default=1))
+
+    @property
+    def seed_terms(self) -> Tuple[ReadonlyReductionTermRef, ...]:
+        return tuple(getattr(self.loop_summary, "seed_terms", ()) or ())
+
+    @property
+    def seed_term_count(self) -> Optional[int]:
+        value = getattr(self.loop_summary, "seed_term_count", None)
+        try:
+            return None if value is None else max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _int_constant(value: Any, *, default: int) -> int:
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return int(value)
+        if getattr(getattr(value, "expr_type", None), "name", None) == "CONSTANT":
+            try:
+                return int(getattr(value, "value"))
+            except (TypeError, ValueError):
+                return default
+        return default
+
+    def full_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
+        try:
+            count = int(count_value)
+        except (TypeError, ValueError):
+            return None
+        if count <= 0:
+            return None
+        start = self.start_index
+        step = self.index_step
+        if count < start:
+            return None
+        terms: List[ReadonlyReductionTermRef] = list(self.seed_terms)
+        if any(not isinstance(term, ReadonlyReductionTermRef) for term in terms):
+            return None
+        if not terms and self.seed_term_count is not None:
+            if self.seed_term_count != start:
+                return None
+            for index in range(start):
+                term = _loop_summary_term_at_index(self.loop_summary, index)
+                if not isinstance(term, ReadonlyReductionTermRef):
+                    return None
+                terms.append(term)
+        for index in range(start, count, step):
+            term = _loop_summary_term_at_index(self.loop_summary, index)
+            if not isinstance(term, ReadonlyReductionTermRef):
+                return None
+            terms.append(term)
+        return tuple(terms)
 
 
 @dataclass(frozen=True)
@@ -299,6 +375,23 @@ class PairwiseStrategy(CheckStrategy):
                     continue
                 loop_fallback_reason = self._case_pair_loop_summary_safe_fallback_reason(case1, case2)
                 if loop_fallback_reason is not None:
+                    if self._case_pair_conditions_unsat_under_shared_inputs(
+                        base_ctx,
+                        case1,
+                        case2,
+                        symbol_replace_fn1,
+                        symbol_replace_fn2,
+                        pair_id,
+                        loop_fallback_reason,
+                    ):
+                        unsat_count += 1
+                        resolved_pairs.add((i, j))
+                        if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
+                            self._debug_print(
+                                f"  Pair {pair_id}: loop fallback conditions unreachable -> UNSAT "
+                                f"({unsat_count}/{total_pairs})"
+                            )
+                        continue
                     if self._case_pair_can_defer_loop_summary_proof(
                         case1,
                         case2,
@@ -315,7 +408,7 @@ class PairwiseStrategy(CheckStrategy):
                     unknown_count += 1
                     unknown_reasons.append(
                         make_unknown_reason(
-                            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+                            self._unknown_reason_id_for_loop_fallback(loop_fallback_reason),
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(loop_fallback_reason,),
@@ -475,7 +568,7 @@ class PairwiseStrategy(CheckStrategy):
                     unknown_count += 1
                     unknown_reasons.append(
                         make_unknown_reason(
-                            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+                            self._unknown_reason_id_for_loop_fallback(pending.reason),
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(pending.reason,),
@@ -501,11 +594,7 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print("=" * 60)
             blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
             for blocking_reason in blocking_reasons:
-                typed_reason_id = (
-                    blocking_reason
-                    if "return_coverage_" in blocking_reason
-                    else UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
-                )
+                typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)
                 unknown_reasons.append(
                     make_unknown_reason(
                         typed_reason_id,
@@ -571,6 +660,63 @@ class PairwiseStrategy(CheckStrategy):
             self._active_safety_checker = None
             self._active_normalization_stats = None
 
+    def _unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
+        reason_text = str(reason or "")
+        if reason_text.startswith("readonly_contract_"):
+            return UnknownReasonId.READONLY_IDENTITY_MISSING
+        if reason_text in {
+            "semantic_key_missing",
+            "semantic_key_unavailable",
+            "semantic_key_none",
+            "semantic_key_mismatch",
+        }:
+            return UnknownReasonId.READONLY_IDENTITY_MISSING
+        if reason_text in {
+            "loop_summary_guard_mismatch",
+            "loop_summary_shape_mismatch",
+            "loop_summary_unproven",
+            "loop_summary_unknown",
+            "loop_summary_operand_mismatch",
+            "loop_summary_intrinsic_mismatch",
+        }:
+            return UnknownReasonId.METHOD_B_CLOSURE_BLOCKED
+        return UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING
+
+    def _unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
+        reason_text = str(reason or "")
+        if "return_coverage_gap" in reason_text:
+            return UnknownReasonId.RETURN_COVERAGE_GAP
+        if "return_coverage_inconclusive" in reason_text:
+            return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+        if "recoverable_partial" in reason_text or "argument_recovery_recoverable_partial" in reason_text:
+            return UnknownReasonId.RECOVERABLE_PARTIAL
+        return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+
+    def _case_pair_conditions_unsat_under_shared_inputs(
+        self,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        param_replace_fn1,
+        param_replace_fn2,
+        pair_id: str,
+        loop_fallback_reason: Optional[str],
+    ) -> bool:
+        if loop_fallback_reason != "loop_summary_shape_mismatch":
+            return False
+        if not case1.conditions or not case2.conditions:
+            return False
+        query = self._build_condition_only_query(
+            base_ctx,
+            case1,
+            case2,
+            param_replace_fn1,
+            param_replace_fn2,
+            pair_id,
+        )
+        result = Z3Solver(timeout=1, debug=False).check_equivalence_direct(query)
+        return result.status == SolverStatus.UNSAT
+
     def _solve_query_twostage(
         self,
         base_ctx: Dict[str, Any],
@@ -631,7 +777,13 @@ class PairwiseStrategy(CheckStrategy):
         if not isinstance(summary_ref, ReadonlyReductionRef):
             return None
         accumulator_proof = getattr(summary_ref, "accumulator_proof", None)
-        if accumulator_proof is None or getattr(summary_ref, "loop_summary", None) is None:
+        if accumulator_proof is None:
+            return self._prove_exact_load_sum_matches_readonly_loop_summary(
+                exact_case,
+                summary_case,
+                summary_ref,
+            )
+        if getattr(summary_ref, "loop_summary", None) is None:
             return None
         result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
         if max(1, int(getattr(summary_ref, "result_size", 0) or 0)) != result_size:
@@ -690,6 +842,89 @@ class PairwiseStrategy(CheckStrategy):
             constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
             result_size=result_size,
         )
+
+    def _prove_exact_load_sum_matches_readonly_loop_summary(
+        self,
+        exact_case: ReturnCase,
+        summary_case: ReturnCase,
+        summary_ref: ReadonlyReductionRef,
+    ) -> Optional[_ExactReadonlyReductionProof]:
+        loop_summary = getattr(summary_ref, "loop_summary", None)
+        if loop_summary is None:
+            return None
+        requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
+        if callable(requires_effect_proof) and requires_effect_proof():
+            return None
+        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
+        if callable(requires_path_proof) and requires_path_proof():
+            return None
+        result_size = max(1, int(getattr(summary_ref, "result_size", 0) or 0))
+        term_descriptor = getattr(loop_summary, "term_descriptor", None)
+        if term_descriptor is None:
+            return None
+        if max(1, int(getattr(term_descriptor, "result_size", 0) or result_size)) != result_size:
+            return None
+        if self._normalize_constant_bias(
+            int(getattr(summary_ref, "constant_bias", 0) or 0),
+            result_size,
+        ) != self._normalize_constant_bias(
+            int(getattr(loop_summary, "constant_bias", 0) or 0),
+            result_size,
+        ):
+            return None
+        extracted = self._extract_readonly_reduction_terms_and_bias_from_expression(
+            exact_case.value_expr,
+            exact_case.parameters,
+            getattr(summary_ref, "pointer_base_ref", None),
+            program_is_big_endian=getattr(exact_case, "program_is_big_endian", None),
+        )
+        if extracted is None:
+            return None
+        extracted_terms, extracted_bias = extracted
+        exact_bits = int(expression_smt_bit_width(exact_case.value_expr) or 0)
+        if exact_bits != result_size * 8:
+            return None
+        if self._normalize_constant_bias(extracted_bias, result_size) != self._normalize_constant_bias(
+            int(getattr(loop_summary, "constant_bias", 0) or 0),
+            result_size,
+        ):
+            return None
+        adapter = _ReadonlyLoopSummaryProofAdapter(
+            pointer_base_ref=getattr(summary_ref, "pointer_base_ref", None),
+            count_parameter_name=str(getattr(summary_ref, "count_parameter_name", None) or "count"),
+            count_parameter_index=getattr(summary_ref, "count_parameter_index", None),
+            count_parameter_storage_identity_key=getattr(
+                summary_ref,
+                "count_parameter_storage_identity_key",
+                None,
+            ),
+            limit_expr=getattr(loop_summary, "limit_expr", None),
+            result_size=result_size,
+            loop_summary=loop_summary,
+        )
+        extracted_key = tuple(term.stable_key() for term in extracted_terms)
+        max_count = self._exact_reduction_count_search_bound(adapter, len(extracted_terms))
+        for count_value in range(1, max_count + 1):
+            expected_terms = adapter.full_terms_for_count_value(count_value)
+            if expected_terms is None:
+                continue
+            if extracted_key != tuple(term.stable_key() for term in expected_terms):
+                continue
+            if self._cases_admit_reduction_count(
+                exact_case,
+                summary_case,
+                adapter,
+                count_value,
+            ):
+                return _ExactReadonlyReductionProof(
+                    exact_terms=tuple(extracted_terms),
+                    constant_bias=self._normalize_constant_bias(extracted_bias, result_size),
+                    result_size=result_size,
+                    count_value=int(count_value),
+                    expected_terms=tuple(expected_terms),
+                    evidence="loop_summary_materialized_terms",
+                )
+        return None
 
     def _exact_terms_match_reduction_proof_under_case_conditions(
         self,
@@ -840,6 +1075,12 @@ class PairwiseStrategy(CheckStrategy):
                 result_size=result_size,
             )
             if readonly_decision.equivalent:
+                return readonly_decision
+            if readonly_decision.reason in {
+                "readonly_contract_type_mismatch",
+                "readonly_contract_result_width_mismatch",
+                "readonly_contract_mismatch",
+            }:
                 return readonly_decision
             loop_result = compare_loop_summaries(left_loop_summary, right_loop_summary)
             decisive = loop_result.is_equivalent()
@@ -2108,6 +2349,31 @@ class PairwiseStrategy(CheckStrategy):
             return solver_result
         return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
 
+    def _return_cases_have_smt_total_coverage(
+        self,
+        cases: Sequence[Any],
+    ) -> Optional[bool]:
+        miss_conditions: List[Condition] = []
+        for case in cases or ():
+            conditions = list(getattr(case, "conditions", None) or [])
+            if not conditions:
+                return True
+            miss_expr = self._case_miss_expression(conditions)
+            if miss_expr is None:
+                return None
+            miss_conditions.append(Condition(miss_expr, False))
+        if not miss_conditions:
+            return False
+
+        parameters: List[Dict[str, Any]] = []
+        for case in cases or ():
+            parameters.extend(list(getattr(case, "parameters", None) or []))
+        identity_conditions = self._conditions_with_object_identity_parameter_symbols(
+            miss_conditions,
+            parameters,
+        )
+        return ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
+
     def _condition_set_implies(
         self,
         premises: Sequence[Condition],
@@ -3020,7 +3286,7 @@ class PairwiseStrategy(CheckStrategy):
             expr_type = getattr(expr, "expr_type", None)
             expr_kind = getattr(expr_type, "__class__", None)
             if expr_type is not None and expr_kind is not None and expr_type == expr_kind.PARAMETER:
-                return expr.clone_with(name=parameter_symbol(expr))
+                return expr.clone_with(name=parameter_symbol(expr), runtime_ref=None)
             cloned_operands = [clone_expr(operand) for operand in (getattr(expr, "operands", None) or [])]
             cloned_value = clone_value(getattr(expr, "value", None))
             return expr.clone_with(operands=cloned_operands, value=cloned_value)

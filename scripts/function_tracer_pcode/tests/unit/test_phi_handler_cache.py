@@ -113,6 +113,29 @@ class _FakeMultiequal:
         return "MULTIEQUAL"
 
 
+class _FakeOp:
+    def __init__(self, mnemonic: str, inputs, output=None, stable_key: str = "op"):
+        self._mnemonic = mnemonic
+        self._inputs = inputs
+        self._output = output
+        self._stable_key = stable_key
+
+    def getMnemonic(self):
+        return self._mnemonic
+
+    def getNumInputs(self):
+        return len(self._inputs)
+
+    def getInput(self, index: int):
+        return self._inputs[index]
+
+    def getOutput(self):
+        return self._output
+
+    def getOpcode(self):
+        return None
+
+
 class _FakeTracer:
     def __init__(self):
         self.debug = False
@@ -124,6 +147,14 @@ class _FakeTracer:
 
     def emit_unknown_event(self, **_kwargs):
         return None
+
+
+def _eq_param(value: int) -> Condition:
+    param = Expression.parameter("param_1", size=4)
+    return Condition(
+        Expression.binary_op("INT_EQUAL", param, Expression.constant(value, 4)),
+        False,
+    )
 
 
 def test_phi_handler_reuses_cached_multiequal_expansion():
@@ -184,3 +215,48 @@ def test_phi_handler_uses_alternative_valid_path_when_first_path_contradicts():
 
     assert len(expanded) == 1
     assert expanded[0].value.to_string() == "v_20488"
+
+
+def test_phi_handler_passes_active_conditions_to_nested_multiequal_inputs():
+    class _PathAwareTracker:
+        def __init__(self, cond_a, cond_b):
+            self.cond_a = cond_a
+            self.cond_b = cond_b
+
+        def get_block_by_hash(self, block):
+            return _FakeBlockInfo(block)
+
+        def get_path_conditions_to_block(self, _block_info):
+            return []
+
+        def get_all_valid_paths_to_block(self, block_info):
+            if block_info.block.getIndex() == 10:
+                return [[self.cond_a]]
+            if block_info.block.getIndex() == 11:
+                return [[self.cond_b]]
+            return [[]]
+
+    cond_a = _eq_param(1)
+    cond_b = _eq_param(2)
+    tracer = _FakeTracer()
+    handler = PhiHandler(tracer, _PathAwareTracker(cond_a, cond_b))
+
+    in_block_a = _FakeBlock(10)
+    in_block_b = _FakeBlock(11)
+    phi_block = _FakeBlock(12)
+    phi_block._ins = [in_block_a, in_block_b]
+
+    output = _FakeVarnode("register", 0x5000, 4, "out")
+    input_a = _FakeVarnode("register", 0x5008, 4, "a")
+    input_b = _FakeVarnode("register", 0x5010, 4, "b")
+    multiequal = _FakeMultiequal([input_a, input_b], output, phi_block, "phi:nested")
+    phi_output = _FakeVarnode("register", 0x5000, 4, "out", def_op=multiequal)
+    add_output = _FakeVarnode("register", 0x5018, 4, "sum")
+    one = _FakeVarnode("const", 1, 4, "one")
+    add_op = _FakeOp("INT_ADD", [phi_output, one], add_output, "op:add")
+
+    expanded = handler._trace_operation_with_phi(add_op, [cond_a], 0)
+
+    assert len(expanded) == 1
+    assert "v_20488" in expanded[0].value.to_string()
+    assert "v_20496" not in expanded[0].value.to_string()

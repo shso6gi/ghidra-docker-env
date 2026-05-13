@@ -327,6 +327,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+            target_regression="loop_summary_proof_missing",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.RETURN_COVERAGE_GAP,
@@ -335,6 +336,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.FUNCTION,
             UnknownAggregationUnit.FUNCTION,
             recovery_proof_kind=UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+            target_regression="return_coverage_gap",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
@@ -343,6 +345,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.FUNCTION,
             UnknownAggregationUnit.FUNCTION,
             recovery_proof_kind=UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+            target_regression="return_coverage_inconclusive",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
@@ -386,6 +389,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.QUERY,
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+            target_regression="solver_unknown_timeout",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.NORMALIZATION_NO_CHANGE,
@@ -394,6 +398,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+            target_regression="normalization_no_change",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE,
@@ -402,6 +407,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+            target_regression="solver_proven_rewrite_no_change",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED,
@@ -410,6 +416,7 @@ def _register_defaults() -> None:
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
             recovery_proof_kind=UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+            target_regression="solver_proven_rewrite_proof_failed",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.EMPTY_RETURN_CASES,
@@ -535,6 +542,147 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="method_b_closure_blocked",
             description="Recover Method-B closure only when covering case and guard partition proofs exist.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.GUARD_PARTITION_COMPLETION,
+                    "loop_summary_guard_partition",
+                    required_evidence=(
+                        "loop_summary_seed",
+                        "term_sequence",
+                        "case_guard_disjunction",
+                        "pure_side_effect_profile",
+                    ),
+                    description="Complete the loop-summary guard partition before using it as proof.",
+                ),
+            ),
+            target_regression="loop_summary_proof_missing",
+            description="Recover generic loop-summary proof gaps by completing the guard partition.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+                    "return_partition_extraction",
+                    required_evidence=(
+                        "missing_return_guard",
+                        "tail_or_default_return_value",
+                        "return_storage",
+                    ),
+                    description="Extract the missing return partition and value under its guard.",
+                ),
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+                    "return_guard_coverage",
+                    required_evidence=(
+                        "case_guard_disjunction",
+                        "path_feasibility",
+                        "function_precondition",
+                    ),
+                    description="Prove the completed return cases cover the function precondition.",
+                ),
+            ),
+            target_regression="return_coverage_gap",
+            description="Recover return coverage gaps by adding the missing partition and coverage proof.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+                    "return_coverage_smt_disambiguation",
+                    required_evidence=(
+                        "case_guard_disjunction",
+                        "normalized_guard_formula",
+                        "solver_model_or_timeout",
+                    ),
+                    description="Disambiguate inconclusive return coverage with normalized SMT guards.",
+                ),
+            ),
+            target_regression="return_coverage_inconclusive",
+            description="Recover inconclusive coverage by proving or refuting the uncovered guard.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "solver_timeout_retry",
+                    required_evidence=(
+                        "query_hash",
+                        "timeout_budget",
+                        "solver_options",
+                        "normalized_query",
+                    ),
+                    description="Retry the timed-out query with traceable options and normalized terms.",
+                ),
+            ),
+            target_regression="solver_unknown_timeout",
+            description="Recover solver timeouts by retrying a normalized query with explicit solver settings.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.NORMALIZATION_NO_CHANGE,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "normalization_strategy_selection",
+                    required_evidence=(
+                        "query_hash",
+                        "typed_expression_key",
+                        "candidate_rewrite_rules",
+                    ),
+                    description="Select a typed normalization strategy when the previous pass made no change.",
+                ),
+            ),
+            target_regression="normalization_no_change",
+            description="Recover no-op normalization by choosing a typed rewrite strategy.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "rewrite_candidate_generation",
+                    required_evidence=(
+                        "pre_normalized_query",
+                        "rewrite_candidate",
+                        "typed_expression_key",
+                    ),
+                    description="Generate a semantically typed rewrite candidate before retrying the solver.",
+                ),
+            ),
+            target_regression="solver_proven_rewrite_no_change",
+            description="Recover no-op solver rewrites by producing a typed rewrite candidate.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "rewrite_proof_recheck",
+                    required_evidence=(
+                        "rewrite_before_expr",
+                        "rewrite_after_expr",
+                        "proof_counterexample_or_solver_trace",
+                    ),
+                    description="Recheck the failed rewrite proof with typed expressions and counterexample evidence.",
+                ),
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "solver_retry",
+                    required_evidence=(
+                        "normalized_query",
+                        "solver_options",
+                        "query_hash",
+                    ),
+                    description="Retry the normalized query with explicit solver settings and traceable query identity.",
+                ),
+            ),
+            target_regression="solver_proven_rewrite_proof_failed",
+            description="Recover failed solver-proven rewrites by rechecking the proof and retrying the normalized query.",
         ),
     ):
         register_unknown_recovery_plan(plan)

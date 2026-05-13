@@ -186,6 +186,153 @@ def test_tracer_storage_backed_parameter_fallback_coerces_bound_arguments_object
     assert resolved.runtime_ref.parameter_index == 0
 
 
+def test_tracer_parameter_symbol_uses_bound_argument_by_object_index():
+    target = Expression.constant(0x401200, size=8)
+    tracer = PcodeTracer(
+        Mock(),
+        _EmptyHighFunction(),
+        debug=False,
+        bound_parameter_values={0: target},
+    )
+    tracer._parameter_descriptors = [
+        ParameterStorageDescriptor(
+            name="param_1",
+            index=0,
+            size_bytes=8,
+            is_signed=False,
+            data_type="code *",
+            data_type_obj=None,
+            storage_info=_reg_storage(
+                "a0",
+                "a0",
+                size_bits=64,
+                bit_offset_in_base=0,
+                offset=0x20,
+                base_offset=0x20,
+            ),
+        )
+    ]
+
+    resolved = tracer._resolve_bound_parameter_expression(
+        name="param_1",
+        index=0,
+        data_type="code *",
+        data_type_obj=None,
+        size_bytes=8,
+        storage_info=_reg_storage(
+            "a0",
+            "a0",
+            size_bits=64,
+            bit_offset_in_base=0,
+            offset=0x20,
+            base_offset=0x20,
+        ),
+    )
+
+    assert resolved is not None
+    assert resolved.expr_type.name == "CONSTANT"
+    assert resolved.value == 0x401200
+    assert resolved.runtime_ref.parameter_index == 0
+
+
+def test_tracer_parameter_symbol_uses_bound_argument_by_storage_identity_without_index():
+    target = Expression.constant(0x401240, size=8)
+    storage = _reg_storage(
+        "a0",
+        "a0",
+        size_bits=64,
+        bit_offset_in_base=0,
+        offset=0x20,
+        base_offset=0x20,
+    )
+    tracer = PcodeTracer(
+        Mock(),
+        _EmptyHighFunction(),
+        debug=False,
+        bound_parameter_storage_values={storage.storage_identity_key(): target},
+    )
+    tracer._parameter_descriptors = [
+        ParameterStorageDescriptor(
+            name="param_1",
+            index=-1,
+            size_bytes=8,
+            is_signed=False,
+            data_type="code *",
+            data_type_obj=None,
+            storage_info=storage,
+        )
+    ]
+
+    resolved = tracer._resolve_bound_parameter_expression(
+        name="param_1",
+        index=-1,
+        data_type="code *",
+        data_type_obj=None,
+        size_bytes=8,
+        storage_info=storage,
+    )
+
+    assert resolved is not None
+    assert resolved.expr_type.name == "CONSTANT"
+    assert resolved.value == 0x401240
+    assert resolved.runtime_ref.is_storage()
+    assert resolved.runtime_ref.storage_identity_key == storage.storage_identity_key()
+
+
+def test_tracer_storage_backed_parameter_fallback_uses_storage_bound_argument_without_index():
+    target = Expression.constant(0x401280, size=8)
+    storage = _reg_storage(
+        "a0",
+        "a0",
+        size_bits=64,
+        bit_offset_in_base=0,
+        offset=0x20,
+        base_offset=0x20,
+    )
+    tracer = PcodeTracer(
+        Mock(),
+        _EmptyHighFunction(),
+        debug=False,
+        bound_parameter_storage_values={storage.storage_identity_key(): target},
+    )
+    tracer._parameter_descriptors = [
+        ParameterStorageDescriptor(
+            name="param_1",
+            index=-1,
+            size_bytes=8,
+            is_signed=False,
+            data_type="code *",
+            data_type_obj=None,
+            storage_info=storage,
+        )
+    ]
+
+    resolved = tracer._resolve_storage_backed_parameter_expression(storage)
+
+    assert resolved is not None
+    assert resolved.expr_type.name == "CONSTANT"
+    assert resolved.value == 0x401280
+    assert resolved.runtime_ref.is_storage()
+    assert resolved.runtime_ref.storage_identity_key == storage.storage_identity_key()
+
+
+def test_tracer_implicit_call_recovery_refuses_pathless_storage_fallback(monkeypatch):
+    tracer = PcodeTracer(Mock(), _EmptyHighFunction(), debug=False)
+    target_ref = CallTargetRef.from_name("callee")
+    parameter = Mock()
+
+    monkeypatch.setattr(tracer, "_resolve_call_target_function", lambda _target_ref: object())
+    monkeypatch.setattr(tracer, "_call_target_parameters", lambda _target_function: [parameter])
+    monkeypatch.setattr(tracer, "_recover_implicit_call_arguments_with_effect_model", lambda *_args: [])
+    monkeypatch.setattr(
+        tracer,
+        "_call_storage_is_unmodified_before_call",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("pathless storage fallback must not run")),
+    )
+
+    assert tracer._recover_implicit_call_argument_expressions(object(), target_ref) == []
+
+
 def test_return_analyzer_specializes_local_target_expansions_with_bound_argument_objects():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     tracer = Mock()
@@ -379,6 +526,142 @@ def test_return_analyzer_local_target_cache_key_depends_on_argument_objects():
     assert key_a != key_b
 
 
+def test_return_analyzer_binds_call_args_to_callee_parameter_indexes():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    target_expr = Expression.constant(0x401200, size=8)
+    lhs_expr = Expression.parameter("lhs", index=10, size=4)
+    rhs_expr = Expression.parameter("rhs", index=11, size=4)
+
+    bound = analyzer._bound_parameter_values_from_call_args(
+        [target_expr, lhs_expr, rhs_expr],
+        [
+            {"name": "param_1", "index": 1, "size": 8, "data_type": "code *"},
+            {"name": "param_2", "index": 2, "size": 4, "data_type": "int"},
+            {"name": "param_3", "index": 3, "size": 4, "data_type": "int"},
+        ],
+    )
+
+    assert set(bound) == {1, 2, 3}
+    assert bound[1].value == 0x401200
+    assert bound[2].name == "lhs"
+    assert bound[3].name == "rhs"
+
+
+def test_return_analyzer_does_not_bind_call_args_by_ordinal_without_identity():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    target_expr = Expression.constant(0x401200, size=8)
+
+    bound = analyzer._bound_parameter_values_from_call_args(
+        [target_expr],
+        [{"name": "param_1", "size": 8, "data_type": "code *"}],
+    )
+    storage_bound = analyzer._bound_parameter_storage_values_from_call_args(
+        [target_expr],
+        [{"name": "param_1", "size": 8, "data_type": "code *"}],
+    )
+
+    assert bound == {}
+    assert storage_bound == {}
+
+
+def test_return_analyzer_binds_call_args_by_callee_storage_identity_without_index():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    target_expr = Expression.constant(0x401240, size=8)
+    storage = _reg_storage(
+        "a0",
+        "a0",
+        size_bits=64,
+        bit_offset_in_base=0,
+        offset=0x20,
+        base_offset=0x20,
+    )
+
+    bound = analyzer._bound_parameter_values_from_call_args(
+        [target_expr],
+        [{"name": "param_1", "size": 8, "data_type": "code *", "storage": storage}],
+    )
+    storage_bound = analyzer._bound_parameter_storage_values_from_call_args(
+        [target_expr],
+        [{"name": "param_1", "size": 8, "data_type": "code *", "storage": storage}],
+    )
+
+    assert bound == {}
+    assert set(storage_bound) == {storage.storage_identity_key()}
+    assert storage_bound[storage.storage_identity_key()].value == 0x401240
+
+
+def test_return_analyzer_call_target_analysis_does_not_bind_args_by_ordinal_without_identity(monkeypatch):
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee = _FakeFunction("callee", 0x401000)
+    target_ref = CallTargetRef.from_name("callee", entry_offset=0x401000, function_obj=callee)
+    captured_kwargs = []
+
+    monkeypatch.setattr(
+        analyzer,
+        "_get_freshest_callee_parameters",
+        lambda _target_ref: [{"name": "param_1", "size": 8, "data_type": "code *"}],
+    )
+
+    def fake_analyze_function(_function, **kwargs):
+        captured_kwargs.append(kwargs)
+        return create_mock_analysis("callee")
+
+    analyzer.analyze_function = fake_analyze_function
+
+    result = analyzer._get_or_analyze_call_target(
+        target_ref,
+        set(),
+        args=[Expression.constant(0x401200, size=8)],
+    )
+
+    assert result is not None
+    assert captured_kwargs
+    assert captured_kwargs[0]["bound_parameter_values"] == {}
+    assert captured_kwargs[0]["bound_parameter_storage_values"] == {}
+
+
+def test_return_analyzer_call_target_analysis_binds_storage_identity_without_index(monkeypatch):
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee = _FakeFunction("callee", 0x401000)
+    target_ref = CallTargetRef.from_name("callee", entry_offset=0x401000, function_obj=callee)
+    storage = _reg_storage(
+        "a0",
+        "a0",
+        size_bits=64,
+        bit_offset_in_base=0,
+        offset=0x20,
+        base_offset=0x20,
+    )
+    captured_kwargs = []
+
+    monkeypatch.setattr(
+        analyzer,
+        "_get_freshest_callee_parameters",
+        lambda _target_ref: [
+            {"name": "param_1", "size": 8, "data_type": "code *", "storage": storage}
+        ],
+    )
+
+    def fake_analyze_function(_function, **kwargs):
+        captured_kwargs.append(kwargs)
+        return create_mock_analysis("callee")
+
+    analyzer.analyze_function = fake_analyze_function
+
+    result = analyzer._get_or_analyze_call_target(
+        target_ref,
+        set(),
+        args=[Expression.constant(0x401240, size=8)],
+    )
+
+    assert result is not None
+    assert captured_kwargs
+    assert captured_kwargs[0]["bound_parameter_values"] == {}
+    storage_values = captured_kwargs[0]["bound_parameter_storage_values"]
+    assert set(storage_values) == {storage.storage_identity_key()}
+    assert storage_values[storage.storage_identity_key()].value == 0x401240
+
+
 def test_return_analyzer_propagates_specialized_deferred_calls_to_parent_context():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     analyzer._current_deferred_calls = {}
@@ -439,6 +722,9 @@ def test_return_analyzer_propagates_specialized_deferred_calls_to_parent_context
 def test_return_analyzer_scopes_call_analysis_cache_by_bound_argument_objects():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     callee = _FakeFunction("callee", 0x401000)
+    analyzer._effect_summary_parameter_cache[analyzer._function_cache_key(callee)] = [
+        {"name": "param_1", "index": 0, "size": 4},
+    ]
     target_ref = CallTargetRef.from_name(
         "callee",
         entry_offset=0x401000,

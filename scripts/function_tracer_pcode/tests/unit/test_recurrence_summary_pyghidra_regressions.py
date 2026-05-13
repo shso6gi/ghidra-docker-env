@@ -33,12 +33,26 @@ _LOOP_METHOD_B_ARM64_GCC_O3 = (
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O3"
 )
+_LOOP_METHOD_B_ARM64_CLANG_O0 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-arm64-clang-O0"
+)
 _LOOP_METHOD_B_ARM64_GCC_O2 = (
     Path(__file__).resolve().parents[4]
     / "targets"
     / "cate1"
     / "loop_method_b_test"
     / "loop_method_b_test-arm64-gcc-O2"
+)
+_LOOP_METHOD_B_ARM64_GCC_O0 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-arm64-gcc-O0"
 )
 _LOOP_METHOD_B_ARM64_GCC_O1 = (
     Path(__file__).resolve().parents[4]
@@ -75,6 +89,13 @@ _LOOP_METHOD_B_MIPS64_CLANG_O1 = (
     / "loop_method_b_test"
     / "loop_method_b_test-mips64-clang-O1"
 )
+_LOOP_METHOD_B_MIPS64_CLANG_O0 = (
+    Path(__file__).resolve().parents[4]
+    / "targets"
+    / "cate1"
+    / "loop_method_b_test"
+    / "loop_method_b_test-mips64-clang-O0"
+)
 _LOOP_METHOD_B_MIPS64_CLANG_O2 = (
     Path(__file__).resolve().parents[4]
     / "targets"
@@ -98,6 +119,8 @@ _LOOP_METHOD_B_MIPS64_GCC_O1 = (
 )
 _LOOP_METHOD_B_FUNCTION = "lmb_sum_prefix_peeled3_tail"
 _LOOP_METHOD_B_PEELED1_FUNCTION = "lmb_sum_prefix_peeled1_tail"
+_LOOP_METHOD_B_LOOP_FUNCTION = "lmb_sum_prefix_loop"
+_LOOP_METHOD_B_WRONG_TAIL_FUNCTION = "lmb_sum_prefix_wrong_tail"
 
 
 @pytest.fixture(scope="session")
@@ -247,6 +270,200 @@ def test_loop_method_b_vectorized_prefix_sum_recovers_object_proof(_running_pygh
         assert tuple(term.byte_offset for term in proof.seed_terms) == (0, 4, 8)
         assert tuple(proof.lane_terms) == ((0, 4), (4, 4), (8, 4), (12, 4))
         assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(4) or ())) == (0, 4, 8, 12)
+
+
+def test_loop_method_b_o0_prefix_loop_synthesizes_missing_positive_summary(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    binary_path = _LOOP_METHOD_B_ARM64_CLANG_O0
+    if not binary_path.is_file():
+        pytest.skip(f"loop_method_b binary not found: {binary_path}")
+
+    with _load_program(pyghidra, binary_path) as program:
+        pyghidra.analyze(program)
+        analyzer = ReturnAnalyzer(program, debug=False)
+        result = analyzer.analyze_function_by_name(_LOOP_METHOD_B_LOOP_FUNCTION, timeout=60)
+        if result is None:
+            pytest.fail("analysis did not produce a result for O0 prefix-loop regression")
+
+        readonly_returns = [
+            ret for ret in result.returns
+            if getattr(
+                getattr(getattr(ret, "value", None), "runtime_ref", None),
+                "accumulator_proof",
+                None,
+            )
+            is not None
+        ]
+        if not readonly_returns:
+            pytest.fail("missing synthetic readonly reduction summary for O0 prefix loop")
+
+        proof = readonly_returns[0].value.runtime_ref.accumulator_proof
+        assert proof is not None
+        assert proof.return_region_value_proven is True
+        assert proof.start_offset == 0
+        assert proof.start_index == 0
+        assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(3) or ())) == (0, 4, 8)
+        assert all("call_out_of_scope" not in ret.value.to_string() for ret in result.returns)
+
+
+def test_loop_method_b_mips64_clang_o0_prefix_loop_recovers_register_reused_accumulator(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    binary_path = _LOOP_METHOD_B_MIPS64_CLANG_O0
+    if not binary_path.is_file():
+        pytest.skip(f"loop_method_b binary not found: {binary_path}")
+
+    with _load_program(pyghidra, binary_path) as program:
+        pyghidra.analyze(program)
+        analyzer = ReturnAnalyzer(program, debug=False)
+        result = analyzer.analyze_function_by_name(_LOOP_METHOD_B_LOOP_FUNCTION, timeout=60)
+        if result is None:
+            pytest.fail("analysis did not produce a result for MIPS64 O0 prefix-loop regression")
+
+        readonly_returns = [
+            ret for ret in result.returns
+            if getattr(
+                getattr(getattr(ret, "value", None), "runtime_ref", None),
+                "accumulator_proof",
+                None,
+            )
+            is not None
+        ]
+        if not readonly_returns:
+            pytest.fail("missing readonly reduction summary for MIPS64 O0 prefix loop")
+
+        proof = readonly_returns[0].value.runtime_ref.accumulator_proof
+        assert proof is not None
+        assert proof.start_offset == 0
+        assert proof.start_index == 0
+        assert proof.element_size == 4
+        assert tuple(term.byte_offset for term in (proof.full_terms_for_count_value(3) or ())) == (0, 4, 8)
+        assert not any("return_case_coverage_gap" in note for note in result.analysis_notes)
+
+
+def test_loop_method_b_wrong_tail_arm64_o0_vs_mips64_o0_proves_equivalent(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    left_binary = _LOOP_METHOD_B_ARM64_CLANG_O0
+    right_binary = _LOOP_METHOD_B_MIPS64_CLANG_O0
+    if not left_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {left_binary}")
+    if not right_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {right_binary}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "loop-method-b-wrong-tail-arm64-mips64-o0", create=True) as project:
+            left_loader = pyghidra.program_loader().project(project).source(str(left_binary))
+            with left_loader.load() as left_loaded:
+                left_program = left_loaded.getPrimaryDomainObject()
+                pyghidra.analyze(left_program)
+
+                right_loader = pyghidra.program_loader().project(project).source(str(right_binary))
+                with right_loader.load() as right_loaded:
+                    right_program = right_loaded.getPrimaryDomainObject()
+                    pyghidra.analyze(right_program)
+
+                    checker = EquivalenceChecker(
+                        debug=False,
+                        strategy="pairwise",
+                        timeout=120,
+                        pairwise_timeout=5,
+                        pairwise_timeout_hard=30,
+                    )
+                    result = checker.check_from_binaries(
+                        left_program,
+                        right_program,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        decompile_timeout=60,
+                        retry_with_type_fix=True,
+                    )
+
+                    assert result.is_equivalent is True
+                    assert result.pairwise_stats is not None
+                    assert result.pairwise_stats.get("unknown", 0) == 0
+                    assert result.pairwise_stats.get("sat", 0) == 0
+
+
+def test_loop_method_b_wrong_tail_o0_vs_o1_resolves_deferred_prefix_call(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    left_binary = _LOOP_METHOD_B_ARM64_CLANG_O0
+    right_binary = _LOOP_METHOD_B_ARM64_CLANG_O1
+    if not left_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {left_binary}")
+    if not right_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {right_binary}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "loop-method-b-wrong-tail-o0-o1", create=True) as project:
+            left_loader = pyghidra.program_loader().project(project).source(str(left_binary))
+            with left_loader.load() as left_loaded:
+                left_program = left_loaded.getPrimaryDomainObject()
+                pyghidra.analyze(left_program)
+
+                right_loader = pyghidra.program_loader().project(project).source(str(right_binary))
+                with right_loader.load() as right_loaded:
+                    right_program = right_loaded.getPrimaryDomainObject()
+                    pyghidra.analyze(right_program)
+
+                    checker = EquivalenceChecker(
+                        debug=False,
+                        strategy="pairwise",
+                        timeout=10,
+                        pairwise_timeout=5,
+                        pairwise_timeout_hard=30,
+                    )
+                    result = checker.check_from_binaries(
+                        left_program,
+                        right_program,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        decompile_timeout=60,
+                        retry_with_type_fix=True,
+                    )
+
+                    assert result.is_equivalent is True
+
+
+def test_loop_method_b_wrong_tail_gcc_o0_vs_o1_narrows_readonly_return_surface(_running_pyghidra):
+    pyghidra = _running_pyghidra
+    left_binary = _LOOP_METHOD_B_ARM64_GCC_O0
+    right_binary = _LOOP_METHOD_B_ARM64_GCC_O1
+    if not left_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {left_binary}")
+    if not right_binary.is_file():
+        pytest.skip(f"loop_method_b binary not found: {right_binary}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pyghidra.open_project(temp_dir, "loop-method-b-wrong-tail-gcc-o0-o1", create=True) as project:
+            left_loader = pyghidra.program_loader().project(project).source(str(left_binary))
+            with left_loader.load() as left_loaded:
+                left_program = left_loaded.getPrimaryDomainObject()
+                pyghidra.analyze(left_program)
+
+                right_loader = pyghidra.program_loader().project(project).source(str(right_binary))
+                with right_loader.load() as right_loaded:
+                    right_program = right_loaded.getPrimaryDomainObject()
+                    pyghidra.analyze(right_program)
+
+                    checker = EquivalenceChecker(
+                        debug=False,
+                        strategy="pairwise",
+                        timeout=10,
+                        pairwise_timeout=5,
+                        pairwise_timeout_hard=30,
+                    )
+                    result = checker.check_from_binaries(
+                        left_program,
+                        right_program,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        _LOOP_METHOD_B_WRONG_TAIL_FUNCTION,
+                        decompile_timeout=60,
+                        retry_with_type_fix=True,
+                    )
+
+                    assert result.is_equivalent is True
+                    assert result.pairwise_stats is not None
+                    assert result.pairwise_stats.get("unknown", 0) == 0
+                    assert result.pairwise_stats.get("sat", 0) == 0
 
 
 def test_loop_method_b_mips64_gcc_peeled1_tail_recovers_seed_compensated_summary(_running_pyghidra):

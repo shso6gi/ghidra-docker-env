@@ -8,7 +8,10 @@ from conftest import MockDataType, create_mock_analysis
 
 
 def _param(name: str, size: int) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=size)
+    index = -1
+    if name.startswith("param_") and name[6:].isdigit():
+        index = int(name[6:]) - 1
+    return Expression(ExpressionType.PARAMETER, name=name, value=index, size=size)
 
 
 def _const(value: int, size: int) -> Expression:

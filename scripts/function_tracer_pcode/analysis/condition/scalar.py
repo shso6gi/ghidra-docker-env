@@ -181,6 +181,14 @@ def extract_scalar_constraint(condition: Condition) -> Optional[ScalarConstraint
     if bits <= 0:
         return None
 
+    if expr.operator in (
+        "INT_SLESS",
+        "INT_SLESSEQUAL",
+        "INT_LESS",
+        "INT_LESSEQUAL",
+    ) and base_offset != 0:
+        return None
+
     adjusted_constant_raw = _normalize_affine_constant(
         constant=const_raw,
         base_offset=base_offset,

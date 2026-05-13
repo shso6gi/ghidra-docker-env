@@ -10,10 +10,13 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     UnknownReasonId,
+    build_unknown_recovery_actions,
     get_unknown_recovery_plan,
     get_unknown_reason_definition,
     make_unknown_reason,
     summarize_unknown_recovery_backlog,
+    unknown_reason_registry_snapshot,
+    unknown_recovery_plan_registry_snapshot,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
@@ -130,6 +133,42 @@ def test_plan15_recovery_plan_maps_core_reasons_to_required_proofs():
         ("seed_compensation", "term_sequence", "pure_side_effect_profile"),
         ("guard_partition", "partition_coverage_proof"),
     ]
+
+
+def test_plan16_operational_backlog_reasons_have_registered_actions():
+    reason_ids = (
+        UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+        UnknownReasonId.NORMALIZATION_NO_CHANGE,
+        UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE,
+        UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED,
+    )
+
+    for reason_id in reason_ids:
+        actions = build_unknown_recovery_actions([make_unknown_reason(reason_id)])
+        assert actions
+        assert {action.status for action in actions} == {
+            UnknownRecoveryActionStatus.PLANNED.value,
+        }
+        assert all(action.proof_stage != "unspecified" for action in actions)
+        assert all(action.required_evidence for action in actions)
+        assert {action.target_regression for action in actions} == {reason_id.value}
+
+
+def test_recovery_kind_reasons_all_have_registered_plans():
+    definitions = unknown_reason_registry_snapshot()
+    plans = unknown_recovery_plan_registry_snapshot()
+
+    missing = sorted(
+        reason_id
+        for reason_id, definition in definitions.items()
+        if definition.recovery_proof_kind != UnknownRecoveryProofKind.NONE.value
+        and reason_id not in plans
+    )
+
+    assert missing == []
 
 
 def test_unknown_reason_record_serializes_recovery_proof_obligations():

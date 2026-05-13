@@ -204,3 +204,27 @@ def test_expression_to_smt_prefers_signed_extension_from_datatype_object_not_nam
     smt = expression_to_smt(expr)
 
     assert "((_ sign_extend 32) param_1)" in smt
+
+
+def test_expression_to_smt_coerces_constant_zero_inside_bool_or():
+    expr = _binary(
+        "BOOL_OR",
+        _binary("INT_EQUAL", _param("param_1", size=8), _const(0, size=8)),
+        _const(0, size=1),
+    )
+
+    smt = expression_to_smt(expr)
+
+    assert smt == "(or (= param_1 (_ bv0 64)) false)"
+
+
+def test_expression_to_smt_coerces_bitvector_operand_inside_bool_and():
+    expr = _binary(
+        "BOOL_AND",
+        _param("flag", size=1),
+        _binary("INT_EQUAL", _param("param_1", size=8), _const(0, size=8)),
+    )
+
+    smt = expression_to_smt(expr)
+
+    assert smt == "(and (not (= flag (_ bv0 8))) (= param_1 (_ bv0 64)))"

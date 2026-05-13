@@ -385,33 +385,38 @@ class BoundedCallRefiner:
         had_alignment_failure = False
         had_return_expansion = False
         for _target_ref, target_conditions, callee_analysis in candidates:
-            aligned_arguments = self._align_deferred_arguments_to_callee(
-                deferred,
-                caller_analysis.parameters,
-                callee_analysis.parameters,
-            )
-            if len(aligned_arguments) < len(callee_analysis.parameters):
-                had_alignment_failure = True
-                self._debug(
-                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
-                    f"{len(callee_analysis.parameters)} args, got {len(aligned_arguments)}"
+            already_specialized = self._analysis_is_fully_argument_specialized(callee_analysis)
+            if already_specialized:
+                aligned_arguments = []
+                replacements = {}
+            else:
+                aligned_arguments = self._align_deferred_arguments_to_callee(
+                    deferred,
+                    caller_analysis.parameters,
+                    callee_analysis.parameters,
                 )
-                continue
-            if not _call_arguments_width_safe_for_callee_analysis(
-                callee_analysis,
-                aligned_arguments,
-            ):
-                had_alignment_failure = True
-                self._debug(
-                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
-                    "partial-width argument is used as a full-width callee value"
-                )
-                continue
+                if len(aligned_arguments) < len(callee_analysis.parameters):
+                    had_alignment_failure = True
+                    self._debug(
+                        f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
+                        f"{len(callee_analysis.parameters)} args, got {len(aligned_arguments)}"
+                    )
+                    continue
+                if not _call_arguments_width_safe_for_callee_analysis(
+                    callee_analysis,
+                    aligned_arguments,
+                ):
+                    had_alignment_failure = True
+                    self._debug(
+                        f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
+                        "partial-width argument is used as a full-width callee value"
+                    )
+                    continue
 
-            replacements = _build_parameter_replacements(
-                callee_analysis.parameters,
-                aligned_arguments,
-            )
+                replacements = _build_parameter_replacements(
+                    callee_analysis.parameters,
+                    aligned_arguments,
+                )
             substituted_effects = self._substitute_effects_for_deferred_call(
                 callee_analysis,
                 replacements,
@@ -484,9 +489,12 @@ class BoundedCallRefiner:
         seen = set()
 
         def add_candidate(target_ref: CallTargetRef, conditions: Sequence[Condition]) -> None:
-            callee_analysis = self._provide_analysis(target_ref, None)
+            call_arguments = list(getattr(deferred, "arguments", ()) or ())
+            callee_analysis = None
+            if call_arguments:
+                callee_analysis = self._provide_analysis(target_ref, call_arguments)
             if callee_analysis is None:
-                callee_analysis = self._provide_analysis(target_ref, deferred.arguments)
+                callee_analysis = self._provide_analysis(target_ref, None)
             if callee_analysis is None or not callee_analysis.returns:
                 return
             key = (
@@ -511,6 +519,22 @@ class BoundedCallRefiner:
             add_candidate(deferred.target_ref, [])
 
         return candidates
+
+    def _analysis_is_fully_argument_specialized(
+        self,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> bool:
+        if analysis is None:
+            return False
+        parameter_count = len(getattr(analysis, "parameters", ()) or ())
+        if parameter_count <= 0:
+            return False
+        scope_key = getattr(analysis, "analysis_scope_key", None)
+        if not isinstance(scope_key, tuple) or len(scope_key) < 4:
+            return False
+        bound_by_index = scope_key[2] if isinstance(scope_key[2], tuple) else ()
+        bound_by_storage = scope_key[3] if isinstance(scope_key[3], tuple) else ()
+        return max(len(bound_by_index), len(bound_by_storage)) >= parameter_count
 
     def _align_deferred_arguments_to_callee(
         self,

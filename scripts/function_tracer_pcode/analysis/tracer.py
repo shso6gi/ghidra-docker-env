@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
+import inspect
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Any, TYPE_CHECKING
 from ..model import (
     CanonicalLocation,
     Expression,
@@ -30,6 +31,24 @@ from .debug.unknown_trace import (
 
 if TYPE_CHECKING:
     from .phi_resolver import PhiHandler
+
+
+def _callable_accepts_positional_args(fn: Callable, count: int) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    positional_count = 0
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            positional_count += 1
+    return positional_count >= count
+
 
 class VarnodeKey:
     """Varnodeを識別するためのキー"""
@@ -92,6 +111,7 @@ class PcodeTracer:
         debug: bool = False,
         *,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
+        bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
     ):
         self.program = program
         self.high_function = high_function
@@ -116,11 +136,17 @@ class PcodeTracer:
         
         # PHI handler（analyzerから設定される）
         self.phi_handler: Optional['PhiHandler'] = None
+        self.condition_tracker = None
         self._parameter_descriptors: List[ParameterStorageDescriptor] = []
         self._bound_parameter_values: Dict[int, Expression] = {
             int(index): self._clone_expression(expr)
             for index, expr in (bound_parameter_values or {}).items()
             if expr is not None
+        }
+        self._bound_parameter_storage_values: Dict[Tuple[Any, ...], Expression] = {
+            tuple(key): self._clone_expression(expr)
+            for key, expr in (bound_parameter_storage_values or {}).items()
+            if key is not None and expr is not None
         }
         self._function_program_id, self._function_entry_offset = self._resolve_current_function_scope()
         self._parameter_descriptors = self._collect_parameter_descriptors()
@@ -163,20 +189,9 @@ class PcodeTracer:
     ):
         if self.record_deferred_call is None:
             return None
-        try:
-            return self.record_deferred_call(
-                target_ref,
-                args,
-                call_target_expr,
-                pcode_op_ref,
-            )
-        except TypeError:
-            try:
-                return self.record_deferred_call(target_ref, args, call_target_expr)
-            except Exception:
-                return None
-        except Exception:
-            return None
+        if _callable_accepts_positional_args(self.record_deferred_call, 4):
+            return self.record_deferred_call(target_ref, args, call_target_expr, pcode_op_ref)
+        return self.record_deferred_call(target_ref, args, call_target_expr)
 
     def _clone_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:
@@ -273,6 +288,38 @@ class PcodeTracer:
             owner_program_id=self._function_program_id,
             owner_entry_offset=self._function_entry_offset,
         )
+
+    def _make_storage_location_ref(
+        self,
+        storage_info: Optional[StorageInfo],
+    ) -> Optional[LocationBaseRef]:
+        storage_key = self._storage_identity_key(storage_info)
+        if storage_info is None or storage_key is None:
+            return None
+        return LocationBaseRef.storage(
+            space_id=storage_info.space_id,
+            space_name=storage_info.space_name or ("register" if storage_info.is_register else "mem"),
+            offset=int(storage_info.offset or getattr(storage_info, "base_register_offset", 0) or 0),
+            size=max(1, int(storage_info.size or storage_info.register_size or 1)),
+            storage_identity_key=storage_key,
+        )
+
+    def _make_parameter_or_storage_location_ref(
+        self,
+        name: Optional[str],
+        *,
+        index: Optional[int] = None,
+        storage_info: Optional[StorageInfo] = None,
+    ) -> LocationBaseRef:
+        try:
+            normalized_index = int(index) if index is not None else None
+        except Exception:
+            normalized_index = None
+        if normalized_index is None or normalized_index < 0:
+            storage_ref = self._make_storage_location_ref(storage_info)
+            if storage_ref is not None:
+                return storage_ref
+        return self._make_parameter_location_ref(name, index=normalized_index)
 
     def _get_storage_info_from_variable_storage(self, variable_storage) -> Optional[StorageInfo]:
         if variable_storage is None:
@@ -506,7 +553,14 @@ class PcodeTracer:
         if best_descriptor is None:
             return None
 
-        source_expr = self._bound_parameter_values.get(best_descriptor.index)
+        source_expr = (
+            self._bound_parameter_values.get(best_descriptor.index)
+            if best_descriptor.index >= 0
+            else None
+        )
+        storage_key = self._storage_identity_key(best_descriptor.storage_info)
+        if source_expr is None and storage_key is not None:
+            source_expr = self._bound_parameter_storage_values.get(storage_key)
         if source_expr is None:
             source_expr = Expression.parameter(
                 best_descriptor.name,
@@ -515,9 +569,10 @@ class PcodeTracer:
                 best_descriptor.data_type_obj,
                 best_descriptor.size_bytes,
                 storage_info=best_descriptor.storage_info,
-                runtime_ref=self._make_parameter_location_ref(
+                runtime_ref=self._make_parameter_or_storage_location_ref(
                     best_descriptor.name,
                     index=best_descriptor.index,
+                    storage_info=best_descriptor.storage_info,
                 ),
             )
         else:
@@ -532,17 +587,84 @@ class PcodeTracer:
             storage_info,
             is_signed=best_descriptor.is_signed,
         )
-        resolved.runtime_ref = self._make_parameter_location_ref(
+        resolved.runtime_ref = self._make_parameter_or_storage_location_ref(
             best_descriptor.name,
             index=best_descriptor.index,
+            storage_info=best_descriptor.storage_info,
         )
         return resolved
+
+    def _resolve_bound_parameter_expression(
+        self,
+        *,
+        name: str,
+        index: int,
+        data_type: Optional[str],
+        data_type_obj,
+        size_bytes: int,
+        storage_info: Optional[StorageInfo],
+    ) -> Optional[Expression]:
+        source_expr = self._bound_parameter_values.get(index) if index >= 0 else None
+        storage_key = self._storage_identity_key(storage_info)
+        if source_expr is None and storage_key is not None:
+            source_expr = self._bound_parameter_storage_values.get(storage_key)
+        if source_expr is None:
+            return None
+
+        descriptor = None
+        if index >= 0:
+            descriptor = next(
+                (
+                    candidate
+                    for candidate in self._parameter_descriptors
+                    if int(candidate.index) == int(index)
+                ),
+                None,
+            )
+        if descriptor is None and storage_key is not None:
+            descriptor = next(
+                (
+                    candidate
+                    for candidate in self._parameter_descriptors
+                    if self._storage_identity_key(candidate.storage_info) == storage_key
+                ),
+                None,
+            )
+        if descriptor is None:
+            descriptor = ParameterStorageDescriptor(
+                name=name,
+                index=index,
+                size_bytes=max(1, int(size_bytes or 1)),
+                is_signed=self._coerce_descriptor_signedness(data_type_obj, data_type),
+                data_type=data_type,
+                data_type_obj=data_type_obj,
+                storage_info=storage_info,
+            )
+
+        resolved = self._coerce_bound_argument_to_parameter(source_expr, descriptor)
+        resolved.storage_info = storage_info
+        resolved.runtime_ref = self._make_parameter_or_storage_location_ref(
+            name,
+            index=index,
+            storage_info=storage_info,
+        )
+        return resolved
+
+    def _storage_identity_key(self, storage_info: Optional[StorageInfo]) -> Optional[Tuple[Any, ...]]:
+        if storage_info is None:
+            return None
+        try:
+            key = storage_info.storage_identity_key()
+        except Exception:
+            key = None
+        return tuple(key) if key is not None else None
 
     def _recover_call_argument_expressions(
         self,
         pcode_op,
         depth: int,
         use_cache: bool,
+        target_ref: Optional[CallTargetRef] = None,
     ) -> List[Expression]:
         recovered: List[Expression] = []
         if pcode_op is None:
@@ -554,7 +676,332 @@ class PcodeTracer:
                 )
             except Exception:
                 recovered.append(Expression.unknown(f"call_arg_{index}_unknown"))
-        return recovered
+        if recovered:
+            return recovered
+        return self._recover_implicit_call_argument_expressions(
+            pcode_op,
+            target_ref,
+        )
+
+    def _recover_implicit_call_argument_expressions(
+        self,
+        pcode_op,
+        target_ref: Optional[CallTargetRef],
+    ) -> List[Expression]:
+        """Recover omitted ABI-register call arguments through path-covered evidence."""
+
+        target_function = self._resolve_call_target_function(target_ref)
+        if target_function is None:
+            if self._debug_available():
+                self._debug_print("  [CallArgRecovery] no target function for implicit CALL args")
+            return []
+        parameters = self._call_target_parameters(target_function)
+        if not parameters:
+            if self._debug_available():
+                self._debug_print("  [CallArgRecovery] target function has no parameter objects")
+            return []
+
+        shared_recovered = self._recover_implicit_call_arguments_with_effect_model(
+            pcode_op,
+            parameters,
+        )
+        if len(shared_recovered) >= len(parameters):
+            if self._debug_available():
+                self._debug_print(
+                    "  [CallArgRecovery] recovered implicit CALL args via shared effect model: "
+                    + ", ".join(arg.to_string() for arg in shared_recovered[: len(parameters)])
+                )
+            return shared_recovered[: len(parameters)]
+        if self._debug_available():
+            self._debug_print(
+                "  [CallArgRecovery] shared effect-model recovery did not cover all params "
+                f"(got={len(shared_recovered)}, expected={len(parameters)})"
+            )
+        return []
+
+    def _recover_implicit_call_arguments_with_effect_model(
+        self,
+        pcode_op,
+        parameters: Sequence[Any],
+    ) -> List[Expression]:
+        caller_parameters = self._caller_parameter_dicts_for_call_recovery()
+        callee_parameters = [
+            descriptor
+            for parameter in parameters
+            for descriptor in [self._call_parameter_descriptor(parameter)]
+            if descriptor is not None
+        ]
+        if not caller_parameters or len(callee_parameters) != len(parameters):
+            return []
+        try:
+            from .effect_summary import _recover_call_argument_expressions as recover_call_args
+
+            recovered = recover_call_args(
+                pcode_op,
+                self,
+                caller_parameters,
+                callee_parameters,
+                [],
+                condition_tracker=getattr(self, "condition_tracker", None),
+            )
+        except Exception:
+            return []
+        return list(recovered or [])
+
+    def _caller_parameter_dicts_for_call_recovery(self) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for descriptor in self._parameter_descriptors:
+            result.append(
+                {
+                    "name": descriptor.name,
+                    "index": descriptor.index,
+                    "size": descriptor.size_bytes,
+                    "data_type": descriptor.data_type,
+                    "data_type_obj": descriptor.data_type_obj,
+                    "is_signed": descriptor.is_signed,
+                    "storage": descriptor.storage_info,
+                    "storage_info": descriptor.storage_info,
+                }
+            )
+        return result
+
+    def _call_parameter_descriptor(self, parameter) -> Optional[Dict[str, Any]]:
+        storage_info = self._call_parameter_storage_info(parameter)
+        if storage_info is None:
+            return None
+        name = ""
+        for accessor in ("getName", "getNameString"):
+            getter = getattr(parameter, accessor, None)
+            if not callable(getter):
+                continue
+            try:
+                name = str(getter() or "")
+            except Exception:
+                name = ""
+            if name:
+                break
+        index = -1
+        for accessor in ("getOrdinal", "getIndex"):
+            getter = getattr(parameter, accessor, None)
+            if not callable(getter):
+                continue
+            try:
+                index = int(getter())
+            except Exception:
+                index = -1
+            if index >= 0:
+                break
+        size_bytes = 0
+        for accessor in ("getLength", "getSize"):
+            getter = getattr(parameter, accessor, None)
+            if not callable(getter):
+                continue
+            try:
+                size_bytes = int(getter())
+            except Exception:
+                size_bytes = 0
+            if size_bytes > 0:
+                break
+        if size_bytes <= 0:
+            size_bytes = max(1, int(getattr(storage_info, "size", 0) or 0))
+        data_type_obj = None
+        try:
+            data_type_obj = parameter.getDataType()
+        except Exception:
+            data_type_obj = None
+        data_type = get_data_type_display_name(data_type_obj)
+        return {
+            "name": name or f"param_{index + 1 if index >= 0 else len(name)}",
+            "index": index,
+            "size": max(1, int(size_bytes)),
+            "data_type": data_type,
+            "data_type_obj": data_type_obj,
+            "is_signed": self._coerce_descriptor_signedness(data_type_obj, data_type),
+            "storage": storage_info,
+            "storage_info": storage_info,
+        }
+
+    def _resolve_call_target_function(
+        self,
+        target_ref: Optional[CallTargetRef],
+    ):
+        function_obj = getattr(target_ref, "function_obj", None)
+        if function_obj is not None:
+            return function_obj
+        address_offset = getattr(target_ref, "entry_offset", None)
+        if address_offset is None:
+            address_offset = getattr(target_ref, "address_offset", None)
+        if address_offset is None or self.program is None:
+            return None
+        try:
+            address_factory = self.program.getAddressFactory()
+            default_space = address_factory.getDefaultAddressSpace()
+            address = default_space.getAddress(int(address_offset))
+            function_manager = self.program.getFunctionManager()
+            return function_manager.getFunctionAt(address)
+        except Exception:
+            return None
+
+    def _call_target_parameters(self, target_function) -> List[Any]:
+        get_parameters = getattr(target_function, "getParameters", None)
+        if callable(get_parameters):
+            try:
+                return list(get_parameters() or [])
+            except Exception:
+                return []
+        return []
+
+    def _call_parameter_storage_info(self, parameter) -> Optional[StorageInfo]:
+        storage = None
+        for accessor in ("getVariableStorage", "getStorage"):
+            getter = getattr(parameter, accessor, None)
+            if not callable(getter):
+                continue
+            try:
+                storage = getter()
+            except Exception:
+                storage = None
+            if storage is not None:
+                break
+        return self._get_storage_info_from_variable_storage(storage)
+
+    def _coerce_call_argument_to_parameter(
+        self,
+        expr: Expression,
+        parameter,
+        storage_info: StorageInfo,
+    ) -> Optional[Expression]:
+        size_bytes = 0
+        try:
+            size_bytes = int(parameter.getLength())
+        except Exception:
+            size_bytes = 0
+        if size_bytes <= 0:
+            try:
+                size_bytes = int(parameter.getSize())
+            except Exception:
+                size_bytes = 0
+        if size_bytes <= 0:
+            size_bytes = max(1, int(getattr(storage_info, "size", 0) or 0))
+
+        data_type_obj = None
+        try:
+            data_type_obj = parameter.getDataType()
+        except Exception:
+            data_type_obj = None
+        data_type = get_data_type_display_name(data_type_obj)
+        is_signed = self._coerce_descriptor_signedness(data_type_obj, data_type)
+        target_storage = storage_info
+        if size_bytes > 0 and int(getattr(target_storage, "size", 0) or 0) != int(size_bytes):
+            target_storage = StorageInfo(
+                is_register=True,
+                space_name=target_storage.space_name,
+                space_id=target_storage.space_id,
+                offset=target_storage.offset,
+                size=int(size_bytes),
+                size_bits=int(size_bytes) * 8,
+                register_offset=target_storage.register_offset,
+                register_size=int(size_bytes),
+                register_size_bits=int(size_bytes) * 8,
+                register_name=target_storage.register_name,
+                base_register_name=target_storage.base_register_name,
+                base_register_offset=target_storage.base_register_offset,
+                base_register_size=target_storage.base_register_size,
+                base_register_size_bits=target_storage.base_register_size_bits,
+                bit_offset_in_base=target_storage.bit_offset_in_base,
+                is_stack_pointer=target_storage.is_stack_pointer,
+                is_frame_pointer=target_storage.is_frame_pointer,
+            )
+        coerced = self._coerce_expression_width(
+            expr,
+            getattr(expr, "storage_info", None),
+            target_storage,
+            is_signed=is_signed,
+        )
+        coerced.data_type = data_type
+        coerced.data_type_obj = data_type_obj
+        return coerced
+
+    def _call_storage_is_unmodified_before_call(
+        self,
+        storage_info: StorageInfo,
+        call_op,
+    ) -> bool:
+        call_key = self._pcode_sequence_sort_key(call_op)
+        if call_key is None:
+            return False
+        for op in self._iter_high_pcode_ops():
+            if self._same_pcode_op(op, call_op):
+                return True
+            op_key = self._pcode_sequence_sort_key(op)
+            if op_key is None or op_key >= call_key:
+                continue
+            output = getattr(op, "getOutput", lambda: None)()
+            if output is None:
+                continue
+            output_storage = self._get_storage_info_from_varnode(output)
+            if output_storage is None:
+                continue
+            if self._storage_ranges_overlap(storage_info, output_storage):
+                return False
+        return True
+
+    def _iter_high_pcode_ops(self):
+        blocks = getattr(self.high_function, "getBasicBlocks", lambda: [])()
+        for block in blocks or []:
+            iterator = getattr(block, "getIterator", lambda: None)()
+            if iterator is None:
+                continue
+            while iterator.hasNext():
+                yield iterator.next()
+
+    def _pcode_sequence_sort_key(self, pcode_op) -> Optional[Tuple[int, int, int]]:
+        try:
+            seq = pcode_op.getSeqnum()
+        except Exception:
+            seq = None
+        if seq is None:
+            return None
+        try:
+            target = seq.getTarget()
+            address_offset = int(target.getOffset())
+        except Exception:
+            return None
+        try:
+            seq_time = int(seq.getTime())
+        except Exception:
+            seq_time = 0
+        try:
+            seq_order = int(seq.getOrder())
+        except Exception:
+            seq_order = 0
+        return (address_offset, seq_time, seq_order)
+
+    def _same_pcode_op(self, left, right) -> bool:
+        if left is right:
+            return True
+        left_ref = self._make_pcode_op_ref(left)
+        right_ref = self._make_pcode_op_ref(right)
+        return (
+            left_ref is not None
+            and right_ref is not None
+            and left_ref.stable_key() == right_ref.stable_key()
+        )
+
+    def _storage_ranges_overlap(
+        self,
+        left: StorageInfo,
+        right: StorageInfo,
+    ) -> bool:
+        if not left.is_register or not right.is_register:
+            return False
+        if not left.shares_base_register_with(right):
+            return False
+        left_low = int(getattr(left, "bit_offset_in_base", 0) or 0)
+        left_high = left_low + int(getattr(left, "size_bits", 0) or 0)
+        right_low = int(getattr(right, "bit_offset_in_base", 0) or 0)
+        right_high = right_low + int(getattr(right, "size_bits", 0) or 0)
+        return left_high > right_low and right_high > left_low
 
     def _recover_call_target_expression(
         self,
@@ -583,7 +1030,12 @@ class PcodeTracer:
         display_name = None
 
         if self.record_deferred_call is not None:
-            deferred_args = self._recover_call_argument_expressions(pcode_op, depth, use_cache)
+            deferred_args = self._recover_call_argument_expressions(
+                pcode_op,
+                depth,
+                use_cache,
+                target_ref,
+            )
             deferred_target_expr = self._recover_call_target_expression(
                 pcode_op,
                 depth,
@@ -1006,6 +1458,7 @@ class PcodeTracer:
                         else storage_info.size
                     ) or size,
                 ),
+                storage_identity_key=storage_info.storage_identity_key(),
                 display_hint=storage_info.register_name if storage_info.is_register else None,
             ),
             offset=0,
@@ -1400,6 +1853,22 @@ class PcodeTracer:
                     
                     if self._debug_available():
                         self._debug_print(f"  -> Parameter: {sym_name} (index={param_idx})")
+
+                    bound_expr = self._resolve_bound_parameter_expression(
+                        name=sym_name,
+                        index=param_idx,
+                        data_type=dtype,
+                        data_type_obj=dtype_obj,
+                        size_bytes=varnode.getSize(),
+                        storage_info=storage_info,
+                    )
+                    if bound_expr is not None:
+                        if self._debug_available():
+                            self._debug_print(
+                                "  -> Bound parameter argument: "
+                                f"{bound_expr.to_string()}"
+                            )
+                        return bound_expr
                     
                     return Expression.parameter(
                         sym_name, param_idx, dtype, dtype_obj, varnode.getSize(),

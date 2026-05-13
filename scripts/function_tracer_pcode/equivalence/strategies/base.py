@@ -197,6 +197,13 @@ class CheckStrategy(ABC):
             return False
         if any(not getattr(case, "conditions", None) for case in cases):
             return True
+        case_conditions = [
+            condition
+            for case in cases
+            for condition in (getattr(case, "conditions", None) or ())
+        ]
+        if not ConditionSMTOracle.has_object_identity_support(case_conditions):
+            return None
         smt_result = self._return_cases_have_smt_total_coverage(cases)
         if smt_result is not None:
             return smt_result

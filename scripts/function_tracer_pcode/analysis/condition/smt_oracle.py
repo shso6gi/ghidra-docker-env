@@ -227,9 +227,17 @@ class ConditionSMTOracle:
                     runtime_identity,
                 )
             if expr_type == expr_kind.PARAMETER:
+                parameter_name = getattr(expr, "name", None)
                 try:
                     parameter_index = int(getattr(expr, "value", -1))
                     if parameter_index >= 0:
+                        # Some synthetic/unit-test expressions can carry a
+                        # placeholder index for multiple distinct parameters.
+                        # Include the name when present to avoid conflating
+                        # unrelated parameters in solver-backed condition
+                        # implication.
+                        if parameter_name:
+                            return ("parameter_index_name", parameter_index, str(parameter_name))
                         return ("parameter_index", parameter_index)
                 except (TypeError, ValueError):
                     parameter_index = None
@@ -244,6 +252,8 @@ class ConditionSMTOracle:
                     if storage_identity is None:
                         return None
                     return ("parameter_storage", storage_identity)
+                if parameter_name:
+                    return ("parameter_name", str(parameter_name))
             return None
         if expr_type == expr_kind.CALL:
             return normalize_call_symbol_name(getattr(expr, "name", None))
@@ -263,7 +273,14 @@ class ConditionSMTOracle:
                     if expr_type is None or expr_kind is None:
                         continue
                     if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-                        if cls._expression_identity_key(node) is None:
+                        identity = cls._expression_identity_key(node)
+                        if identity is None:
+                            return False
+                        # A name-only fallback is useful to avoid accidental
+                        # SMT symbol collisions in synthetic expressions, but
+                        # it is not a strong object identity for proving
+                        # coverage completeness.
+                        if identity[0] == "parameter_name":
                             return False
             return True
         except Exception:

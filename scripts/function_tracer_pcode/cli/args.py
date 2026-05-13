@@ -194,6 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pairwise戦略でUNKNOWNになったクエリを/tmpに保存する",
     )
     parser.add_argument(
+        "--pairwise-unknown-dir",
+        default=None,
+        help="--pairwise-save-unknown で保存する UNKNOWN クエリの出力ディレクトリ",
+    )
+    parser.add_argument(
         "--normalize-mode",
         choices=["off", "safe", "full"],
         default="safe",

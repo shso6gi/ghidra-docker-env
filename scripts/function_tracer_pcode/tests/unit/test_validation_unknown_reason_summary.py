@@ -5,6 +5,8 @@ import sys
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownDecisionEffect,
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
     UnknownReasonClass,
     UnknownReasonId,
     UnknownReasonScope,
@@ -96,6 +98,13 @@ def test_validation_unknown_summary_tracks_plan16_dimensions_for_target_cases():
     assert summary.proof_backlog_by_proof_kind == {
         "abi_relation_proof": 1,
         "high_bit_proof": 1,
+    }
+    assert summary.proof_backlog_by_action_status == {
+        UnknownRecoveryActionStatus.PLANNED.value: 2,
+    }
+    assert summary.proof_backlog_by_recovery_action == {
+        "return_width_bridge_missing | abi_relation_proof | abi_relation | planned": 1,
+        "return_width_bridge_missing | high_bit_proof | high_bit_relation | planned": 1,
     }
     assert summary.operational_unknown_by_reason == {
         UnknownReasonId.RECOVERABLE_PARTIAL.value: 1,
@@ -209,6 +218,9 @@ def test_validation_summary_uses_final_unknown_contributor_from_debug_trace():
         "proof_backed_covering_case": 1,
         "guard_partition_completion": 1,
     }
+    assert summary.proof_backlog_by_action_status == {
+        UnknownRecoveryActionStatus.PLANNED.value: 2,
+    }
 
 
 def test_validation_unknown_summary_formatters_include_plan16_sections():
@@ -232,12 +244,52 @@ def test_validation_unknown_summary_formatters_include_plan16_sections():
     assert "UNKNOWN by decision_effect:" in summary_text
     assert "UNKNOWN by reason_scope:" in summary_text
     assert "Proof backlog by reason:" in summary_text
+    assert "Proof backlog by recovery_action:" in summary_text
+    assert "Proof backlog by action_status:" in summary_text
     assert "Operational UNKNOWN by reason:" in summary_text
     assert "UNKNOWN by reason delta:" in diff_text
     assert "UNKNOWN by decision_effect delta:" in diff_text
     assert "UNKNOWN by reason_scope delta:" in diff_text
     assert "Proof backlog by proof_kind delta:" in diff_text
+    assert "Proof backlog by recovery_action delta:" in diff_text
+    assert "Proof backlog by action_status delta:" in diff_text
     assert "Operational UNKNOWN by class delta:" in diff_text
+
+
+def test_validation_unknown_summary_makes_return_coverage_gap_actionable():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "loop_method_b_test:lmb_sum_prefix_peeled3_tail",
+                reasons=[make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP)],
+            ),
+            _payload(
+                "loop_method_b_test:lmb_solver_rewrite",
+                reasons=[make_unknown_reason(UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED)],
+            ),
+        ]
+    )
+
+    assert summary.proof_backlog_by_reason == {
+        UnknownReasonId.RETURN_COVERAGE_GAP.value: 1,
+        UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED.value: 1,
+    }
+    assert summary.proof_backlog_by_proof_kind == {
+        UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value: 2,
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION.value: 2,
+    }
+    assert summary.proof_backlog_by_action_status == {
+        UnknownRecoveryActionStatus.PLANNED.value: 4,
+    }
+    assert (
+        "return_coverage_gap | return_coverage_completion | return_partition_extraction | planned"
+        in summary.proof_backlog_by_recovery_action
+    )
+    assert (
+        "solver_proven_rewrite_proof_failed | solver_retry_or_normalization | "
+        "rewrite_proof_recheck | planned"
+        in summary.proof_backlog_by_recovery_action
+    )
 
 
 def test_validation_summary_extracts_typed_result_json_from_log_text():

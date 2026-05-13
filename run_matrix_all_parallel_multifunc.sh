@@ -7,14 +7,46 @@
 # ---------------------- 設定 ----------------------
 # 対象関数を配列で指定
 TARGET_FUNCS=(
+    "modulo_mixed"
+    "chained_divide"
+    "chained_modulo"
+    "complex_arithmetic"
+    "conditional_divide"
+    "signed_divide_logic"
+    "safe_divide"
+    "divide_by_power_of_2"
+    "modulo_power_of_2"
+    "bitwise_and_divide"
+    "unsigned_divide"
+    "unsigned_modulo"
+    "signed_unsigned_mix"
+    "divide_int64"
+    "modulo_uint64"
+    "widen_divide"
+    "calculate_average"
+    "calculate_percentage"
+    "divide_ceiling"
+    "divide_round"
+    "divide_by_3"
+    "divide_by_7"
+    "divide_by_10"
+    "modulo_by_10"
+    "divide_by_1000"
+    "nested_divide"
+    "nested_divmod"
+    "compound_divide"
+    "compound_modulo"
+    "ternary_divide"
     "ternary_modulo"
     # 必要に応じて追加
 )
 
 OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/arithmetic_long_test"
 BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test"
-PARALLEL_JOBS=${PARALLEL_JOBS:-10}  # 同時実行数。環境変数で上書き可能
+PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
+VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
+VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -58,6 +90,26 @@ unset IFS
 
 TOTAL_PAIRS=$(( ${#IDS[@]} * (${#IDS[@]} - 1) / 2 ))
 
+VALIDATION_BEFORE_SOURCE="not configured"
+if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+    VALIDATION_BEFORE_SOURCE="configured"
+elif [[ "$VALIDATION_AUTO_BEFORE_SNAPSHOT" != "0" && -d "$OUTPUT_BASE_DIR" ]]; then
+    EXISTING_VALIDATION_LOG="$(find "$OUTPUT_BASE_DIR" -type f -name "*.log" -print -quit 2>/dev/null || true)"
+    if [[ -n "$EXISTING_VALIDATION_LOG" ]]; then
+        VALIDATION_BEFORE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/equivalence_before.XXXXXX")"
+        cp -a "$OUTPUT_BASE_DIR"/. "$VALIDATION_BEFORE_DIR"/
+        VALIDATION_BEFORE_SOURCE="auto snapshot"
+    fi
+fi
+VALIDATION_BEFORE_LABEL="(none)"
+if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+    VALIDATION_BEFORE_LABEL="$VALIDATION_BEFORE_DIR"
+fi
+if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" && -z "$VALIDATION_BEFORE_DIR" ]]; then
+    echo "Error: VALIDATION_REQUIRE_BEFORE_DELTA requires VALIDATION_BEFORE_DIR or an auto before snapshot." >&2
+    exit 1
+fi
+
 echo "============================================================"
 echo "  Equivalence Check Script (Multi-function)"
 echo "============================================================"
@@ -65,6 +117,8 @@ echo "Target functions: ${TARGET_FUNCS[*]}"
 echo "Number of functions: ${#TARGET_FUNCS[@]}"
 echo "Pairs per function: $TOTAL_PAIRS"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
+echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "============================================================"
 echo ""
 
@@ -95,8 +149,10 @@ run_pair() {
         status="ERROR !"
     elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
         status="TIMEOUT"
-    else
+    elif grep -q "^Result: UNKNOWN" "$LOG_FILE"; then
         status="UNKNOWN"
+    else
+        status="INCOMPLETE"
     fi
 
     local msg="[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $status"
@@ -106,6 +162,23 @@ run_pair() {
 
 export -f run_pair
 export BASE_PATH
+
+write_summary_file() {
+    local output_file="$1"
+    shift
+    local tmp_file
+    tmp_file="$(mktemp "${output_file}.tmp.XXXXXX")" || return 1
+    if "$@" > "$tmp_file"; then
+        tee "$output_file" < "$tmp_file"
+        local tee_status=$?
+        rm -f "$tmp_file"
+        return "$tee_status"
+    fi
+    local status=$?
+    rm -f "$tmp_file"
+    echo "Error: summary generation failed for $output_file (exit=$status); leaving existing summary unchanged." >&2
+    return "$status"
+}
 
 calculate_elapsed_seconds() {
     local start_ts="$1"
@@ -152,7 +225,7 @@ classify_log_result() {
     elif grep -q "^Result: UNKNOWN" "$log_file"; then
         echo "UNKNOWN"
     else
-        echo "UNKNOWN"
+        echo "INCOMPLETE"
     fi
 }
 
@@ -341,40 +414,6 @@ print_pairwise_normalization_summary_block() {
     printf "%s  LOGS=%3d | ATTEMPTS=%3d, CHANGED=%3d, NO_CHANGE=%3d | UNSAT=%3d, SAT=%3d, UNKNOWN=%3d\n" \
         "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
-print_unknown_validation_summary_block() {
-    local indent="$1"
-    shift
-    local -a log_files=("$@")
-
-    if (( ${#log_files[@]} == 0 )); then
-        return 0
-    fi
-
-    echo ""
-    python3 -m scripts.function_tracer_pcode.validation.unknown_reason_summary \
-        --summary \
-        --indent "$indent" \
-        "${log_files[@]}" || true
-}
-
-print_unknown_validation_diff_block() {
-    local indent="$1"
-    local before_dir="$2"
-    shift 2
-    local -a log_files=("$@")
-
-    if [[ -z "$before_dir" || ! -d "$before_dir" || ${#log_files[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    echo ""
-    python3 -m scripts.function_tracer_pcode.validation.unknown_reason_summary \
-        --diff \
-        --before-dir "$before_dir" \
-        --indent "$indent" \
-        "${log_files[@]}" || true
-}
-
 
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
@@ -384,11 +423,11 @@ declare -A FUNC_WALL_TIME_SECONDS=()
 for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     FUNC_INDEX=$((FUNC_INDEX + 1))
     func_start_ts=$(date +%s.%N)
-    
+
     # 関数ごとの出力ディレクトリを設定
     OUTPUT_DIR="${OUTPUT_BASE_DIR}/${TARGET_FUNC}"
     mkdir -p "$OUTPUT_DIR"
-    
+
     # サブシェルにエクスポート
     export OUTPUT_DIR TARGET_FUNC
 
@@ -448,6 +487,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     declare -a ERROR_PAIRS=()
     declare -a UNKNOWN_PAIRS=()
     declare -a TIMEOUT_PAIRS=()
+    declare -a INCOMPLETE_PAIRS=()
 
     for ((i=0; i<${#IDS[@]}-1; i++)); do
         ROW_ID="${IDS[$i]}"
@@ -472,8 +512,14 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
                 TIMEOUT)
                 TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
                 ;;
-                *)
+                UNKNOWN)
                 UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
+                ;;
+                INCOMPLETE)
+                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
+                ;;
+                *)
+                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
                 ;;
             esac
         done
@@ -484,36 +530,45 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
     shopt -u nullglob
 
-    {
-        FUNCTION_SUMMARY_ARGS=(
-            --function-summary
-            --function-name "$TARGET_FUNC"
-            --elapsed-seconds "$func_elapsed_seconds"
-        )
-        if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
-            FUNCTION_SUMMARY_ARGS+=(--before-dir "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}")
-        fi
+    FUNCTION_SUMMARY_ARGS=(
+        --function-summary
+        --function-name "$TARGET_FUNC"
+        --elapsed-seconds "$func_elapsed_seconds"
+    )
+    if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+        FUNCTION_SUMMARY_ARGS+=(--before-dir "${VALIDATION_BEFORE_DIR}/${TARGET_FUNC}")
+    fi
+    if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" ]]; then
+        FUNCTION_SUMMARY_ARGS+=(--require-before-dir)
+    fi
+    if ! write_summary_file "$RESULT_FILE" \
         python3 -m scripts.function_tracer_pcode.validation.result_summary \
             "${FUNCTION_SUMMARY_ARGS[@]}" \
-            "${FUNC_LOG_FILES[@]}"
-    } | tee "$RESULT_FILE"
+            "${FUNC_LOG_FILES[@]}"; then
+        exit 1
+    fi
 
 done
 
 # ---------------------- 全体サマリー ----------------------
+# 全体サマリーの保存先
 SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
 mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
 
-{
-    OVERALL_SUMMARY_ARGS=(--overall-summary)
-    if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
-        OVERALL_SUMMARY_ARGS+=(--before-dir "$VALIDATION_BEFORE_DIR")
-    fi
-    for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
-        OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")
-    done
+OVERALL_SUMMARY_ARGS=(--overall-summary)
+if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
+    OVERALL_SUMMARY_ARGS+=(--before-dir "$VALIDATION_BEFORE_DIR")
+fi
+if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" ]]; then
+    OVERALL_SUMMARY_ARGS+=(--require-before-dir)
+fi
+for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
+    OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")
+done
+if ! write_summary_file "$SUMMARY_FILE" \
     python3 -m scripts.function_tracer_pcode.validation.result_summary \
         "${OVERALL_SUMMARY_ARGS[@]}" \
-        "${ALL_LOG_FILES[@]}"
-} | tee "$SUMMARY_FILE"
+        "${ALL_LOG_FILES[@]}"; then
+    exit 1
+fi
