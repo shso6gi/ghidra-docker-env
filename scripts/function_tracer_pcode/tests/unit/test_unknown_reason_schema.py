@@ -431,6 +431,46 @@ def test_equivalence_result_gates_equivalent_decision_when_pending_proof_exists(
     assert result.to_dict()["decision_gated_by_pending_proof"] is True
 
 
+def test_equivalence_result_allows_equivalent_decision_when_proof_is_complete():
+    record = make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=("call_effect_summary",),
+            ),
+        ),
+        proof_stage="object_evidence_collected",
+        evidence_kind="call_effect_summary",
+        object_target_key=("unsupported_call_effect", "function1", ("function", 1, 0x1000)),
+        recovery_action="call_effect_summary_proof_required",
+        action_status=UnknownRecoveryActionStatus.PROOF_COMPLETE,
+    )
+    result = EquivalenceResult(
+        is_equivalent=True,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="mock",
+                    status=SolverStatus.UNSAT,
+                    elapsed_time=0.01,
+                )
+            ]
+        ),
+        unknown_reasons=[record],
+    )
+
+    assert result.is_equivalent is True
+    assert result.decision_gated_by_pending_proof is False
+    assert result.unknown_recovery_actions[0].status == UnknownRecoveryActionStatus.PROOF_COMPLETE.value
+
+
 class _FakeCase:
     value_expr = Expression.constant(1, size=4)
     conditions = []

@@ -19,6 +19,15 @@ from .signature import (
 from .call_target import CallTargetRef, coerce_call_target_ref
 from .runtime_refs import DeferredCallRef, PcodeOpRef, UnknownValueRef
 
+
+def _jsonable_nested_tuple(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_jsonable_nested_tuple(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable_nested_tuple(item) for item in value]
+    return value
+
+
 @dataclass
 class ReturnInfo:
     """単一のreturn文の情報"""
@@ -523,6 +532,7 @@ class FunctionReturnAnalysis:
     comparison_surface: Optional[ComparisonSurface] = None
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
     program_is_big_endian: Optional[bool] = None
+    completed_recovery_proof_ids: Tuple[Tuple[Any, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -564,6 +574,11 @@ class FunctionReturnAnalysis:
             "incomplete_control_flow": self.incomplete_control_flow,
             "deferred_calls": [info.to_dict() for info in self.deferred_calls.values()],
         }
+        if self.completed_recovery_proof_ids:
+            result["completed_recovery_proof_ids"] = [
+                _jsonable_nested_tuple(proof_id)
+                for proof_id in self.completed_recovery_proof_ids
+            ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key
         if self.program_is_big_endian is not None:

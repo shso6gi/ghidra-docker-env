@@ -593,22 +593,36 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print("=" * 60)
             self._debug_print(f"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)")
         elif coverage_unsafety_reasons or equivalence_blocking_reasons:
-            final_is_equiv = None
             self._debug_print("=" * 60)
-            blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
-            for blocking_reason in blocking_reasons:
-                unknown_reasons.append(
-                    self._make_blocking_unsafety_unknown_reason(
-                        blocking_reason,
-                        analysis1,
-                        analysis2,
-                        stage="S_PAIRWISE",
-                    )
+            coverage_unknown_reasons = [
+                self._make_blocking_unsafety_unknown_reason(
+                    blocking_reason,
+                    analysis1,
+                    analysis2,
+                    stage="S_PAIRWISE",
                 )
-            self._debug_print(
-                "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
-                f"{', '.join(blocking_reasons)})"
+                for blocking_reason in coverage_unsafety_reasons
+            ]
+            unresolved_equivalence_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
+                equivalence_blocking_reasons,
+                analysis1,
+                analysis2,
+                stage="S_PAIRWISE",
             )
+            if coverage_unknown_reasons or unresolved_equivalence_blocking_reasons:
+                final_is_equiv = None
+                unknown_reasons.extend(coverage_unknown_reasons)
+                unknown_reasons.extend(unresolved_equivalence_blocking_reasons)
+                blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
+                self._debug_print(
+                    "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
+                    f"{', '.join(blocking_reasons)})"
+                )
+            else:
+                final_is_equiv = True
+                self._debug_print(
+                    "Result: EQUIVALENT (all pairs UNSAT; call-effect summary proof complete)"
+                )
         elif unsat_count == total_pairs:
             final_is_equiv = True
             self._debug_print("=" * 60)

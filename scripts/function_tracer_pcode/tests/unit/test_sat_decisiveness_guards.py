@@ -96,6 +96,74 @@ def _build_symbolic_post_state_analysis(name: str) -> FunctionReturnAnalysis:
     )
 
 
+def _base_context_for_single_int_param():
+    return {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+            "(assert (= x_1 x_2))",
+        ],
+        "params1": [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)],
+        "params2": [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+
+
+def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2):
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+
+def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND"),
+        target_ref=None,
+        target_expr=Expression.parameter("fp", 0, size=8),
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+
+
 def test_function_return_analysis_marks_symbolic_post_state_reads_as_sat_unsafe():
     analysis = _build_symbolic_post_state_analysis("with_locread")
 
@@ -824,6 +892,99 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
     assert result.unknown_pairs == 0
 
 
+def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert result.unknown_reasons[0].proof_obligation_id is not None
+
+
+def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    wrong_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_ids = (
+        (
+            wrong_reason.reason_id,
+            wrong_reason.proof_stage,
+            wrong_reason.recovery_proof_kind,
+            wrong_reason.evidence_kind,
+            ("unsupported_call_effect", "different-callsite"),
+        ),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+
+
+def test_pairwise_call_effect_summary_proof_complete_allows_recovery(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_ids = (completed_reason.proof_obligation_id,)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
 def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap():
     class _CoverageGapSolverRunner:
         def __init__(self):
@@ -1088,6 +1249,52 @@ def test_monolithic_strategy_does_not_accept_unsat_with_unsupported_effect_summa
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+
+
+def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
+    class _UnsatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+        def run_sequential(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    analysis1.completed_recovery_proof_ids = (completed_reason.proof_obligation_id,)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
     assert result.counterexample_raw is None
 
 

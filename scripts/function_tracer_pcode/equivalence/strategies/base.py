@@ -205,6 +205,67 @@ class CheckStrategy(ABC):
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
         )
 
+    def _unresolved_equivalence_blocking_unknown_reasons(
+        self,
+        blocking_reasons: Sequence[str],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        stage: str,
+    ) -> List[UnknownReasonRecord]:
+        unresolved: List[UnknownReasonRecord] = []
+        for blocking_reason in blocking_reasons:
+            reason_record = self._make_blocking_unsafety_unknown_reason(
+                blocking_reason,
+                analysis1,
+                analysis2,
+                stage=stage,
+            )
+            if self._call_effect_summary_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+            ):
+                continue
+            unresolved.append(reason_record)
+        return unresolved
+
+    def _call_effect_summary_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        if reason_record.reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+            return False
+        if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
+            return False
+        proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
+        if proof_obligation_id is None:
+            return False
+        return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
+
+    @classmethod
+    def _completed_recovery_proof_ids(
+        cls,
+        *analyses: FunctionReturnAnalysis,
+    ) -> Tuple[Tuple[Any, ...], ...]:
+        proof_ids: List[Tuple[Any, ...]] = []
+        for analysis in analyses:
+            for proof_id in getattr(analysis, "completed_recovery_proof_ids", ()) or ():
+                normalized = cls._normalize_nested_tuple(proof_id)
+                if isinstance(normalized, tuple):
+                    proof_ids.append(normalized)
+        return tuple(proof_ids)
+
+    @classmethod
+    def _normalize_nested_tuple(cls, value: Any):
+        if value is None:
+            return None
+        if isinstance(value, (tuple, list)):
+            return tuple(cls._normalize_nested_tuple(item) for item in value)
+        return value
+
     def _call_effect_blocking_object_target_key(
         self,
         blocking_reason: str,

@@ -208,6 +208,7 @@ class UnknownRecoveryPlan:
 class UnknownRecoveryActionStatus(str, Enum):
     PLANNED = "planned"
     PENDING_PROOF = "pending_proof"
+    PROOF_COMPLETE = "proof_complete"
     NO_REGISTERED_PLAN = "no_registered_plan"
 
 

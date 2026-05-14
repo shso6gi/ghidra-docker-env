@@ -226,20 +226,24 @@ class MonolithicStrategy(CheckStrategy):
                 )
                 final_is_equivalent = None
             if final_is_equivalent is True and equivalence_blocking_reasons:
-                for reason in equivalence_blocking_reasons:
-                    unknown_reasons.append(
-                        self._make_blocking_unsafety_unknown_reason(
-                            reason,
-                            analysis1,
-                            analysis2,
-                            stage="S_MONOLITHIC_FALLBACK",
-                        )
-                    )
-                self._debug_print(
-                    "Monolithic UNSAT downgraded to UNKNOWN due to incomplete effect analysis "
-                    f"({', '.join(equivalence_blocking_reasons)})"
+                unresolved_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
+                    equivalence_blocking_reasons,
+                    analysis1,
+                    analysis2,
+                    stage="S_MONOLITHIC_FALLBACK",
                 )
-                final_is_equivalent = None
+                if unresolved_blocking_reasons:
+                    unknown_reasons.extend(unresolved_blocking_reasons)
+                    self._debug_print(
+                        "Monolithic UNSAT downgraded to UNKNOWN due to incomplete effect analysis "
+                        f"({', '.join(equivalence_blocking_reasons)})"
+                    )
+                    final_is_equivalent = None
+                else:
+                    self._debug_print(
+                        "Monolithic UNSAT accepted after completed call-effect summary proof "
+                        f"({', '.join(equivalence_blocking_reasons)})"
+                    )
             if final_is_equivalent is False and sat_unsafety_reasons:
                 unknown_reasons.append(
                     make_unknown_reason(
