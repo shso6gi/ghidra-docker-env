@@ -1,0 +1,35 @@
+{
+  "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
+  "baseline_id": "observed-v0@0a53352",
+  "created_at": "2026-05-14T09:26:41.954200+00:00",
+  "entries": [],
+  "existing_positive_ref": "positive-indirect-deferred-call-existing-eq",
+  "manifest_kind": "synthetic_positive_manifest",
+  "manifest_version": 1,
+  "planned_negative_synthetic_count": 2,
+  "planned_negative_synthetic_entries": [
+    {
+      "artifact_status": "planned_not_created",
+      "binary_pair": "S1_S2",
+      "category": "synthetic_negative",
+      "expected_result": "NOT_EQ",
+      "function": "syn_call_target_mismatch",
+      "id": "synthetic-negative-call-target-mismatch",
+      "must_not_be_equivalent": true,
+      "reason": "observed baseline has no concrete call-target mismatch negative guard"
+    },
+    {
+      "artifact_status": "planned_not_created",
+      "binary_pair": "S3_S4",
+      "category": "synthetic_negative",
+      "expected_result": "NOT_EQ",
+      "function": "syn_argument_storage_mismatch",
+      "id": "synthetic-negative-argument-storage-mismatch",
+      "must_not_be_equivalent": true,
+      "reason": "observed baseline has no concrete argument-storage mismatch negative guard"
+    }
+  ],
+  "reason": "observed baseline contains an indirect/deferred-call positive representative",
+  "synthetic_positive_baseline_id": null,
+  "synthetic_positive_required": false
+}

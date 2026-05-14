@@ -1,0 +1,109 @@
+{
+  "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
+  "baseline_id": "observed-v0@0a53352",
+  "created_at": "2026-05-14T09:26:41.954117+00:00",
+  "entries": [
+    {
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_result": "EQ",
+      "expected_result": "EQ",
+      "function": "fc_equiv_call_chain",
+      "id": "positive-call-chain-existing-eq",
+      "left_binary_id": "B10",
+      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+      "object_evidence_status": "not_verified",
+      "observed_reason_ids": [],
+      "observed_reason_records": [],
+      "right_binary_id": "B11",
+      "role": "call-chain existing EQ",
+      "source_artifact": {
+        "log_path": "logs/function_call/fc_equiv_call_chain/fc_equiv_call_chain_B10_B11.log",
+        "log_sha256": "b8e1bc789e38284781965e53aceb8596d9268841b1d3af796a9082bdf1cc798f",
+        "payload_pointer": "/typed_result_payloads/-1"
+      }
+    },
+    {
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_result": "EQ",
+      "expected_result": "EQ",
+      "function": "fc_recorded_chain",
+      "id": "positive-recorded-call-effect-existing-eq",
+      "left_binary_id": "B10",
+      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+      "object_evidence_status": "not_verified",
+      "observed_reason_ids": [],
+      "observed_reason_records": [],
+      "right_binary_id": "B11",
+      "role": "recorded call/effect existing EQ",
+      "source_artifact": {
+        "log_path": "logs/function_call/fc_recorded_chain/fc_recorded_chain_B10_B11.log",
+        "log_sha256": "7957b2a183665334416de8c5cb013f34a7b934ecc79e7480ec14555e5d4e209b",
+        "payload_pointer": "/typed_result_payloads/-1"
+      }
+    },
+    {
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_result": "EQ",
+      "expected_result": "EQ",
+      "function": "fc_guarded_call",
+      "id": "positive-direct-call-control",
+      "left_binary_id": "B10",
+      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+      "object_evidence_status": "not_verified",
+      "observed_reason_ids": [],
+      "observed_reason_records": [],
+      "right_binary_id": "B11",
+      "role": "direct-call control",
+      "source_artifact": {
+        "log_path": "logs/function_call/fc_guarded_call/fc_guarded_call_B10_B11.log",
+        "log_sha256": "82e95e142374e5b3407abf3840c02adffa5caae2e41d9a4546b6fd49c37a8d19",
+        "payload_pointer": "/typed_result_payloads/-1"
+      }
+    },
+    {
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_result": "EQ",
+      "expected_result": "EQ",
+      "function": "fc_equiv_direct",
+      "id": "positive-no-call-control",
+      "left_binary_id": "B10",
+      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+      "object_evidence_status": "not_verified",
+      "observed_reason_ids": [],
+      "observed_reason_records": [],
+      "right_binary_id": "B11",
+      "role": "no-call control",
+      "source_artifact": {
+        "log_path": "logs/function_call/fc_equiv_direct/fc_equiv_direct_B10_B11.log",
+        "log_sha256": "c76dec330641cde170bad047cde52e1c29c4eee640ebc3a8327e461fda664909",
+        "payload_pointer": "/typed_result_payloads/-1"
+      }
+    },
+    {
+      "binary_pair": "B2_B13",
+      "category": "function_call",
+      "current_result": "EQ",
+      "expected_result": "EQ",
+      "function": "fc_dispatch_indirect",
+      "id": "positive-indirect-deferred-call-existing-eq",
+      "left_binary_id": "B13",
+      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+      "object_evidence_status": "not_verified",
+      "observed_reason_ids": [],
+      "observed_reason_records": [],
+      "right_binary_id": "B2",
+      "role": "indirect/deferred call positive",
+      "source_artifact": {
+        "log_path": "logs/function_call/fc_dispatch_indirect/fc_dispatch_indirect_B13_B2.log",
+        "log_sha256": "4f7c34cb9e14bd68562692d75c5c3e1c0985c5b6f483e879243f5c35b3801849",
+        "payload_pointer": "/typed_result_payloads/-1"
+      }
+    }
+  ],
+  "manifest_kind": "positive_concrete_pairs",
+  "manifest_version": 1
+}
