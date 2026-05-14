@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from ..equivalence.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
+    coerce_unknown_reason_records,
+)
 from .unknown_reason_summary import (
     compare_validation_unknowns,
     extract_result_payloads_from_logs,
@@ -85,6 +89,39 @@ class OverallValidationSummary:
             },
             "overall": self.overall.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class ValidationBaselineComparison:
+    before_total_results: int = 0
+    after_total_results: int = 0
+    final_result_counts_delta: Dict[str, int] = field(default_factory=dict)
+    unknown_final_results_delta: int = 0
+    timeout_final_results_delta: int = 0
+    timeout_class_multiset_delta: Dict[str, int] = field(default_factory=dict)
+    validation_unknown_unit_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    reason_record_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    proof_action_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    pair_result_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    missing_pair_identities: Tuple[Tuple[str, str], ...] = ()
+    added_pair_identities: Tuple[Tuple[str, str], ...] = ()
+
+    def has_differences(self) -> bool:
+        return any(
+            (
+                self.before_total_results != self.after_total_results,
+                bool(self.final_result_counts_delta),
+                self.unknown_final_results_delta != 0,
+                self.timeout_final_results_delta != 0,
+                bool(self.timeout_class_multiset_delta),
+                bool(self.validation_unknown_unit_multiset_delta),
+                bool(self.reason_record_multiset_delta),
+                bool(self.proof_action_multiset_delta),
+                bool(self.pair_result_multiset_delta),
+                bool(self.missing_pair_identities),
+                bool(self.added_pair_identities),
+            )
+        )
 
 
 def classify_result_payload(payload: Mapping[str, Any]) -> str:
@@ -190,6 +227,50 @@ def aggregate_validation_logs_by_function(log_paths: Iterable[Any]) -> OverallVa
     )
 
 
+def compare_validation_baseline_records(
+    before_records: Iterable[ValidationLogRecord],
+    after_records: Iterable[ValidationLogRecord],
+) -> ValidationBaselineComparison:
+    before_record_tuple = tuple(before_records)
+    after_record_tuple = tuple(after_records)
+    before_unknown_payloads = _payloads_from_records(before_record_tuple)
+    after_unknown_payloads = _payloads_from_records(after_record_tuple)
+    unknown_diff = compare_validation_unknowns(
+        before_unknown_payloads,
+        after_unknown_payloads,
+    )
+    before_counts = _status_counts(before_record_tuple)
+    after_counts = _status_counts(after_record_tuple)
+    before_pair_identities = _pair_identity_set(before_record_tuple)
+    after_pair_identities = _pair_identity_set(after_record_tuple)
+    return ValidationBaselineComparison(
+        before_total_results=len(before_record_tuple),
+        after_total_results=len(after_record_tuple),
+        final_result_counts_delta=_diff_counts(before_counts, after_counts),
+        unknown_final_results_delta=(
+            int(after_counts.get(STATUS_UNKNOWN, 0) or 0)
+            - int(before_counts.get(STATUS_UNKNOWN, 0) or 0)
+        ),
+        timeout_final_results_delta=(
+            int(after_counts.get(STATUS_TIMEOUT, 0) or 0)
+            - int(before_counts.get(STATUS_TIMEOUT, 0) or 0)
+        ),
+        timeout_class_multiset_delta=_diff_counts(
+            _timeout_class_multiset(before_record_tuple),
+            _timeout_class_multiset(after_record_tuple),
+        ),
+        validation_unknown_unit_multiset_delta=unknown_diff.validation_unknown_unit_multiset_delta,
+        reason_record_multiset_delta=unknown_diff.reason_record_multiset_delta,
+        proof_action_multiset_delta=unknown_diff.proof_action_multiset_delta,
+        pair_result_multiset_delta=_diff_counts(
+            _pair_result_multiset(before_record_tuple),
+            _pair_result_multiset(after_record_tuple),
+        ),
+        missing_pair_identities=tuple(sorted(before_pair_identities - after_pair_identities)),
+        added_pair_identities=tuple(sorted(after_pair_identities - before_pair_identities)),
+    )
+
+
 def format_function_results_summary(
     function_name: str,
     aggregate: ValidationResultAggregate,
@@ -221,6 +302,16 @@ def format_function_results_summary(
             lines.append(
                 format_validation_unknown_diff(
                     compare_validation_unknowns(before_payloads, payloads),
+                    indent="  ",
+                )
+            )
+            lines.append("")
+            lines.append(
+                format_validation_baseline_comparison(
+                    compare_validation_baseline_records(
+                        aggregate_validation_logs(before_log_paths).records,
+                        aggregate.records,
+                    ),
                     indent="  ",
                 )
             )
@@ -283,9 +374,76 @@ def format_overall_results_summary(
                 indent="  ",
             )
         )
+        lines.append("")
+        lines.append(
+            format_validation_baseline_comparison(
+                compare_validation_baseline_records(
+                    aggregate_validation_logs(before_log_paths).records,
+                    summary.overall.records,
+                ),
+                indent="  ",
+            )
+        )
     else:
         lines.append(format_validation_unknown_diff_unavailable(unknown_summary, indent="  "))
     lines.append("============================================================")
+    return "\n".join(lines)
+
+
+def format_validation_baseline_comparison(
+    comparison: ValidationBaselineComparison,
+    *,
+    indent: str = "",
+) -> str:
+    lines = [
+        f"{indent}Canonical baseline comparison:",
+        f"{indent}  Total results delta      : {_format_delta(comparison.after_total_results - comparison.before_total_results)}",
+        f"{indent}  UNKNOWN final result delta: {_format_delta(comparison.unknown_final_results_delta)}",
+        f"{indent}  TIMEOUT final result delta: {_format_delta(comparison.timeout_final_results_delta)}",
+    ]
+    _append_delta_block(lines, "Final result count delta", comparison.final_result_counts_delta, indent)
+    _append_delta_block(
+        lines,
+        "Timeout class tuple delta",
+        comparison.timeout_class_multiset_delta,
+        indent,
+    )
+    _append_delta_block(
+        lines,
+        "Validation UNKNOWN unit tuple delta",
+        comparison.validation_unknown_unit_multiset_delta,
+        indent,
+    )
+    _append_delta_block(
+        lines,
+        "Reason record tuple delta",
+        comparison.reason_record_multiset_delta,
+        indent,
+    )
+    _append_delta_block(
+        lines,
+        "Proof action tuple delta",
+        comparison.proof_action_multiset_delta,
+        indent,
+    )
+    _append_delta_block(
+        lines,
+        "Pair result tuple delta",
+        comparison.pair_result_multiset_delta,
+        indent,
+    )
+    _append_identity_block(
+        lines,
+        "Missing pair identities",
+        comparison.missing_pair_identities,
+        indent,
+    )
+    _append_identity_block(
+        lines,
+        "Added pair identities",
+        comparison.added_pair_identities,
+        indent,
+    )
     return "\n".join(lines)
 
 
@@ -328,6 +486,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="fail instead of emitting baseline-unavailable delta sections",
     )
     parser.add_argument(
+        "--require-baseline-match",
+        action="store_true",
+        help="fail when canonical before/after baseline comparison has any delta",
+    )
+    parser.add_argument(
         "--function-wall-time",
         action="append",
         default=None,
@@ -341,13 +504,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         function_name = args.function_name or _single_function_name(aggregate.records) or "(unknown)"
         before_logs = sorted(Path(args.before_dir).glob("*.log")) if args.before_dir else ()
         _require_before_logs(before_logs, args.require_before_dir)
-        print(
-            format_function_results_summary(
-                function_name,
-                aggregate,
-                elapsed_seconds=args.elapsed_seconds,
-                before_log_paths=before_logs,
-            )
+        output = format_function_results_summary(
+            function_name,
+            aggregate,
+            elapsed_seconds=args.elapsed_seconds,
+            before_log_paths=before_logs,
+        )
+        print(output)
+        _require_baseline_match(
+            before_logs,
+            aggregate.records,
+            args.require_baseline_match,
         )
         return 0
 
@@ -355,12 +522,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     assert_aggregation_invariant(overall)
     before_logs = sorted(Path(args.before_dir).glob("*/*.log")) if args.before_dir else ()
     _require_before_logs(before_logs, args.require_before_dir)
-    print(
-        format_overall_results_summary(
-            overall,
-            function_wall_times=_parse_function_wall_times(args.function_wall_time or ()),
-            before_log_paths=before_logs,
-        )
+    output = format_overall_results_summary(
+        overall,
+        function_wall_times=_parse_function_wall_times(args.function_wall_time or ()),
+        before_log_paths=before_logs,
+    )
+    print(output)
+    _require_baseline_match(
+        before_logs,
+        overall.overall.records,
+        args.require_baseline_match,
     )
     return 0
 
@@ -370,6 +541,19 @@ def _require_before_logs(before_logs: Sequence[Any], require_before_dir: bool) -
         raise SystemExit(
             "--require-before-dir requires --before-dir with baseline *.log files"
         )
+
+
+def _require_baseline_match(
+    before_logs: Sequence[Any],
+    after_records: Sequence[ValidationLogRecord],
+    require_baseline_match: bool,
+) -> None:
+    if not require_baseline_match:
+        return
+    before_records = aggregate_validation_logs(before_logs).records if before_logs else ()
+    comparison = compare_validation_baseline_records(before_records, after_records)
+    if comparison.has_differences():
+        raise SystemExit("baseline comparison mismatch")
 
 
 def _format_count_lines(indent: str, aggregate: ValidationResultAggregate) -> Tuple[str, ...]:
@@ -407,6 +591,157 @@ def _payloads_from_records(records: Iterable[ValidationLogRecord]) -> Tuple[Mapp
     for record in records:
         payloads.extend(record.payloads)
     return tuple(payloads)
+
+
+def _status_counts(records: Iterable[ValidationLogRecord]) -> Dict[str, int]:
+    counts = {status: 0 for status in STATUS_ORDER}
+    for record in records:
+        status = record.status if record.status in counts else STATUS_UNKNOWN
+        counts[status] += 1
+    return counts
+
+
+def _pair_result_multiset(records: Iterable[ValidationLogRecord]) -> Dict[Tuple[str, ...], int]:
+    counts: Dict[Tuple[str, ...], int] = {}
+    for record in records:
+        key = _canonical_pair_result_tuple(record)
+        counts[key] = int(counts.get(key, 0) or 0) + 1
+    return counts
+
+
+def _pair_identity_set(records: Iterable[ValidationLogRecord]) -> set:
+    return {
+        _canonical_pair_result_tuple(record)[:2]
+        for record in records
+    }
+
+
+def _timeout_class_multiset(records: Iterable[ValidationLogRecord]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for record in records:
+        payload = record.payloads[-1] if record.payloads else {}
+        timeout_class = _canonical_timeout_class(payload, record.status)
+        if timeout_class == UNKNOWN_TUPLE_MISSING:
+            continue
+        counts[timeout_class] = int(counts.get(timeout_class, 0) or 0) + 1
+    return counts
+
+
+def _canonical_pair_result_tuple(record: ValidationLogRecord) -> Tuple[str, ...]:
+    payload = record.payloads[-1] if record.payloads else {}
+    function_name = str(
+        payload.get("function1_name")
+        or payload.get("function_name")
+        or record.function_name
+    )
+    left_binary, right_binary = _payload_or_record_binary_ids(payload, record)
+    binary_pair = " ↔ ".join(sorted((left_binary, right_binary)))
+    return (
+        function_name,
+        binary_pair,
+        record.status if record.status in STATUS_ORDER else STATUS_UNKNOWN,
+        _canonical_blocking_reason(payload, record.status),
+        _canonical_timeout_class(payload, record.status),
+    )
+
+
+def _payload_or_record_binary_ids(
+    payload: Mapping[str, Any],
+    record: ValidationLogRecord,
+) -> Tuple[str, str]:
+    left = payload.get("binary1_name")
+    right = payload.get("binary2_name")
+    if left is not None and right is not None:
+        return _path_name(left), _path_name(right)
+    if "↔" in record.pair_label:
+        raw_left, raw_right = record.pair_label.split("↔", 1)
+        return raw_left.strip(), raw_right.strip()
+    return record.pair_label, record.pair_label
+
+
+def _path_name(value: Any) -> str:
+    text = str(value)
+    return Path(text).name if text else UNKNOWN_TUPLE_MISSING
+
+
+def _canonical_blocking_reason(payload: Mapping[str, Any], status: str) -> str:
+    explicit = payload.get("blocking_reason")
+    if explicit:
+        return str(explicit)
+    records = tuple(coerce_unknown_reason_records(payload.get("unknown_reasons") or ()))
+    if records:
+        return ",".join(sorted({str(record.reason_id) for record in records}))
+    if status == STATUS_TIMEOUT:
+        return _canonical_timeout_class(payload, status)
+    return UNKNOWN_TUPLE_MISSING
+
+
+def _canonical_timeout_class(payload: Mapping[str, Any], status: str) -> str:
+    if status != STATUS_TIMEOUT:
+        return UNKNOWN_TUPLE_MISSING
+    for key in ("timeout_class", "timeout_reason"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    solver_results = payload.get("solver_results")
+    if isinstance(solver_results, Mapping):
+        all_results = solver_results.get("all_results") or solver_results.get("results") or ()
+        for solver_result in all_results:
+            if isinstance(solver_result, Mapping) and str(solver_result.get("status")) == "TIMEOUT":
+                return "solver_timeout"
+    if payload.get("is_timeout") is True:
+        return "timeout"
+    return UNKNOWN_TUPLE_MISSING
+
+
+def _diff_counts(before: Mapping[Any, int], after: Mapping[Any, int]) -> Dict[Any, int]:
+    keys = set(before.keys()) | set(after.keys())
+    return {
+        key: int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0)
+        for key in sorted(keys)
+        if int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0) != 0
+    }
+
+
+def _append_delta_block(
+    lines: list,
+    title: str,
+    counts: Mapping[Any, int],
+    indent: str,
+) -> None:
+    lines.append(f"{indent}  {title}:")
+    if not counts:
+        lines.append(f"{indent}    ok")
+        return
+    for key in sorted(counts):
+        lines.append(f"{indent}    - {_format_key(key)}: {_format_delta(counts[key])}")
+
+
+def _append_identity_block(
+    lines: list,
+    title: str,
+    identities: Sequence[Tuple[str, str]],
+    indent: str,
+) -> None:
+    lines.append(f"{indent}  {title}:")
+    if not identities:
+        lines.append(f"{indent}    ok")
+        return
+    for function_name, binary_pair in identities:
+        lines.append(f"{indent}    - {function_name} | {binary_pair}")
+
+
+def _format_key(key: Any) -> str:
+    if isinstance(key, tuple):
+        return " | ".join(str(part) for part in key)
+    return str(key)
+
+
+def _format_delta(value: int) -> str:
+    value = int(value or 0)
+    if value > 0:
+        return f"+{value}"
+    return str(value)
 
 
 def _single_function_name(records: Sequence[ValidationLogRecord]) -> Optional[str]:

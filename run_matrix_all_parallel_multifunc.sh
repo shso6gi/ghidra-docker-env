@@ -47,6 +47,7 @@ PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
+VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -119,6 +120,7 @@ echo "Pairs per function: $TOTAL_PAIRS"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
+echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
 echo "============================================================"
 echo ""
 
@@ -541,6 +543,9 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" ]]; then
         FUNCTION_SUMMARY_ARGS+=(--require-before-dir)
     fi
+    if [[ "$VALIDATION_REQUIRE_BASELINE_MATCH" != "0" ]]; then
+        FUNCTION_SUMMARY_ARGS+=(--require-baseline-match)
+    fi
     if ! write_summary_file "$RESULT_FILE" \
         python3 -m scripts.function_tracer_pcode.validation.result_summary \
             "${FUNCTION_SUMMARY_ARGS[@]}" \
@@ -562,6 +567,9 @@ if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
 fi
 if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" ]]; then
     OVERALL_SUMMARY_ARGS+=(--require-before-dir)
+fi
+if [[ "$VALIDATION_REQUIRE_BASELINE_MATCH" != "0" ]]; then
+    OVERALL_SUMMARY_ARGS+=(--require-baseline-match)
 fi
 for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")

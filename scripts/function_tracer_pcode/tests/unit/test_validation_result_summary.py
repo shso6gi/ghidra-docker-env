@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
     UnknownReasonId,
     make_unknown_reason,
 )
@@ -20,8 +22,10 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     aggregate_validation_logs_by_function,
     assert_aggregation_invariant,
     classify_log_text,
+    compare_validation_baseline_records,
     format_function_results_summary,
     format_overall_results_summary,
+    format_validation_baseline_comparison,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
@@ -31,6 +35,7 @@ from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
 
 def _write_log(tmp_path, name, human_result, payload=None):
     path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [human_result]
     if payload is not None:
         lines.extend(
@@ -252,6 +257,152 @@ def test_result_summary_require_before_dir_emits_real_delta(tmp_path):
     assert "- return_width_bridge_missing: -1" in result.stdout
 
 
+def test_canonical_baseline_comparison_uses_sorted_binary_pair_and_reason_tuples(tmp_path):
+    before_log = _write_log(
+        tmp_path / "before",
+        "fc_apply_indirect_B2_B1.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_apply_indirect",
+            None,
+            binary1_name="function_call_test-mips64-clang-O2",
+            binary2_name="function_call_test-mips64-clang-O1",
+            unknown_reasons=[
+                make_unknown_reason(
+                    UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+                    recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                    proof_stage="object_evidence_collected",
+                    action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+                ).to_dict()
+            ],
+        ),
+    )
+    after_log = _write_log(
+        tmp_path / "after",
+        "fc_apply_indirect_B1_B2.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_apply_indirect",
+            None,
+            binary1_name="function_call_test-mips64-clang-O1",
+            binary2_name="function_call_test-mips64-clang-O2",
+            unknown_reasons=[
+                make_unknown_reason(
+                    UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+                    recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                    proof_stage="object_evidence_collected",
+                    action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+                ).to_dict()
+            ],
+        ),
+    )
+    before = aggregate_validation_logs([before_log])
+    after = aggregate_validation_logs([after_log])
+
+    comparison = compare_validation_baseline_records(before.records, after.records)
+
+    assert not comparison.has_differences()
+    assert comparison.pair_result_multiset_delta == {}
+    assert comparison.validation_unknown_unit_multiset_delta == {}
+    assert comparison.proof_action_multiset_delta == {}
+
+
+def test_canonical_baseline_comparison_reports_pair_and_timeout_deltas(tmp_path):
+    before_log = _write_log(
+        tmp_path / "before",
+        "fc_apply_indirect_B1_B2.log",
+        "Result: TIMEOUT",
+        _payload(
+            "fc_apply_indirect",
+            None,
+            binary1_name="function_call_test-mips64-clang-O1",
+            binary2_name="function_call_test-mips64-clang-O2",
+            is_timeout=True,
+            timeout_class="solver_timeout",
+        ),
+    )
+    after_log = _write_log(
+        tmp_path / "after",
+        "fc_apply_indirect_B1_B2.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_apply_indirect",
+            None,
+            binary1_name="function_call_test-mips64-clang-O1",
+            binary2_name="function_call_test-mips64-clang-O2",
+            unknown_reasons=[
+                make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP).to_dict()
+            ],
+        ),
+    )
+    before = aggregate_validation_logs([before_log])
+    after = aggregate_validation_logs([after_log])
+
+    comparison = compare_validation_baseline_records(before.records, after.records)
+    text = format_validation_baseline_comparison(comparison)
+
+    assert comparison.has_differences()
+    assert comparison.final_result_counts_delta == {
+        STATUS_TIMEOUT: -1,
+        STATUS_UNKNOWN: 1,
+    }
+    assert comparison.timeout_class_multiset_delta == {"solver_timeout": -1}
+    assert comparison.timeout_final_results_delta == -1
+    assert comparison.unknown_final_results_delta == 1
+    assert any(
+        key[0] == "fc_apply_indirect"
+        and key[2] == STATUS_TIMEOUT
+        and value == -1
+        for key, value in comparison.pair_result_multiset_delta.items()
+    )
+    assert "Canonical baseline comparison:" in text
+    assert "Pair result tuple delta:" in text
+    assert "solver_timeout: -1" in text
+
+
+def test_result_summary_require_baseline_match_rejects_canonical_mismatch(tmp_path):
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    before_dir.mkdir()
+    after_dir.mkdir()
+    before_log = _write_log(
+        before_dir,
+        "fc_apply_indirect_B1_B2.log",
+        "Result: UNKNOWN",
+        _payload("fc_apply_indirect", None),
+    )
+    after_log = _write_log(
+        after_dir,
+        "fc_apply_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload("fc_apply_indirect", True),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--function-summary",
+            "--function-name",
+            "fc_apply_indirect",
+            "--before-dir",
+            str(before_dir),
+            "--require-before-dir",
+            "--require-baseline-match",
+            str(after_log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Canonical baseline comparison:" in result.stdout
+    assert "baseline comparison mismatch" in result.stderr
+    assert before_log.is_file()
+
+
 def test_matrix_runners_update_summary_outputs_only_after_success():
     script_paths = (
         "loop_run_matrix_all_parallel_multifunc.sh",
@@ -265,8 +416,11 @@ def test_matrix_runners_update_summary_outputs_only_after_success():
     for script_path in script_paths:
         script = Path(script_path).read_text()
         assert "VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}" in script
+        assert "VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}" in script
         assert "write_summary_file()" in script
         assert "FUNCTION_SUMMARY_ARGS+=(--require-before-dir)" in script
         assert "OVERALL_SUMMARY_ARGS+=(--require-before-dir)" in script
+        assert "FUNCTION_SUMMARY_ARGS+=(--require-baseline-match)" in script
+        assert "OVERALL_SUMMARY_ARGS+=(--require-baseline-match)" in script
         assert '} | tee "$RESULT_FILE"' not in script
         assert '} | tee "$SUMMARY_FILE"' not in script
