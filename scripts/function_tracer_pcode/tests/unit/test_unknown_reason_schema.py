@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     UnknownReasonId,
+    build_proof_obligation_id,
     build_unknown_recovery_actions,
     get_unknown_recovery_plan,
     get_unknown_reason_definition,
@@ -245,6 +246,55 @@ def test_equivalence_blocking_unsafety_can_emit_pending_call_effect_proof_obliga
             0x401000,
             ("pcode_op", 0x401020, 7, 0, None, "CALL"),
         ),
+    )
+
+
+def test_proof_obligation_id_full_key_distinguishes_evidence_and_object_target():
+    base_target = (
+        "runtime_ref",
+        "B10",
+        ("function_ref", ("function", 1, 0x401000)),
+        ("pcode_op", "ram", 0x401020, "ram", 0x401020, 7, "CALLIND", 0),
+        ("argument", 0, ("register", "a0", 8)),
+    )
+    argument_one_target = (
+        "runtime_ref",
+        "B10",
+        ("function_ref", ("function", 1, 0x401000)),
+        ("pcode_op", "ram", 0x401020, "ram", 0x401020, 7, "CALLIND", 0),
+        ("argument", 1, ("register", "a1", 8)),
+    )
+
+    call_effect_id = build_proof_obligation_id(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        "object_evidence_collected",
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        "call_effect_summary",
+        base_target,
+    )
+    runtime_ref_id = build_proof_obligation_id(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        "object_evidence_collected",
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        "runtime_ref",
+        base_target,
+    )
+    argument_one_id = build_proof_obligation_id(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        "object_evidence_collected",
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        "call_effect_summary",
+        argument_one_target,
+    )
+
+    assert call_effect_id != runtime_ref_id
+    assert call_effect_id != argument_one_id
+    assert call_effect_id == (
+        "equivalence_blocking_unsafety",
+        "object_evidence_collected",
+        "call_effect_summary_proof",
+        "call_effect_summary",
+        base_target,
     )
 
 
