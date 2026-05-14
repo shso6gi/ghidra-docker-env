@@ -1,0 +1,104 @@
+diff --git a/.gitignore b/.gitignore
+index 1f596a9..2700b5b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -16,4 +16,21 @@ solver_boolector.py
+ solver_yices2.py
+ solver_cvc5.py
+ *.txt
+-*.log
+\ No newline at end of file
++*.log
++docs/
++*.html
++*.zip
++.local-ghidra/*
++.local-ghidra-extract/*
++.local-jdk/*
++.venv-pyghidra/*
++.venv/*
++*.jar
++*.tcd
++*.lock
++*.save
++Git.lnk
++*.c
++tmp/*
++ghidra_*
++.codex
+\ No newline at end of file
+diff --git a/.vscode/launch.json b/.vscode/launch.json
+index 046905d..fb68699 100644
+--- a/.vscode/launch.json
++++ b/.vscode/launch.json
+@@ -5,16 +5,18 @@
+             "name": "Debug function_tracer_pcode - equiv divide",
+             "type": "debugpy",
+             "request": "launch",
+-            "module": "scripts.function_tracer_pcode.main",
++            "module": "scripts.function_tracer_pcode.cli.main",
+             "args": [
+                 "--equiv",
+-                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-arm64-clang-O0",
+-                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic/arithmetic-mips64-clang-O1",
++                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test/arithmetic_long_test-mips64-gcc-O1",
++                "/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test/arithmetic_long_test-arm64-clang-O1",
+                 "-f",
+-                "divide",
+-                "--retry-with-int",
++                "modulo_mixed",
++                // "--retry-with-int",
+                 "-d",
+                 // "-v"
++                "--equiv-timeout",
++                "300"
+             ],
+             "cwd": "/workspaces/ghidra-docker-env",
+             "console": "integratedTerminal",
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index d9b23bc..bd9c214 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -1,5 +1,8 @@
+ {
++  "python.analysis.diagnosticMode": "workspace",
+   "python.analysis.extraPaths": [
+     "${workspaceFolder}/scripts/function_tracer_pcode"
+-  ]
+-}
+\ No newline at end of file
++  ],
++  "python.analysis.stubPath": "${workspaceFolder}/typings",
++  "python.analysis.useLibraryCodeForTypes": false
++}
+diff --git a/docs/equivalence_flow_diagrams.md b/docs/equivalence_flow_diagrams.md
+index 3cf6ed0..68f4369 100644
+--- a/docs/equivalence_flow_diagrams.md
++++ b/docs/equivalence_flow_diagrams.md
+@@ -83,6 +83,8 @@ P1/P2/P4-A の型修正 phase は Ghidra `Program` を更新しません。
+ その effective analysis view を使って次の stage plan を再実行します。
+ そのため、retry 後に見ているのは「仮説を注入して永続変更した Program」ではなく、
+ 「元 Program から得た解析結果に仮説コンテキストを重ねた view」です。
++旧実装のような「changed side only selective reanalysis」は現在は使っていません。
++CALL/CALLIND の target も `ADDR_xxx` のような synthetic 文字列ではなく、`Function` / entry point / raw code address を保持する `CallTargetRef` として内部表現化し、文字列は表示と互換層に限定しています。
+ 
+ ```mermaid
+ flowchart TD
+diff --git a/flow.txt b/flow.txt
+deleted file mode 100644
+index 0be4a2d..0000000
+--- a/flow.txt
++++ /dev/null
+@@ -1,11 +0,0 @@
+-等価性判定実行
+-    ↓ (is_equivalent=False)
+-戻り値の型を確認（両バイナリ）
+-    ↓ (longlong/undefined等の場合)
+-int型に変更 → 再デコンパイル → 再判定
+-    ↓ (まだis_equivalent=False)
+-引数の型を確認（両バイナリ）
+-    ↓ (longlong/undefined等の引数がある場合)
+-int型に変更 → 再デコンパイル → 再判定
+-    ↓
+-最終結果を返す
+\ No newline at end of file

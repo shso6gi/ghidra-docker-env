@@ -1,0 +1,8 @@
+ M .gitignore
+ M .vscode/launch.json
+ M .vscode/settings.json
+ M docs/equivalence_flow_diagrams.md
+ D flow.txt
+?? pyrightconfig.json
+?? scripts/function_tracer_pcode/tests/unit/test_freeze_observed_baseline.py
+?? scripts/function_tracer_pcode/validation/freeze_observed_baseline.py
