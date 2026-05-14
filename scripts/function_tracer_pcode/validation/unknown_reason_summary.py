@@ -17,8 +17,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from ..equivalence.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
+    UnknownCountKind,
     UnknownReasonClass,
     UnknownReasonId,
+    UnknownRecoveryProofKind,
     UnknownReasonRecord,
     build_unknown_recovery_actions,
     coerce_unknown_reason_records,
@@ -40,6 +43,10 @@ class UnknownValidationSummary:
     total_results: int = 0
     unknown_results: int = 0
     unknown_units: int = 0
+    final_result_counts: Dict[str, int] = field(default_factory=dict)
+    validation_unknown_unit_multiset: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    reason_record_multiset: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    proof_action_multiset: Dict[Tuple[str, ...], int] = field(default_factory=dict)
     unknown_by_reason: Dict[str, int] = field(default_factory=dict)
     unknown_by_decision_effect: Dict[str, int] = field(default_factory=dict)
     unknown_by_reason_scope: Dict[str, int] = field(default_factory=dict)
@@ -55,6 +62,12 @@ class UnknownValidationSummary:
             "total_results": self.total_results,
             "unknown_results": self.unknown_results,
             "unknown_units": self.unknown_units,
+            "final_result_counts": dict(self.final_result_counts),
+            "validation_unknown_unit_multiset": _tuple_multiset_to_dict(
+                self.validation_unknown_unit_multiset
+            ),
+            "reason_record_multiset": _tuple_multiset_to_dict(self.reason_record_multiset),
+            "proof_action_multiset": _tuple_multiset_to_dict(self.proof_action_multiset),
             "unknown_by_reason": dict(self.unknown_by_reason),
             "unknown_by_decision_effect": dict(self.unknown_by_decision_effect),
             "unknown_by_reason_scope": dict(self.unknown_by_reason_scope),
@@ -80,6 +93,10 @@ class UnknownValidationDiff:
     proof_backlog_by_proof_kind_delta: Dict[str, int]
     proof_backlog_by_recovery_action_delta: Dict[str, int]
     proof_backlog_by_action_status_delta: Dict[str, int]
+    final_result_counts_delta: Dict[str, int]
+    validation_unknown_unit_multiset_delta: Dict[Tuple[str, ...], int]
+    reason_record_multiset_delta: Dict[Tuple[str, ...], int]
+    proof_action_multiset_delta: Dict[Tuple[str, ...], int]
     operational_unknown_by_reason_delta: Dict[str, int]
     operational_unknown_by_class_delta: Dict[str, int]
 
@@ -96,6 +113,16 @@ class UnknownValidationDiff:
             "proof_backlog_by_proof_kind_delta": dict(self.proof_backlog_by_proof_kind_delta),
             "proof_backlog_by_recovery_action_delta": dict(self.proof_backlog_by_recovery_action_delta),
             "proof_backlog_by_action_status_delta": dict(self.proof_backlog_by_action_status_delta),
+            "final_result_counts_delta": dict(self.final_result_counts_delta),
+            "validation_unknown_unit_multiset_delta": _tuple_multiset_to_dict(
+                self.validation_unknown_unit_multiset_delta
+            ),
+            "reason_record_multiset_delta": _tuple_multiset_to_dict(
+                self.reason_record_multiset_delta
+            ),
+            "proof_action_multiset_delta": _tuple_multiset_to_dict(
+                self.proof_action_multiset_delta
+            ),
             "operational_unknown_by_reason_delta": dict(self.operational_unknown_by_reason_delta),
             "operational_unknown_by_class_delta": dict(self.operational_unknown_by_class_delta),
         }
@@ -110,6 +137,10 @@ def summarize_validation_unknowns(
     total_results = 0
     unknown_results = 0
     unknown_units = 0
+    final_result_counts: Dict[str, int] = {}
+    validation_unknown_unit_multiset: Dict[Tuple[str, ...], int] = {}
+    reason_record_multiset: Dict[Tuple[str, ...], int] = {}
+    proof_action_multiset: Dict[Tuple[str, ...], int] = {}
     unknown_by_reason: Dict[str, int] = {}
     unknown_by_decision_effect: Dict[str, int] = {}
     unknown_by_reason_scope: Dict[str, int] = {}
@@ -125,13 +156,13 @@ def summarize_validation_unknowns(
         if target_filter and not _payload_matches_targets(payload, target_filter):
             continue
         total_results += 1
+        _inc(final_result_counts, _payload_final_result(payload))
         if not _payload_is_unknown(payload):
             continue
         unknown_results += 1
 
-        records = _select_primary_records_by_aggregation_unit(
-            _extract_final_unknown_reasons(payload)
-        )
+        extracted_records = _extract_final_unknown_reasons(payload)
+        records = _select_primary_records_by_aggregation_unit(extracted_records)
         if not records:
             records = (
                 make_unknown_reason(
@@ -142,13 +173,32 @@ def summarize_validation_unknowns(
             )
         unknown_units += len(records)
 
+        for record in extracted_records or records:
+            _inc(
+                reason_record_multiset,
+                _global_reason_tuple_from_record(
+                    record,
+                    UnknownCountKind.REASON_RECORD.value,
+                ),
+            )
+            for action in build_unknown_recovery_actions((record,)):
+                _inc(proof_action_multiset, _global_reason_tuple_from_action(action))
+
         for record in records:
+            _inc(
+                validation_unknown_unit_multiset,
+                _global_reason_tuple_from_record(
+                    record,
+                    UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+                ),
+            )
             _inc(unknown_by_reason, record.reason_id)
             _inc(unknown_by_decision_effect, record.decision_effect)
             _inc(unknown_by_reason_scope, record.reason_scope)
+            actions = build_unknown_recovery_actions((record,))
             if _is_proof_backlog(record):
                 _inc(proof_backlog_by_reason, record.reason_id)
-                for action in build_unknown_recovery_actions((record,)):
+                for action in actions:
                     _inc(proof_backlog_by_proof_kind, action.proof_kind)
                     _inc(proof_backlog_by_recovery_action, _recovery_action_key(action))
                     _inc(proof_backlog_by_action_status, action.status)
@@ -160,6 +210,10 @@ def summarize_validation_unknowns(
         total_results=total_results,
         unknown_results=unknown_results,
         unknown_units=unknown_units,
+        final_result_counts=final_result_counts,
+        validation_unknown_unit_multiset=validation_unknown_unit_multiset,
+        reason_record_multiset=reason_record_multiset,
+        proof_action_multiset=proof_action_multiset,
         unknown_by_reason=unknown_by_reason,
         unknown_by_decision_effect=unknown_by_decision_effect,
         unknown_by_reason_scope=unknown_by_reason_scope,
@@ -210,6 +264,22 @@ def compare_validation_unknowns(
             before.proof_backlog_by_action_status,
             after.proof_backlog_by_action_status,
         ),
+        final_result_counts_delta=_diff_counts(
+            before.final_result_counts,
+            after.final_result_counts,
+        ),
+        validation_unknown_unit_multiset_delta=_diff_counts(
+            before.validation_unknown_unit_multiset,
+            after.validation_unknown_unit_multiset,
+        ),
+        reason_record_multiset_delta=_diff_counts(
+            before.reason_record_multiset,
+            after.reason_record_multiset,
+        ),
+        proof_action_multiset_delta=_diff_counts(
+            before.proof_action_multiset,
+            after.proof_action_multiset,
+        ),
         operational_unknown_by_reason_delta=_diff_counts(
             before.operational_unknown_by_reason,
             after.operational_unknown_by_reason,
@@ -232,6 +302,25 @@ def format_validation_unknown_summary(
         f"{indent}  Unknown results: {summary.unknown_results}",
         f"{indent}  Unknown units  : {summary.unknown_units}",
     ]
+    _append_count_block(lines, "Final results", summary.final_result_counts, indent)
+    _append_count_block(
+        lines,
+        "Validation UNKNOWN unit tuples",
+        summary.validation_unknown_unit_multiset,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Reason record tuples",
+        summary.reason_record_multiset,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Proof action tuples",
+        summary.proof_action_multiset,
+        indent,
+    )
     _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent)
     _append_count_block(
         lines,
@@ -283,6 +372,25 @@ def format_validation_unknown_diff(
         f"{indent}  Unknown results delta: {_format_delta(diff.delta_unknown_results)}",
         f"{indent}  Unknown units delta  : {_format_delta(diff.delta_unknown_units)}",
     ]
+    _append_count_block(lines, "Final results delta", diff.final_result_counts_delta, indent)
+    _append_count_block(
+        lines,
+        "Validation UNKNOWN unit tuple delta",
+        diff.validation_unknown_unit_multiset_delta,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Reason record tuple delta",
+        diff.reason_record_multiset_delta,
+        indent,
+    )
+    _append_count_block(
+        lines,
+        "Proof action tuple delta",
+        diff.proof_action_multiset_delta,
+        indent,
+    )
     _append_count_block(lines, "UNKNOWN by reason delta", diff.unknown_by_reason_delta, indent)
     _append_count_block(
         lines,
@@ -347,6 +455,34 @@ def format_validation_unknown_diff_unavailable(
         f"{indent}  Current unknown results: {summary.unknown_results}",
         f"{indent}  Current unknown units  : {summary.unknown_units}",
     ]
+    _append_count_block(
+        lines,
+        "Final results delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Validation UNKNOWN unit tuple delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Reason record tuple delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
+    _append_count_block(
+        lines,
+        "Proof action tuple delta",
+        {},
+        indent,
+        empty_label="baseline unavailable",
+    )
     _append_count_block(
         lines,
         "UNKNOWN by reason delta",
@@ -509,6 +645,26 @@ def _payload_is_unknown(payload: Mapping[str, Any]) -> bool:
     return payload.get("error_message") is None
 
 
+def _payload_final_result(payload: Mapping[str, Any]) -> str:
+    debug_trace = payload.get("debug_trace")
+    if isinstance(debug_trace, Mapping):
+        final_result = debug_trace.get("final_result")
+        if final_result is not None:
+            if final_result is True:
+                return "EQUIVALENT"
+            if final_result is False:
+                return "NOT_EQ"
+            return str(final_result)
+    is_equivalent = payload.get("is_equivalent")
+    if is_equivalent is True:
+        return "EQUIVALENT"
+    if is_equivalent is False:
+        return "NOT_EQ"
+    if payload.get("error_message") is not None:
+        return "ERROR"
+    return "UNKNOWN"
+
+
 def _payload_matches_targets(payload: Mapping[str, Any], targets: Sequence[str]) -> bool:
     haystack = " ".join(
         str(value)
@@ -556,7 +712,37 @@ def _select_primary_records_by_aggregation_unit(
 
 
 def _is_proof_backlog(record: UnknownReasonRecord) -> bool:
-    return record.reason_class in _PROOF_BACKLOG_CLASSES
+    return (
+        record.reason_class in _PROOF_BACKLOG_CLASSES
+        or record.action_status == "pending_proof"
+    )
+
+
+def _global_reason_tuple_from_record(
+    record: UnknownReasonRecord,
+    count_kind: str,
+) -> Tuple[str, ...]:
+    return (
+        str(count_kind),
+        str(record.reason_id),
+        str(record.decision_effect),
+        str(record.reason_scope),
+        str(record.recovery_proof_kind or UNKNOWN_TUPLE_MISSING),
+        str(record.proof_stage or UNKNOWN_TUPLE_MISSING),
+        str(record.action_status or UNKNOWN_TUPLE_MISSING),
+    )
+
+
+def _global_reason_tuple_from_action(action: Any) -> Tuple[str, ...]:
+    return (
+        str(getattr(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
+        str(getattr(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
+        str(getattr(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
+        str(getattr(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
+        str(getattr(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
+        str(getattr(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
+        str(getattr(action, "status", UNKNOWN_TUPLE_MISSING)),
+    )
 
 
 def _payload_stage(payload: Mapping[str, Any]) -> Optional[str]:
@@ -577,8 +763,8 @@ def _payload_pair_or_case(payload: Mapping[str, Any]) -> Optional[str]:
 
 
 def _inc(counts: Dict[str, int], key: Any, amount: int = 1) -> None:
-    text_key = str(key)
-    counts[text_key] = int(counts.get(text_key, 0) or 0) + int(amount)
+    count_key = key if isinstance(key, tuple) else str(key)
+    counts[count_key] = int(counts.get(count_key, 0) or 0) + int(amount)
 
 
 def _recovery_action_key(action: Any) -> str:
@@ -600,6 +786,19 @@ def _diff_counts(before: Mapping[str, int], after: Mapping[str, int]) -> Dict[st
         for key in sorted(keys)
         if int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0) != 0
     }
+
+
+def _tuple_multiset_to_dict(counts: Mapping[Tuple[Any, ...], int]) -> Dict[str, int]:
+    return {
+        " | ".join(_format_tuple_value(part) for part in key): value
+        for key, value in counts.items()
+    }
+
+
+def _format_tuple_value(value: Any) -> str:
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_format_tuple_value(part) for part in value) + ")"
+    return str(value)
 
 
 def _append_count_block(

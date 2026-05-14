@@ -71,7 +71,10 @@ from ..semantic_width import (
     normalize_analysis_semantic_width,
 )
 from ..debug_trace import NormalizationRuleApplication
-from ..unknown_reason import UnknownReasonId, make_unknown_reason
+from ..unknown_reason import (
+    UnknownReasonId,
+    make_unknown_reason,
+)
 
 
 @dataclass(frozen=True)
@@ -594,13 +597,12 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print("=" * 60)
             blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
             for blocking_reason in blocking_reasons:
-                typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)
                 unknown_reasons.append(
-                    make_unknown_reason(
-                        typed_reason_id,
+                    self._make_blocking_unsafety_unknown_reason(
+                        blocking_reason,
+                        analysis1,
+                        analysis2,
                         stage="S_PAIRWISE",
-                        evidence_refs=(blocking_reason,),
-                        detail=blocking_reason,
                     )
                 )
             self._debug_print(
@@ -681,16 +683,6 @@ class PairwiseStrategy(CheckStrategy):
         }:
             return UnknownReasonId.METHOD_B_CLOSURE_BLOCKED
         return UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING
-
-    def _unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
-        reason_text = str(reason or "")
-        if "return_coverage_gap" in reason_text:
-            return UnknownReasonId.RETURN_COVERAGE_GAP
-        if "return_coverage_inconclusive" in reason_text:
-            return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
-        if "recoverable_partial" in reason_text or "argument_recovery_recoverable_partial" in reason_text:
-            return UnknownReasonId.RECOVERABLE_PARTIAL
-        return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
 
     def _case_pair_conditions_unsat_under_shared_inputs(
         self,

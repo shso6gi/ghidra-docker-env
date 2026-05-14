@@ -8,6 +8,16 @@ from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
+UNKNOWN_TUPLE_MISSING = "<missing>"
+
+
+class UnknownCountKind(str, Enum):
+    FINAL_RESULT = "final_result"
+    VALIDATION_UNKNOWN_UNIT = "validation_unknown_unit"
+    REASON_RECORD = "reason_record"
+    PROOF_ACTION = "proof_action"
+
+
 class UnknownReasonId(str, Enum):
     RETURN_WIDTH_BRIDGE_MISSING = "return_width_bridge_missing"
     RECOVERABLE_PARTIAL = "recoverable_partial"
@@ -73,6 +83,7 @@ class UnknownRecoveryProofKind(str, Enum):
     ABI_RELATION_HIGH_BIT_PROOF = "abi_relation_high_bit_proof"
     ABI_RELATION_PROOF = "abi_relation_proof"
     HIGH_BIT_PROOF = "high_bit_proof"
+    CALL_EFFECT_SUMMARY_PROOF = "call_effect_summary_proof"
     PATH_SENSITIVE_ARGUMENT_MERGE = "path_sensitive_argument_merge"
     STORAGE_BACKED_IDENTITY_PROPAGATION = "storage_backed_identity_propagation"
     PROOF_BACKED_COVERING_CASE = "proof_backed_covering_case"
@@ -96,6 +107,16 @@ def _coerce_evidence_refs(evidence_refs: Optional[Sequence[Any]]) -> Tuple[str, 
             continue
         refs.append(str(ref))
     return tuple(refs)
+
+
+def _coerce_optional_tuple(value: Any) -> Optional[Tuple[Any, ...]]:
+    if value is None:
+        return None
+    if isinstance(value, tuple):
+        return tuple(_coerce_optional_tuple(item) if isinstance(item, list) else item for item in value)
+    if isinstance(value, list):
+        return tuple(_coerce_optional_tuple(item) if isinstance(item, list) else item for item in value)
+    return (value,)
 
 
 def _registered_recovery_proof_kind_values() -> Tuple[str, ...]:
@@ -186,12 +207,16 @@ class UnknownRecoveryPlan:
 
 class UnknownRecoveryActionStatus(str, Enum):
     PLANNED = "planned"
+    PENDING_PROOF = "pending_proof"
     NO_REGISTERED_PLAN = "no_registered_plan"
 
 
 @dataclass(frozen=True)
 class UnknownRecoveryAction:
+    count_kind: str
     reason_id: str
+    decision_effect: str
+    reason_scope: str
     proof_kind: str
     proof_stage: str
     status: str
@@ -200,12 +225,19 @@ class UnknownRecoveryAction:
     pair_or_case: Optional[str] = None
     required_evidence: Tuple[str, ...] = ()
     evidence_refs: Tuple[str, ...] = ()
+    evidence_kind: Optional[str] = None
+    object_target_key: Optional[Tuple[Any, ...]] = None
+    proof_obligation_id: Optional[Tuple[Any, ...]] = None
+    recovery_action: Optional[str] = None
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "count_kind": self.count_kind,
             "reason_id": self.reason_id,
+            "decision_effect": self.decision_effect,
+            "reason_scope": self.reason_scope,
             "proof_kind": self.proof_kind,
             "proof_stage": self.proof_stage,
             "status": self.status,
@@ -214,6 +246,10 @@ class UnknownRecoveryAction:
             "pair_or_case": self.pair_or_case,
             "required_evidence": list(self.required_evidence),
             "evidence_refs": list(self.evidence_refs),
+            "evidence_kind": self.evidence_kind,
+            "object_target_key": self.object_target_key,
+            "proof_obligation_id": self.proof_obligation_id,
+            "recovery_action": self.recovery_action,
             "target_regression": self.target_regression,
             "detail": self.detail,
         }
@@ -221,7 +257,10 @@ class UnknownRecoveryAction:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
         return cls(
+            count_kind=_enum_value(payload.get("count_kind")) or UnknownCountKind.PROOF_ACTION.value,
             reason_id=normalize_unknown_reason_id(payload.get("reason_id")),
+            decision_effect=str(payload.get("decision_effect") or UnknownDecisionEffect.DIAGNOSTIC_ONLY.value),
+            reason_scope=str(payload.get("reason_scope") or UnknownReasonScope.GLOBAL.value),
             proof_kind=normalize_recovery_proof_kind(payload.get("proof_kind")) or UnknownRecoveryProofKind.NONE.value,
             proof_stage=str(payload.get("proof_stage") or "unspecified"),
             status=str(payload.get("status") or UnknownRecoveryActionStatus.PLANNED.value),
@@ -230,6 +269,10 @@ class UnknownRecoveryAction:
             pair_or_case=payload.get("pair_or_case"),
             required_evidence=_coerce_evidence_refs(payload.get("required_evidence") or ()),
             evidence_refs=_coerce_evidence_refs(payload.get("evidence_refs") or ()),
+            evidence_kind=payload.get("evidence_kind"),
+            object_target_key=_coerce_optional_tuple(payload.get("object_target_key")),
+            proof_obligation_id=_coerce_optional_tuple(payload.get("proof_obligation_id")),
+            recovery_action=payload.get("recovery_action"),
             target_regression=payload.get("target_regression"),
             detail=payload.get("detail"),
         )
@@ -726,6 +769,22 @@ def unknown_recovery_plan_registry_snapshot() -> Dict[str, UnknownRecoveryPlan]:
     return dict(_UNKNOWN_RECOVERY_PLAN_REGISTRY)
 
 
+def build_proof_obligation_id(
+    reason_id: Any,
+    proof_stage: Any,
+    recovery_proof_kind: Any,
+    evidence_kind: Any,
+    object_target_key: Any,
+) -> Tuple[Any, ...]:
+    return (
+        normalize_unknown_reason_id(reason_id),
+        str(proof_stage or UNKNOWN_TUPLE_MISSING),
+        normalize_recovery_proof_kind(recovery_proof_kind) or UnknownRecoveryProofKind.NONE.value,
+        str(evidence_kind or UNKNOWN_TUPLE_MISSING),
+        _coerce_optional_tuple(object_target_key) or (UNKNOWN_TUPLE_MISSING,),
+    )
+
+
 def coerce_unknown_recovery_proof_obligation(value: Any) -> UnknownRecoveryProofObligation:
     if isinstance(value, UnknownRecoveryProofObligation):
         return value
@@ -745,6 +804,7 @@ _register_default_recovery_plans()
 
 @dataclass(frozen=True)
 class UnknownReasonRecord:
+    count_kind: str
     reason_id: str
     reason_class: str
     decision_effect: str
@@ -755,11 +815,18 @@ class UnknownReasonRecord:
     evidence_refs: Tuple[str, ...] = ()
     recovery_proof_kind: str = UnknownRecoveryProofKind.NONE.value
     recovery_proof_obligations: Tuple[UnknownRecoveryProofObligation, ...] = ()
+    proof_stage: Optional[str] = None
+    evidence_kind: Optional[str] = None
+    object_target_key: Optional[Tuple[Any, ...]] = None
+    proof_obligation_id: Optional[Tuple[Any, ...]] = None
+    recovery_action: Optional[str] = None
+    action_status: Optional[str] = None
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "count_kind": self.count_kind,
             "reason_id": self.reason_id,
             "reason_class": self.reason_class,
             "decision_effect": self.decision_effect,
@@ -772,6 +839,12 @@ class UnknownReasonRecord:
             "recovery_proof_obligations": [
                 obligation.to_dict() for obligation in self.recovery_proof_obligations
             ],
+            "proof_stage": self.proof_stage,
+            "evidence_kind": self.evidence_kind,
+            "object_target_key": self.object_target_key,
+            "proof_obligation_id": self.proof_obligation_id,
+            "recovery_action": self.recovery_action,
+            "action_status": self.action_status,
             "target_regression": self.target_regression,
             "detail": self.detail,
         }
@@ -780,6 +853,7 @@ class UnknownReasonRecord:
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownReasonRecord":
         return make_unknown_reason(
             payload.get("reason_id"),
+            count_kind=payload.get("count_kind"),
             reason_class=payload.get("reason_class"),
             decision_effect=payload.get("decision_effect"),
             reason_scope=payload.get("reason_scope"),
@@ -789,6 +863,12 @@ class UnknownReasonRecord:
             evidence_refs=payload.get("evidence_refs") or (),
             recovery_proof_kind=payload.get("recovery_proof_kind"),
             recovery_proof_obligations=payload.get("recovery_proof_obligations"),
+            proof_stage=payload.get("proof_stage"),
+            evidence_kind=payload.get("evidence_kind"),
+            object_target_key=payload.get("object_target_key"),
+            proof_obligation_id=payload.get("proof_obligation_id"),
+            recovery_action=payload.get("recovery_action"),
+            action_status=payload.get("action_status"),
             target_regression=payload.get("target_regression"),
             detail=payload.get("detail"),
         )
@@ -797,6 +877,7 @@ class UnknownReasonRecord:
 def make_unknown_reason(
     reason_id: Any,
     *,
+    count_kind: Any = None,
     reason_class: Any = None,
     decision_effect: Any = None,
     reason_scope: Any = None,
@@ -806,6 +887,12 @@ def make_unknown_reason(
     evidence_refs: Optional[Sequence[Any]] = None,
     recovery_proof_kind: Any = None,
     recovery_proof_obligations: Optional[Sequence[Any]] = None,
+    proof_stage: Optional[str] = None,
+    evidence_kind: Optional[str] = None,
+    object_target_key: Any = None,
+    proof_obligation_id: Any = None,
+    recovery_action: Optional[str] = None,
+    action_status: Any = None,
     target_regression: Optional[str] = None,
     detail: Optional[str] = None,
 ) -> UnknownReasonRecord:
@@ -836,7 +923,32 @@ def make_unknown_reason(
         coerced_recovery_obligations = coerce_unknown_recovery_proof_obligations(
             recovery_proof_obligations
         )
+    normalized_proof_kind = normalized_recovery_proof_kind or definition.recovery_proof_kind
+    coerced_object_target_key = _coerce_optional_tuple(object_target_key)
+    normalized_action_status = _enum_value(action_status)
+    if normalized_action_status is not None:
+        normalized_action_status = str(normalized_action_status)
+    resolved_proof_stage = proof_stage
+    if resolved_proof_stage is None and len(coerced_recovery_obligations) == 1:
+        resolved_proof_stage = coerced_recovery_obligations[0].proof_stage
+    resolved_evidence_kind = str(evidence_kind) if evidence_kind is not None else None
+    coerced_proof_obligation_id = _coerce_optional_tuple(proof_obligation_id)
+    if (
+        coerced_proof_obligation_id is None
+        and resolved_proof_stage is not None
+        and resolved_evidence_kind is not None
+        and coerced_object_target_key is not None
+        and normalized_proof_kind != UnknownRecoveryProofKind.NONE.value
+    ):
+        coerced_proof_obligation_id = build_proof_obligation_id(
+            definition.reason_id,
+            resolved_proof_stage,
+            normalized_proof_kind,
+            resolved_evidence_kind,
+            coerced_object_target_key,
+        )
     return UnknownReasonRecord(
+        count_kind=_enum_value(count_kind) or UnknownCountKind.REASON_RECORD.value,
         reason_id=definition.reason_id,
         reason_class=_enum_value(reason_class) or definition.reason_class,
         decision_effect=_enum_value(decision_effect) or definition.decision_effect,
@@ -845,8 +957,14 @@ def make_unknown_reason(
         stage=stage,
         pair_or_case=pair_or_case,
         evidence_refs=coerced_evidence_refs,
-        recovery_proof_kind=normalized_recovery_proof_kind or definition.recovery_proof_kind,
+        recovery_proof_kind=normalized_proof_kind,
         recovery_proof_obligations=coerced_recovery_obligations,
+        proof_stage=resolved_proof_stage,
+        evidence_kind=resolved_evidence_kind,
+        object_target_key=coerced_object_target_key,
+        proof_obligation_id=coerced_proof_obligation_id,
+        recovery_action=recovery_action,
+        action_status=normalized_action_status,
         target_regression=target_regression if target_regression is not None else definition.target_regression,
         detail=detail,
     )
@@ -870,7 +988,10 @@ def coerce_unknown_recovery_action(value: Any) -> UnknownRecoveryAction:
     if isinstance(value, Mapping):
         return UnknownRecoveryAction.from_dict(value)
     return UnknownRecoveryAction(
+        count_kind=UnknownCountKind.PROOF_ACTION.value,
         reason_id=UnknownReasonId.UNKNOWN.value,
+        decision_effect=UnknownDecisionEffect.DIAGNOSTIC_ONLY.value,
+        reason_scope=UnknownReasonScope.GLOBAL.value,
         proof_kind=UnknownRecoveryProofKind.NONE.value,
         proof_stage="unspecified",
         status=UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,
@@ -902,31 +1023,74 @@ def build_unknown_recovery_actions(
                 continue
             actions.append(
                 UnknownRecoveryAction(
+                    count_kind=UnknownCountKind.PROOF_ACTION.value,
                     reason_id=record.reason_id,
+                    decision_effect=record.decision_effect,
+                    reason_scope=record.reason_scope,
                     proof_kind=record.recovery_proof_kind,
-                    proof_stage="unspecified",
-                    status=UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,
+                    proof_stage=record.proof_stage or "unspecified",
+                    status=record.action_status or UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,
                     aggregation_unit=record.aggregation_unit,
                     stage=record.stage,
                     pair_or_case=record.pair_or_case,
                     evidence_refs=record.evidence_refs,
+                    evidence_kind=record.evidence_kind,
+                    object_target_key=record.object_target_key,
+                    proof_obligation_id=record.proof_obligation_id,
+                    recovery_action=record.recovery_action,
                     target_regression=record.target_regression,
                     detail=record.detail,
                 )
             )
             continue
         for obligation in obligations:
+            proof_stage = record.proof_stage or obligation.proof_stage
+            if (
+                record.proof_stage is not None
+                or record.evidence_kind is not None
+                or record.object_target_key is not None
+                or record.recovery_action is not None
+                or record.action_status is not None
+            ):
+                proof_kind = record.recovery_proof_kind
+                if proof_kind == UnknownRecoveryProofKind.NONE.value:
+                    proof_kind = obligation.proof_kind
+            else:
+                proof_kind = obligation.proof_kind
+            evidence_kind = record.evidence_kind
+            if evidence_kind is None and obligation.required_evidence:
+                evidence_kind = obligation.required_evidence[0]
+            proof_obligation_id = record.proof_obligation_id
+            if (
+                proof_obligation_id is None
+                and evidence_kind is not None
+                and record.object_target_key is not None
+            ):
+                proof_obligation_id = build_proof_obligation_id(
+                    record.reason_id,
+                    proof_stage,
+                    proof_kind,
+                    evidence_kind,
+                    record.object_target_key,
+                )
             actions.append(
                 UnknownRecoveryAction(
+                    count_kind=UnknownCountKind.PROOF_ACTION.value,
                     reason_id=record.reason_id,
-                    proof_kind=obligation.proof_kind,
-                    proof_stage=obligation.proof_stage,
-                    status=UnknownRecoveryActionStatus.PLANNED.value,
+                    decision_effect=record.decision_effect,
+                    reason_scope=record.reason_scope,
+                    proof_kind=proof_kind,
+                    proof_stage=proof_stage,
+                    status=record.action_status or UnknownRecoveryActionStatus.PLANNED.value,
                     aggregation_unit=record.aggregation_unit,
                     stage=record.stage,
                     pair_or_case=record.pair_or_case,
                     required_evidence=obligation.required_evidence,
                     evidence_refs=record.evidence_refs,
+                    evidence_kind=evidence_kind,
+                    object_target_key=record.object_target_key,
+                    proof_obligation_id=proof_obligation_id,
+                    recovery_action=record.recovery_action,
                     target_regression=record.target_regression,
                     detail=obligation.description or record.detail,
                 )

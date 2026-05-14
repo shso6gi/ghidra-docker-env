@@ -4,8 +4,11 @@ import subprocess
 import sys
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
+    UnknownCountKind,
     UnknownDecisionEffect,
     UnknownRecoveryActionStatus,
+    UnknownRecoveryProofObligation,
     UnknownRecoveryProofKind,
     UnknownReasonClass,
     UnknownReasonId,
@@ -111,6 +114,37 @@ def test_validation_unknown_summary_tracks_plan16_dimensions_for_target_cases():
     }
     assert summary.operational_unknown_by_class == {
         UnknownReasonClass.OPERATIONAL_GAP.value: 1,
+    }
+    assert summary.final_result_counts == {
+        "UNKNOWN": 2,
+        "EQUIVALENT": 1,
+    }
+    assert summary.reason_record_multiset[
+        (
+            UnknownCountKind.REASON_RECORD.value,
+            UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+            UnknownReasonScope.QUERY.value,
+            UnknownRecoveryProofKind.ABI_RELATION_HIGH_BIT_PROOF.value,
+            UNKNOWN_TUPLE_MISSING,
+            UNKNOWN_TUPLE_MISSING,
+        )
+    ] == 1
+
+
+def test_validation_summary_normalizes_bool_debug_trace_final_result_counts():
+    summary = summarize_validation_unknowns(
+        [
+            _payload("eq", debug_trace={"final_result": True}),
+            _payload("not_eq", debug_trace={"final_result": False}),
+            _payload("unknown", debug_trace={"final_result": None}),
+        ],
+    )
+
+    assert summary.final_result_counts == {
+        "EQUIVALENT": 1,
+        "NOT_EQ": 1,
+        "UNKNOWN": 1,
     }
 
 
@@ -313,6 +347,73 @@ def test_validation_summary_extracts_typed_result_json_from_log_text():
     assert len(payloads) == 1
     assert summary.unknown_by_reason == {
         UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value: 1,
+    }
+
+
+def test_validation_summary_separates_reason_units_from_proof_actions_by_count_kind():
+    record = make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=(
+                    "call_effect_summary",
+                    "runtime_ref",
+                    "callsite_storage",
+                ),
+            ),
+        ),
+        evidence_kind="runtime_ref",
+        object_target_key=("deferred_call_site", 7),
+        recovery_action="call_effect_summary_proof_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+
+    summary = summarize_validation_unknowns(
+        [
+            _payload("fc_apply_indirect", reasons=[record]),
+            _payload("fc_no_call", is_equivalent=True),
+        ],
+    )
+
+    assert summary.final_result_counts == {
+        "UNKNOWN": 1,
+        "EQUIVALENT": 1,
+    }
+    assert summary.validation_unknown_unit_multiset == {
+        (
+            UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+            UnknownReasonScope.FUNCTION.value,
+            UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+            "object_evidence_collected",
+            UnknownRecoveryActionStatus.PENDING_PROOF.value,
+        ): 1,
+    }
+    assert summary.reason_record_multiset == {
+        (
+            UnknownCountKind.REASON_RECORD.value,
+            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+            UnknownReasonScope.FUNCTION.value,
+            UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+            "object_evidence_collected",
+            UnknownRecoveryActionStatus.PENDING_PROOF.value,
+        ): 1,
+    }
+    assert summary.proof_action_multiset == {
+        (
+            UnknownCountKind.PROOF_ACTION.value,
+            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+            UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+            UnknownReasonScope.FUNCTION.value,
+            UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+            "object_evidence_collected",
+            UnknownRecoveryActionStatus.PENDING_PROOF.value,
+        ): 1,
     }
 
 

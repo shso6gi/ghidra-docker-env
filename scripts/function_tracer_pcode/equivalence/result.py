@@ -12,6 +12,7 @@ from ..transform.rewrite.rules import RewriteResult
 from .debug_trace import DebugTrace  # 新規追加
 from .unknown_reason import (
     UnknownRecoveryAction,
+    UnknownRecoveryActionStatus,
     UnknownReasonRecord,
     build_unknown_recovery_actions,
     coerce_unknown_recovery_actions,
@@ -95,6 +96,7 @@ class EquivalenceResult:
     sat_pair_info: Optional[Dict[str, Any]] = None
     stage_path: List[str] = field(default_factory=list)
     debug_trace: Optional[DebugTrace] = None
+    decision_gated_by_pending_proof: bool = False
     
     # ★ 新規追加: 正規化ルール適用履歴
     normalization_rules: List[Any] = field(default_factory=list)  # List[NormalizationRuleApplication]
@@ -109,6 +111,17 @@ class EquivalenceResult:
             self.unknown_recovery_actions = list(
                 build_unknown_recovery_actions(self.unknown_reasons)
             )
+        if self.is_equivalent is True and self._has_pending_proof_gate():
+            self.is_equivalent = None
+            self.decision_gated_by_pending_proof = True
+
+    def _has_pending_proof_gate(self) -> bool:
+        for action in self.unknown_recovery_actions:
+            if action.status != UnknownRecoveryActionStatus.PENDING_PROOF.value:
+                continue
+            if action.proof_obligation_id is not None or action.object_target_key is not None:
+                return True
+        return False
     
     def is_timeout(self) -> bool:
         """タイムアウトで結果が不明かどうかを判定"""
@@ -170,6 +183,7 @@ class EquivalenceResult:
                 action.to_dict() for action in self.unknown_recovery_actions
             ],
             "unknown_recovery_backlog": summarize_unknown_recovery_backlog(self.unknown_reasons),
+            "decision_gated_by_pending_proof": self.decision_gated_by_pending_proof,
             "sat_pair_info": self.sat_pair_info,
             "stage_path": self.stage_path,
         }
@@ -287,6 +301,9 @@ class EquivalenceResult:
                     lines.append(
                         f"  {reason_id}: count={entry.get('count', 0)}, proofs={proof_kinds}"
                     )
+        if self.decision_gated_by_pending_proof:
+            lines.append("")
+            lines.append("Decision gated: pending proof obligation blocks EQUIVALENT recovery")
                 
         lines.append("")
         

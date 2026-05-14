@@ -7,6 +7,8 @@ side instead of round-tripping through rendered strings.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import fields, is_dataclass
 from typing import Any, Optional, Tuple
 
@@ -477,3 +479,326 @@ def expression_key_or_identity(
     if expr is None:
         return ("uncomparable_expression", "none")
     return ("uncomparable_expression", type(expr).__name__, id(expr))
+
+
+def expression_provenance_key(
+    expr: Optional[Expression],
+    *,
+    safe_budget: int = 256,
+    max_digest_nodes: int = 8192,
+    include_memory_read_order: bool = True,
+    include_semantic_runtime_refs: bool = True,
+) -> StructuralKey:
+    """Stable key for object-target provenance.
+
+    Unlike expression_key_or_identity(), this never falls back to process-local
+    object ids. If the semantic structural key is too deep or otherwise
+    uncomparable, use a stable digest over a full object-derived expression
+    payload and include source atoms for diagnostics.
+    """
+
+    if expr is None:
+        return ("none",)
+
+    storage_key = _expression_storage_key(expr)
+    if storage_key is not None:
+        return ("storage", storage_key)
+
+    runtime_key = _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
+    if runtime_key is not None:
+        return ("runtime_ref", runtime_key)
+
+    safe = expression_key_safe(
+        expr,
+        budget=safe_budget,
+        include_memory_read_order=include_memory_read_order,
+        include_semantic_runtime_refs=include_semantic_runtime_refs,
+    )
+    if safe is not None:
+        return ("expression", safe)
+
+    payload, source_atoms, complete = _expression_provenance_payload(
+        expr,
+        max_nodes=max_digest_nodes,
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return (
+        "expression_digest",
+        hashlib.sha256(encoded).hexdigest(),
+        ("complete", bool(complete)),
+        ("root", _expression_descriptor(expr)),
+        ("source_atoms", tuple(sorted(source_atoms, key=repr))),
+    )
+
+
+def _expression_provenance_payload(
+    expr: Expression,
+    *,
+    max_nodes: int,
+) -> Tuple[StructuralKey, Tuple[StructuralKey, ...], bool]:
+    count = 0
+    complete = True
+    active: set[int] = set()
+    source_atoms: set[StructuralKey] = set()
+    digest_by_id: dict[int, str] = {}
+    stack: list[Tuple[Optional[Expression], bool]] = [(expr, False)]
+
+    none_digest = _digest_structural_payload(("none",))
+
+    while stack:
+        node, exiting = stack.pop()
+        if node is None:
+            continue
+
+        node_id = id(node)
+        if exiting:
+            active.discard(node_id)
+            operand_digests = []
+            for operand in getattr(node, "operands", ()) or ():
+                operand_digests.append(
+                    none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
+                )
+            payload = (
+                "expr",
+                _expression_descriptor(node),
+                ("value", _stable_value_key(getattr(node, "value", None))),
+                ("data_type", getattr(node, "data_type", None)),
+                ("storage", _expression_storage_key(node)),
+                (
+                    "runtime_ref",
+                    _semantic_runtime_ref_key(getattr(node, "runtime_ref", None)),
+                ),
+                ("read_order", getattr(node, "read_order_key", None)),
+                ("opcode", getattr(node, "opcode", None)),
+                ("operands", tuple(operand_digests)),
+            )
+            digest_by_id[node_id] = _digest_structural_payload(payload)
+            continue
+
+        if node_id in digest_by_id:
+            continue
+        if count >= max_nodes:
+            complete = False
+            tail_digest, tail_source_atoms, tail_complete, tail_count = (
+                _expression_subtree_digest_and_source_atoms(node)
+            )
+            source_atoms.update(tail_source_atoms)
+            digest_by_id[node_id] = _digest_structural_payload(
+                (
+                    "truncated",
+                    _expression_descriptor(node),
+                    ("tail_digest", tail_digest),
+                    ("tail_complete", bool(tail_complete)),
+                    ("tail_nodes", int(tail_count)),
+                )
+            )
+            continue
+
+        if node_id in active:
+            complete = False
+            digest_by_id[node_id] = _digest_structural_payload(
+                ("cycle", _expression_descriptor(node))
+            )
+            continue
+
+        count += 1
+        active.add(node_id)
+        source_atom = _expression_source_atom(node)
+        if source_atom is not None:
+            source_atoms.add(source_atom)
+
+        stack.append((node, True))
+        for operand in reversed(getattr(node, "operands", ()) or ()):
+            if operand is not None:
+                stack.append((operand, False))
+
+    root_digest = digest_by_id.get(id(expr), none_digest)
+    payload = (
+        "digest_payload",
+        root_digest,
+        ("nodes", int(count)),
+    )
+    return payload, tuple(source_atoms), bool(complete)
+
+
+def _expression_subtree_digest_and_source_atoms(
+    expr: Expression,
+) -> Tuple[str, set[StructuralKey], bool, int]:
+    count = 0
+    complete = True
+    active: set[int] = set()
+    source_atoms: set[StructuralKey] = set()
+    digest_by_id: dict[int, str] = {}
+    stack: list[Tuple[Optional[Expression], bool]] = [(expr, False)]
+    none_digest = _digest_structural_payload(("none",))
+
+    while stack:
+        node, exiting = stack.pop()
+        if node is None:
+            continue
+
+        node_id = id(node)
+        if exiting:
+            active.discard(node_id)
+            operand_digests = []
+            for operand in getattr(node, "operands", ()) or ():
+                operand_digests.append(
+                    none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
+                )
+            payload = (
+                "expr",
+                _expression_descriptor(node),
+                ("value", _stable_value_key(getattr(node, "value", None))),
+                ("data_type", getattr(node, "data_type", None)),
+                ("storage", _expression_storage_key(node)),
+                (
+                    "runtime_ref",
+                    _semantic_runtime_ref_key(getattr(node, "runtime_ref", None)),
+                ),
+                ("read_order", getattr(node, "read_order_key", None)),
+                ("opcode", getattr(node, "opcode", None)),
+                ("operands", tuple(operand_digests)),
+            )
+            digest_by_id[node_id] = _digest_structural_payload(payload)
+            continue
+
+        if node_id in digest_by_id and node_id not in active:
+            continue
+        if node_id in active:
+            complete = False
+            digest_by_id.setdefault(
+                node_id,
+                _digest_structural_payload(("cycle", _expression_descriptor(node))),
+            )
+            continue
+
+        count += 1
+        active.add(node_id)
+        source_atom = _expression_source_atom(node)
+        if source_atom is not None:
+            source_atoms.add(source_atom)
+
+        stack.append((node, True))
+        for operand in reversed(getattr(node, "operands", ()) or ()):
+            if operand is not None:
+                stack.append((operand, False))
+
+    return digest_by_id.get(id(expr), none_digest), source_atoms, bool(complete), int(count)
+
+
+def _digest_structural_payload(payload: StructuralKey) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _expression_descriptor(expr: Expression) -> StructuralKey:
+    expr_type = getattr(expr, "expr_type", None)
+    expr_type_name = getattr(expr_type, "name", None) or (
+        str(expr_type) if expr_type is not None else None
+    )
+    return (
+        expr_type_name,
+        getattr(expr, "operator", None),
+        getattr(expr, "name", None),
+        int(getattr(expr, "size", 0) or 0),
+    )
+
+
+def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
+    storage_key = _expression_storage_key(expr)
+    if storage_key is not None:
+        return ("storage", storage_key)
+    runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+    if runtime_key is not None:
+        return ("runtime_ref", runtime_key)
+    expr_type = getattr(expr, "expr_type", None)
+    expr_type_name = getattr(expr_type, "name", None)
+    if expr_type in {
+        ExpressionType.PARAMETER,
+        ExpressionType.VARIABLE,
+        ExpressionType.UNKNOWN,
+        ExpressionType.CONSTANT,
+        ExpressionType.LITERAL,
+    }:
+        return (
+            "expr_source",
+            expr_type_name,
+            getattr(expr, "name", None),
+            _stable_value_key(getattr(expr, "value", None)),
+            int(getattr(expr, "size", 0) or 0),
+        )
+    return None
+
+
+def _expression_storage_key(expr: Expression) -> Optional[StructuralKey]:
+    storage_info = getattr(expr, "storage_info", None)
+    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
+    if callable(storage_key_fn):
+        try:
+            storage_key = storage_key_fn()
+            if storage_key is not None:
+                return _stable_value_key(storage_key)
+        except Exception:
+            return None
+    return None
+
+
+def _raw_stable_key_or_none(value: Any) -> Optional[StructuralKey]:
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            key = stable_key()
+            if key is not None:
+                return key
+        except Exception:
+            pass
+    return None
+
+
+def _stable_value_key(value: Any) -> StructuralKey:
+    if value is None:
+        return ("none",)
+    if isinstance(value, bool):
+        return ("bool", int(value))
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", repr(value))
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, Expression):
+        return ("expression_ref", _expression_descriptor(value))
+    if isinstance(value, Condition):
+        return (
+            "condition",
+            _stable_value_key(value.expression),
+            ("negated", bool(value.negated)),
+        )
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_stable_value_key(item) for item in value))
+    if isinstance(value, list):
+        return ("list", tuple(_stable_value_key(item) for item in value))
+    if isinstance(value, dict):
+        items = [
+            (_stable_value_key(key), _stable_value_key(item))
+            for key, item in value.items()
+        ]
+        items.sort()
+        return ("dict", tuple(items))
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            return ("stable", _stable_value_key(stable_key()))
+        except Exception:
+            pass
+    return ("opaque", type(value).__module__, type(value).__qualname__)

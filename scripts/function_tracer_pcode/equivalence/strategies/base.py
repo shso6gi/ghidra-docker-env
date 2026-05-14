@@ -2,15 +2,23 @@
 """戦略基底クラス"""
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List, Sequence
+from typing import Optional, Dict, Any, List, Sequence, Tuple
 from dataclasses import dataclass, field
 
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
-from ...model import Condition, Expression, FunctionReturnAnalysis
+from ...model import Condition, Expression, FunctionReturnAnalysis, expression_provenance_key
 from ...model import ExpressionType
 from ...model.render_smt import expression_contains_unsupported_smt_ops
 from ...smt import ParallelResult
-from ..unknown_reason import UnknownReasonRecord, coerce_unknown_reason_records
+from ..unknown_reason import (
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
+    UnknownReasonId,
+    UnknownReasonRecord,
+    coerce_unknown_reason_records,
+    make_unknown_reason,
+)
 
 
 @dataclass
@@ -131,6 +139,281 @@ class CheckStrategy(ABC):
             if detail:
                 self._debug_print(detail)
         return reasons
+
+    def _unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
+        reason_kind = self._blocking_reason_kind(reason)
+        if reason_kind == "return_coverage_gap":
+            return UnknownReasonId.RETURN_COVERAGE_GAP
+        if reason_kind == "return_coverage_inconclusive":
+            return UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+        if reason_kind in {"recoverable_partial", "argument_recovery_recoverable_partial"}:
+            return UnknownReasonId.RECOVERABLE_PARTIAL
+        return UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY
+
+    def _make_blocking_unsafety_unknown_reason(
+        self,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        stage: str,
+    ):
+        typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)
+        if typed_reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY:
+            return make_unknown_reason(
+                typed_reason_id,
+                stage=stage,
+                evidence_refs=(blocking_reason,),
+                detail=blocking_reason,
+            )
+
+        object_target_key = self._call_effect_blocking_object_target_key(
+            blocking_reason,
+            analysis1,
+            analysis2,
+        )
+        if object_target_key is None:
+            return make_unknown_reason(
+                typed_reason_id,
+                stage=stage,
+                evidence_refs=(blocking_reason,),
+                detail=blocking_reason,
+            )
+
+        return make_unknown_reason(
+            typed_reason_id,
+            stage=stage,
+            evidence_refs=(blocking_reason,),
+            detail=blocking_reason,
+            recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+            recovery_proof_obligations=(
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                    "object_evidence_collected",
+                    required_evidence=(
+                        "call_effect_summary",
+                        "runtime_ref",
+                        "callsite_storage",
+                    ),
+                    description="Collect object-derived call/effect evidence before using UNSAT as equivalence proof.",
+                ),
+            ),
+            proof_stage="object_evidence_collected",
+            evidence_kind="call_effect_summary",
+            object_target_key=object_target_key,
+            recovery_action="call_effect_summary_proof_required",
+            action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+
+    def _call_effect_blocking_object_target_key(
+        self,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Tuple[Any, ...]]:
+        label, reason_text = self._split_blocking_reason(blocking_reason)
+        reason_kind = self._blocking_reason_kind(blocking_reason)
+        if reason_kind not in {
+            "unsupported_call_effect_summary",
+            "effect_summary_path_coverage_incomplete",
+            "effect_call_argument_evidence_incomplete",
+            "bounded_call_refinement_argument_alignment_failed",
+            "bounded_call_refinement_deferred_target_unresolved",
+            "bounded_call_refinement_return_summary_unusable",
+        }:
+            return None
+        analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+        if analysis is None:
+            return None
+        deferred_call_keys = tuple(
+            self._deferred_call_object_target_key(info, analysis=analysis, side_label=label)
+            for info in getattr(analysis, "deferred_calls", {}).values()
+            if self._deferred_call_is_blocking(info)
+        )
+        effect_summary = getattr(analysis, "effect_summary", None)
+        evidence_keys = ()
+        unsupported_call_site_keys = ()
+        if effect_summary is not None:
+            evidence_keys = tuple(
+                self._call_argument_evidence_object_key(
+                    evidence,
+                    analysis=analysis,
+                    side_label=label,
+                )
+                for evidence in getattr(effect_summary, "call_argument_evidence", {}).values()
+                if evidence is not None
+            )
+            unsupported_call_site_keys = tuple(
+                self._unsupported_call_effect_object_key(
+                    site,
+                    analysis=analysis,
+                    side_label=label,
+                )
+                for site in getattr(effect_summary, "unsupported_call_sites", ()) or ()
+                if site is not None
+            )
+        selected_deferred_keys: Tuple[Any, ...] = ()
+        selected_evidence_keys: Tuple[Any, ...] = ()
+        selected_unsupported_keys: Tuple[Any, ...] = ()
+
+        if reason_kind == "unsupported_call_effect_summary":
+            selected_unsupported_keys = unsupported_call_site_keys
+            if len(selected_unsupported_keys) == 1:
+                return selected_unsupported_keys[0]
+        elif reason_kind == "effect_call_argument_evidence_incomplete":
+            selected_evidence_keys = evidence_keys
+            if not selected_evidence_keys:
+                selected_deferred_keys = deferred_call_keys
+                if len(selected_deferred_keys) == 1:
+                    return selected_deferred_keys[0]
+        elif reason_kind in {
+            "bounded_call_refinement_argument_alignment_failed",
+            "bounded_call_refinement_deferred_target_unresolved",
+            "bounded_call_refinement_return_summary_unusable",
+        }:
+            selected_deferred_keys = deferred_call_keys
+            if len(selected_deferred_keys) == 1:
+                return selected_deferred_keys[0]
+        elif reason_kind == "effect_summary_path_coverage_incomplete":
+            selected_evidence_keys = evidence_keys
+            selected_unsupported_keys = unsupported_call_site_keys
+
+        return (
+            "call_effect_blocker",
+            label,
+            self._analysis_entry_key(analysis),
+            reason_kind,
+            reason_text,
+            selected_deferred_keys,
+            selected_evidence_keys,
+            selected_unsupported_keys,
+        )
+
+    @staticmethod
+    def _split_blocking_reason(blocking_reason: str) -> Tuple[str, str]:
+        text = str(blocking_reason or "")
+        if ":" not in text:
+            return "", text
+        label, reason = text.split(":", 1)
+        return label, reason
+
+    @classmethod
+    def _blocking_reason_kind(cls, blocking_reason: Optional[str]) -> str:
+        _label, reason = cls._split_blocking_reason(str(blocking_reason or ""))
+        return reason.split(":", 1)[0]
+
+    @staticmethod
+    def _deferred_call_is_blocking(info: Any) -> bool:
+        status = getattr(info, "call_argument_recovery_status", None)
+        return status != "complete"
+
+    def _deferred_call_object_target_key(
+        self,
+        info: Any,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        side_label: Optional[str] = None,
+    ) -> Tuple[Any, ...]:
+        deferred_ref = getattr(info, "deferred_call_ref", None)
+        target_ref = getattr(info, "target_ref", None)
+        pcode_op_ref = getattr(deferred_ref, "pcode_op_ref", None)
+        target_expr_key = self._typed_target_expression_key(
+            getattr(info, "call_target_expr", None)
+        )
+        return (
+            "deferred_call",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._stable_key_or_none(deferred_ref),
+            self._stable_key_or_none(pcode_op_ref),
+            self._stable_key_or_none(target_ref),
+            target_expr_key,
+            tuple(
+                (
+                    "argument",
+                    index,
+                    self._expression_runtime_object_key(argument),
+                )
+                for index, argument in enumerate(getattr(info, "arguments", ()) or ())
+            ),
+            getattr(info, "call_argument_recovery_status", None),
+        )
+
+    def _call_argument_evidence_object_key(
+        self,
+        evidence: Any,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        side_label: Optional[str] = None,
+    ) -> Tuple[Any, ...]:
+        return (
+            "call_argument_evidence",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._stable_key_or_none(evidence),
+            self._stable_key_or_none(getattr(evidence, "target_ref", None)),
+            tuple(
+                (
+                    "argument",
+                    index,
+                    self._expression_runtime_object_key(argument),
+                )
+                for index, argument in enumerate(getattr(evidence, "arguments", ()) or ())
+            ),
+            bool(getattr(evidence, "coverage_complete", False)),
+            getattr(evidence, "recovery_status", None),
+        )
+
+    def _unsupported_call_effect_object_key(
+        self,
+        site: Any,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        side_label: Optional[str] = None,
+    ) -> Tuple[Any, ...]:
+        return (
+            "unsupported_call_effect",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._stable_key_or_none(getattr(site, "pcode_op_ref", None)),
+            self._stable_key_or_none(getattr(site, "target_ref", None)),
+            self._typed_target_expression_key(getattr(site, "target_expr", None)),
+            int(getattr(site, "order_key", 0) or 0),
+            getattr(site, "reason", None),
+        )
+
+    @classmethod
+    def _typed_target_expression_key(cls, expr: Any) -> Optional[Tuple[Any, ...]]:
+        if expr is None:
+            return None
+        return ("typed_target_expression", cls._expression_runtime_object_key(expr))
+
+    @staticmethod
+    def _analysis_entry_key(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        function_ref = getattr(analysis, "function_ref", None)
+        stable_key = getattr(function_ref, "stable_key", None)
+        if callable(stable_key):
+            try:
+                key = stable_key()
+                if key is not None:
+                    return ("function_ref", key)
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                pass
+        return ("entry_point", getattr(analysis, "entry_point", None))
+
+    @staticmethod
+    def _stable_key_or_none(value: Any):
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            try:
+                return stable_key()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                return None
+        return None
+
+    @classmethod
+    def _expression_runtime_object_key(cls, expr: Any) -> Tuple[Any, ...]:
+        return expression_provenance_key(expr)
 
     def _check_return_case_coverage_gap(
         self,

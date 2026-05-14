@@ -6,7 +6,9 @@ from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownCountKind,
     UnknownRecoveryActionStatus,
+    UnknownRecoveryProofObligation,
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     UnknownReasonId,
@@ -61,6 +63,7 @@ def test_unknown_reason_record_has_plan13_schema_fields():
     }.issubset(payload)
     assert payload["reason_id"] == UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value
     assert payload["recovery_proof_kind"] == UnknownRecoveryProofKind.ABI_RELATION_HIGH_BIT_PROOF.value
+    assert payload["count_kind"] == UnknownCountKind.REASON_RECORD.value
 
 
 def test_unknown_reason_registry_normalizes_scoped_reason_text():
@@ -190,6 +193,61 @@ def test_unknown_reason_record_serializes_recovery_proof_obligations():
     ]
 
 
+def test_equivalence_blocking_unsafety_can_emit_pending_call_effect_proof_obligation():
+    record = make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        stage="S_PAIRWISE",
+        evidence_refs=("function1:effect_call_argument_evidence_incomplete",),
+        recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=(
+                    "call_effect_summary",
+                    "runtime_ref",
+                    "callsite_storage",
+                ),
+            ),
+        ),
+        evidence_kind="call_effect_summary",
+        object_target_key=("deferred_call_site", 1, 0x401000, ("pcode_op", 0x401020, 7, 0, None, "CALL")),
+        recovery_action="call_effect_summary_proof_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+
+    payload = record.to_dict()
+    actions = build_unknown_recovery_actions([record])
+
+    assert payload["count_kind"] == UnknownCountKind.REASON_RECORD.value
+    assert payload["proof_stage"] == "object_evidence_collected"
+    assert payload["evidence_kind"] == "call_effect_summary"
+    assert payload["object_target_key"] == (
+        "deferred_call_site",
+        1,
+        0x401000,
+        ("pcode_op", 0x401020, 7, 0, None, "CALL"),
+    )
+    assert payload["recovery_action"] == "call_effect_summary_proof_required"
+    assert payload["action_status"] == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert actions[0].count_kind == UnknownCountKind.PROOF_ACTION.value
+    assert actions[0].status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert actions[0].proof_stage == "object_evidence_collected"
+    assert actions[0].evidence_kind == "call_effect_summary"
+    assert actions[0].proof_obligation_id == (
+        "equivalence_blocking_unsafety",
+        "object_evidence_collected",
+        "call_effect_summary_proof",
+        "call_effect_summary",
+        (
+            "deferred_call_site",
+            1,
+            0x401000,
+            ("pcode_op", 0x401020, 7, 0, None, "CALL"),
+        ),
+    )
+
+
 def test_unknown_recovery_backlog_groups_required_proofs_by_reason():
     summary = summarize_unknown_recovery_backlog(
         [
@@ -281,6 +339,46 @@ def test_equivalence_result_serializes_unknown_recovery_backlog():
     assert backlog[UnknownReasonId.READONLY_IDENTITY_MISSING.value]["proof_obligation_counts"] == {
         UnknownRecoveryProofKind.STORAGE_BACKED_IDENTITY_PROPAGATION.value: 1,
     }
+
+
+def test_equivalence_result_gates_equivalent_decision_when_pending_proof_exists():
+    record = make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=("call_effect_summary",),
+            ),
+        ),
+        proof_stage="object_evidence_collected",
+        evidence_kind="call_effect_summary",
+        object_target_key=("call_effect_blocker", "function1", ("function", 1, 0x1000)),
+        recovery_action="call_effect_summary_proof_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+    result = EquivalenceResult(
+        is_equivalent=True,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="mock",
+                    status=SolverStatus.UNSAT,
+                    elapsed_time=0.01,
+                )
+            ]
+        ),
+        unknown_reasons=[record],
+    )
+
+    assert result.is_equivalent is None
+    assert result.decision_gated_by_pending_proof is True
+    assert result.to_dict()["decision_gated_by_pending_proof"] is True
 
 
 class _FakeCase:
@@ -527,6 +625,17 @@ def test_checker_check_builds_reason_selected_recovery_actions():
         "extension_semantics",
         "high_bits_irrelevant_or_equal",
     ]
+
+
+def test_checker_accepts_pairwise_unknown_dir_from_cli_contract():
+    checker = EquivalenceChecker(
+        pairwise_save_unknown=True,
+        pairwise_unknown_dir="/tmp/pairwise-unknown",
+    )
+
+    assert checker.pairwise_strategy.save_unknown_queries is True
+    assert checker.pairwise_strategy.unknown_query_dir == "/tmp/pairwise-unknown"
+    assert checker.loop_template_strategy.unknown_query_dir == "/tmp/pairwise-unknown"
 
 
 def test_unknown_by_reason_counts_primary_reason_once_per_pair():

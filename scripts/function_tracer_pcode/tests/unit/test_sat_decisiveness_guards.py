@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     CallArgumentEvidence,
     EffectSummary,
     StoreEffect,
+    UnsupportedCallEffectRef,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilderResult
@@ -17,6 +18,11 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import
     QueryResult,
     ReturnCase,
 )
+from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
+    UnknownReasonId,
+)
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
     Condition,
@@ -26,6 +32,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     PcodeOpRef,
     ReturnInfo,
+    expression_provenance_key,
 )
 from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
@@ -51,6 +58,26 @@ def _eq(lhs: Expression, rhs: Expression) -> Condition:
 
 def _ne(lhs: Expression, rhs: Expression) -> Condition:
     return Condition(Expression.binary_op("INT_NOTEQUAL", lhs, rhs), False)
+
+
+def _deep_zext_target(name: str, index: int, depth: int = 300) -> Expression:
+    expr = Expression.parameter(name, index, size=8)
+    for _ in range(depth):
+        expr = Expression.unary_op("INT_ZEXT", expr)
+    return expr
+
+
+def _deep_target_with_tail_op(
+    name: str,
+    index: int,
+    tail_operator: str,
+    depth: int = 8200,
+) -> Expression:
+    expr = Expression.parameter(name, index, size=8)
+    expr = Expression.unary_op(tail_operator, expr)
+    for _ in range(max(0, depth - 1)):
+        expr = Expression.unary_op("INT_ZEXT", expr)
+    return expr
 
 
 def _build_symbolic_post_state_analysis(name: str) -> FunctionReturnAnalysis:
@@ -1165,6 +1192,718 @@ def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_incon
     assert result.is_equivalent is None
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+
+
+def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = {
+        "header_lines": [
+            "(declare-const x_1 (_ BitVec 32))",
+            "(declare-const x_2 (_ BitVec 32))",
+            "(assert (= x_1 x_2))",
+        ],
+        "params1": [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)],
+        "params2": [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)],
+        "extra_vars1": [],
+        "extra_vars2": [],
+        "constrained_fragments": [],
+        "return_size1": 32,
+        "return_size2": 32,
+    }
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+
+    x = Expression.parameter("x", 0, size=4)
+    pcode_ref = PcodeOpRef(address_offset=0x3000, seq_time=1, seq_order=0, mnemonic="CALL")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+        arguments=[Expression.parameter("param_1", 0, size=4)],
+        deferred_call_ref=DeferredCallRef(
+            caller_program_id=1,
+            caller_entry_offset=0x400000,
+            pcode_op_ref=pcode_ref,
+            target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+            sequence=0,
+        ),
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+        call_argument_recovery_reason="argument_recovery_inconclusive",
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=x, conditions=[])],
+        return_type="int",
+    )
+    analysis1.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2", value=x, conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=x,
+        return_info=analysis1.returns[0],
+        return_type="int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=x,
+        return_info=analysis2.returns[0],
+        return_type="int",
+        parameters=analysis2.parameters,
+    )
+
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == "func1" else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert len(result.unknown_reasons) == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
+    assert reason.recovery_proof_kind == UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
+    assert reason.proof_stage == "object_evidence_collected"
+    assert reason.evidence_kind == "call_effect_summary"
+    assert reason.recovery_action == "call_effect_summary_proof_required"
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.object_target_key[0] == "deferred_call"
+    assert pcode_ref.stable_key() in reason.object_target_key
+
+
+def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_proof():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=pcode_ref,
+        target_ref=None,
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+
+    assert reason.recovery_proof_kind == UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.object_target_key[0] == "unsupported_call_effect"
+    assert pcode_ref.stable_key() in reason.object_target_key
+
+
+def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=pcode_ref,
+        target_ref=None,
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    left = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+    right = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func", program_id=2, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+
+    left_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        left,
+        right,
+        stage="S_PAIRWISE",
+    )
+    right_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function2:unsupported_call_effect_summary",
+        left,
+        right,
+        stage="S_PAIRWISE",
+    )
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+    assert ("function_ref", ("function", 1, 0x1000)) in left_reason.object_target_key
+    assert ("function_ref", ("function", 2, 0x1000)) in right_reason.object_target_key
+
+
+def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_call():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    unsupported_pcode = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    deferred_pcode = PcodeOpRef(address_offset=0x4000, seq_time=7, seq_order=2, mnemonic="CALL")
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=unsupported_pcode,
+        target_ref=None,
+        reason="target_identity_unavailable",
+        order_key=9,
+    )
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+        arguments=[Expression.parameter("x", 0, size=4)],
+        deferred_call_ref=DeferredCallRef(
+            caller_program_id=1,
+            caller_entry_offset=0x1000,
+            pcode_op_ref=deferred_pcode,
+            target_ref=CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000),
+            sequence=0,
+        ),
+        call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+    analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    assert reason.object_target_key[0] == "unsupported_call_effect"
+    assert unsupported_pcode.stable_key() in reason.object_target_key
+    assert deferred_pcode.stable_key() not in reason.object_target_key
+
+
+def test_deferred_call_object_key_distinguishes_unknown_target_expression_provenance():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    deferred_ref = DeferredCallRef(
+        caller_program_id=1,
+        caller_entry_offset=0x1000,
+        pcode_op_ref=pcode_ref,
+        target_ref=CallTargetRef.unknown(),
+        sequence=0,
+    )
+
+    def _analysis_with_target_expr(target_expr: Expression) -> FunctionReturnAnalysis:
+        deferred = DeferredCallInfo(
+            placeholder_name="indirect",
+            target_ref=CallTargetRef.unknown(),
+            arguments=[Expression.parameter("x", 0, size=4)],
+            call_target_expr=target_expr,
+            deferred_call_ref=deferred_ref,
+            call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+        return analysis
+
+    left = _analysis_with_target_expr(Expression.parameter("fp", 0, size=8))
+    right = _analysis_with_target_expr(Expression.parameter("gp", 1, size=8))
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    left_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        left,
+        other,
+        stage="S_PAIRWISE",
+    )
+    right_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        right,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+    assert ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))) in left_reason.object_target_key
+    assert ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))) in right_reason.object_target_key
+
+
+def test_deferred_call_object_key_distinguishes_truncated_target_expression_provenance():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+    deferred_ref = DeferredCallRef(
+        caller_program_id=1,
+        caller_entry_offset=0x1000,
+        pcode_op_ref=pcode_ref,
+        target_ref=CallTargetRef.unknown(),
+        sequence=0,
+    )
+
+    def _analysis_with_target_expr(target_expr: Expression) -> FunctionReturnAnalysis:
+        deferred = DeferredCallInfo(
+            placeholder_name="indirect",
+            target_ref=CallTargetRef.unknown(),
+            arguments=[Expression.parameter("x", 0, size=4)],
+            call_target_expr=target_expr,
+            deferred_call_ref=deferred_ref,
+            call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+        return analysis
+
+    left = _analysis_with_target_expr(_deep_zext_target("fp", 0))
+    right = _analysis_with_target_expr(_deep_zext_target("gp", 1))
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    left_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        left,
+        other,
+        stage="S_PAIRWISE",
+    )
+    right_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:effect_call_argument_evidence_incomplete",
+        right,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+
+
+def test_expression_provenance_key_handles_very_deep_target_expression_without_recursion_error():
+    left_key = expression_provenance_key(_deep_zext_target("fp", 0, depth=900))
+    right_key = expression_provenance_key(_deep_zext_target("gp", 1, depth=900))
+
+    assert left_key != right_key
+
+
+def test_expression_provenance_key_distinguishes_sources_beyond_digest_node_limit():
+    left_key = expression_provenance_key(_deep_zext_target("fp", 0, depth=8200))
+    right_key = expression_provenance_key(_deep_zext_target("gp", 1, depth=8200))
+
+    assert left_key != right_key
+
+
+def test_expression_provenance_key_distinguishes_deep_tail_structure_beyond_digest_node_limit():
+    zext_key = expression_provenance_key(
+        _deep_target_with_tail_op("fp", 0, "INT_ZEXT", depth=8200)
+    )
+    sext_key = expression_provenance_key(
+        _deep_target_with_tail_op("fp", 0, "INT_SEXT", depth=8200)
+    )
+
+    assert zext_key != sext_key
+
+
+def test_unsupported_call_effect_object_key_distinguishes_target_expression_provenance():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
+
+    def _analysis_with_site(target_expr: Expression) -> FunctionReturnAnalysis:
+        site = UnsupportedCallEffectRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=None,
+            target_expr=target_expr,
+            reason="target_identity_unavailable",
+            order_key=9,
+        )
+        return FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                has_unsupported_call=True,
+                unsupported_call_sites=(site,),
+            ),
+        )
+
+    left = _analysis_with_site(Expression.parameter("fp", 0, size=8))
+    right = _analysis_with_site(Expression.parameter("gp", 1, size=8))
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    left_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        left,
+        other,
+        stage="S_PAIRWISE",
+    )
+    right_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        right,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+    assert ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))) in left_reason.object_target_key
+    assert ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))) in right_reason.object_target_key
+
+
+def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_expression_id():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
+    target_expr = _deep_zext_target("fp", 0)
+
+    site = UnsupportedCallEffectRef(
+        pcode_op_ref=pcode_ref,
+        target_ref=None,
+        target_expr=target_expr,
+        reason="target_identity_unavailable",
+        order_key=10,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="func",
+        entry_point="0x1000",
+        function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+        effect_summary=EffectSummary(
+            parameter_names=["x"],
+            effects=[],
+            has_unsupported_call=True,
+            unsupported_call_sites=(site,),
+        ),
+    )
+    other = FunctionReturnAnalysis(
+        function_name="other",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis,
+        other,
+        stage="S_PAIRWISE",
+    )
+
+    target_identity = id(target_expr)
+    assert not _nested_contains(site.stable_key(), target_identity)
+    assert not _nested_contains(reason.object_target_key, target_identity)
+    assert not _nested_contains(reason.proof_obligation_id, target_identity)
+
+
+def test_unsupported_call_effect_object_key_distinguishes_truncated_target_expression_provenance():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
+
+    def _reason_for(target_expr: Expression):
+        site = UnsupportedCallEffectRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=None,
+            target_expr=target_expr,
+            reason="target_identity_unavailable",
+            order_key=10,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                has_unsupported_call=True,
+                unsupported_call_sites=(site,),
+            ),
+        )
+        other = FunctionReturnAnalysis(
+            function_name="other",
+            entry_point="0x2000",
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        return site, strategy._make_blocking_unsafety_unknown_reason(
+            "function1:unsupported_call_effect_summary",
+            analysis,
+            other,
+            stage="S_PAIRWISE",
+        )
+
+    left_site, left_reason = _reason_for(_deep_zext_target("fp", 0))
+    right_site, right_reason = _reason_for(_deep_zext_target("gp", 1))
+
+    assert left_site.stable_key() != right_site.stable_key()
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+
+
+def test_unsupported_call_effect_object_key_handles_very_deep_target_expression_without_recursion_error():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
+
+    def _reason_for(target_expr: Expression):
+        site = UnsupportedCallEffectRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=None,
+            target_expr=target_expr,
+            reason="target_identity_unavailable",
+            order_key=10,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                has_unsupported_call=True,
+                unsupported_call_sites=(site,),
+            ),
+        )
+        other = FunctionReturnAnalysis(
+            function_name="other",
+            entry_point="0x2000",
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        return strategy._make_blocking_unsafety_unknown_reason(
+            "function1:unsupported_call_effect_summary",
+            analysis,
+            other,
+            stage="S_PAIRWISE",
+        )
+
+    left_reason = _reason_for(_deep_zext_target("fp", 0, depth=900))
+    right_reason = _reason_for(_deep_zext_target("gp", 1, depth=900))
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+
+
+def test_unsupported_call_effect_object_key_distinguishes_sources_beyond_digest_node_limit():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
+
+    def _reason_for(target_expr: Expression):
+        site = UnsupportedCallEffectRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=None,
+            target_expr=target_expr,
+            reason="target_identity_unavailable",
+            order_key=10,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                has_unsupported_call=True,
+                unsupported_call_sites=(site,),
+            ),
+        )
+        other = FunctionReturnAnalysis(
+            function_name="other",
+            entry_point="0x2000",
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        return strategy._make_blocking_unsafety_unknown_reason(
+            "function1:unsupported_call_effect_summary",
+            analysis,
+            other,
+            stage="S_PAIRWISE",
+        )
+
+    left_reason = _reason_for(_deep_zext_target("fp", 0, depth=8200))
+    right_reason = _reason_for(_deep_zext_target("gp", 1, depth=8200))
+
+    assert left_reason.object_target_key != right_reason.object_target_key
+    assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
+
+
+def test_unsupported_call_effect_object_key_distinguishes_deep_tail_structure_beyond_digest_node_limit():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
+
+    def _reason_for(target_expr: Expression):
+        site = UnsupportedCallEffectRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=None,
+            target_expr=target_expr,
+            reason="target_identity_unavailable",
+            order_key=10,
+        )
+        analysis = FunctionReturnAnalysis(
+            function_name="func",
+            entry_point="0x1000",
+            function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+            effect_summary=EffectSummary(
+                parameter_names=["x"],
+                effects=[],
+                has_unsupported_call=True,
+                unsupported_call_sites=(site,),
+            ),
+        )
+        other = FunctionReturnAnalysis(
+            function_name="other",
+            entry_point="0x2000",
+            parameters=[_param("x")],
+            returns=[ReturnInfo(address="0x2000", value=Expression.parameter("x", 0, size=4), conditions=[])],
+            return_type="int",
+        )
+        return strategy._make_blocking_unsafety_unknown_reason(
+            "function1:unsupported_call_effect_summary",
+            analysis,
+            other,
+            stage="S_PAIRWISE",
+        )
+
+    zext_reason = _reason_for(_deep_target_with_tail_op("fp", 0, "INT_ZEXT", depth=8200))
+    sext_reason = _reason_for(_deep_target_with_tail_op("fp", 0, "INT_SEXT", depth=8200))
+
+    assert zext_reason.object_target_key != sext_reason.object_target_key
+    assert zext_reason.proof_obligation_id != sext_reason.proof_obligation_id
+
+
+def _nested_contains(value, needle) -> bool:
+    if value == needle:
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_nested_contains(item, needle) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _nested_contains(key, needle) or _nested_contains(item, needle)
+            for key, item in value.items()
+        )
+    return False
+
+
+def test_blocking_unsafety_reason_mapping_accepts_detail_suffix_for_return_coverage():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+
+    assert (
+        strategy._unknown_reason_id_for_blocking_unsafety("function1:return_coverage_gap:case=3")
+        == UnknownReasonId.RETURN_COVERAGE_GAP
+    )
+    assert (
+        strategy._unknown_reason_id_for_blocking_unsafety("function2:return_coverage_inconclusive:branch=exit")
+        == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+    )
 
 
 def test_monolithic_strategy_does_not_accept_unsat_with_deferred_call_argument_inconclusive():

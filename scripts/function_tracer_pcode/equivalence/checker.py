@@ -70,6 +70,7 @@ class EquivalenceChecker:
         pairwise_timeout: int = 5,
         pairwise_timeout_hard: int = 30,
         pairwise_save_unknown: bool = False,
+        pairwise_unknown_dir: Optional[str] = None,
         normalization_mode: str = "safe",
         enable_fact_normalization: bool = False,
         enable_template_abstraction: bool = False,
@@ -110,6 +111,8 @@ class EquivalenceChecker:
         self.pairwise_strategy.per_query_timeout = pairwise_timeout
         self.pairwise_strategy.per_query_timeout_hard = pairwise_timeout_hard
         self.pairwise_strategy.save_unknown_queries = pairwise_save_unknown
+        if pairwise_unknown_dir is not None:
+            self.pairwise_strategy.unknown_query_dir = pairwise_unknown_dir
         
         self.monolithic_strategy = MonolithicStrategy(
             self.formula_builder,
@@ -126,6 +129,8 @@ class EquivalenceChecker:
         self.loop_template_strategy.per_query_timeout = pairwise_timeout
         self.loop_template_strategy.per_query_timeout_hard = pairwise_timeout_hard
         self.loop_template_strategy.save_unknown_queries = pairwise_save_unknown
+        if pairwise_unknown_dir is not None:
+            self.loop_template_strategy.unknown_query_dir = pairwise_unknown_dir
         
         # ★ strategy 引数に応じて stage_plan を切り替える
         if strategy == "pairwise":

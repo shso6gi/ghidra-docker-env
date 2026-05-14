@@ -16,7 +16,9 @@ from .counterexample import CounterexampleFormatter, FormattedCounterexample
 from .formula import FormulaBuilder, ParameterFragmentInfo
 from .strategies import CheckStrategy, MonolithicStrategy, PairwiseStrategy
 from .unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
     UnknownAggregationUnit,
+    UnknownCountKind,
     UnknownDecisionEffect,
     UnknownRecoveryAction,
     UnknownRecoveryActionStatus,
@@ -27,6 +29,7 @@ from .unknown_reason import (
     UnknownRecoveryPlan,
     UnknownRecoveryProofObligation,
     UnknownRecoveryProofKind,
+    build_proof_obligation_id,
     build_unknown_recovery_actions,
     get_unknown_recovery_plan,
     summarize_unknown_recovery_backlog,
@@ -70,7 +73,9 @@ __all__ = [
     'CheckStrategy',
     'MonolithicStrategy',
     'PairwiseStrategy',
+    "UNKNOWN_TUPLE_MISSING",
     "UnknownAggregationUnit",
+    "UnknownCountKind",
     "UnknownDecisionEffect",
     "UnknownRecoveryAction",
     "UnknownRecoveryActionStatus",
@@ -81,6 +86,7 @@ __all__ = [
     "UnknownRecoveryPlan",
     "UnknownRecoveryProofObligation",
     "UnknownRecoveryProofKind",
+    "build_proof_obligation_id",
     "build_unknown_recovery_actions",
     "get_unknown_recovery_plan",
     "summarize_unknown_recovery_backlog",

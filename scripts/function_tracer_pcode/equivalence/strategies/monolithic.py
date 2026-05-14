@@ -228,11 +228,11 @@ class MonolithicStrategy(CheckStrategy):
             if final_is_equivalent is True and equivalence_blocking_reasons:
                 for reason in equivalence_blocking_reasons:
                     unknown_reasons.append(
-                        make_unknown_reason(
-                            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+                        self._make_blocking_unsafety_unknown_reason(
+                            reason,
+                            analysis1,
+                            analysis2,
                             stage="S_MONOLITHIC_FALLBACK",
-                            evidence_refs=(reason,),
-                            detail=reason,
                         )
                     )
                 self._debug_print(

@@ -23,9 +23,11 @@ from ..model import (
     PostStateValueRef,
     PTRADD_OPCODE,
     PTRSUB_OPCODE,
+    PcodeOpRef,
     StorageInfo,
     coerce_call_target_ref,
     expression_key_or_identity,
+    expression_provenance_key,
     expression_key_safe,
 )
 from ..model.signature import (
@@ -46,6 +48,61 @@ class StoreEffect:
     order_key: int
 
 
+@dataclass(frozen=True)
+class UnsupportedCallEffectRef:
+    """Object-derived evidence for a call whose effects were not summarized."""
+
+    pcode_op_ref: Optional[PcodeOpRef]
+    target_ref: Optional[CallTargetRef]
+    reason: str
+    order_key: int
+    target_expr: Optional[Expression] = None
+
+    @classmethod
+    def from_call_op(
+        cls,
+        op,
+        *,
+        target_ref: Optional[CallTargetRef],
+        target_expr: Optional[Expression] = None,
+        reason: str,
+    ) -> "UnsupportedCallEffectRef":
+        return cls(
+            pcode_op_ref=PcodeOpRef.from_pcode_op(op),
+            target_ref=target_ref,
+            target_expr=target_expr,
+            reason=str(reason),
+            order_key=_get_order_key(op),
+        )
+
+    def stable_key(self) -> Tuple[object, ...]:
+        target_key = self.target_ref.stable_key() if self.target_ref is not None else None
+        target_expr_key = _stable_target_expression_key(self.target_expr)
+        return (
+            "unsupported_call_effect",
+            self.pcode_op_ref.stable_key() if self.pcode_op_ref is not None else None,
+            target_key,
+            target_expr_key,
+            int(self.order_key),
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "kind": "unsupported_call_effect",
+            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
+            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
+            "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
+            "reason": self.reason,
+            "order_key": int(self.order_key),
+        }
+
+
+def _stable_target_expression_key(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
+    if expr is None:
+        return None
+    return expression_provenance_key(expr)
+
+
 @dataclass
 class EffectSummary:
     parameter_names: List[str]
@@ -55,9 +112,11 @@ class EffectSummary:
     incomplete_reasons: Tuple[str, ...] = ()
     parameter_refs: List[LocationBaseRef] = field(default_factory=list)
     call_argument_evidence: Dict[Tuple[object, ...], "CallArgumentEvidence"] = field(default_factory=dict)
+    unsupported_call_sites: Tuple[UnsupportedCallEffectRef, ...] = ()
 
     def __post_init__(self) -> None:
         self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))
+        self.unsupported_call_sites = tuple(self.unsupported_call_sites or ())
         if self.parameter_refs:
             self.parameter_refs = [
                 coerced
@@ -735,6 +794,7 @@ def summarize_store_effects(
     has_unsupported_call = False
     incomplete_reasons: Set[str] = set()
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
+    unsupported_call_sites: List[UnsupportedCallEffectRef] = []
 
     for block_info in block_infos:
         coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
@@ -801,9 +861,18 @@ def summarize_store_effects(
                 )
                 for i in range(1, op.getNumInputs())
             ]
+            target_expr = _resolve_call_target_expression(tracer, op)
             target_ref = _resolve_call_target_ref(tracer, op)
             if target_ref is None:
                 has_unsupported_call = True
+                unsupported_call_sites.append(
+                    UnsupportedCallEffectRef.from_call_op(
+                        op,
+                        target_ref=None,
+                        target_expr=target_expr,
+                        reason="target_identity_unavailable",
+                    )
+                )
                 if debug:
                     print(
                         "[EffectSummary] skip unresolved call effect summary: "
@@ -898,6 +967,14 @@ def summarize_store_effects(
                     callee_summary = direct_call_summary(target_ref, variant_args)
                     if callee_summary is None:
                         has_unsupported_call = True
+                        unsupported_call_sites.append(
+                            UnsupportedCallEffectRef.from_call_op(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                reason="callee_effect_summary_missing",
+                            )
+                        )
                         if debug:
                             print(
                                 "[EffectSummary] missing callee effect summary: "
@@ -910,6 +987,14 @@ def summarize_store_effects(
                         variant_args,
                     ):
                         has_unsupported_call = True
+                        unsupported_call_sites.append(
+                            UnsupportedCallEffectRef.from_call_op(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                reason="call_argument_width_unsafe_for_effect_summary",
+                            )
+                        )
                         if debug:
                             print(
                                 "[EffectSummary] skip call effect summary: "
@@ -919,6 +1004,14 @@ def summarize_store_effects(
                     callee_incomplete_reasons = _effect_summary_incomplete_reasons(callee_summary)
                     if callee_incomplete_reasons:
                         has_unsupported_call = True
+                        unsupported_call_sites.append(
+                            UnsupportedCallEffectRef.from_call_op(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                reason="callee_effect_summary_incomplete",
+                            )
+                        )
                         if debug:
                             print(
                                 "[EffectSummary] skip incomplete callee effect summary: "
@@ -933,6 +1026,14 @@ def summarize_store_effects(
                                 callee_parameters,
                             ):
                                 has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    UnsupportedCallEffectRef.from_call_op(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        reason="callee_unsupported_call_may_expose_parameter_memory",
+                                    )
+                                )
                             elif debug:
                                 print(
                                     "[EffectSummary] effect-free callee summary has only "
@@ -947,6 +1048,14 @@ def summarize_store_effects(
                         continue
                     if not is_call_effect_summary_allowed(callee_summary):
                         has_unsupported_call = True
+                        unsupported_call_sites.append(
+                            UnsupportedCallEffectRef.from_call_op(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                reason="callee_effect_summary_not_allowed",
+                            )
+                        )
                         continue
 
                     for effect in callee_summary.effects:
@@ -964,6 +1073,14 @@ def summarize_store_effects(
                         )
                         if substituted_location is None:
                             has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                UnsupportedCallEffectRef.from_call_op(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    reason="substituted_effect_location_unavailable",
+                                )
+                            )
                             if debug:
                                 arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
                                 print(
@@ -1028,6 +1145,7 @@ def summarize_store_effects(
         incomplete_reasons=tuple(sorted(incomplete_reasons)),
         parameter_refs=_parameter_refs_from_descriptors(parameters),
         call_argument_evidence=dict(call_argument_evidence),
+        unsupported_call_sites=tuple(unsupported_call_sites),
     )
 
 
@@ -2263,6 +2381,21 @@ def _resolve_call_target_ref(tracer, op) -> Optional[CallTargetRef]:
     if resolved_from_value is not None:
         return resolved_from_value
     return CallTargetRef.from_code_address(target_value)
+
+
+def _resolve_call_target_expression(tracer, op) -> Optional[Expression]:
+    if op is None or op.getNumInputs() < 1:
+        return None
+    try:
+        target_varnode = op.getInput(0)
+    except Exception:
+        return None
+    if target_varnode is None:
+        return None
+    try:
+        return tracer.trace_varnode(target_varnode, use_cache=False)
+    except Exception:
+        return None
 
 
 def _resolve_call_target_name(tracer, op) -> Optional[str]:
