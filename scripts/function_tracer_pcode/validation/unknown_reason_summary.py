@@ -36,6 +36,40 @@ _PROOF_BACKLOG_CLASSES = {
 }
 RESULT_JSON_BEGIN = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
 RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
+_GLOBAL_REASON_TUPLE_WIDTH = 7
+_GLOBAL_REASON_COUNT_KINDS = {
+    UnknownCountKind.FINAL_RESULT.value,
+    UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+    UnknownCountKind.REASON_RECORD.value,
+    UnknownCountKind.PROOF_ACTION.value,
+}
+_CORRESPONDENCE_RAW_LOG_MISSING_KEY = (
+    UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+    UnknownReasonId.UNKNOWN.value,
+    UNKNOWN_TUPLE_MISSING,
+    UNKNOWN_TUPLE_MISSING,
+    UNKNOWN_TUPLE_MISSING,
+    UNKNOWN_TUPLE_MISSING,
+    UNKNOWN_TUPLE_MISSING,
+)
+
+
+@dataclass(frozen=True)
+class UnknownReasonCorrespondenceDiagnostic:
+    classification: str
+    tuple_key: Tuple[str, ...]
+    validation_unknown_units: int = 0
+    reason_records: int = 0
+    proof_actions: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "classification": self.classification,
+            "tuple_key": list(self.tuple_key),
+            "validation_unknown_units": self.validation_unknown_units,
+            "reason_records": self.reason_records,
+            "proof_actions": self.proof_actions,
+        }
 
 
 @dataclass(frozen=True)
@@ -77,6 +111,10 @@ class UnknownValidationSummary:
             "proof_backlog_by_action_status": dict(self.proof_backlog_by_action_status),
             "operational_unknown_by_reason": dict(self.operational_unknown_by_reason),
             "operational_unknown_by_class": dict(self.operational_unknown_by_class),
+            "reason_record_correspondence": [
+                diagnostic.to_dict()
+                for diagnostic in diagnose_unknown_reason_correspondence(self)
+            ],
         }
 
 
@@ -291,6 +329,102 @@ def compare_validation_unknowns(
     )
 
 
+def diagnose_unknown_reason_correspondence(
+    summary: UnknownValidationSummary,
+) -> Tuple[UnknownReasonCorrespondenceDiagnostic, ...]:
+    """Classify validation-unit, detail-record, and proof-action count drift.
+
+    The comparison key intentionally mirrors the global reason tuple minus
+    ``count_kind``. Optional tuple fields are normalized to
+    ``UNKNOWN_TUPLE_MISSING`` so callers can compare v0/v1 artifacts without
+    prose-derived fallbacks.
+    """
+
+    validation_by_signature = _reason_signature_counts(
+        summary.validation_unknown_unit_multiset,
+        UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+    )
+    reason_by_signature = _reason_signature_counts(
+        summary.reason_record_multiset,
+        UnknownCountKind.REASON_RECORD.value,
+    )
+    proof_action_by_signature = _reason_signature_counts(
+        summary.proof_action_multiset,
+        UnknownCountKind.PROOF_ACTION.value,
+    )
+    diagnostics = []
+
+    if (
+        summary.unknown_results > 0
+        and not validation_by_signature
+        and not reason_by_signature
+    ):
+        diagnostics.append(
+            UnknownReasonCorrespondenceDiagnostic(
+                classification="raw_log_missing",
+                tuple_key=_CORRESPONDENCE_RAW_LOG_MISSING_KEY,
+                validation_unknown_units=0,
+                reason_records=0,
+                proof_actions=0,
+            )
+        )
+
+    for signature in sorted(set(validation_by_signature) | set(reason_by_signature)):
+        validation_count = int(validation_by_signature.get(signature, 0) or 0)
+        reason_count = int(reason_by_signature.get(signature, 0) or 0)
+        if validation_count == reason_count:
+            continue
+        if reason_count > validation_count:
+            classification = "aggregation_difference"
+        elif reason_count == 0:
+            classification = "detail_missing"
+        else:
+            classification = "parser_bug"
+        diagnostics.append(
+            UnknownReasonCorrespondenceDiagnostic(
+                classification=classification,
+                tuple_key=_reason_tuple_from_signature(
+                    UnknownCountKind.REASON_RECORD.value,
+                    signature,
+                ),
+                validation_unknown_units=validation_count,
+                reason_records=reason_count,
+                proof_actions=int(proof_action_by_signature.get(signature, 0) or 0),
+            )
+        )
+
+    for signature, action_count in sorted(proof_action_by_signature.items()):
+        validation_count = int(validation_by_signature.get(signature, 0) or 0)
+        reason_count = int(reason_by_signature.get(signature, 0) or 0)
+        if action_count == reason_count and action_count == validation_count:
+            continue
+        diagnostics.append(
+            UnknownReasonCorrespondenceDiagnostic(
+                classification="proof_action_expansion",
+                tuple_key=_reason_tuple_from_signature(
+                    UnknownCountKind.PROOF_ACTION.value,
+                    signature,
+                ),
+                validation_unknown_units=validation_count,
+                reason_records=reason_count,
+                proof_actions=int(action_count or 0),
+            )
+        )
+
+    return tuple(
+        sorted(
+            diagnostics,
+            key=lambda diagnostic: (
+                diagnostic.classification,
+                diagnostic.tuple_key,
+                diagnostic.validation_unknown_units,
+                diagnostic.reason_records,
+                diagnostic.proof_actions,
+            ),
+        )
+    )
+
+
 def format_validation_unknown_summary(
     summary: UnknownValidationSummary,
     *,
@@ -357,6 +491,11 @@ def format_validation_unknown_summary(
         lines,
         "Operational UNKNOWN by reason",
         summary.operational_unknown_by_reason,
+        indent,
+    )
+    _append_correspondence_diagnostics(
+        lines,
+        diagnose_unknown_reason_correspondence(summary),
         indent,
     )
     return "\n".join(lines)
@@ -762,6 +901,44 @@ def _payload_pair_or_case(payload: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _reason_signature_counts(
+    counts: Mapping[Tuple[Any, ...], int],
+    default_count_kind: str,
+) -> Dict[Tuple[str, ...], int]:
+    signatures: Dict[Tuple[str, ...], int] = {}
+    for raw_key, count in counts.items():
+        normalized = _normalize_global_reason_tuple(raw_key, default_count_kind)
+        signature = normalized[1:]
+        _inc(signatures, signature, int(count or 0))
+    return signatures
+
+
+def _normalize_global_reason_tuple(
+    raw_key: Tuple[Any, ...],
+    default_count_kind: str,
+) -> Tuple[str, ...]:
+    parts = tuple(str(part) for part in (raw_key or ()))
+    if parts and parts[0] in _GLOBAL_REASON_COUNT_KINDS:
+        normalized = parts
+    else:
+        normalized = (str(default_count_kind),) + parts
+    if len(normalized) >= _GLOBAL_REASON_TUPLE_WIDTH:
+        return normalized[:_GLOBAL_REASON_TUPLE_WIDTH]
+    return normalized + (UNKNOWN_TUPLE_MISSING,) * (
+        _GLOBAL_REASON_TUPLE_WIDTH - len(normalized)
+    )
+
+
+def _reason_tuple_from_signature(
+    count_kind: str,
+    signature: Tuple[str, ...],
+) -> Tuple[str, ...]:
+    parts = (str(count_kind),) + tuple(str(part) for part in signature)
+    if len(parts) >= _GLOBAL_REASON_TUPLE_WIDTH:
+        return parts[:_GLOBAL_REASON_TUPLE_WIDTH]
+    return parts + (UNKNOWN_TUPLE_MISSING,) * (_GLOBAL_REASON_TUPLE_WIDTH - len(parts))
+
+
 def _inc(counts: Dict[str, int], key: Any, amount: int = 1) -> None:
     count_key = key if isinstance(key, tuple) else str(key)
     counts[count_key] = int(counts.get(count_key, 0) or 0) + int(amount)
@@ -815,6 +992,25 @@ def _append_count_block(
         return
     for key in sorted(counts):
         lines.append(f"{indent}    - {key}: {counts[key]}")
+
+
+def _append_correspondence_diagnostics(
+    lines: list,
+    diagnostics: Sequence[UnknownReasonCorrespondenceDiagnostic],
+    indent: str,
+) -> None:
+    lines.append(f"{indent}  Validation UNKNOWN unit / reason record correspondence:")
+    if not diagnostics:
+        lines.append(f"{indent}    - ok")
+        return
+    for diagnostic in diagnostics:
+        lines.append(
+            f"{indent}    - {diagnostic.classification}: "
+            f"{_format_tuple_value(diagnostic.tuple_key)} "
+            f"(validation_unknown_unit={diagnostic.validation_unknown_units}, "
+            f"reason_record={diagnostic.reason_records}, "
+            f"proof_action={diagnostic.proof_actions})"
+        )
 
 
 def _format_delta(value: int) -> str:

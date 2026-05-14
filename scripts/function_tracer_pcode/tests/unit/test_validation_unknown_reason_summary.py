@@ -18,7 +18,9 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
+    UnknownValidationSummary,
     compare_validation_unknowns,
+    diagnose_unknown_reason_correspondence,
     extract_result_payloads_from_text,
     format_validation_unknown_diff,
     format_validation_unknown_summary,
@@ -415,6 +417,141 @@ def test_validation_summary_separates_reason_units_from_proof_actions_by_count_k
             UnknownRecoveryActionStatus.PENDING_PROOF.value,
         ): 1,
     }
+
+
+def test_validation_summary_classifies_reason_record_aggregation_difference():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "fc_apply_indirect",
+                reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+                        pair_or_case="B10-B11",
+                        aggregation_unit="pair",
+                    ),
+                    make_unknown_reason(
+                        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                        pair_or_case="B10-B11",
+                        aggregation_unit="pair",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    diagnostics = diagnose_unknown_reason_correspondence(summary)
+
+    assert any(
+        diagnostic.classification == "aggregation_difference"
+        and diagnostic.reason_records == 1
+        and diagnostic.validation_unknown_units == 0
+        and UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING.value in diagnostic.tuple_key
+        for diagnostic in diagnostics
+    )
+
+
+def test_validation_summary_classifies_proof_action_expansion():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "fc_apply_indirect",
+                reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                        pair_or_case="B10-B11",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    diagnostics = diagnose_unknown_reason_correspondence(summary)
+    proof_action_diagnostics = [
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.classification == "proof_action_expansion"
+    ]
+
+    assert len(proof_action_diagnostics) == 2
+    assert {diagnostic.proof_actions for diagnostic in proof_action_diagnostics} == {1}
+    assert {
+        diagnostic.tuple_key[4] for diagnostic in proof_action_diagnostics
+    } == {"abi_relation_proof", "high_bit_proof"}
+
+
+def test_validation_summary_classifies_missing_detail_and_parser_bug_correspondence():
+    unit_tuple = (
+        UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+        UnknownReasonScope.FUNCTION.value,
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+        "object_evidence_collected",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    )
+    reason_tuple = (
+        UnknownCountKind.REASON_RECORD.value,
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+        UnknownReasonScope.FUNCTION.value,
+        UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+        "object_evidence_collected",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    )
+
+    detail_missing = diagnose_unknown_reason_correspondence(
+        UnknownValidationSummary(
+            total_results=1,
+            unknown_results=1,
+            unknown_units=1,
+            validation_unknown_unit_multiset={unit_tuple: 1},
+            reason_record_multiset={},
+        )
+    )
+    parser_bug = diagnose_unknown_reason_correspondence(
+        UnknownValidationSummary(
+            total_results=1,
+            unknown_results=1,
+            unknown_units=2,
+            validation_unknown_unit_multiset={unit_tuple: 2},
+            reason_record_multiset={reason_tuple: 1},
+        )
+    )
+    raw_missing = diagnose_unknown_reason_correspondence(
+        UnknownValidationSummary(
+            total_results=1,
+            unknown_results=1,
+            unknown_units=0,
+            validation_unknown_unit_multiset={},
+            reason_record_multiset={},
+        )
+    )
+
+    assert {diagnostic.classification for diagnostic in detail_missing} == {"detail_missing"}
+    assert {diagnostic.classification for diagnostic in parser_bug} == {"parser_bug"}
+    assert {diagnostic.classification for diagnostic in raw_missing} == {"raw_log_missing"}
+
+
+def test_validation_unknown_summary_formats_correspondence_diagnostics():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "fc_apply_indirect",
+                reasons=[
+                    make_unknown_reason(
+                        UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING,
+                        pair_or_case="B10-B11",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    text = format_validation_unknown_summary(summary)
+
+    assert "Validation UNKNOWN unit / reason record correspondence:" in text
+    assert "proof_action_expansion" in text
 
 
 def test_validation_summary_module_execution_has_no_runtime_warning():
