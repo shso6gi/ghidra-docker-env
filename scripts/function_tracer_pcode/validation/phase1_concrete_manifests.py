@@ -50,7 +50,7 @@ DEFAULT_PHASE1_PLAN: Mapping[str, Any] = {
             "id": "positive-call-chain-existing-eq",
             "category": "function_call",
             "function": "fc_equiv_call_chain",
-            "binary_pair": "B10_B11",
+            "binary_pair": "B13_B5",
             "expected_result": "EQ",
             "role": "call-chain existing EQ",
         },
@@ -58,7 +58,7 @@ DEFAULT_PHASE1_PLAN: Mapping[str, Any] = {
             "id": "positive-recorded-call-effect-existing-eq",
             "category": "function_call",
             "function": "fc_recorded_chain",
-            "binary_pair": "B10_B11",
+            "binary_pair": "B13_B5",
             "expected_result": "EQ",
             "role": "recorded call/effect existing EQ",
         },
@@ -66,7 +66,7 @@ DEFAULT_PHASE1_PLAN: Mapping[str, Any] = {
             "id": "positive-direct-call-control",
             "category": "function_call",
             "function": "fc_guarded_call",
-            "binary_pair": "B10_B11",
+            "binary_pair": "B13_B5",
             "expected_result": "EQ",
             "role": "direct-call control",
         },
@@ -74,7 +74,7 @@ DEFAULT_PHASE1_PLAN: Mapping[str, Any] = {
             "id": "positive-no-call-control",
             "category": "function_call",
             "function": "fc_equiv_direct",
-            "binary_pair": "B10_B11",
+            "binary_pair": "B13_B5",
             "expected_result": "EQ",
             "role": "no-call control",
         },
@@ -82,7 +82,7 @@ DEFAULT_PHASE1_PLAN: Mapping[str, Any] = {
             "id": "positive-indirect-deferred-call-existing-eq",
             "category": "function_call",
             "function": "fc_dispatch_indirect",
-            "binary_pair": "B13_B2",
+            "binary_pair": "B13_B5",
             "expected_result": "EQ",
             "role": "indirect/deferred call positive",
         },
@@ -320,9 +320,22 @@ def build_phase1_concrete_manifests(
     baseline_id = str(baseline_manifest.get("baseline_id") or "")
     baseline_git_head = baseline_manifest.get("git_head")
     evidence = _load_pair_evidence(raw_dir, baseline_manifest)
+    positive_object_evidence = _load_positive_object_evidence(output)
+    synthetic = _build_synthetic_manifest(
+        baseline_id=baseline_id,
+        baseline_git_head=baseline_git_head,
+        synthetic_plan=active_plan.get("synthetic") or {},
+        output_dir=output,
+    )
+    synthetic_negative_entries = _materialize_synthetic_negative_entries(synthetic)
 
     positive_entries = [
-        _materialize_entry(raw_entry, evidence, expected_current_result="EQ")
+        _materialize_entry(
+            raw_entry,
+            evidence,
+            expected_current_result="EQ",
+            positive_object_evidence=positive_object_evidence,
+        )
         for raw_entry in active_plan.get("positive", ())
     ]
     positive = _build_manifest(
@@ -334,7 +347,7 @@ def build_phase1_concrete_manifests(
     negative_entries = [
         _materialize_entry(raw_entry, evidence, expected_current_result=str(raw_entry["expected_result"]))
         for raw_entry in active_plan.get("negative", ())
-    ]
+    ] + synthetic_negative_entries
     negative = _build_manifest(
         manifest_kind="negative_concrete_pairs",
         baseline_id=baseline_id,
@@ -351,12 +364,6 @@ def build_phase1_concrete_manifests(
             for raw_entry in active_plan.get("representative", ())
         ],
     )
-    synthetic = _build_synthetic_manifest(
-        baseline_id=baseline_id,
-        baseline_git_head=baseline_git_head,
-        synthetic_plan=active_plan.get("synthetic") or {},
-    )
-
     validate_positive_manifest(positive)
     validate_negative_manifest(negative)
     validate_representative_manifest(representative)
@@ -390,6 +397,7 @@ def build_phase1_concrete_manifests(
             "negative": len(negative["entries"]),
             "representative": len(representative["entries"]),
             "synthetic": len(synthetic["entries"]),
+            "synthetic_negative": len(synthetic.get("synthetic_negative_entries") or ()),
             "planned_negative_synthetic": synthetic.get("planned_negative_synthetic_count", 0),
         },
         "phase1_ready": readiness["phase1_ready"],
@@ -413,6 +421,12 @@ def validate_positive_manifest(
         status = entry.get("object_evidence_status")
         if require_object_evidence and status != "verified":
             raise ValueError(f"positive entry {entry.get('id')} lacks verified object evidence")
+        if status == "verified":
+            ref = entry.get("object_evidence_ref")
+            if not isinstance(ref, Mapping) or not ref.get("sha256"):
+                raise ValueError(f"positive entry {entry.get('id')} verified without evidence ref")
+            if not isinstance(entry.get("object_evidence_summary"), Mapping):
+                raise ValueError(f"positive entry {entry.get('id')} verified without evidence summary")
 
 
 def validate_negative_manifest(manifest: Mapping[str, Any]) -> None:
@@ -438,11 +452,7 @@ def validate_negative_manifest(manifest: Mapping[str, Any]) -> None:
                 raise ValueError(f"negative entry {entry.get('id')} requires explicit proof obligation")
         elif expected == "NOT_EQ":
             source = entry.get("ground_truth_source")
-            if (
-                not isinstance(source, Mapping)
-                or source.get("classification") != "ground_truth_not_eq"
-                or source.get("oracle_review_status") != "accepted"
-            ):
+            if not _ground_truth_source_is_accepted_not_eq(source):
                 raise ValueError(
                     f"negative entry {entry.get('id')} expected NOT_EQ requires accepted ground_truth_not_eq"
                 )
@@ -499,6 +509,8 @@ def validate_synthetic_manifest(manifest: Mapping[str, Any]) -> None:
             raise ValueError(f"synthetic negative entry {entry.get('id')} must be planned_not_created")
         if entry.get("must_not_be_equivalent") is not True:
             raise ValueError(f"synthetic negative entry {entry.get('id')} requires must_not_be_equivalent")
+    for entry in manifest.get("synthetic_negative_entries") or ():
+        _validate_synthetic_negative_entry(entry)
 
 
 def validate_phase1_readiness(index: Mapping[str, Any]) -> None:
@@ -549,6 +561,7 @@ def _build_synthetic_manifest(
     baseline_id: str,
     baseline_git_head: Any,
     synthetic_plan: Mapping[str, Any],
+    output_dir: Path,
 ) -> Dict[str, Any]:
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -559,6 +572,33 @@ def _build_synthetic_manifest(
     }
     manifest.update(dict(synthetic_plan))
     manifest.setdefault("entries", [])
+    created_negative_entries: Sequence[Mapping[str, Any]] = ()
+    artifact_path = output_dir / "synthetic_negative" / "synthetic_negative_artifact_manifest.json"
+    if artifact_path.is_file():
+        artifact = _read_json(artifact_path)
+        created_negative_entries = artifact.get("entries") or ()
+        if not isinstance(created_negative_entries, list):
+            raise ValueError(f"synthetic negative artifact entries must be a sequence in {artifact_path}")
+        manifest["synthetic_negative_artifact_ref"] = {
+            "path": _relative_posix(artifact_path, output_dir),
+            "sha256": _sha256_file(artifact_path),
+            "manifest_kind": artifact.get("manifest_kind"),
+            "synthetic_negative_baseline_id": artifact.get("synthetic_negative_baseline_id"),
+        }
+        manifest["synthetic_negative_entries"] = [dict(entry) for entry in created_negative_entries]
+    else:
+        manifest.setdefault("synthetic_negative_entries", [])
+    created_ids = {
+        str(entry.get("id"))
+        for entry in manifest.get("synthetic_negative_entries") or ()
+        if isinstance(entry, Mapping)
+    }
+    planned_entries = []
+    for entry in manifest.get("planned_negative_synthetic_entries") or ():
+        if str(entry.get("id")) in created_ids:
+            continue
+        planned_entries.append(entry)
+    manifest["planned_negative_synthetic_entries"] = planned_entries
     manifest.setdefault("synthetic_positive_required", False)
     manifest["planned_negative_synthetic_count"] = len(
         manifest.get("planned_negative_synthetic_entries") or ()
@@ -586,6 +626,7 @@ def _materialize_entry(
     evidence: Mapping[Tuple[str, str, str], PairEvidence],
     *,
     expected_current_result: str,
+    positive_object_evidence: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     key = (
         str(raw_entry["category"]),
@@ -618,15 +659,149 @@ def _materialize_entry(
         }
     )
     if item.current_result == "EQ":
-        entry.setdefault("object_evidence_status", "not_verified")
-        entry.setdefault(
-            "object_evidence_requirement",
-            "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-        )
+        evidence_record = (positive_object_evidence or {}).get(str(entry.get("id")))
+        if evidence_record is not None:
+            _validate_positive_object_evidence_record(entry, evidence_record)
+            entry["object_evidence_status"] = "verified"
+            entry["object_evidence_ref"] = dict(evidence_record["object_evidence_ref"])
+            entry["object_evidence_summary"] = dict(evidence_record["shape_confirmation"])
+        else:
+            entry.setdefault("object_evidence_status", "not_verified")
+            entry.setdefault(
+                "object_evidence_requirement",
+                "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
+            )
     required = set(entry.get("required_reason_ids") or ())
     if required and not required.issubset(set(item.observed_reason_ids)):
         raise ValueError(f"concrete pair {key} missing required reasons {sorted(required)}")
     return entry
+
+
+def _materialize_synthetic_negative_entries(
+    synthetic_manifest: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    entries = []
+    for raw_entry in synthetic_manifest.get("synthetic_negative_entries") or ():
+        _validate_synthetic_negative_entry(raw_entry)
+        entry = dict(raw_entry)
+        entry.setdefault("category", "synthetic_negative")
+        entry.setdefault("current_result", entry.get("expected_result"))
+        entry["observed_reason_ids"] = list(entry.get("observed_reason_ids") or ())
+        entry["observed_reason_records"] = list(entry.get("observed_reason_records") or ())
+        entries.append(entry)
+    return entries
+
+
+def _load_positive_object_evidence(output_dir: Path) -> Dict[str, Dict[str, Any]]:
+    path = output_dir / "object_evidence" / "positive_object_evidence.json"
+    if not path.is_file():
+        return {}
+    manifest = _read_json(path)
+    sha256 = _sha256_file(path)
+    result: Dict[str, Dict[str, Any]] = {}
+    for entry in manifest.get("entries") or ():
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"positive object evidence entry must be an object in {path}")
+        entry_id = str(entry.get("entry_id") or entry.get("id") or "")
+        if not entry_id:
+            raise ValueError(f"positive object evidence entry missing entry_id in {path}")
+        record = dict(entry)
+        record["object_evidence_ref"] = {
+            "path": _relative_posix(path, output_dir),
+            "sha256": sha256,
+            "payload_pointer": f"/entries/{len(result)}",
+        }
+        result[entry_id] = record
+    return result
+
+
+def _validate_positive_object_evidence_record(
+    manifest_entry: Mapping[str, Any],
+    evidence_record: Mapping[str, Any],
+) -> None:
+    entry_id = str(manifest_entry.get("id") or "")
+    if evidence_record.get("status") != "verified":
+        raise ValueError(f"positive object evidence for {entry_id} is not verified")
+    for field_name in ("category", "function", "binary_pair"):
+        evidence_value = evidence_record.get(field_name)
+        if evidence_value is not None and str(evidence_value) != str(manifest_entry.get(field_name)):
+            raise ValueError(
+                f"positive object evidence for {entry_id} has mismatched {field_name}"
+            )
+    source = evidence_record.get("evidence_source")
+    if not isinstance(source, Mapping) or source.get("kind") not in {
+        "pyghidra_analysis_json",
+        "pyghidra_object_probe",
+    }:
+        raise ValueError(f"positive object evidence for {entry_id} must be PyGhidra object evidence")
+    shape = evidence_record.get("shape_confirmation")
+    if not isinstance(shape, Mapping) or not shape.get("object_facts"):
+        raise ValueError(f"positive object evidence for {entry_id} missing object facts")
+
+
+def _validate_synthetic_negative_entry(entry: Mapping[str, Any]) -> None:
+    if entry.get("artifact_status") != "created":
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must be created")
+    required_fields = (
+        "ground_truth_source",
+        "synthetic_negative_baseline_id",
+        "function",
+        "binary_pair",
+        "left_binary_id",
+        "right_binary_id",
+        "expected_result",
+        "must_not_be_equivalent",
+        "negative_case",
+        "binary_hashes",
+        "source_revision",
+        "build_flags",
+        "build_import_decompiler_settings",
+        "expected_counts",
+        "object_evidence",
+    )
+    for field_name in required_fields:
+        if not entry.get(field_name):
+            raise ValueError(f"synthetic negative entry {entry.get('id')} missing {field_name}")
+    if entry.get("must_not_be_equivalent") is not True:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} requires must_not_be_equivalent")
+    if entry.get("expected_result") != "NOT_EQ":
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must expect NOT_EQ")
+    if entry.get("negative_case") not in NEGATIVE_MINIMUM_CASES:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} has unknown negative case")
+    source = entry.get("ground_truth_source")
+    if not _ground_truth_source_is_accepted_not_eq(source):
+        raise ValueError(
+            f"synthetic negative entry {entry.get('id')} requires accepted ground_truth_source"
+        )
+
+
+def _ground_truth_source_is_accepted_not_eq(source: object) -> bool:
+    if not isinstance(source, Mapping):
+        return False
+    if source.get("classification") != "ground_truth_not_eq":
+        return False
+    if source.get("oracle_review_status") != "accepted":
+        return False
+    if source.get("expected_equivalent") is not False:
+        return False
+    required_statuses = {
+        "counterexample_replay_status": "passed",
+        "abi_storage_width_proof": "passed",
+        "return_compare_width_proof": "passed",
+        "coverage_status": "complete",
+        "sat_unsafety_status": "none",
+        "call_memory_effect_status": "supported",
+    }
+    for field_name, expected in required_statuses.items():
+        if source.get(field_name) != expected:
+            return False
+    if not source.get("ub_exclusion_rule"):
+        return False
+    if source.get("expected_equivalent") is True and not (
+        source.get("oracle_exception") is True or source.get("eq_goal_excluded") is True
+    ):
+        return False
+    return True
 
 
 def _phase1_readiness(

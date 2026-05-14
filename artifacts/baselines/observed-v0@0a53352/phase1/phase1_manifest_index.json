@@ -1,19 +1,16 @@
 {
   "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
   "baseline_id": "observed-v0@0a53352",
-  "blocking_issue_kinds": [
-    "missing_negative_minimum_cases",
-    "planned_synthetic_negative_artifacts_not_created",
-    "positive_object_evidence_not_verified"
-  ],
+  "blocking_issue_kinds": [],
   "counts": {
-    "negative": 7,
-    "planned_negative_synthetic": 2,
+    "negative": 9,
+    "planned_negative_synthetic": 0,
     "positive": 5,
     "representative": 3,
-    "synthetic": 0
+    "synthetic": 0,
+    "synthetic_negative": 2
   },
-  "created_at": "2026-05-14T09:26:41.983322+00:00",
+  "created_at": "2026-05-14T10:43:22.796880+00:00",
   "manifest_kind": "phase1_concrete_manifest_index",
   "manifest_version": 1,
   "manifests": {
@@ -22,48 +19,13 @@
     "representative": "representative_manifest.json",
     "synthetic": "synthetic_manifest.json"
   },
-  "phase1_ready": false,
+  "phase1_ready": true,
   "readiness": {
-    "blocking_issue_kinds": [
-      "missing_negative_minimum_cases",
-      "planned_synthetic_negative_artifacts_not_created",
-      "positive_object_evidence_not_verified"
-    ],
-    "blocking_issues": [
-      {
-        "kind": "missing_negative_minimum_cases",
-        "missing_cases": [
-          "call target mismatch",
-          "argument storage mismatch"
-        ],
-        "required_action": "create concrete observed or synthetic negative artifacts before semantic fixes",
-        "severity": "blocking"
-      },
-      {
-        "entries": [
-          "positive-call-chain-existing-eq",
-          "positive-recorded-call-effect-existing-eq",
-          "positive-direct-call-control",
-          "positive-no-call-control",
-          "positive-indirect-deferred-call-existing-eq"
-        ],
-        "kind": "positive_object_evidence_not_verified",
-        "required_action": "confirm positive shape with object-derived PyGhidra evidence",
-        "severity": "blocking"
-      },
-      {
-        "entries": [
-          "synthetic-negative-call-target-mismatch",
-          "synthetic-negative-argument-storage-mismatch"
-        ],
-        "kind": "planned_synthetic_negative_artifacts_not_created",
-        "required_action": "materialize planned synthetic negative artifacts and rerun manifest builder",
-        "severity": "blocking"
-      }
-    ],
-    "negative_count": 7,
-    "phase1_ready": false,
-    "planned_negative_synthetic_count": 2,
+    "blocking_issue_kinds": [],
+    "blocking_issues": [],
+    "negative_count": 9,
+    "phase1_ready": true,
+    "planned_negative_synthetic_count": 0,
     "positive_count": 5,
     "representative_count": 3,
     "synthetic_positive_required": false

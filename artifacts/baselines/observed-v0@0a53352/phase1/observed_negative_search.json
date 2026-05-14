@@ -1,0 +1,31 @@
+{
+  "accepted_ground_truth_not_eq_count": 0,
+  "audit_manifest_ref": {
+    "path": "artifacts/baselines/observed-v0@0a53352/audit/not_eq_audit_manifest.json",
+    "sha256": "b1ed936c6188eca8179d8c2524457525922493d2226e875288abac454dcf02ba"
+  },
+  "baseline_id": "observed-v0@0a53352",
+  "created_at": "2026-05-14T10:24:32.318901+00:00",
+  "eligible_observed_candidates": [],
+  "fallback_action": "materialized synthetic-negative-v0@phase1-guards for the two missing minimum negative cases",
+  "manifest_kind": "phase1_observed_missing_negative_search",
+  "manifest_version": 1,
+  "not_eq_audit_classifications": {
+    "unresolved": 72
+  },
+  "not_eq_audit_entry_count": 72,
+  "object_evidence_search_notes": [
+    "No observed pair was promoted by function name or log prose.",
+    "Top-level parameter storage and call target strings in logs are insufficient for must_not_be_equivalent without accepted oracle evidence.",
+    "The two missing negative cases are therefore supplied by synthetic-negative-v0@phase1-guards with PyGhidra object facts and replayable counterexamples."
+  ],
+  "rejection_summary": {
+    "accepted_ground_truth_not_eq_candidates": 0,
+    "reason": "observed-v0 same-source NOT_EQ entries remain audit inputs, not accepted ground truth; no observed pair can satisfy must_not_be_equivalent for these cases before accepted oracle evidence"
+  },
+  "search_basis": "machine-readable result payloads plus oracle/audit status; callsite object facts are required before a same-source observed pair can become must_not_be_equivalent",
+  "searched_negative_cases": [
+    "call target mismatch",
+    "argument storage mismatch"
+  ]
+}

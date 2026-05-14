@@ -1,105 +1,963 @@
 {
   "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
   "baseline_id": "observed-v0@0a53352",
-  "created_at": "2026-05-14T09:26:41.954117+00:00",
+  "created_at": "2026-05-14T10:43:22.767296+00:00",
   "entries": [
     {
-      "binary_pair": "B10_B11",
+      "binary_pair": "B5_B13",
       "category": "function_call",
       "current_result": "EQ",
       "expected_result": "EQ",
       "function": "fc_equiv_call_chain",
       "id": "positive-call-chain-existing-eq",
-      "left_binary_id": "B10",
-      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-      "object_evidence_status": "not_verified",
+      "left_binary_id": "B13",
+      "object_evidence_ref": {
+        "path": "object_evidence/positive_object_evidence.json",
+        "payload_pointer": "/entries/0",
+        "sha256": "d15edda4c1053952cb4021cea7717c62859d35a16f09706f755b1db49c070aaa"
+      },
+      "object_evidence_status": "verified",
+      "object_evidence_summary": {
+        "object_facts": {
+          "left": {
+            "call_count": 2,
+            "calls": [
+              {
+                "address_offset": 4831843332,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842608,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 36,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 44,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 2,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 4831843356,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842744,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16,
+                    "size": 8,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 5,
+                    "size": 8,
+                    "space": "const"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 5,
+                "target": "fc_bias"
+              }
+            ],
+            "entry_offset": 4831843252,
+            "parameters": []
+          },
+          "left_binary_id": "B13",
+          "right": {
+            "call_count": 2,
+            "calls": [
+              {
+                "address_offset": 1050924,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050644,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16392,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 0,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 1050932,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050708,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 8,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 5,
+                    "size": 8,
+                    "space": "const"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 1,
+                "target": "fc_bias"
+              }
+            ],
+            "entry_offset": 1050900,
+            "parameters": []
+          },
+          "right_binary_id": "B5"
+        },
+        "required_call_targets": [
+          "fc_add",
+          "fc_bias"
+        ],
+        "role": "call-chain existing EQ"
+      },
       "observed_reason_ids": [],
       "observed_reason_records": [],
-      "right_binary_id": "B11",
+      "right_binary_id": "B5",
       "role": "call-chain existing EQ",
       "source_artifact": {
-        "log_path": "logs/function_call/fc_equiv_call_chain/fc_equiv_call_chain_B10_B11.log",
-        "log_sha256": "b8e1bc789e38284781965e53aceb8596d9268841b1d3af796a9082bdf1cc798f",
+        "log_path": "logs/function_call/fc_equiv_call_chain/fc_equiv_call_chain_B13_B5.log",
+        "log_sha256": "e0f899234828974c6525fb7377ea28af9674d3353eac623e027b3718fc7276fa",
         "payload_pointer": "/typed_result_payloads/-1"
       }
     },
     {
-      "binary_pair": "B10_B11",
+      "binary_pair": "B5_B13",
       "category": "function_call",
       "current_result": "EQ",
       "expected_result": "EQ",
       "function": "fc_recorded_chain",
       "id": "positive-recorded-call-effect-existing-eq",
-      "left_binary_id": "B10",
-      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-      "object_evidence_status": "not_verified",
+      "left_binary_id": "B13",
+      "object_evidence_ref": {
+        "path": "object_evidence/positive_object_evidence.json",
+        "payload_pointer": "/entries/1",
+        "sha256": "d15edda4c1053952cb4021cea7717c62859d35a16f09706f755b1db49c070aaa"
+      },
+      "object_evidence_status": "verified",
+      "object_evidence_summary": {
+        "object_facts": {
+          "left": {
+            "call_count": 6,
+            "calls": [
+              {
+                "address_offset": 4831846700,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842608,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 36,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 44,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 3,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 4831846724,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831846512,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 1,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16,
+                    "size": 8,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 7,
+                "target": "fc_record"
+              },
+              {
+                "address_offset": 4831846756,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842812,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 52,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 2,
+                    "size": 8,
+                    "space": "const"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 11,
+                "target": "fc_scale"
+              },
+              {
+                "address_offset": 4831846780,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831846512,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 10,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16,
+                    "size": 8,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 15,
+                "target": "fc_record"
+              },
+              {
+                "address_offset": 4831846816,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842608,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 20,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 20,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 19,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 4831846848,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831846512,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 100,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 20,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 23,
+                "target": "fc_record"
+              }
+            ],
+            "entry_offset": 4831846612,
+            "parameters": []
+          },
+          "left_binary_id": "B13",
+          "right": {
+            "call_count": 6,
+            "calls": [
+              {
+                "address_offset": 1052548,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050644,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16392,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 0,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 1052560,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1052464,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 1,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 1,
+                "target": "fc_record"
+              },
+              {
+                "address_offset": 1052576,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050740,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16400,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 2,
+                    "size": 8,
+                    "space": "const"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 2,
+                "target": "fc_scale"
+              },
+              {
+                "address_offset": 1052588,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1052464,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 10,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 3,
+                "target": "fc_record"
+              },
+              {
+                "address_offset": 1052604,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050644,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 4,
+                "target": "fc_add"
+              },
+              {
+                "address_offset": 1052620,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1052464,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 100,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16384,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 5,
+                "target": "fc_record"
+              }
+            ],
+            "entry_offset": 1052520,
+            "parameters": []
+          },
+          "right_binary_id": "B5"
+        },
+        "required_call_targets": [
+          "fc_record"
+        ],
+        "role": "recorded call/effect existing EQ"
+      },
       "observed_reason_ids": [],
       "observed_reason_records": [],
-      "right_binary_id": "B11",
+      "right_binary_id": "B5",
       "role": "recorded call/effect existing EQ",
       "source_artifact": {
-        "log_path": "logs/function_call/fc_recorded_chain/fc_recorded_chain_B10_B11.log",
-        "log_sha256": "7957b2a183665334416de8c5cb013f34a7b934ecc79e7480ec14555e5d4e209b",
+        "log_path": "logs/function_call/fc_recorded_chain/fc_recorded_chain_B13_B5.log",
+        "log_sha256": "062c120a99954d36961e40d33256357367942bf89b7f0f2b4c733588de12d0bf",
         "payload_pointer": "/typed_result_payloads/-1"
       }
     },
     {
-      "binary_pair": "B10_B11",
+      "binary_pair": "B5_B13",
       "category": "function_call",
       "current_result": "EQ",
       "expected_result": "EQ",
       "function": "fc_guarded_call",
       "id": "positive-direct-call-control",
-      "left_binary_id": "B10",
-      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-      "object_evidence_status": "not_verified",
+      "left_binary_id": "B13",
+      "object_evidence_ref": {
+        "path": "object_evidence/positive_object_evidence.json",
+        "payload_pointer": "/entries/2",
+        "sha256": "d15edda4c1053952cb4021cea7717c62859d35a16f09706f755b1db49c070aaa"
+      },
+      "object_evidence_status": "verified",
+      "object_evidence_summary": {
+        "object_facts": {
+          "left": {
+            "call_count": 2,
+            "calls": [
+              {
+                "address_offset": 4831844316,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842676,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 0,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 75264,
+                    "size": 4,
+                    "space": "unique"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 2,
+                "target": "fc_sub"
+              },
+              {
+                "address_offset": 4831844376,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831842608,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 75264,
+                    "size": 4,
+                    "space": "unique"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 44,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 2,
+                "target": "fc_add"
+              }
+            ],
+            "entry_offset": 4831844184,
+            "parameters": []
+          },
+          "left_binary_id": "B13",
+          "right": {
+            "call_count": 2,
+            "calls": [
+              {
+                "address_offset": 1051332,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050676,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": true,
+                    "is_register": false,
+                    "offset": 0,
+                    "size": 8,
+                    "space": "const"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 441856,
+                    "size": 4,
+                    "space": "unique"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 1,
+                "target": "fc_sub"
+              },
+              {
+                "address_offset": 1051356,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1050644,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 441856,
+                    "size": 4,
+                    "space": "unique"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16392,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 1,
+                "target": "fc_add"
+              }
+            ],
+            "entry_offset": 1051264,
+            "parameters": []
+          },
+          "right_binary_id": "B5"
+        },
+        "required_call_targets": [
+          "fc_add",
+          "fc_sub"
+        ],
+        "role": "direct-call control"
+      },
       "observed_reason_ids": [],
       "observed_reason_records": [],
-      "right_binary_id": "B11",
+      "right_binary_id": "B5",
       "role": "direct-call control",
       "source_artifact": {
-        "log_path": "logs/function_call/fc_guarded_call/fc_guarded_call_B10_B11.log",
-        "log_sha256": "82e95e142374e5b3407abf3840c02adffa5caae2e41d9a4546b6fd49c37a8d19",
+        "log_path": "logs/function_call/fc_guarded_call/fc_guarded_call_B13_B5.log",
+        "log_sha256": "afd25b753e344655146831db559712315a9bbb0bb4c661e7951e66db83a82dd4",
         "payload_pointer": "/typed_result_payloads/-1"
       }
     },
     {
-      "binary_pair": "B10_B11",
+      "binary_pair": "B5_B13",
       "category": "function_call",
       "current_result": "EQ",
       "expected_result": "EQ",
       "function": "fc_equiv_direct",
       "id": "positive-no-call-control",
-      "left_binary_id": "B10",
-      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-      "object_evidence_status": "not_verified",
+      "left_binary_id": "B13",
+      "object_evidence_ref": {
+        "path": "object_evidence/positive_object_evidence.json",
+        "payload_pointer": "/entries/3",
+        "sha256": "d15edda4c1053952cb4021cea7717c62859d35a16f09706f755b1db49c070aaa"
+      },
+      "object_evidence_status": "verified",
+      "object_evidence_summary": {
+        "object_facts": {
+          "left": {
+            "call_count": 0,
+            "calls": [],
+            "entry_offset": 4831843180,
+            "parameters": []
+          },
+          "left_binary_id": "B13",
+          "right": {
+            "call_count": 0,
+            "calls": [],
+            "entry_offset": 1050864,
+            "parameters": []
+          },
+          "right_binary_id": "B5"
+        },
+        "required_call_targets": [],
+        "role": "no-call control"
+      },
       "observed_reason_ids": [],
       "observed_reason_records": [],
-      "right_binary_id": "B11",
+      "right_binary_id": "B5",
       "role": "no-call control",
       "source_artifact": {
-        "log_path": "logs/function_call/fc_equiv_direct/fc_equiv_direct_B10_B11.log",
-        "log_sha256": "c76dec330641cde170bad047cde52e1c29c4eee640ebc3a8327e461fda664909",
+        "log_path": "logs/function_call/fc_equiv_direct/fc_equiv_direct_B13_B5.log",
+        "log_sha256": "532435f93543822dd4e4af761d6b9bcadf16fe81c17547956796c98fb65f6797",
         "payload_pointer": "/typed_result_payloads/-1"
       }
     },
     {
-      "binary_pair": "B2_B13",
+      "binary_pair": "B5_B13",
       "category": "function_call",
       "current_result": "EQ",
       "expected_result": "EQ",
       "function": "fc_dispatch_indirect",
       "id": "positive-indirect-deferred-call-existing-eq",
       "left_binary_id": "B13",
-      "object_evidence_requirement": "PyGhidra/object-derived shape confirmation required before Phase 1 readiness",
-      "object_evidence_status": "not_verified",
+      "object_evidence_ref": {
+        "path": "object_evidence/positive_object_evidence.json",
+        "payload_pointer": "/entries/4",
+        "sha256": "d15edda4c1053952cb4021cea7717c62859d35a16f09706f755b1db49c070aaa"
+      },
+      "object_evidence_status": "verified",
+      "object_evidence_summary": {
+        "object_facts": {
+          "left": {
+            "call_count": 1,
+            "calls": [
+              {
+                "address_offset": 4831846476,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 4831846228,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": -40,
+                    "size": 8,
+                    "space": "stack"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 44,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 3,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 52,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 4,
+                "target": "fc_apply_indirect"
+              }
+            ],
+            "entry_offset": 4831846352,
+            "parameters": []
+          },
+          "left_binary_id": "B13",
+          "right": {
+            "call_count": 1,
+            "calls": [
+              {
+                "address_offset": 1052452,
+                "inputs": [
+                  {
+                    "index": 0,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": 1052316,
+                    "size": 8,
+                    "space": "ram"
+                  },
+                  {
+                    "index": 1,
+                    "is_constant": false,
+                    "is_register": false,
+                    "offset": -8,
+                    "size": 8,
+                    "space": "stack"
+                  },
+                  {
+                    "index": 2,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16392,
+                    "size": 4,
+                    "space": "register"
+                  },
+                  {
+                    "index": 3,
+                    "is_constant": false,
+                    "is_register": true,
+                    "offset": 16400,
+                    "size": 4,
+                    "space": "register"
+                  }
+                ],
+                "mnemonic": "CALL",
+                "seq_order": 1,
+                "target": "fc_apply_indirect"
+              }
+            ],
+            "entry_offset": 1052380,
+            "parameters": []
+          },
+          "right_binary_id": "B5"
+        },
+        "required_call_targets": [
+          "fc_apply_indirect"
+        ],
+        "role": "indirect/deferred call positive"
+      },
       "observed_reason_ids": [],
       "observed_reason_records": [],
-      "right_binary_id": "B2",
+      "right_binary_id": "B5",
       "role": "indirect/deferred call positive",
       "source_artifact": {
-        "log_path": "logs/function_call/fc_dispatch_indirect/fc_dispatch_indirect_B13_B2.log",
-        "log_sha256": "4f7c34cb9e14bd68562692d75c5c3e1c0985c5b6f483e879243f5c35b3801849",
+        "log_path": "logs/function_call/fc_dispatch_indirect/fc_dispatch_indirect_B13_B5.log",
+        "log_sha256": "80e70c31939a211fd24990dac74f2243d36fa5f0b8de894f7178dcf469c0e609",
         "payload_pointer": "/typed_result_payloads/-1"
       }
     }

@@ -1,0 +1,346 @@
+{
+  "created_at": "2026-05-14T10:24:32.295577+00:00",
+  "entries": [
+    {
+      "artifact_status": "created",
+      "binary_hashes": {
+        "S1": "99dc219f5a6f5e5ddcd17c7b60a334914aaef97a68777807037ff0d0f5671249",
+        "S2": "26ff6b2562e5e7a276d6acaf2bec5e96b1310afef97de06dbb133c9e4a97dca6"
+      },
+      "binary_pair": "S1_S2",
+      "binary_paths": {
+        "S1": "tmp/phase1_synthetic_negative_build/S1",
+        "S2": "tmp/phase1_synthetic_negative_build/S2"
+      },
+      "build_flags": [
+        "-O0",
+        "-g0",
+        "-fno-inline",
+        "-fno-builtin",
+        "-fno-ipa-sra",
+        "-fno-lto"
+      ],
+      "build_import_decompiler_settings": {
+        "analysis_options": "default auto-analysis via PyGhidra",
+        "compiler_spec_id": "gcc",
+        "decompiler_timeout_seconds": 60,
+        "ghidra_version": "12.0.1_PUBLIC",
+        "language_id": "x86:LE:64:default",
+        "loader": "ELF"
+      },
+      "category": "synthetic_negative",
+      "compiler_metadata": {
+        "compiler": "gcc",
+        "host_arch": "x86_64",
+        "version": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0"
+      },
+      "current_result": "NOT_EQ",
+      "expected_counts": {
+        "final_result": {
+          "NOT_EQ": 1
+        },
+        "validation_unknown_unit": {}
+      },
+      "expected_result": "NOT_EQ",
+      "function": "syn_call_target_mismatch",
+      "ground_truth_source": {
+        "abi_storage_width_proof": "passed",
+        "call_memory_effect_status": "supported",
+        "classification": "ground_truth_not_eq",
+        "counterexample": {
+          "a": 7,
+          "b": 5,
+          "left_return": 12,
+          "right_return": 2
+        },
+        "counterexample_replay_status": "passed",
+        "coverage_status": "complete",
+        "eq_goal_excluded": true,
+        "expected_equivalent": false,
+        "oracle_exception": false,
+        "oracle_review_status": "accepted",
+        "oracle_source": "synthetic_negative_source_pair",
+        "return_compare_width_proof": "passed",
+        "sat_unsafety_status": "none",
+        "ub_exclusion_rule": "defined integer inputs only; no signed overflow in listed replay input"
+      },
+      "id": "synthetic-negative-call-target-mismatch",
+      "left_binary_id": "S1",
+      "must_not_be_equivalent": true,
+      "negative_case": "call target mismatch",
+      "object_evidence": {
+        "evidence_ref": {
+          "path": "tmp/phase1_synthetic_negative_pcode_object_facts.json",
+          "sha256": "5e21d891185311aac076b0880da7b31960f289d4fad339cb2a9fd09b2a3baf22",
+          "tool": "Ghidra DecompInterface HighFunction PcodeOp iterator"
+        },
+        "evidence_source": "pyghidra_object_probe",
+        "object_facts": {
+          "callee_identity_policy": "internal function entry + signature metadata",
+          "left_call_target": "syn_target_add",
+          "left_pcode_calls": [
+            {
+              "address_offset": 1053043,
+              "inputs": [
+                {
+                  "index": 0,
+                  "is_constant": false,
+                  "is_register": false,
+                  "offset": 1052969,
+                  "register_name": null,
+                  "size": 8,
+                  "space": "ram"
+                },
+                {
+                  "index": 1,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 56,
+                  "register_name": "EDI",
+                  "size": 4,
+                  "space": "register"
+                },
+                {
+                  "index": 2,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 48,
+                  "register_name": "ESI",
+                  "size": 4,
+                  "space": "register"
+                }
+              ],
+              "mnemonic": "CALL",
+              "seq_order": 0,
+              "target": "syn_target_add"
+            }
+          ],
+          "mismatch_kind": "direct_call_target_identity",
+          "right_call_target": "syn_target_sub",
+          "right_pcode_calls": [
+            {
+              "address_offset": 1053043,
+              "inputs": [
+                {
+                  "index": 0,
+                  "is_constant": false,
+                  "is_register": false,
+                  "offset": 1052993,
+                  "register_name": null,
+                  "size": 8,
+                  "space": "ram"
+                },
+                {
+                  "index": 1,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 56,
+                  "register_name": "EDI",
+                  "size": 4,
+                  "space": "register"
+                },
+                {
+                  "index": 2,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 48,
+                  "register_name": "ESI",
+                  "size": 4,
+                  "space": "register"
+                }
+              ],
+              "mnemonic": "CALL",
+              "seq_order": 0,
+              "target": "syn_target_sub"
+            }
+          ]
+        }
+      },
+      "right_binary_id": "S2",
+      "source_revision": {
+        "git_head": "f04d610ad02780becfe415f812557b94f6598898",
+        "kind": "embedded_source_pair",
+        "left_source_sha256": "23ccbb3cac7ee1983c30edd50cfecb24a1edbecbaaa537b52d0bf6e2df738801",
+        "left_source_text": "#include <stdint.h>\n__attribute__((noinline)) int syn_target_add(int a, int b) { return a + b; }\n__attribute__((noinline)) int syn_target_sub(int a, int b) { return a - b; }\n__attribute__((noinline)) int syn_call_target_mismatch(int a, int b) { return syn_target_add(a, b); }\nint main(void) { return syn_call_target_mismatch(7, 5); }\n",
+        "right_source_sha256": "9e6ec1c0aefa085713d1bcce611d141b79f999c84f946bedecf2b4913873ea15",
+        "right_source_text": "#include <stdint.h>\n__attribute__((noinline)) int syn_target_add(int a, int b) { return a + b; }\n__attribute__((noinline)) int syn_target_sub(int a, int b) { return a - b; }\n__attribute__((noinline)) int syn_call_target_mismatch(int a, int b) { return syn_target_sub(a, b); }\nint main(void) { return syn_call_target_mismatch(7, 5); }\n"
+      },
+      "synthetic_negative_baseline_id": "synthetic-negative-v0@phase1-guards"
+    },
+    {
+      "artifact_status": "created",
+      "binary_hashes": {
+        "S3": "bc7474d6d70824a1f90f0fba9944de5573c2e51654e5bb291668bdf8b1e489cf",
+        "S4": "2ebeb2b17a9b6c3e073957b997db940ece578077369305f5cb532b6acf9a7060"
+      },
+      "binary_pair": "S3_S4",
+      "binary_paths": {
+        "S3": "tmp/phase1_synthetic_negative_build/S3",
+        "S4": "tmp/phase1_synthetic_negative_build/S4"
+      },
+      "build_flags": [
+        "-O0",
+        "-g0",
+        "-fno-inline",
+        "-fno-builtin",
+        "-fno-ipa-sra",
+        "-fno-lto"
+      ],
+      "build_import_decompiler_settings": {
+        "analysis_options": "default auto-analysis via PyGhidra",
+        "compiler_spec_id": "gcc",
+        "decompiler_timeout_seconds": 60,
+        "ghidra_version": "12.0.1_PUBLIC",
+        "language_id": "x86:LE:64:default",
+        "loader": "ELF"
+      },
+      "category": "synthetic_negative",
+      "compiler_metadata": {
+        "compiler": "gcc",
+        "host_arch": "x86_64",
+        "version": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0"
+      },
+      "current_result": "NOT_EQ",
+      "expected_counts": {
+        "final_result": {
+          "NOT_EQ": 1
+        },
+        "validation_unknown_unit": {}
+      },
+      "expected_result": "NOT_EQ",
+      "function": "syn_argument_storage_mismatch",
+      "ground_truth_source": {
+        "abi_storage_width_proof": "passed",
+        "call_memory_effect_status": "supported",
+        "classification": "ground_truth_not_eq",
+        "counterexample": {
+          "a": 1,
+          "b": 2,
+          "left_return": 1,
+          "right_return": 2
+        },
+        "counterexample_replay_status": "passed",
+        "coverage_status": "complete",
+        "eq_goal_excluded": true,
+        "expected_equivalent": false,
+        "oracle_exception": false,
+        "oracle_review_status": "accepted",
+        "oracle_source": "synthetic_negative_source_pair",
+        "return_compare_width_proof": "passed",
+        "sat_unsafety_status": "none",
+        "ub_exclusion_rule": "defined integer inputs only; no signed overflow in listed replay input"
+      },
+      "id": "synthetic-negative-argument-storage-mismatch",
+      "left_binary_id": "S3",
+      "must_not_be_equivalent": true,
+      "negative_case": "argument storage mismatch",
+      "object_evidence": {
+        "evidence_ref": {
+          "path": "tmp/phase1_synthetic_negative_pcode_object_facts.json",
+          "sha256": "5e21d891185311aac076b0880da7b31960f289d4fad339cb2a9fd09b2a3baf22",
+          "tool": "Ghidra DecompInterface HighFunction PcodeOp iterator"
+        },
+        "evidence_source": "pyghidra_object_probe",
+        "object_facts": {
+          "call_target": "syn_first_arg",
+          "callee_identity_policy": "internal function entry + signature metadata",
+          "left_argument_ordinal_0_source": "parameter a",
+          "left_pcode_calls": [
+            {
+              "address_offset": 1053016,
+              "inputs": [
+                {
+                  "index": 0,
+                  "is_constant": false,
+                  "is_register": false,
+                  "offset": 1052969,
+                  "register_name": null,
+                  "size": 8,
+                  "space": "ram"
+                },
+                {
+                  "index": 1,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 56,
+                  "register_name": "EDI",
+                  "size": 4,
+                  "space": "register"
+                },
+                {
+                  "index": 2,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 48,
+                  "register_name": "ESI",
+                  "size": 4,
+                  "space": "register"
+                }
+              ],
+              "mnemonic": "CALL",
+              "seq_order": 0,
+              "target": "syn_first_arg"
+            }
+          ],
+          "mismatch_kind": "call_argument_storage_identity",
+          "right_argument_ordinal_0_source": "parameter b",
+          "right_pcode_calls": [
+            {
+              "address_offset": 1053016,
+              "inputs": [
+                {
+                  "index": 0,
+                  "is_constant": false,
+                  "is_register": false,
+                  "offset": 1052969,
+                  "register_name": null,
+                  "size": 8,
+                  "space": "ram"
+                },
+                {
+                  "index": 1,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 48,
+                  "register_name": "ESI",
+                  "size": 4,
+                  "space": "register"
+                },
+                {
+                  "index": 2,
+                  "is_constant": false,
+                  "is_register": true,
+                  "offset": 56,
+                  "register_name": "EDI",
+                  "size": 4,
+                  "space": "register"
+                }
+              ],
+              "mnemonic": "CALL",
+              "seq_order": 0,
+              "target": "syn_first_arg"
+            }
+          ]
+        }
+      },
+      "right_binary_id": "S4",
+      "source_revision": {
+        "git_head": "f04d610ad02780becfe415f812557b94f6598898",
+        "kind": "embedded_source_pair",
+        "left_source_sha256": "29492d1a35d0f6cf8ce33e3c53df68c6dbc3e4cc237b5dbbaa8601fdcd9e482b",
+        "left_source_text": "#include <stdint.h>\n__attribute__((noinline)) int syn_first_arg(int x, int y) { (void)y; return x; }\n__attribute__((noinline)) int syn_argument_storage_mismatch(int a, int b) { return syn_first_arg(a, b); }\nint main(void) { return syn_argument_storage_mismatch(1, 2); }\n",
+        "right_source_sha256": "0b16b10f88cd7ae1e82c269ef4cfc2ceb4ace1685303c496cec31fe03f4f99e6",
+        "right_source_text": "#include <stdint.h>\n__attribute__((noinline)) int syn_first_arg(int x, int y) { (void)y; return x; }\n__attribute__((noinline)) int syn_argument_storage_mismatch(int a, int b) { return syn_first_arg(b, a); }\nint main(void) { return syn_argument_storage_mismatch(1, 2); }\n"
+      },
+      "synthetic_negative_baseline_id": "synthetic-negative-v0@phase1-guards"
+    }
+  ],
+  "manifest_kind": "phase1_synthetic_negative_artifact",
+  "manifest_version": 1,
+  "source_revision": {
+    "dirty_state_inherited_from_workspace": true,
+    "git_head": "f04d610ad02780becfe415f812557b94f6598898"
+  },
+  "storage_policy": "metadata_committed; generated binaries are local external artifacts under tmp/phase1_synthetic_negative_build",
+  "synthetic_negative_baseline_id": "synthetic-negative-v0@phase1-guards"
+}
