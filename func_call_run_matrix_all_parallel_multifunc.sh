@@ -5,38 +5,68 @@
 # ------------------------------------------------------------
 
 # ---------------------- 設定 ----------------------
-# 対象関数を配列で指定
-TARGET_FUNCS=(
-    # "fc_wrap_add_then_bias"
-    # "fc_wrap_scaled_delta"
-    # "fc_equiv_direct"
-    # "fc_equiv_call_chain"
-    # "fc_equiv_two_stage"
-    # "fc_nonequiv_near_miss"
-    # "fc_select_simple"
-    # "fc_branch_chain"
-    # "fc_guarded_call"
-    # "fc_long_divmod_mix"
-    # "fc_long_branch_dispatch"
-    # "fc_widen_then_bias"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+CONFIGURED_TARGET_FUNCS=(
     "fc_read_after_void"
-    # "fc_recursive_sum"
-    # "fc_is_even"
-    # "fc_is_odd"
-    #"fc_dispatch_indirect"
-    #"fc_apply_indirect"
-    #"fc_recorded_chain"
-    #"fc_recorded_branch"
-    # 必要に応じて追加
 )
 
-OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/function_call_test"
-BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/function_call_test"
+FULL20_TARGET_FUNCS=(
+    "fc_wrap_add_then_bias"
+    "fc_wrap_scaled_delta"
+    "fc_equiv_direct"
+    "fc_equiv_call_chain"
+    "fc_equiv_two_stage"
+    "fc_nonequiv_near_miss"
+    "fc_select_simple"
+    "fc_branch_chain"
+    "fc_guarded_call"
+    "fc_long_divmod_mix"
+    "fc_long_branch_dispatch"
+    "fc_widen_then_bias"
+    "fc_read_after_void"
+    "fc_recursive_sum"
+    "fc_is_even"
+    "fc_is_odd"
+    "fc_dispatch_indirect"
+    "fc_apply_indirect"
+    "fc_recorded_chain"
+    "fc_recorded_branch"
+)
+
+PHASE2_TARGET_FUNCS=(
+    "fc_apply_indirect"
+    "fc_dispatch_indirect"
+    "fc_recursive_sum"
+)
+
+FUNCTION_CALL_TARGET_SET=${FUNCTION_CALL_TARGET_SET:-configured}
+case "$FUNCTION_CALL_TARGET_SET" in
+    configured)
+        TARGET_FUNCS=("${CONFIGURED_TARGET_FUNCS[@]}")
+        ;;
+    full20|full|all)
+        TARGET_FUNCS=("${FULL20_TARGET_FUNCS[@]}")
+        ;;
+    phase2|equivalence_blocking_unsafety)
+        TARGET_FUNCS=("${PHASE2_TARGET_FUNCS[@]}")
+        ;;
+    *)
+        IFS=',' read -r -a TARGET_FUNCS <<< "$FUNCTION_CALL_TARGET_SET"
+        ;;
+esac
+
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/equivalence_all/function_call_test"}
+BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/cate1/function_call_test"}
+PYTHON_BIN=${PYTHON_BIN:-python3}
 PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
+VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
+RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-"${TMPDIR:-/tmp}/ghidra-equivalence-function-call.$$"}
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -74,9 +104,7 @@ declare -A BINARY_MAP=(
     # [B24]="function_call_test-x86_64-gcc-O3"
 )
 
-IDS=(${!BINARY_MAP[@]})
-IFS=$'\n' IDS=($(sort <<<"${IDS[*]}"))
-unset IFS
+mapfile -t IDS < <(printf '%s\n' "${!BINARY_MAP[@]}" | sort)
 
 TOTAL_PAIRS=$(( ${#IDS[@]} * (${#IDS[@]} - 1) / 2 ))
 
@@ -104,9 +132,15 @@ echo "============================================================"
 echo "  Equivalence Check Script (Multi-function)"
 echo "============================================================"
 echo "Target functions: ${TARGET_FUNCS[*]}"
+echo "Target function set: $FUNCTION_CALL_TARGET_SET"
 echo "Number of functions: ${#TARGET_FUNCS[@]}"
 echo "Pairs per function: $TOTAL_PAIRS"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Python: $PYTHON_BIN"
+echo "Output base dir: $OUTPUT_BASE_DIR"
+echo "Binary base path: $BASE_PATH"
+echo "Per-pair TMPDIR root: $RUNNER_TMP_ROOT"
+echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
@@ -125,7 +159,30 @@ run_pair() {
     local OUTPUT_DIR="$8"
     local LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
 
-    python3 -m scripts.function_tracer_pcode.cli.main \
+    if [[ "$VALIDATION_SKIP_COMPLETED" != "0" && -f "$LOG_FILE" ]] \
+        && grep -q "^=== EQUIVALENCE_RESULT_JSON_END ===" "$LOG_FILE"; then
+        local skipped_status
+        if grep -q "^Result: EQUIVALENT" "$LOG_FILE"; then
+            skipped_status="EQUIVALENT ✓"
+        elif grep -q "^Result: NOT EQUIVALENT" "$LOG_FILE"; then
+            skipped_status="NOT EQUIVALENT ✗"
+        elif grep -q "^Result: ERROR" "$LOG_FILE"; then
+            skipped_status="ERROR !"
+        elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
+            skipped_status="TIMEOUT"
+        elif grep -q "^Result: UNKNOWN" "$LOG_FILE"; then
+            skipped_status="UNKNOWN"
+        else
+            skipped_status="INCOMPLETE"
+        fi
+        echo "[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $skipped_status (skipped)"
+        return 0
+    fi
+
+    local PAIR_TMPDIR="${RUNNER_TMP_ROOT}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}"
+    mkdir -p "$PAIR_TMPDIR"
+
+    TMPDIR="$PAIR_TMPDIR" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
         -f "$TARGET_FUNC" -d --emit-result-json \
         > "$LOG_FILE" 2>&1
@@ -152,20 +209,21 @@ run_pair() {
 }
 
 export -f run_pair
-export BASE_PATH
+export BASE_PATH PYTHON_BIN RUNNER_TMP_ROOT VALIDATION_SKIP_COMPLETED
 
 write_summary_file() {
     local output_file="$1"
     shift
     local tmp_file
     tmp_file="$(mktemp "${output_file}.tmp.XXXXXX")" || return 1
-    if "$@" > "$tmp_file"; then
+    "$@" > "$tmp_file"
+    local status=$?
+    if (( status == 0 )); then
         tee "$output_file" < "$tmp_file"
         local tee_status=$?
         rm -f "$tmp_file"
         return "$tee_status"
     fi
-    local status=$?
     rm -f "$tmp_file"
     echo "Error: summary generation failed for $output_file (exit=$status); leaving existing summary unchanged." >&2
     return "$status"

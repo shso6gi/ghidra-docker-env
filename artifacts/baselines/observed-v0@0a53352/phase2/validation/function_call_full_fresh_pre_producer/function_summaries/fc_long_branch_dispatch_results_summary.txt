@@ -1,0 +1,158 @@
+--- Results for fc_long_branch_dispatch ---
+  Total pairs     : 120
+  Equivalent     : 56
+  Not equivalent : 0
+  Error          : 0
+  Unknown        : 0
+  Timeout        : 64
+  Incomplete     : 0
+
+  TIMEOUT pairs:
+    - B1 ↔ B10
+    - B1 ↔ B11
+    - B1 ↔ B12
+    - B1 ↔ B13
+    - B1 ↔ B14
+    - B1 ↔ B15
+    - B1 ↔ B16
+    - B1 ↔ B9
+    - B2 ↔ B10
+    - B2 ↔ B11
+    - B2 ↔ B12
+    - B2 ↔ B13
+    - B2 ↔ B14
+    - B2 ↔ B15
+    - B2 ↔ B16
+    - B2 ↔ B9
+    - B3 ↔ B10
+    - B3 ↔ B11
+    - B3 ↔ B12
+    - B3 ↔ B13
+    - B3 ↔ B14
+    - B3 ↔ B15
+    - B3 ↔ B16
+    - B3 ↔ B9
+    - B4 ↔ B10
+    - B4 ↔ B11
+    - B4 ↔ B12
+    - B4 ↔ B13
+    - B4 ↔ B14
+    - B4 ↔ B15
+    - B4 ↔ B16
+    - B4 ↔ B9
+    - B5 ↔ B10
+    - B5 ↔ B11
+    - B5 ↔ B12
+    - B5 ↔ B13
+    - B5 ↔ B14
+    - B5 ↔ B15
+    - B5 ↔ B16
+    - B5 ↔ B9
+    - B6 ↔ B10
+    - B6 ↔ B11
+    - B6 ↔ B12
+    - B6 ↔ B13
+    - B6 ↔ B14
+    - B6 ↔ B15
+    - B6 ↔ B16
+    - B6 ↔ B9
+    - B7 ↔ B10
+    - B7 ↔ B11
+    - B7 ↔ B12
+    - B7 ↔ B13
+    - B7 ↔ B14
+    - B7 ↔ B15
+    - B7 ↔ B16
+    - B7 ↔ B9
+    - B8 ↔ B10
+    - B8 ↔ B11
+    - B8 ↔ B12
+    - B8 ↔ B13
+    - B8 ↔ B14
+    - B8 ↔ B15
+    - B8 ↔ B16
+    - B8 ↔ B9
+
+  UNKNOWN validation summary:
+    Total results : 120
+    Unknown results: 64
+    Unknown units  : 64
+    Final results:
+      - EQUIVALENT: 56
+      - UNKNOWN: 64
+    Validation UNKNOWN unit tuples:
+      - ('validation_unknown_unit', 'solver_unknown_timeout', 'retryable', 'query', 'solver_retry_or_normalization', 'solver_timeout_retry', '<missing>'): 64
+    Reason record tuples:
+      - ('reason_record', 'solver_unknown_timeout', 'retryable', 'query', 'solver_retry_or_normalization', 'solver_timeout_retry', '<missing>'): 64
+    Proof action tuples:
+      - ('proof_action', 'solver_unknown_timeout', 'retryable', 'query', 'solver_retry_or_normalization', 'solver_timeout_retry', 'planned'): 64
+    UNKNOWN by reason:
+      - solver_unknown_timeout: 64
+    UNKNOWN by decision_effect:
+      - retryable: 64
+    UNKNOWN by reason_scope:
+      - query: 64
+    Proof backlog by reason:
+      (none)
+    Proof backlog by proof_kind:
+      (none)
+    Proof backlog by recovery_action:
+      (none)
+    Proof backlog by action_status:
+      (none)
+    Operational UNKNOWN by reason:
+      - solver_unknown_timeout: 64
+    Validation UNKNOWN unit / reason record correspondence:
+      - proof_action_expansion: (proof_action, solver_unknown_timeout, retryable, query, solver_retry_or_normalization, solver_timeout_retry, planned) (validation_unknown_unit=0, reason_record=0, proof_action=64)
+
+  UNKNOWN validation before/after delta:
+    Unknown results delta: 0
+    Unknown units delta  : 0
+    Final results delta:
+      (none)
+    Validation UNKNOWN unit tuple delta:
+      (none)
+    Reason record tuple delta:
+      (none)
+    Proof action tuple delta:
+      (none)
+    UNKNOWN by reason delta:
+      (none)
+    UNKNOWN by decision_effect delta:
+      (none)
+    UNKNOWN by reason_scope delta:
+      (none)
+    Proof backlog by reason delta:
+      (none)
+    Proof backlog by proof_kind delta:
+      (none)
+    Proof backlog by recovery_action delta:
+      (none)
+    Proof backlog by action_status delta:
+      (none)
+    Operational UNKNOWN by reason delta:
+      (none)
+    Operational UNKNOWN by class delta:
+      (none)
+
+  Canonical baseline comparison:
+    Total results delta      : 0
+    UNKNOWN final result delta: 0
+    TIMEOUT final result delta: 0
+    Final result count delta:
+      ok
+    Timeout class tuple delta:
+      ok
+    Validation UNKNOWN unit tuple delta:
+      ok
+    Reason record tuple delta:
+      ok
+    Proof action tuple delta:
+      ok
+    Pair result tuple delta:
+      ok
+    Missing pair identities:
+      ok
+    Added pair identities:
+      ok
+

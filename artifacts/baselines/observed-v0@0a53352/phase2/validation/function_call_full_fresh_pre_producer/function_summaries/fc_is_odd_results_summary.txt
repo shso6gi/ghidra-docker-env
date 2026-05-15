@@ -1,0 +1,258 @@
+--- Results for fc_is_odd ---
+  Total pairs     : 120
+  Equivalent     : 0
+  Not equivalent : 0
+  Error          : 0
+  Unknown        : 120
+  Timeout        : 0
+  Incomplete     : 0
+
+  UNKNOWN pairs:
+    - B1 ↔ B10
+    - B1 ↔ B11
+    - B1 ↔ B12
+    - B1 ↔ B13
+    - B1 ↔ B14
+    - B1 ↔ B15
+    - B1 ↔ B16
+    - B1 ↔ B2
+    - B1 ↔ B3
+    - B1 ↔ B4
+    - B1 ↔ B5
+    - B1 ↔ B6
+    - B1 ↔ B7
+    - B1 ↔ B8
+    - B1 ↔ B9
+    - B10 ↔ B11
+    - B10 ↔ B12
+    - B10 ↔ B13
+    - B10 ↔ B14
+    - B10 ↔ B15
+    - B10 ↔ B16
+    - B11 ↔ B12
+    - B11 ↔ B13
+    - B11 ↔ B14
+    - B11 ↔ B15
+    - B11 ↔ B16
+    - B12 ↔ B13
+    - B12 ↔ B14
+    - B12 ↔ B15
+    - B12 ↔ B16
+    - B13 ↔ B14
+    - B13 ↔ B15
+    - B13 ↔ B16
+    - B14 ↔ B15
+    - B14 ↔ B16
+    - B15 ↔ B16
+    - B2 ↔ B10
+    - B2 ↔ B11
+    - B2 ↔ B12
+    - B2 ↔ B13
+    - B2 ↔ B14
+    - B2 ↔ B15
+    - B2 ↔ B16
+    - B2 ↔ B3
+    - B2 ↔ B4
+    - B2 ↔ B5
+    - B2 ↔ B6
+    - B2 ↔ B7
+    - B2 ↔ B8
+    - B2 ↔ B9
+    - B3 ↔ B10
+    - B3 ↔ B11
+    - B3 ↔ B12
+    - B3 ↔ B13
+    - B3 ↔ B14
+    - B3 ↔ B15
+    - B3 ↔ B16
+    - B3 ↔ B4
+    - B3 ↔ B5
+    - B3 ↔ B6
+    - B3 ↔ B7
+    - B3 ↔ B8
+    - B3 ↔ B9
+    - B4 ↔ B10
+    - B4 ↔ B11
+    - B4 ↔ B12
+    - B4 ↔ B13
+    - B4 ↔ B14
+    - B4 ↔ B15
+    - B4 ↔ B16
+    - B4 ↔ B5
+    - B4 ↔ B6
+    - B4 ↔ B7
+    - B4 ↔ B8
+    - B4 ↔ B9
+    - B5 ↔ B10
+    - B5 ↔ B11
+    - B5 ↔ B12
+    - B5 ↔ B13
+    - B5 ↔ B14
+    - B5 ↔ B15
+    - B5 ↔ B16
+    - B5 ↔ B6
+    - B5 ↔ B7
+    - B5 ↔ B8
+    - B5 ↔ B9
+    - B6 ↔ B10
+    - B6 ↔ B11
+    - B6 ↔ B12
+    - B6 ↔ B13
+    - B6 ↔ B14
+    - B6 ↔ B15
+    - B6 ↔ B16
+    - B6 ↔ B7
+    - B6 ↔ B8
+    - B6 ↔ B9
+    - B7 ↔ B10
+    - B7 ↔ B11
+    - B7 ↔ B12
+    - B7 ↔ B13
+    - B7 ↔ B14
+    - B7 ↔ B15
+    - B7 ↔ B16
+    - B7 ↔ B8
+    - B7 ↔ B9
+    - B8 ↔ B10
+    - B8 ↔ B11
+    - B8 ↔ B12
+    - B8 ↔ B13
+    - B8 ↔ B14
+    - B8 ↔ B15
+    - B8 ↔ B16
+    - B8 ↔ B9
+    - B9 ↔ B10
+    - B9 ↔ B11
+    - B9 ↔ B12
+    - B9 ↔ B13
+    - B9 ↔ B14
+    - B9 ↔ B15
+    - B9 ↔ B16
+
+  UNKNOWN validation summary:
+    Total results : 120
+    Unknown results: 120
+    Unknown units  : 832
+    Final results:
+      - UNKNOWN: 120
+    Validation UNKNOWN unit tuples:
+      - ('validation_unknown_unit', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', '<missing>', '<missing>'): 14
+      - ('validation_unknown_unit', 'return_width_bridge_missing', 'blocks_equivalence', 'query', 'abi_relation_high_bit_proof', '<missing>', '<missing>'): 191
+      - ('validation_unknown_unit', 'sat_unsafety', 'blocks_disequivalence', 'pair', 'none', '<missing>', '<missing>'): 20
+      - ('validation_unknown_unit', 'unresolved_expression', 'blocks_decision', 'expression', 'none', '<missing>', '<missing>'): 607
+    Reason record tuples:
+      - ('reason_record', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'call_effect_summary_proof', 'object_evidence_collected', 'pending_proof'): 12
+      - ('reason_record', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', '<missing>', '<missing>'): 23
+      - ('reason_record', 'return_coverage_inconclusive', 'blocks_decision', 'function', 'return_coverage_completion', 'return_coverage_smt_disambiguation', '<missing>'): 3
+      - ('reason_record', 'return_width_bridge_missing', 'blocks_equivalence', 'query', 'abi_relation_high_bit_proof', '<missing>', '<missing>'): 191
+      - ('reason_record', 'sat_unsafety', 'blocks_disequivalence', 'pair', 'none', '<missing>', '<missing>'): 20
+      - ('reason_record', 'unresolved_expression', 'blocks_decision', 'expression', 'none', '<missing>', '<missing>'): 607
+    Proof action tuples:
+      - ('proof_action', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'call_effect_summary_proof', 'object_evidence_collected', 'pending_proof'): 12
+      - ('proof_action', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', 'return_guard_coverage', 'planned'): 23
+      - ('proof_action', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', 'return_partition_extraction', 'planned'): 23
+      - ('proof_action', 'return_coverage_inconclusive', 'blocks_decision', 'function', 'return_coverage_completion', 'return_coverage_smt_disambiguation', 'planned'): 3
+      - ('proof_action', 'return_width_bridge_missing', 'blocks_equivalence', 'query', 'abi_relation_proof', 'abi_relation', 'planned'): 191
+      - ('proof_action', 'return_width_bridge_missing', 'blocks_equivalence', 'query', 'high_bit_proof', 'high_bit_relation', 'planned'): 191
+    UNKNOWN by reason:
+      - return_coverage_gap: 14
+      - return_width_bridge_missing: 191
+      - sat_unsafety: 20
+      - unresolved_expression: 607
+    UNKNOWN by decision_effect:
+      - blocks_decision: 607
+      - blocks_disequivalence: 20
+      - blocks_equivalence: 205
+    UNKNOWN by reason_scope:
+      - expression: 607
+      - function: 14
+      - pair: 20
+      - query: 191
+    Proof backlog by reason:
+      - return_coverage_gap: 14
+      - return_width_bridge_missing: 191
+    Proof backlog by proof_kind:
+      - abi_relation_proof: 191
+      - high_bit_proof: 191
+      - return_coverage_completion: 28
+    Proof backlog by recovery_action:
+      - return_coverage_gap | return_coverage_completion | return_guard_coverage | planned: 14
+      - return_coverage_gap | return_coverage_completion | return_partition_extraction | planned: 14
+      - return_width_bridge_missing | abi_relation_proof | abi_relation | planned: 191
+      - return_width_bridge_missing | high_bit_proof | high_bit_relation | planned: 191
+    Proof backlog by action_status:
+      - planned: 410
+    Operational UNKNOWN by reason:
+      - sat_unsafety: 20
+      - unresolved_expression: 607
+    Validation UNKNOWN unit / reason record correspondence:
+      - aggregation_difference: (reason_record, equivalence_blocking_unsafety, blocks_equivalence, function, call_effect_summary_proof, object_evidence_collected, pending_proof) (validation_unknown_unit=0, reason_record=12, proof_action=12)
+      - aggregation_difference: (reason_record, return_coverage_gap, blocks_equivalence, function, return_coverage_completion, <missing>, <missing>) (validation_unknown_unit=14, reason_record=23, proof_action=0)
+      - aggregation_difference: (reason_record, return_coverage_inconclusive, blocks_decision, function, return_coverage_completion, return_coverage_smt_disambiguation, <missing>) (validation_unknown_unit=0, reason_record=3, proof_action=0)
+      - proof_action_expansion: (proof_action, equivalence_blocking_unsafety, blocks_equivalence, function, call_effect_summary_proof, object_evidence_collected, pending_proof) (validation_unknown_unit=0, reason_record=12, proof_action=12)
+      - proof_action_expansion: (proof_action, return_coverage_gap, blocks_equivalence, function, return_coverage_completion, return_guard_coverage, planned) (validation_unknown_unit=0, reason_record=0, proof_action=23)
+      - proof_action_expansion: (proof_action, return_coverage_gap, blocks_equivalence, function, return_coverage_completion, return_partition_extraction, planned) (validation_unknown_unit=0, reason_record=0, proof_action=23)
+      - proof_action_expansion: (proof_action, return_coverage_inconclusive, blocks_decision, function, return_coverage_completion, return_coverage_smt_disambiguation, planned) (validation_unknown_unit=0, reason_record=0, proof_action=3)
+      - proof_action_expansion: (proof_action, return_width_bridge_missing, blocks_equivalence, query, abi_relation_proof, abi_relation, planned) (validation_unknown_unit=0, reason_record=0, proof_action=191)
+      - proof_action_expansion: (proof_action, return_width_bridge_missing, blocks_equivalence, query, high_bit_proof, high_bit_relation, planned) (validation_unknown_unit=0, reason_record=0, proof_action=191)
+
+  UNKNOWN validation before/after delta:
+    Unknown results delta: 0
+    Unknown units delta  : 0
+    Final results delta:
+      (none)
+    Validation UNKNOWN unit tuple delta:
+      - ('validation_unknown_unit', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', '<missing>', '<missing>'): 1
+      - ('validation_unknown_unit', 'return_coverage_inconclusive', 'blocks_decision', 'function', 'return_coverage_completion', 'return_coverage_smt_disambiguation', '<missing>'): -1
+    Reason record tuple delta:
+      - ('reason_record', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'call_effect_summary_proof', 'object_evidence_collected', 'pending_proof'): 12
+      - ('reason_record', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'none', '<missing>', '<missing>'): -12
+    Proof action tuple delta:
+      - ('proof_action', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'call_effect_summary_proof', 'object_evidence_collected', 'pending_proof'): 12
+    UNKNOWN by reason delta:
+      - return_coverage_gap: 1
+      - return_coverage_inconclusive: -1
+    UNKNOWN by decision_effect delta:
+      - blocks_decision: -1
+      - blocks_equivalence: 1
+    UNKNOWN by reason_scope delta:
+      (none)
+    Proof backlog by reason delta:
+      - return_coverage_gap: 1
+      - return_coverage_inconclusive: -1
+    Proof backlog by proof_kind delta:
+      - return_coverage_completion: 1
+    Proof backlog by recovery_action delta:
+      - return_coverage_gap | return_coverage_completion | return_guard_coverage | planned: 1
+      - return_coverage_gap | return_coverage_completion | return_partition_extraction | planned: 1
+      - return_coverage_inconclusive | return_coverage_completion | return_coverage_smt_disambiguation | planned: -1
+    Proof backlog by action_status delta:
+      - planned: 1
+    Operational UNKNOWN by reason delta:
+      (none)
+    Operational UNKNOWN by class delta:
+      (none)
+
+  Canonical baseline comparison:
+    Total results delta      : 0
+    UNKNOWN final result delta: 0
+    TIMEOUT final result delta: 0
+    Final result count delta:
+      ok
+    Timeout class tuple delta:
+      ok
+    Validation UNKNOWN unit tuple delta:
+      - validation_unknown_unit | return_coverage_gap | blocks_equivalence | function | return_coverage_completion | <missing> | <missing>: +1
+      - validation_unknown_unit | return_coverage_inconclusive | blocks_decision | function | return_coverage_completion | return_coverage_smt_disambiguation | <missing>: -1
+    Reason record tuple delta:
+      - reason_record | equivalence_blocking_unsafety | blocks_equivalence | function | call_effect_summary_proof | object_evidence_collected | pending_proof: +12
+      - reason_record | equivalence_blocking_unsafety | blocks_equivalence | function | none | <missing> | <missing>: -12
+    Proof action tuple delta:
+      - proof_action | equivalence_blocking_unsafety | blocks_equivalence | function | call_effect_summary_proof | object_evidence_collected | pending_proof: +12
+    Pair result tuple delta:
+      ok
+    Missing pair identities:
+      ok
+    Added pair identities:
+      ok
+

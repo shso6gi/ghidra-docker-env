@@ -1,0 +1,792 @@
+{
+  "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
+  "baseline_id": "observed-v0@0a53352",
+  "created_at": "2026-05-15T05:55:00.059313+00:00",
+  "current_log_roots": {
+    "function_call": "tmp/phase2_validation/target_function_matrix/function_call"
+  },
+  "entries": [
+    {
+      "accepted_reason_records": [
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function1",
+            [
+              "function_ref",
+              [
+                "function",
+                3730456254234121056,
+                1052592
+              ]
+            ],
+            [
+              "pcode_op",
+              1052616,
+              18,
+              0,
+              2,
+              "CALLIND"
+            ],
+            null,
+            [
+              "typed_target_expression",
+              [
+                "storage",
+                [
+                  "tuple",
+                  [
+                    [
+                      "str",
+                      "register_storage"
+                    ],
+                    [
+                      "int",
+                      548
+                    ],
+                    [
+                      "int",
+                      32
+                    ],
+                    [
+                      "int",
+                      64
+                    ],
+                    [
+                      "int",
+                      0
+                    ],
+                    [
+                      "int",
+                      64
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            269469696,
+            "target_identity_unavailable"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function1",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730456254234121056,
+                  1052592
+                ]
+              ],
+              [
+                "pcode_op",
+                1052616,
+                18,
+                0,
+                2,
+                "CALLIND"
+              ],
+              null,
+              [
+                "typed_target_expression",
+                [
+                  "storage",
+                  [
+                    "tuple",
+                    [
+                      [
+                        "str",
+                        "register_storage"
+                      ],
+                      [
+                        "int",
+                        548
+                      ],
+                      [
+                        "int",
+                        32
+                      ],
+                      [
+                        "int",
+                        64
+                      ],
+                      [
+                        "int",
+                        0
+                      ],
+                      [
+                        "int",
+                        64
+                      ]
+                    ]
+                  ]
+                ]
+              ],
+              269469696,
+              "target_identity_unavailable"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        },
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function2",
+            [
+              "function_ref",
+              [
+                "function",
+                3730456287635460979,
+                1052512
+              ]
+            ],
+            [
+              "pcode_op",
+              1052536,
+              18,
+              0,
+              2,
+              "CALLIND"
+            ],
+            null,
+            [
+              "typed_target_expression",
+              [
+                "storage",
+                [
+                  "tuple",
+                  [
+                    [
+                      "str",
+                      "register_storage"
+                    ],
+                    [
+                      "int",
+                      548
+                    ],
+                    [
+                      "int",
+                      32
+                    ],
+                    [
+                      "int",
+                      64
+                    ],
+                    [
+                      "int",
+                      0
+                    ],
+                    [
+                      "int",
+                      64
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            269449216,
+            "target_identity_unavailable"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function2",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730456287635460979,
+                  1052512
+                ]
+              ],
+              [
+                "pcode_op",
+                1052536,
+                18,
+                0,
+                2,
+                "CALLIND"
+              ],
+              null,
+              [
+                "typed_target_expression",
+                [
+                  "storage",
+                  [
+                    "tuple",
+                    [
+                      [
+                        "str",
+                        "register_storage"
+                      ],
+                      [
+                        "int",
+                        548
+                      ],
+                      [
+                        "int",
+                        32
+                      ],
+                      [
+                        "int",
+                        64
+                      ],
+                      [
+                        "int",
+                        0
+                      ],
+                      [
+                        "int",
+                        64
+                      ]
+                    ]
+                  ]
+                ]
+              ],
+              269449216,
+              "target_identity_unavailable"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        }
+      ],
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_log_path": "tmp/phase2_validation/target_function_matrix/function_call/fc_apply_indirect/fc_apply_indirect_B10_B11.log",
+      "current_result": "UNKNOWN",
+      "entry_id": "representative-equivalence-blocking-unsafety-apply",
+      "expected_movement": {
+        "action_status": "pending_proof",
+        "decision_effect": "blocks_equivalence",
+        "evidence_kind": [
+          "call_effect_summary",
+          "runtime_ref",
+          "callsite_storage"
+        ],
+        "proof_stage": "object_evidence_collected",
+        "reason_id": "equivalence_blocking_unsafety",
+        "reason_scope": "function",
+        "recovery_proof_kind": "call_effect_summary_proof"
+      },
+      "failed_kinds": [],
+      "function": "fc_apply_indirect",
+      "movement_status": "expected_movement",
+      "rejected_reason_records": [],
+      "target_reason_id": "equivalence_blocking_unsafety"
+    },
+    {
+      "accepted_reason_records": [
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function1",
+            [
+              "function_ref",
+              [
+                "function",
+                3730460013879696096,
+                1052656
+              ]
+            ],
+            [
+              "pcode_op",
+              1052700,
+              27,
+              3,
+              2,
+              "CALLIND"
+            ],
+            null,
+            [
+              "typed_target_expression",
+              [
+                "runtime_ref",
+                [
+                  "observed_memory_read",
+                  1,
+                  null,
+                  null,
+                  [
+                    "pcode_op",
+                    1052692,
+                    18,
+                    1,
+                    2,
+                    "LOAD"
+                  ],
+                  "ghidra_load"
+                ]
+              ]
+            ],
+            269491203,
+            "target_identity_unavailable"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function1",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730460013879696096,
+                  1052656
+                ]
+              ],
+              [
+                "pcode_op",
+                1052700,
+                27,
+                3,
+                2,
+                "CALLIND"
+              ],
+              null,
+              [
+                "typed_target_expression",
+                [
+                  "runtime_ref",
+                  [
+                    "observed_memory_read",
+                    1,
+                    null,
+                    null,
+                    [
+                      "pcode_op",
+                      1052692,
+                      18,
+                      1,
+                      2,
+                      "LOAD"
+                    ],
+                    "ghidra_load"
+                  ]
+                ]
+              ],
+              269491203,
+              "target_identity_unavailable"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        },
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function2",
+            [
+              "function_ref",
+              [
+                "function",
+                3730460046119213811,
+                1052576
+              ]
+            ],
+            [
+              "pcode_op",
+              1052620,
+              27,
+              3,
+              2,
+              "CALLIND"
+            ],
+            null,
+            [
+              "typed_target_expression",
+              [
+                "runtime_ref",
+                [
+                  "observed_memory_read",
+                  1,
+                  null,
+                  null,
+                  [
+                    "pcode_op",
+                    1052612,
+                    18,
+                    1,
+                    2,
+                    "LOAD"
+                  ],
+                  "ghidra_load"
+                ]
+              ]
+            ],
+            269470723,
+            "target_identity_unavailable"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function2",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730460046119213811,
+                  1052576
+                ]
+              ],
+              [
+                "pcode_op",
+                1052620,
+                27,
+                3,
+                2,
+                "CALLIND"
+              ],
+              null,
+              [
+                "typed_target_expression",
+                [
+                  "runtime_ref",
+                  [
+                    "observed_memory_read",
+                    1,
+                    null,
+                    null,
+                    [
+                      "pcode_op",
+                      1052612,
+                      18,
+                      1,
+                      2,
+                      "LOAD"
+                    ],
+                    "ghidra_load"
+                  ]
+                ]
+              ],
+              269470723,
+              "target_identity_unavailable"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        }
+      ],
+      "binary_pair": "B10_B11",
+      "category": "function_call",
+      "current_log_path": "tmp/phase2_validation/target_function_matrix/function_call/fc_dispatch_indirect/fc_dispatch_indirect_B10_B11.log",
+      "current_result": "UNKNOWN",
+      "entry_id": "representative-equivalence-blocking-unsafety-dispatch",
+      "expected_movement": {
+        "action_status": "pending_proof",
+        "decision_effect": "blocks_equivalence",
+        "evidence_kind": [
+          "call_effect_summary",
+          "runtime_ref",
+          "callsite_storage"
+        ],
+        "proof_stage": "object_evidence_collected",
+        "reason_id": "equivalence_blocking_unsafety",
+        "reason_scope": "function",
+        "recovery_proof_kind": "call_effect_summary_proof"
+      },
+      "failed_kinds": [],
+      "function": "fc_dispatch_indirect",
+      "movement_status": "expected_movement",
+      "rejected_reason_records": [],
+      "target_reason_id": "equivalence_blocking_unsafety"
+    },
+    {
+      "accepted_reason_records": [
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function1",
+            [
+              "function_ref",
+              [
+                "function",
+                3730464421155780608,
+                1052296
+              ]
+            ],
+            [
+              "pcode_op",
+              1052336,
+              27,
+              3,
+              2,
+              "CALL"
+            ],
+            [
+              "function",
+              3730464421155780608,
+              1052296
+            ],
+            [
+              "typed_target_expression",
+              [
+                "expression",
+                [
+                  "const",
+                  [
+                    "int",
+                    1052296
+                  ],
+                  8
+                ]
+              ]
+            ],
+            269398019,
+            "callee_effect_summary_missing"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function1",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730464421155780608,
+                  1052296
+                ]
+              ],
+              [
+                "pcode_op",
+                1052336,
+                27,
+                3,
+                2,
+                "CALL"
+              ],
+              [
+                "function",
+                3730464421155780608,
+                1052296
+              ],
+              [
+                "typed_target_expression",
+                [
+                  "expression",
+                  [
+                    "const",
+                    [
+                      "int",
+                      1052296
+                    ],
+                    8
+                  ]
+                ]
+              ],
+              269398019,
+              "callee_effect_summary_missing"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        },
+        {
+          "action_status": "pending_proof",
+          "decision_effect": "blocks_equivalence",
+          "evidence_kind": "call_effect_summary",
+          "object_target_key": [
+            "unsupported_call_effect",
+            "function2",
+            [
+              "function_ref",
+              [
+                "function",
+                3730464446141249555,
+                4831842328
+              ]
+            ],
+            [
+              "pcode_op",
+              4831842368,
+              27,
+              3,
+              2,
+              "CALL"
+            ],
+            [
+              "function",
+              3730464446141249555,
+              4831842328
+            ],
+            [
+              "typed_target_expression",
+              [
+                "expression",
+                [
+                  "const",
+                  [
+                    "int",
+                    4831842328
+                  ],
+                  8
+                ]
+              ]
+            ],
+            1236951646211,
+            "callee_effect_summary_missing"
+          ],
+          "proof_obligation_id": [
+            "equivalence_blocking_unsafety",
+            "object_evidence_collected",
+            "call_effect_summary_proof",
+            "call_effect_summary",
+            [
+              "unsupported_call_effect",
+              "function2",
+              [
+                "function_ref",
+                [
+                  "function",
+                  3730464446141249555,
+                  4831842328
+                ]
+              ],
+              [
+                "pcode_op",
+                4831842368,
+                27,
+                3,
+                2,
+                "CALL"
+              ],
+              [
+                "function",
+                3730464446141249555,
+                4831842328
+              ],
+              [
+                "typed_target_expression",
+                [
+                  "expression",
+                  [
+                    "const",
+                    [
+                      "int",
+                      4831842328
+                    ],
+                    8
+                  ]
+                ]
+              ],
+              1236951646211,
+              "callee_effect_summary_missing"
+            ]
+          ],
+          "proof_stage": "object_evidence_collected",
+          "reason_id": "equivalence_blocking_unsafety",
+          "reason_scope": "function",
+          "recovery_action": "call_effect_summary_proof_required",
+          "recovery_proof_kind": "call_effect_summary_proof"
+        }
+      ],
+      "binary_pair": "B10_B14",
+      "category": "function_call",
+      "current_log_path": "tmp/phase2_validation/target_function_matrix/function_call/fc_recursive_sum/fc_recursive_sum_B10_B14.log",
+      "current_result": "UNKNOWN",
+      "entry_id": "representative-equivalence-blocking-unsafety-recursive-stress",
+      "expected_movement": {
+        "action_status": "pending_proof",
+        "decision_effect": "blocks_equivalence",
+        "evidence_kind": [
+          "call_effect_summary",
+          "runtime_ref",
+          "callsite_storage"
+        ],
+        "proof_stage": "object_evidence_collected",
+        "reason_id": "equivalence_blocking_unsafety",
+        "reason_scope": "function",
+        "recovery_proof_kind": "call_effect_summary_proof"
+      },
+      "failed_kinds": [],
+      "function": "fc_recursive_sum",
+      "movement_status": "expected_movement",
+      "rejected_reason_records": [],
+      "target_reason_id": "equivalence_blocking_unsafety"
+    }
+  ],
+  "manifest_kind": "phase2_equivalence_blocking_unsafety_expected_movement",
+  "manifest_version": 1,
+  "movement_summary": {
+    "allowed_movement": {
+      "action_status": "pending_proof",
+      "proof_stage": "object_evidence_collected",
+      "reason_id": "equivalence_blocking_unsafety",
+      "recovery_action": "call_effect_summary_proof_required",
+      "recovery_proof_kind": "call_effect_summary_proof"
+    },
+    "expected_representative_ids": [
+      "representative-equivalence-blocking-unsafety-apply",
+      "representative-equivalence-blocking-unsafety-dispatch",
+      "representative-equivalence-blocking-unsafety-recursive-stress"
+    ],
+    "failed": 0,
+    "failed_kinds": [],
+    "missing_representative_ids": [],
+    "passed": 3,
+    "target_reason_id": "equivalence_blocking_unsafety",
+    "total": 3,
+    "unexpected_representative_ids": []
+  },
+  "phase1_manifest_index_ref": {
+    "path": "phase1_manifest_index.json",
+    "sha256": "00ff68abc048a54987376b4e9d792b25011209969bfb4aae6022ec4806db8357"
+  },
+  "phase1_representative_manifest_ref": {
+    "path": "representative_manifest.json",
+    "sha256": "74819bc1314cc386abecd0aadd1dcea04e5e7ac87017eadb3e440ea0ef0d4661"
+  },
+  "phase2_ready": true,
+  "target_reason_id": "equivalence_blocking_unsafety"
+}

@@ -2,7 +2,7 @@
 """戦略基底クラス"""
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List, Sequence, Tuple
+from typing import Optional, Dict, Any, List, Mapping, Sequence, Tuple
 from dataclasses import dataclass, field
 
 from ...analysis.condition.smt_oracle import ConditionSMTOracle
@@ -16,6 +16,7 @@ from ..unknown_reason import (
     UnknownRecoveryProofObligation,
     UnknownReasonId,
     UnknownReasonRecord,
+    build_proof_obligation_id,
     coerce_unknown_reason_records,
     make_unknown_reason,
 )
@@ -49,6 +50,15 @@ class StrategyResult:
 
 class CheckStrategy(ABC):
     """等価性判定戦略の基底クラス"""
+
+    _CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS = {
+        "unsupported_call_effect_summary",
+        "effect_summary_path_coverage_incomplete",
+        "effect_call_argument_evidence_incomplete",
+        "bounded_call_refinement_argument_alignment_failed",
+        "bounded_call_refinement_deferred_target_unresolved",
+        "bounded_call_refinement_return_summary_unusable",
+    }
     
     def __init__(self, formula_builder, solver_runner, debug: bool = False):
         """
@@ -256,7 +266,106 @@ class CheckStrategy(ABC):
                 normalized = cls._normalize_nested_tuple(proof_id)
                 if isinstance(normalized, tuple):
                     proof_ids.append(normalized)
+            proof_ids.extend(cls._produced_recovery_proof_ids(analysis))
         return tuple(proof_ids)
+
+    @classmethod
+    def _produced_recovery_proof_ids(
+        cls,
+        analysis: FunctionReturnAnalysis,
+    ) -> Tuple[Tuple[Any, ...], ...]:
+        if cls._analysis_has_active_call_effect_proof_blockers(analysis):
+            return ()
+        proof_ids: List[Tuple[Any, ...]] = []
+        for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+            proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
+            if proof_id is not None:
+                proof_ids.append(proof_id)
+        return tuple(proof_ids)
+
+    @classmethod
+    def _call_effect_summary_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._evidence_bool(evidence, "object_derived"):
+            return None
+        if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
+            return None
+        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value:
+            return None
+        proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
+        if proof_kind != UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value:
+            return None
+        proof_stage = cls._evidence_text(evidence, "proof_stage")
+        if proof_stage != "object_evidence_collected":
+            return None
+        evidence_kind = cls._evidence_text(evidence, "evidence_kind")
+        if evidence_kind != "call_effect_summary":
+            return None
+        if cls._evidence_has_any(
+            evidence,
+            (
+                "sat_unsafety_reasons",
+                "coverage_gap_reasons",
+                "unsupported_effect_reasons",
+                "active_unsafety_reasons",
+                "active_coverage_gaps",
+                "active_unsupported_effects",
+            ),
+        ):
+            return None
+        object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        if not isinstance(object_target_key, tuple):
+            return None
+        proof_id = build_proof_obligation_id(
+            UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+            proof_stage,
+            proof_kind,
+            evidence_kind,
+            object_target_key,
+        )
+        provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
+        if provided_id is not None and provided_id != proof_id:
+            return None
+        return proof_id
+
+    @classmethod
+    def _analysis_has_active_call_effect_proof_blockers(
+        cls,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        decisive_reasons = getattr(analysis, "get_decisive_sat_unsafety_reasons", lambda: ())()
+        for reason in decisive_reasons:
+            if str(reason) not in cls._CALL_EFFECT_PROOF_RECOVERABLE_UNSAFETY_REASONS:
+                return True
+        for note in getattr(analysis, "analysis_notes", ()) or ():
+            if str(note) in {
+                "return_case_coverage_gap",
+                "return_case_coverage_inconclusive",
+            }:
+                return True
+        return False
+
+    @staticmethod
+    def _evidence_get(evidence: Any, key: str) -> Any:
+        if isinstance(evidence, Mapping):
+            return evidence.get(key)
+        return getattr(evidence, key, None)
+
+    @classmethod
+    def _evidence_text(cls, evidence: Any, key: str) -> str:
+        value = cls._evidence_get(evidence, key)
+        return "" if value is None else str(value)
+
+    @classmethod
+    def _evidence_bool(cls, evidence: Any, key: str) -> bool:
+        return bool(cls._evidence_get(evidence, key))
+
+    @classmethod
+    def _evidence_has_any(cls, evidence: Any, keys: Sequence[str]) -> bool:
+        for key in keys:
+            value = cls._evidence_get(evidence, key)
+            if value:
+                return True
+        return False
 
     @classmethod
     def _normalize_nested_tuple(cls, value: Any):

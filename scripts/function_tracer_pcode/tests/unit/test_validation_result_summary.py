@@ -424,3 +424,39 @@ def test_matrix_runners_update_summary_outputs_only_after_success():
         assert "OVERALL_SUMMARY_ARGS+=(--require-baseline-match)" in script
         assert '} | tee "$RESULT_FILE"' not in script
         assert '} | tee "$SUMMARY_FILE"' not in script
+
+
+def test_function_call_runner_supports_full_phase2_parallel_mode():
+    script = Path("func_call_run_matrix_all_parallel_multifunc.sh").read_text()
+
+    assert "FUNCTION_CALL_TARGET_SET=${FUNCTION_CALL_TARGET_SET:-configured}" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert "FULL20_TARGET_FUNCS=(" in script
+    assert '"fc_apply_indirect"' in script
+    assert '"fc_dispatch_indirect"' in script
+    assert '"fc_recursive_sum"' in script
+    assert "PYTHON_BIN=${PYTHON_BIN:-python3}" in script
+    assert "VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}" in script
+    assert "RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-" in script
+    assert 'TMPDIR="$PAIR_TMPDIR" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main' in script
+    assert " | sort)" in script
+    assert "local status=$?" in script
+
+
+def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
+    script = Path("phase2_run_function_call_full_matrix_32jobs.sh").read_text()
+
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-full20}"' in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
+    assert "function_call_test_phase2_full_pre_producer" in script
+    assert "artifacts/baselines/observed-v0@0a53352/raw/logs/function_call" in script
+    assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-1}"' in script
+    assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-0}"' in script
+    assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"' in script
+    assert 'VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"' in script
+    assert "validation_before_dir=${VALIDATION_BEFORE_DIR:-}" in script
+    assert "baseline_note=$BASELINE_NOTE" in script
+    assert "Skipping Phase 2 gate:" in script
+    assert "phase2_equivalence_blocking_unsafety" in script
+    assert "files_to_copy_for_codex.txt" in script

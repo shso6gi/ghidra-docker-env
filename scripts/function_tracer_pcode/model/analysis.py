@@ -21,6 +21,11 @@ from .runtime_refs import DeferredCallRef, PcodeOpRef, UnknownValueRef
 
 
 def _jsonable_nested_tuple(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _jsonable_nested_tuple(item)
+            for key, item in value.items()
+        }
     if isinstance(value, tuple):
         return [_jsonable_nested_tuple(item) for item in value]
     if isinstance(value, list):
@@ -533,6 +538,7 @@ class FunctionReturnAnalysis:
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
     program_is_big_endian: Optional[bool] = None
     completed_recovery_proof_ids: Tuple[Tuple[Any, ...], ...] = ()
+    completed_recovery_proof_evidence: Tuple[Dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -578,6 +584,11 @@ class FunctionReturnAnalysis:
             result["completed_recovery_proof_ids"] = [
                 _jsonable_nested_tuple(proof_id)
                 for proof_id in self.completed_recovery_proof_ids
+            ]
+        if self.completed_recovery_proof_evidence:
+            result["completed_recovery_proof_evidence"] = [
+                _jsonable_nested_tuple(evidence)
+                for evidence in self.completed_recovery_proof_evidence
             ]
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = self.analysis_scope_key

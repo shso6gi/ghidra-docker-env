@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownReasonId,
+    build_proof_obligation_id,
 )
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
@@ -161,6 +162,53 @@ def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
             has_unsupported_call=True,
             unsupported_call_sites=(site,),
         ),
+    )
+
+
+def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
+    object_target_key = object_target_key or (
+        "unsupported_call_effect",
+        "function1",
+        ("function_ref", ("function", 1, 0x1000)),
+        ("pcode_op", 0x3020, 4, 1, "CALLIND"),
+        None,
+        ("typed_target_expression", ("runtime_ref", ("param", "fp", 0))),
+        9,
+        "target_identity_unavailable",
+    )
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        "recovery_proof_kind": UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value,
+        "proof_stage": "object_evidence_collected",
+        "evidence_kind": "call_effect_summary",
+        "object_target_key": object_target_key,
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _analysis_with_call_effect_summary_proof_evidence(**evidence_overrides) -> FunctionReturnAnalysis:
+    return FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        completed_recovery_proof_evidence=(
+            _call_effect_summary_proof_evidence(**evidence_overrides),
+        ),
+    )
+
+
+def _expected_call_effect_summary_proof_id(evidence):
+    return build_proof_obligation_id(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        evidence["proof_stage"],
+        evidence["recovery_proof_kind"],
+        evidence["evidence_kind"],
+        evidence["object_target_key"],
     )
 
 
@@ -983,6 +1031,87 @@ def test_pairwise_call_effect_summary_proof_complete_allows_recovery(monkeypatch
     assert result.unknown_reasons == []
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
+
+
+def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _call_effect_summary_proof_evidence(
+            object_target_key=completed_reason.object_target_key,
+            proof_obligation_id=completed_reason.proof_obligation_id,
+        ),
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
+def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
+    evidence = _call_effect_summary_proof_evidence()
+    analysis = _analysis_with_call_effect_summary_proof_evidence()
+
+    proof_ids = PairwiseStrategy._completed_recovery_proof_ids(analysis)
+
+    assert proof_ids == (_expected_call_effect_summary_proof_id(evidence),)
+
+
+def test_call_effect_summary_producer_rejects_non_object_derived_evidence():
+    analysis = _analysis_with_call_effect_summary_proof_evidence(object_derived=False)
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis) == ()
+
+
+def test_call_effect_summary_producer_rejects_mismatched_full_proof_id():
+    evidence = _call_effect_summary_proof_evidence()
+    wrong_id = build_proof_obligation_id(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+        evidence["proof_stage"],
+        evidence["recovery_proof_kind"],
+        evidence["evidence_kind"],
+        ("unsupported_call_effect", "different-callsite"),
+    )
+    analysis = _analysis_with_call_effect_summary_proof_evidence(
+        proof_obligation_id=wrong_id,
+    )
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis) == ()
+
+
+def test_call_effect_summary_producer_rejects_active_safety_blockers():
+    coverage_blocked = _analysis_with_call_effect_summary_proof_evidence()
+    coverage_blocked.analysis_notes.append("return_case_coverage_gap")
+    sat_blocked = _analysis_with_call_effect_summary_proof_evidence()
+    sat_blocked.analysis_notes.append("indirect_control_flow_unresolved")
+    unsupported_blocked = _analysis_with_call_effect_summary_proof_evidence(
+        unsupported_effect_reasons=("target_identity_unavailable",),
+    )
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(coverage_blocked) == ()
+    assert PairwiseStrategy._completed_recovery_proof_ids(sat_blocked) == ()
+    assert PairwiseStrategy._completed_recovery_proof_ids(unsupported_blocked) == ()
 
 
 def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap():

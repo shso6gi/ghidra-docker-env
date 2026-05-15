@@ -1,0 +1,54 @@
+{
+  "artifact_kind": "phase2_post_producer_fresh_representative_validation",
+  "artifact_log_root": "artifacts/baselines/observed-v0@0a53352/phase2/validation/post_producer_representative/function_call",
+  "commands": [
+    ".venv-pyghidra/bin/python -m scripts.function_tracer_pcode.cli.main --equiv <B10> <B11/B14> -f <representative> -d --emit-result-json",
+    "python3 -m scripts.function_tracer_pcode.validation.result_summary --overall-summary <representative logs>",
+    "python3 -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety --phase1-dir artifacts/baselines/observed-v0@0a53352/phase1 --output-dir <artifact>/phase2_gate --current-log-root function_call=<representative logs> --require-ready"
+  ],
+  "created_at_utc": "2026-05-15T09:04:21.574947+00:00",
+  "file_hashes": {
+    "function_call/fc_apply_indirect/fc_apply_indirect_B10_B11.log": "6459b9e640000375c2978adeb72a25876f40bfb5ba22c4ea4acf5a7eeb7a3755",
+    "function_call/fc_dispatch_indirect/fc_dispatch_indirect_B10_B11.log": "d15a70da6389298599b7e276a0b4bb9e47f0fe9e7eb5da6dd77d7bbfbe3c66ab",
+    "function_call/fc_recursive_sum/fc_recursive_sum_B10_B14.log": "526259167219bc3e9378f665e4c9e07751b6a40243ba3cf2f33be6e26ca5ad67",
+    "overall_summary.txt": "0250f299f58e13be86b9bf11d69e606833f5d08dee47b4ecaed7ac9e079520b0",
+    "phase2_gate/equivalence_blocking_unsafety_expected_movement.json": "92d436c710e57abde7c7f663dc0edabfc355459da2db02b076d0ebef5e0d2bd5"
+  },
+  "git_head": "ab715af6738170f28ed270addae0528993c11557",
+  "movement_summary": {
+    "allowed_movement": {
+      "action_status": "pending_proof",
+      "proof_stage": "object_evidence_collected",
+      "reason_id": "equivalence_blocking_unsafety",
+      "recovery_action": "call_effect_summary_proof_required",
+      "recovery_proof_kind": "call_effect_summary_proof"
+    },
+    "expected_representative_ids": [
+      "representative-equivalence-blocking-unsafety-apply",
+      "representative-equivalence-blocking-unsafety-dispatch",
+      "representative-equivalence-blocking-unsafety-recursive-stress"
+    ],
+    "failed": 0,
+    "failed_kinds": [],
+    "missing_representative_ids": [],
+    "passed": 3,
+    "target_reason_id": "equivalence_blocking_unsafety",
+    "total": 3,
+    "unexpected_representative_ids": []
+  },
+  "phase2_ready": true,
+  "post_producer_state": {
+    "action_status": "pending_proof",
+    "completed_recovery_proof_ids_expected": "absent_or_empty_for_real_representatives",
+    "final_result": "UNKNOWN",
+    "proof_stage": "object_evidence_collected"
+  },
+  "representative_logs": [
+    "function_call/fc_apply_indirect/fc_apply_indirect_B10_B11.log",
+    "function_call/fc_dispatch_indirect/fc_dispatch_indirect_B10_B11.log",
+    "function_call/fc_recursive_sum/fc_recursive_sum_B10_B14.log"
+  ],
+  "source_log_root": "tmp/phase2_validation/post_producer_representative",
+  "target_reason": "equivalence_blocking_unsafety",
+  "target_recovery_proof_kind": "call_effect_summary_proof"
+}

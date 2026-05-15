@@ -1,0 +1,93 @@
+--- Results for fc_equiv_two_stage ---
+  Total pairs     : 120
+  Equivalent     : 120
+  Not equivalent : 0
+  Error          : 0
+  Unknown        : 0
+  Timeout        : 0
+  Incomplete     : 0
+
+  ✓ All compared pairs are EQUIVALENT.
+
+  UNKNOWN validation summary:
+    Total results : 120
+    Unknown results: 0
+    Unknown units  : 0
+    Final results:
+      - EQUIVALENT: 120
+    Validation UNKNOWN unit tuples:
+      (none)
+    Reason record tuples:
+      (none)
+    Proof action tuples:
+      (none)
+    UNKNOWN by reason:
+      (none)
+    UNKNOWN by decision_effect:
+      (none)
+    UNKNOWN by reason_scope:
+      (none)
+    Proof backlog by reason:
+      (none)
+    Proof backlog by proof_kind:
+      (none)
+    Proof backlog by recovery_action:
+      (none)
+    Proof backlog by action_status:
+      (none)
+    Operational UNKNOWN by reason:
+      (none)
+    Validation UNKNOWN unit / reason record correspondence:
+      - ok
+
+  UNKNOWN validation before/after delta:
+    Unknown results delta: 0
+    Unknown units delta  : 0
+    Final results delta:
+      (none)
+    Validation UNKNOWN unit tuple delta:
+      (none)
+    Reason record tuple delta:
+      (none)
+    Proof action tuple delta:
+      (none)
+    UNKNOWN by reason delta:
+      (none)
+    UNKNOWN by decision_effect delta:
+      (none)
+    UNKNOWN by reason_scope delta:
+      (none)
+    Proof backlog by reason delta:
+      (none)
+    Proof backlog by proof_kind delta:
+      (none)
+    Proof backlog by recovery_action delta:
+      (none)
+    Proof backlog by action_status delta:
+      (none)
+    Operational UNKNOWN by reason delta:
+      (none)
+    Operational UNKNOWN by class delta:
+      (none)
+
+  Canonical baseline comparison:
+    Total results delta      : 0
+    UNKNOWN final result delta: 0
+    TIMEOUT final result delta: 0
+    Final result count delta:
+      ok
+    Timeout class tuple delta:
+      ok
+    Validation UNKNOWN unit tuple delta:
+      ok
+    Reason record tuple delta:
+      ok
+    Proof action tuple delta:
+      ok
+    Pair result tuple delta:
+      ok
+    Missing pair identities:
+      ok
+    Added pair identities:
+      ok
+
