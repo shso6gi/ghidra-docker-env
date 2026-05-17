@@ -477,6 +477,39 @@ def test_function_call_runner_dry_run_uses_baseline_pair_order(tmp_path):
     assert "fc_dummy B15 B8 fc_dummy_B15_B8.log" not in result.stdout
 
 
+def test_function_call_runner_moves_existing_logs_before_dry_run(tmp_path):
+    output_dir = tmp_path / "function_call"
+    old_log = output_dir / "fc_dummy" / "fc_dummy_B1_B2.log"
+    old_log.parent.mkdir(parents=True)
+    old_log.write_text("old\n")
+    env = os.environ.copy()
+    env.update(
+        {
+            "FUNCTION_CALL_TARGET_SET": "fc_dummy",
+            "OUTPUT_BASE_DIR": str(output_dir),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "1",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "func_call_run_matrix_all_parallel_multifunc.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    moved_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Moved old output dir: ")
+    )
+    moved_dir = Path(moved_line.removeprefix("Moved old output dir: "))
+    assert not old_log.exists()
+    assert (moved_dir / "fc_dummy" / "fc_dummy_B1_B2.log").read_text() == "old\n"
+    assert "Validation before dir:" in result.stdout
+    assert "[auto moved old output]" in result.stdout
+
+
 def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     script = Path("phase2_run_function_call_full_matrix_32jobs.sh").read_text()
 
@@ -489,7 +522,10 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-0}"' in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"' in script
     assert 'VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"' in script
+    assert 'VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}"' in script
+    assert "PHASE2_GATE_BASELINE_DIR=" in script
     assert "validation_before_dir=${VALIDATION_BEFORE_DIR:-}" in script
+    assert "validation_moved_output_dir=${VALIDATION_MOVED_OUTPUT_DIR:-}" in script
     assert "baseline_note=$BASELINE_NOTE" in script
     assert "Skipping Phase 2 gate:" in script
     assert "phase2_equivalence_blocking_unsafety" in script

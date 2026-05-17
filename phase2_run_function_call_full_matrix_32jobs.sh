@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 
 DEFAULT_PYTHON_BIN="python3"
 if [[ -x "$SCRIPT_DIR/.venv-pyghidra/bin/python" ]]; then
@@ -25,7 +26,8 @@ DEFAULT_VALIDATION_BEFORE_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a533
 if [[ -z "${VALIDATION_BEFORE_DIR:-}" && -d "$DEFAULT_VALIDATION_BEFORE_DIR" ]]; then
     export VALIDATION_BEFORE_DIR="$DEFAULT_VALIDATION_BEFORE_DIR"
 fi
-export VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-0}"
+PHASE2_GATE_BASELINE_DIR="${VALIDATION_BEFORE_DIR:-}"
+export VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}"
 if [[ -n "${VALIDATION_BEFORE_DIR:-}" ]]; then
     export VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-1}"
 else
@@ -35,10 +37,13 @@ export VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0
 export VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"
 export RUNNER_TMP_ROOT="${RUNNER_TMP_ROOT:-${TMPDIR:-/tmp}/ghidra-equivalence-function-call-full.$$}"
 
+validation_prepare_before_after_logs
+validation_finalize_before_after_config
+
 mkdir -p "$OUTPUT_BASE_DIR"
 
 BASELINE_NOTE="available"
-if [[ -z "${VALIDATION_BEFORE_DIR:-}" ]]; then
+if [[ -z "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
     BASELINE_NOTE="missing; summaries can be regenerated after copying logs to a machine with artifacts/baselines/observed-v0@0a53352"
 fi
 
@@ -57,6 +62,9 @@ validation_auto_before_snapshot=$VALIDATION_AUTO_BEFORE_SNAPSHOT
 validation_require_before_delta=$VALIDATION_REQUIRE_BEFORE_DELTA
 validation_require_baseline_match=$VALIDATION_REQUIRE_BASELINE_MATCH
 validation_skip_completed=$VALIDATION_SKIP_COMPLETED
+validation_before_source=$VALIDATION_BEFORE_SOURCE
+validation_moved_output_dir=${VALIDATION_MOVED_OUTPUT_DIR:-}
+phase2_gate_baseline_dir=${PHASE2_GATE_BASELINE_DIR:-}
 runner_tmp_root=$RUNNER_TMP_ROOT
 baseline_note=$BASELINE_NOTE
 EOF
@@ -93,8 +101,8 @@ if [[ -f "$PHASE1_DIR/representative_manifest.json" ]]; then
         --output-dir "$PHASE2_GATE_OUTPUT_DIR"
         --current-log-root "function_call=$OUTPUT_BASE_DIR"
     )
-    if [[ -n "${VALIDATION_BEFORE_DIR:-}" ]]; then
-        PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$VALIDATION_BEFORE_DIR")
+    if [[ -n "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
+        PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$PHASE2_GATE_BASELINE_DIR")
         PHASE2_REQUIRE_READY=1
     else
         PHASE2_REQUIRE_READY=0

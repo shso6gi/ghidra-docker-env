@@ -7,6 +7,7 @@
 # ---------------------- 設定 ----------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 
 CONFIGURED_TARGET_FUNCS=(
     "fc_read_after_void"
@@ -197,25 +198,8 @@ IDS=("${BINARY_ID_ORDER[@]}")
 
 TOTAL_PAIRS=$(( ${#IDS[@]} * (${#IDS[@]} - 1) / 2 ))
 
-VALIDATION_BEFORE_SOURCE="not configured"
-if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
-    VALIDATION_BEFORE_SOURCE="configured"
-elif [[ "$VALIDATION_AUTO_BEFORE_SNAPSHOT" != "0" && -d "$OUTPUT_BASE_DIR" ]]; then
-    EXISTING_VALIDATION_LOG="$(find "$OUTPUT_BASE_DIR" -type f -name "*.log" -print -quit 2>/dev/null || true)"
-    if [[ -n "$EXISTING_VALIDATION_LOG" ]]; then
-        VALIDATION_BEFORE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/equivalence_before.XXXXXX")"
-        cp -a "$OUTPUT_BASE_DIR"/. "$VALIDATION_BEFORE_DIR"/
-        VALIDATION_BEFORE_SOURCE="auto snapshot"
-    fi
-fi
-VALIDATION_BEFORE_LABEL="(none)"
-if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then
-    VALIDATION_BEFORE_LABEL="$VALIDATION_BEFORE_DIR"
-fi
-if [[ "$VALIDATION_REQUIRE_BEFORE_DELTA" != "0" && -z "$VALIDATION_BEFORE_DIR" ]]; then
-    echo "Error: VALIDATION_REQUIRE_BEFORE_DELTA requires VALIDATION_BEFORE_DIR or an auto before snapshot." >&2
-    exit 1
-fi
+validation_prepare_before_after_logs
+validation_finalize_before_after_config
 
 echo "============================================================"
 echo "  Equivalence Check Script (Multi-function)"
@@ -234,6 +218,9 @@ echo "Per-pair TMPDIR root: $RUNNER_TMP_ROOT"
 echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
 echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
+if [[ -n "${VALIDATION_MOVED_OUTPUT_DIR:-}" ]]; then
+    echo "Moved old output dir: $VALIDATION_MOVED_OUTPUT_DIR"
+fi
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
 echo "============================================================"
