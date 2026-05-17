@@ -31,7 +31,8 @@
     Final results:
       - EQUIVALENT: 1555
       - NOT_EQ: 71
-      - UNKNOWN: 774
+      - TIMEOUT: 119
+      - UNKNOWN: 655
     Validation UNKNOWN unit tuples:
       - ('validation_unknown_unit', 'equivalence_blocking_unsafety', 'blocks_equivalence', 'function', 'call_effect_summary_proof', 'object_evidence_collected', 'pending_proof'): 132
       - ('validation_unknown_unit', 'return_coverage_gap', 'blocks_equivalence', 'function', 'return_coverage_completion', '<missing>', '<missing>'): 71

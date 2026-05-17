@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -436,11 +437,44 @@ def test_function_call_runner_supports_full_phase2_parallel_mode():
     assert '"fc_dispatch_indirect"' in script
     assert '"fc_recursive_sum"' in script
     assert "PYTHON_BIN=${PYTHON_BIN:-python3}" in script
+    assert "FUNCTION_CALL_MANIFEST=${FUNCTION_CALL_MANIFEST:-" in script
+    assert "manifest_query functions" in script
+    assert "manifest_query pairs" in script
     assert "VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}" in script
+    assert "VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}" in script
     assert "RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-" in script
     assert 'TMPDIR="$PAIR_TMPDIR" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main' in script
-    assert " | sort)" in script
+    assert "BINARY_ID_ORDER=(" in script
+    assert 'collect_expected_log_files "$OUTPUT_DIR" "$TARGET_FUNC"' in script
+    assert "collect_all_expected_log_files" in script
+    assert 'mapfile -t PAIR_SPECS < <(collect_pair_specs "$TARGET_FUNC")' in script
+    assert " | sort)" not in script
     assert "local status=$?" in script
+
+
+def test_function_call_runner_dry_run_uses_baseline_pair_order(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "FUNCTION_CALL_TARGET_SET": "fc_dummy",
+            "OUTPUT_BASE_DIR": str(tmp_path / "function_call"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "func_call_run_matrix_all_parallel_multifunc.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "Binary ID order: B1 B2 B3 B4 B5 B6 B7 B8 B9 B10 B11 B12 B13 B14 B15 B16" in result.stdout
+    assert "fc_dummy B1 B2 fc_dummy_B1_B2.log" in result.stdout
+    assert "fc_dummy B8 B15 fc_dummy_B8_B15.log" in result.stdout
+    assert "fc_dummy B15 B8 fc_dummy_B15_B8.log" not in result.stdout
 
 
 def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
@@ -459,4 +493,5 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert "baseline_note=$BASELINE_NOTE" in script
     assert "Skipping Phase 2 gate:" in script
     assert "phase2_equivalence_blocking_unsafety" in script
+    assert "--baseline-log-root" in script
     assert "files_to_copy_for_codex.txt" in script

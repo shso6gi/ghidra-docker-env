@@ -1002,7 +1002,7 @@ def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatc
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 
-def test_pairwise_call_effect_summary_proof_complete_allows_recovery(monkeypatch):
+def test_pairwise_call_effect_summary_bare_completed_proof_id_does_not_recover(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -1027,10 +1027,9 @@ def test_pairwise_call_effect_summary_proof_complete_allows_recovery(monkeypatch
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is True
-    assert result.unknown_reasons == []
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 
 def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(monkeypatch):
@@ -1418,12 +1417,63 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
         analysis2,
         stage="S_MONOLITHIC_FALLBACK",
     )
-    analysis1.completed_recovery_proof_ids = (completed_reason.proof_obligation_id,)
+    analysis1.completed_recovery_proof_evidence = (
+        _call_effect_summary_proof_evidence(
+            object_target_key=completed_reason.object_target_key,
+            proof_obligation_id=completed_reason.proof_obligation_id,
+        ),
+    )
 
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
     assert result.unknown_reasons == []
+    assert result.counterexample_raw is None
+
+
+def test_monolithic_call_effect_summary_bare_completed_proof_id_does_not_recover():
+    class _UnsatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+        def run_sequential(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    analysis1.completed_recovery_proof_ids = (completed_reason.proof_obligation_id,)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
     assert result.counterexample_raw is None
 
 

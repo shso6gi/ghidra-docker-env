@@ -262,10 +262,6 @@ class CheckStrategy(ABC):
     ) -> Tuple[Tuple[Any, ...], ...]:
         proof_ids: List[Tuple[Any, ...]] = []
         for analysis in analyses:
-            for proof_id in getattr(analysis, "completed_recovery_proof_ids", ()) or ():
-                normalized = cls._normalize_nested_tuple(proof_id)
-                if isinstance(normalized, tuple):
-                    proof_ids.append(normalized)
             proof_ids.extend(cls._produced_recovery_proof_ids(analysis))
         return tuple(proof_ids)
 

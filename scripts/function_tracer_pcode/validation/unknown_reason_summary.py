@@ -801,7 +801,21 @@ def _payload_final_result(payload: Mapping[str, Any]) -> str:
         return "NOT_EQ"
     if payload.get("error_message") is not None:
         return "ERROR"
+    if _payload_is_timeout(payload):
+        return "TIMEOUT"
     return "UNKNOWN"
+
+
+def _payload_is_timeout(payload: Mapping[str, Any]) -> bool:
+    if payload.get("is_timeout") is True:
+        return True
+    solver_results = payload.get("solver_results")
+    if isinstance(solver_results, Mapping):
+        all_results = solver_results.get("all_results") or solver_results.get("results") or ()
+        for solver_result in all_results:
+            if isinstance(solver_result, Mapping) and str(solver_result.get("status")) == "TIMEOUT":
+                return True
+    return False
 
 
 def _payload_matches_targets(payload: Mapping[str, Any], targets: Sequence[str]) -> bool:

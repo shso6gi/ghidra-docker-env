@@ -12,6 +12,7 @@ CONFIGURED_TARGET_FUNCS=(
     "fc_read_after_void"
 )
 
+# Fallback only. Full/manifest runs prefer raw/function_call_20_manifest.json.
 FULL20_TARGET_FUNCS=(
     "fc_wrap_add_then_bias"
     "fc_wrap_scaled_delta"
@@ -41,13 +42,64 @@ PHASE2_TARGET_FUNCS=(
     "fc_recursive_sum"
 )
 
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/equivalence_all/function_call_test"}
+BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/cate1/function_call_test"}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+FUNCTION_CALL_MANIFEST=${FUNCTION_CALL_MANIFEST:-"$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/function_call_20_manifest.json"}
+
+manifest_query() {
+    local query="$1"
+    shift
+    if [[ ! -f "$FUNCTION_CALL_MANIFEST" ]]; then
+        return 1
+    fi
+    "$PYTHON_BIN" - "$FUNCTION_CALL_MANIFEST" "$query" "$@" <<'PY'
+import json
+import sys
+
+manifest_path, query, *args = sys.argv[1:]
+with open(manifest_path, "r", encoding="utf-8") as handle:
+    manifest = json.load(handle)
+
+if query == "functions":
+    for item in manifest.get("functions") or ():
+        function = item.get("function")
+        if function:
+            print(function)
+elif query == "binary_ids":
+    for binary_id in manifest.get("binary_ids") or ():
+        print(binary_id)
+elif query == "pairs":
+    function_name = args[0]
+    found = False
+    for item in manifest.get("functions") or ():
+        if item.get("function") != function_name:
+            continue
+        found = True
+        for pair in item.get("binary_pairs") or ():
+            if "_" not in pair:
+                continue
+            left, right = pair.split("_", 1)
+            print(f"{left}\t{right}")
+        break
+    if not found:
+        raise SystemExit(2)
+else:
+    raise SystemExit(f"unknown manifest query: {query}")
+PY
+}
+
 FUNCTION_CALL_TARGET_SET=${FUNCTION_CALL_TARGET_SET:-configured}
 case "$FUNCTION_CALL_TARGET_SET" in
     configured)
         TARGET_FUNCS=("${CONFIGURED_TARGET_FUNCS[@]}")
         ;;
-    full20|full|all)
-        TARGET_FUNCS=("${FULL20_TARGET_FUNCS[@]}")
+    full20|full|all|manifest)
+        if mapfile -t TARGET_FUNCS < <(manifest_query functions) && (( ${#TARGET_FUNCS[@]} > 0 )); then
+            :
+        else
+            TARGET_FUNCS=("${FULL20_TARGET_FUNCS[@]}")
+        fi
         ;;
     phase2|equivalence_blocking_unsafety)
         TARGET_FUNCS=("${PHASE2_TARGET_FUNCS[@]}")
@@ -57,15 +109,13 @@ case "$FUNCTION_CALL_TARGET_SET" in
         ;;
 esac
 
-OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/equivalence_all/function_call_test"}
-BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/cate1/function_call_test"}
-PYTHON_BIN=${PYTHON_BIN:-python3}
 PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
 VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
+VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
 RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-"${TMPDIR:-/tmp}/ghidra-equivalence-function-call.$$"}
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
@@ -104,7 +154,46 @@ declare -A BINARY_MAP=(
     # [B24]="function_call_test-x86_64-gcc-O3"
 )
 
-mapfile -t IDS < <(printf '%s\n' "${!BINARY_MAP[@]}" | sort)
+# Fallback binary order only. The observed-v0 manifest owns full-run pair order.
+BINARY_ID_ORDER=(
+    "B1"
+    "B2"
+    "B3"
+    "B4"
+    "B5"
+    "B6"
+    "B7"
+    "B8"
+    "B9"
+    "B10"
+    "B11"
+    "B12"
+    "B13"
+    "B14"
+    "B15"
+    "B16"
+)
+
+if mapfile -t MANIFEST_BINARY_IDS < <(manifest_query binary_ids) && (( ${#MANIFEST_BINARY_IDS[@]} > 0 )); then
+    BINARY_ID_ORDER=("${MANIFEST_BINARY_IDS[@]}")
+fi
+
+declare -A ORDERED_BINARY_IDS=()
+for BINARY_ID in "${BINARY_ID_ORDER[@]}"; do
+    if [[ -z "${BINARY_MAP[$BINARY_ID]+defined}" ]]; then
+        echo "Error: BINARY_ID_ORDER contains unknown id: $BINARY_ID" >&2
+        exit 1
+    fi
+    ORDERED_BINARY_IDS["$BINARY_ID"]=1
+done
+for BINARY_ID in "${!BINARY_MAP[@]}"; do
+    if [[ -z "${ORDERED_BINARY_IDS[$BINARY_ID]+defined}" ]]; then
+        echo "Error: BINARY_MAP id missing from BINARY_ID_ORDER: $BINARY_ID" >&2
+        exit 1
+    fi
+done
+
+IDS=("${BINARY_ID_ORDER[@]}")
 
 TOTAL_PAIRS=$(( ${#IDS[@]} * (${#IDS[@]} - 1) / 2 ))
 
@@ -139,13 +228,28 @@ echo "Parallel jobs: $PARALLEL_JOBS"
 echo "Python: $PYTHON_BIN"
 echo "Output base dir: $OUTPUT_BASE_DIR"
 echo "Binary base path: $BASE_PATH"
+echo "Function call manifest: $FUNCTION_CALL_MANIFEST"
+echo "Binary ID order: ${IDS[*]}"
 echo "Per-pair TMPDIR root: $RUNNER_TMP_ROOT"
 echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
+echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
 echo "============================================================"
 echo ""
+
+print_fixed_pair_order() {
+    local target_func row_id col_id log_name
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        while IFS=$'\t' read -r row_id col_id; do
+            [[ -n "$row_id" && -n "$col_id" ]] || continue
+            log_name="${target_func}_${row_id}_${col_id}.log"
+            printf "%s %s %s %s\n" "$target_func" "$row_id" "$col_id" "$log_name"
+        done < <(collect_pair_specs "$target_func")
+    done
+}
 
 # ---------------------- ワーカー関数 ----------------------
 run_pair() {
@@ -464,6 +568,51 @@ print_pairwise_normalization_summary_block() {
         "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
 
+collect_pair_specs() {
+    local target_func="$1"
+    local row_id col_id
+
+    if manifest_query pairs "$target_func"; then
+        return 0
+    fi
+
+    for ((i=0; i<${#IDS[@]}-1; i++)); do
+        row_id="${IDS[$i]}"
+        for ((j=i+1; j<${#IDS[@]}; j++)); do
+            col_id="${IDS[$j]}"
+            printf '%s\t%s\n' "$row_id" "$col_id"
+        done
+    done
+}
+
+collect_expected_log_files() {
+    local output_dir="$1"
+    local target_func="$2"
+    local row_id col_id log_file
+
+    while IFS=$'\t' read -r row_id col_id; do
+        [[ -n "$row_id" && -n "$col_id" ]] || continue
+        log_file="${output_dir}/${target_func}_${row_id}_${col_id}.log"
+        if [[ -f "$log_file" ]]; then
+            printf '%s\n' "$log_file"
+        fi
+    done < <(collect_pair_specs "$target_func")
+}
+
+collect_all_expected_log_files() {
+    local target_func
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        collect_expected_log_files "${OUTPUT_BASE_DIR}/${target_func}" "$target_func"
+    done
+}
+
+if [[ "$VALIDATION_RUNNER_DRY_RUN" != "0" ]]; then
+    echo "Dry run fixed pair order:"
+    print_fixed_pair_order
+    exit 0
+fi
+
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
 TOTAL_FUNCS=${#TARGET_FUNCS[@]}
@@ -488,9 +637,12 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     # ---------------------- 並列実行ループ ----------------------
     COUNT=0
     active_jobs=0
+    mapfile -t PAIR_SPECS < <(collect_pair_specs "$TARGET_FUNC")
+    FUNC_TOTAL_PAIRS=${#PAIR_SPECS[@]}
 
-    for ((i=0; i<${#IDS[@]}-1; i++)); do
-        ROW_ID="${IDS[$i]}"
+    for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+        IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
+        [[ -n "$ROW_ID" && -n "$COL_ID" ]] || continue
         BIN1="${BINARY_MAP[$ROW_ID]}"
 
         if [[ ! -f "$BASE_PATH/$BIN1" ]]; then
@@ -498,25 +650,22 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
             continue
         fi
 
-        for ((j=i+1; j<${#IDS[@]}; j++)); do
-            COL_ID="${IDS[$j]}"
-            BIN2="${BINARY_MAP[$COL_ID]}"
+        BIN2="${BINARY_MAP[$COL_ID]}"
 
-            if [[ ! -f "$BASE_PATH/$BIN2" ]]; then
-                echo "Error: $BASE_PATH/$BIN2 not found – skipping $ROW_ID↔$COL_ID"
-                continue
-            fi
+        if [[ ! -f "$BASE_PATH/$BIN2" ]]; then
+            echo "Error: $BASE_PATH/$BIN2 not found – skipping $ROW_ID↔$COL_ID"
+            continue
+        fi
 
-            COUNT=$((COUNT + 1))
+        COUNT=$((COUNT + 1))
 
-            if (( active_jobs >= PARALLEL_JOBS )); then
-                wait -n
-                active_jobs=$(( active_jobs - 1 ))
-            fi
+        if (( active_jobs >= PARALLEL_JOBS )); then
+            wait -n
+            active_jobs=$(( active_jobs - 1 ))
+        fi
 
-            run_pair "$ROW_ID" "$COL_ID" "$BIN1" "$BIN2" "$COUNT" "$TOTAL_PAIRS" "$TARGET_FUNC" "$OUTPUT_DIR" &
-            active_jobs=$(( active_jobs + 1 ))
-        done
+        run_pair "$ROW_ID" "$COL_ID" "$BIN1" "$BIN2" "$COUNT" "$FUNC_TOTAL_PAIRS" "$TARGET_FUNC" "$OUTPUT_DIR" &
+        active_jobs=$(( active_jobs + 1 ))
     done
 
     wait
@@ -538,46 +687,42 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     declare -a TIMEOUT_PAIRS=()
     declare -a INCOMPLETE_PAIRS=()
 
-    for ((i=0; i<${#IDS[@]}-1; i++)); do
-        ROW_ID="${IDS[$i]}"
-        for ((j=i+1; j<${#IDS[@]}; j++)); do
-            COL_ID="${IDS[$j]}"
-            LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
+    for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+        IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
+        [[ -n "$ROW_ID" && -n "$COL_ID" ]] || continue
+        LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
 
-            if [[ ! -f "$LOG_FILE" ]]; then
-                continue
-            fi
+        if [[ ! -f "$LOG_FILE" ]]; then
+            continue
+        fi
 
-            case "$(classify_log_result "$LOG_FILE")" in
-                EQ)
-                EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                NOT_EQ)
-                NON_EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                ERROR)
-                ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                TIMEOUT)
-                TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                UNKNOWN)
-                UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                INCOMPLETE)
-                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                *)
-                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-            esac
-        done
+        case "$(classify_log_result "$LOG_FILE")" in
+            EQ)
+            EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            NOT_EQ)
+            NON_EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            ERROR)
+            ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            TIMEOUT)
+            TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            UNKNOWN)
+            UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            INCOMPLETE)
+            INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            *)
+            INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+        esac
     done
 
     # --- tee を使って画面とファイルの両方に出力 ---
-    shopt -s nullglob
-    FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
-    shopt -u nullglob
+    mapfile -t FUNC_LOG_FILES < <(collect_expected_log_files "$OUTPUT_DIR" "$TARGET_FUNC")
 
     FUNCTION_SUMMARY_ARGS=(
         --function-summary
@@ -606,7 +751,7 @@ done
 # 全体サマリーの保存先
 SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
-mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
+mapfile -t ALL_LOG_FILES < <(collect_all_expected_log_files)
 
 OVERALL_SUMMARY_ARGS=(--overall-summary)
 if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then

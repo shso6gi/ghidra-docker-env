@@ -1,7 +1,10 @@
 {
   "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
   "baseline_id": "observed-v0@0a53352",
-  "created_at": "2026-05-15T08:29:20.549194+00:00",
+  "baseline_log_roots": {
+    "function_call": "artifacts/baselines/observed-v0@0a53352/raw/logs/function_call"
+  },
+  "created_at": "2026-05-17T02:36:14.340364+00:00",
   "current_log_roots": {
     "function_call": "logs/equivalence_all/function_call_test_phase2_full_pre_producer"
   },
@@ -771,13 +774,41 @@
       "representative-equivalence-blocking-unsafety-dispatch",
       "representative-equivalence-blocking-unsafety-recursive-stress"
     ],
-    "failed": 0,
-    "failed_kinds": [],
+    "failed": 1,
+    "failed_kinds": [
+      "unexpected_validation_unknown_unit_delta"
+    ],
     "missing_representative_ids": [],
     "passed": 3,
     "target_reason_id": "equivalence_blocking_unsafety",
     "total": 3,
     "unexpected_representative_ids": []
+  },
+  "overall_baseline_comparison_gate": {
+    "after_total_results": 2400,
+    "allowed_tuple_movement": {
+      "new": "equivalence_blocking_unsafety | blocks_equivalence | function | call_effect_summary_proof | object_evidence_collected | pending_proof",
+      "old": "equivalence_blocking_unsafety | blocks_equivalence | function | none | <missing> | <missing>"
+    },
+    "before_total_results": 2400,
+    "failed_kinds": [
+      "unexpected_validation_unknown_unit_delta"
+    ],
+    "passed": false,
+    "status": "failed",
+    "timeout_final_results_delta": 0,
+    "unexpected_deltas": {
+      "final_result_counts_delta": {},
+      "pair_result_multiset_delta": {},
+      "proof_action_multiset_delta": {},
+      "reason_record_multiset_delta": {},
+      "timeout_class_multiset_delta": {},
+      "validation_unknown_unit_multiset_delta": {
+        "validation_unknown_unit | return_coverage_gap | blocks_equivalence | function | return_coverage_completion | <missing> | <missing>": 1,
+        "validation_unknown_unit | return_coverage_inconclusive | blocks_decision | function | return_coverage_completion | return_coverage_smt_disambiguation | <missing>": -1
+      }
+    },
+    "unknown_final_results_delta": 0
   },
   "phase1_manifest_index_ref": {
     "path": "phase1_manifest_index.json",
@@ -787,6 +818,6 @@
     "path": "representative_manifest.json",
     "sha256": "74819bc1314cc386abecd0aadd1dcea04e5e7ac87017eadb3e440ea0ef0d4661"
   },
-  "phase2_ready": true,
+  "phase2_ready": false,
   "target_reason_id": "equivalence_blocking_unsafety"
 }

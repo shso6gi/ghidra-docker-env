@@ -88,11 +88,27 @@ mkdir -p "$PHASE2_GATE_OUTPUT_DIR"
 
 PHASE1_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/phase1"
 if [[ -f "$PHASE1_DIR/representative_manifest.json" ]]; then
-    python3 -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
-        --phase1-dir "$PHASE1_DIR" \
-        --output-dir "$PHASE2_GATE_OUTPUT_DIR" \
-        --current-log-root "function_call=$OUTPUT_BASE_DIR" \
-        --require-ready
+    PHASE2_GATE_ARGS=(
+        --phase1-dir "$PHASE1_DIR"
+        --output-dir "$PHASE2_GATE_OUTPUT_DIR"
+        --current-log-root "function_call=$OUTPUT_BASE_DIR"
+    )
+    if [[ -n "${VALIDATION_BEFORE_DIR:-}" ]]; then
+        PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$VALIDATION_BEFORE_DIR")
+        PHASE2_REQUIRE_READY=1
+    else
+        PHASE2_REQUIRE_READY=0
+    fi
+    if [[ "$PHASE2_REQUIRE_READY" == "1" ]]; then
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
+            "${PHASE2_GATE_ARGS[@]}" \
+            --require-ready
+    else
+        echo "Running Phase 2 gate without --require-ready because observed-v0 baseline logs are unavailable." >&2
+        echo "Copy raw logs to a review machine with artifacts/baselines/observed-v0@0a53352/raw/logs/function_call and rerun the gate there." >&2
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
+            "${PHASE2_GATE_ARGS[@]}"
+    fi
 else
     echo "Skipping Phase 2 gate: $PHASE1_DIR/representative_manifest.json is missing." >&2
     echo "Copy logs to a review machine with artifacts/baselines/observed-v0@0a53352/phase1 and rerun the gate there." >&2

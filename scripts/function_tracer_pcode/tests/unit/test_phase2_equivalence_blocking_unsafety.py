@@ -159,6 +159,14 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
     )
 
 
+def _old_blocking_reason():
+    return make_unknown_reason(
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
+        decision_effect="blocks_equivalence",
+        reason_scope="function",
+    )
+
+
 def _write_all_representative_logs(root: Path, payload_by_function=None):
     payload_by_function = payload_by_function or {}
     for _entry_id, function, _binary_pair, left, right in REPRESENTATIVES:
@@ -166,17 +174,27 @@ def _write_all_representative_logs(root: Path, payload_by_function=None):
         _write_log(root, function, left, right, payload)
 
 
+def _write_all_baseline_representative_logs(root: Path, payload_by_function=None):
+    payload_by_function = payload_by_function or {}
+    for _entry_id, function, _binary_pair, left, right in REPRESENTATIVES:
+        payload = payload_by_function.get(function) or _payload(function, left, right, None, [_old_blocking_reason()])
+        _write_log(root, function, left, right, payload)
+
+
 def test_phase2_accepts_expected_pending_proof_movement_for_representative(tmp_path):
     phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
     current_root = tmp_path / "logs" / "function_call"
     output_dir = tmp_path / "phase2"
     _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
     _write_all_representative_logs(current_root)
 
     path = build_phase2_equivalence_blocking_unsafety_movement(
         phase1_dir=phase1_dir,
         output_dir=output_dir,
         current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
     )
 
     manifest = json.loads(path.read_text())
@@ -186,15 +204,18 @@ def test_phase2_accepts_expected_pending_proof_movement_for_representative(tmp_p
     assert manifest["phase2_ready"] is True
     assert manifest["movement_summary"]["failed"] == 0
     assert manifest["movement_summary"]["passed"] == 3
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is True
     assert {entry["movement_status"] for entry in manifest["entries"]} == {"expected_movement"}
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
 def test_phase2_rejects_false_eq_while_proof_is_pending(tmp_path):
     phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
     current_root = tmp_path / "logs" / "function_call"
     output_dir = tmp_path / "phase2"
     _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
     _write_all_representative_logs(
         current_root,
         {
@@ -206,6 +227,7 @@ def test_phase2_rejects_false_eq_while_proof_is_pending(tmp_path):
         phase1_dir=phase1_dir,
         output_dir=output_dir,
         current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
     )
 
     manifest = json.loads(path.read_text())
@@ -217,9 +239,11 @@ def test_phase2_rejects_false_eq_while_proof_is_pending(tmp_path):
 
 def test_phase2_rejects_missing_object_target_key_and_non_full_proof_id(tmp_path):
     phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
     current_root = tmp_path / "logs" / "function_call"
     output_dir = tmp_path / "phase2"
     _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
     malformed_id = build_proof_obligation_id(
         UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
         "object_evidence_collected",
@@ -249,6 +273,7 @@ def test_phase2_rejects_missing_object_target_key_and_non_full_proof_id(tmp_path
         phase1_dir=phase1_dir,
         output_dir=output_dir,
         current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
     )
 
     manifest = json.loads(path.read_text())
@@ -259,9 +284,11 @@ def test_phase2_rejects_missing_object_target_key_and_non_full_proof_id(tmp_path
 
 def test_phase2_rejects_aggregate_call_effect_blocker_key_with_log_prose(tmp_path):
     phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
     current_root = tmp_path / "logs" / "function_call"
     output_dir = tmp_path / "phase2"
     _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
     aggregate_key = (
         "call_effect_blocker",
         "function1",
@@ -289,8 +316,58 @@ def test_phase2_rejects_aggregate_call_effect_blocker_key_with_log_prose(tmp_pat
         phase1_dir=phase1_dir,
         output_dir=output_dir,
         current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase2_ready"] is False
     assert "object_target_key_missing_or_not_specific" in manifest["movement_summary"]["failed_kinds"]
+
+
+def test_phase2_rejects_non_target_baseline_tuple_delta(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_extra",
+        "B1",
+        "B2",
+        _payload(
+            "fc_extra",
+            "B1",
+            "B2",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE)],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_extra",
+        "B1",
+        "B2",
+        _payload(
+            "fc_extra",
+            "B1",
+            "B2",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP)],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert "unexpected_validation_unknown_unit_delta" in manifest["movement_summary"]["failed_kinds"]
+    assert "unexpected_reason_record_delta" in manifest["movement_summary"]["failed_kinds"]
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is False

@@ -28,7 +28,7 @@ from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
 )
 
 
-def _payload(function_name, *, is_equivalent=None, reasons=(), debug_trace=None):
+def _payload(function_name, *, is_equivalent=None, reasons=(), debug_trace=None, **extra):
     payload = {
         "is_equivalent": is_equivalent,
         "function1_name": function_name,
@@ -43,6 +43,7 @@ def _payload(function_name, *, is_equivalent=None, reasons=(), debug_trace=None)
     }
     if debug_trace is not None:
         payload["debug_trace"] = debug_trace
+    payload.update(extra)
     return payload
 
 
@@ -147,6 +148,37 @@ def test_validation_summary_normalizes_bool_debug_trace_final_result_counts():
         "EQUIVALENT": 1,
         "NOT_EQ": 1,
         "UNKNOWN": 1,
+    }
+
+
+def test_validation_summary_keeps_timeout_final_result_separate_from_unknown():
+    summary = summarize_validation_unknowns(
+        [
+            _payload(
+                "timeout_flag",
+                is_timeout=True,
+                reasons=[make_unknown_reason(UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT)],
+            ),
+            _payload(
+                "timeout_solver",
+                solver_results={"all_results": [{"status": "TIMEOUT"}]},
+                reasons=[make_unknown_reason(UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT)],
+            ),
+            _payload(
+                "unknown",
+                reasons=[make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION)],
+            ),
+        ],
+    )
+
+    assert summary.unknown_results == 3
+    assert summary.final_result_counts == {
+        "TIMEOUT": 2,
+        "UNKNOWN": 1,
+    }
+    assert summary.unknown_by_reason == {
+        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value: 2,
+        UnknownReasonId.UNRESOLVED_EXPRESSION.value: 1,
     }
 
 

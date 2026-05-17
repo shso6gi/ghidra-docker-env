@@ -20,8 +20,10 @@ from ..equivalence.unknown_reason import (
 from .result_summary import (
     STATUS_EQ,
     STATUS_UNKNOWN,
+    ValidationBaselineComparison,
     ValidationLogRecord,
     aggregate_validation_logs,
+    compare_validation_baseline_records,
 )
 
 
@@ -37,6 +39,22 @@ TARGET_REPRESENTATIVE_IDS = (
     "representative-equivalence-blocking-unsafety-dispatch",
     "representative-equivalence-blocking-unsafety-recursive-stress",
 )
+ALLOWED_NEW_REASON_TUPLE = (
+    TARGET_REASON_ID,
+    "blocks_equivalence",
+    "function",
+    EXPECTED_PROOF_KIND,
+    EXPECTED_PROOF_STAGE,
+    EXPECTED_ACTION_STATUS,
+)
+ALLOWED_OLD_REASON_TUPLE = (
+    TARGET_REASON_ID,
+    "blocks_equivalence",
+    "function",
+    "none",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
 
 
 def build_phase2_equivalence_blocking_unsafety_movement(
@@ -44,6 +62,7 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     phase1_dir: Path,
     output_dir: Path,
     current_log_roots: Mapping[str, Path],
+    baseline_log_roots: Optional[Mapping[str, Path]] = None,
 ) -> Path:
     phase1 = Path(phase1_dir).resolve()
     output = Path(output_dir)
@@ -54,7 +73,11 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     entries = []
     for entry in _target_representatives(representative):
         entries.append(_validate_representative_expected_movement(entry, current_records))
-    summary = _movement_summary(entries)
+    baseline_gate = _validate_overall_baseline_comparison(
+        baseline_log_roots or {},
+        current_log_roots,
+    )
+    summary = _movement_summary(entries, baseline_gate)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "manifest_kind": "phase2_equivalence_blocking_unsafety_expected_movement",
@@ -71,8 +94,13 @@ def build_phase2_equivalence_blocking_unsafety_movement(
             category: str(path)
             for category, path in sorted(current_log_roots.items())
         },
+        "baseline_log_roots": {
+            category: str(path)
+            for category, path in sorted((baseline_log_roots or {}).items())
+        },
         "movement_summary": summary,
-        "phase2_ready": summary["failed"] == 0,
+        "overall_baseline_comparison_gate": baseline_gate,
+        "phase2_ready": summary["failed"] == 0 and baseline_gate.get("passed") is True,
         "entries": entries,
     }
     path = output / "equivalence_blocking_unsafety_expected_movement.json"
@@ -105,12 +133,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="CATEGORY=PATH",
         help="current validation log root for a category; may be repeated",
     )
+    parser.add_argument(
+        "--baseline-log-root",
+        action="append",
+        default=None,
+        metavar="CATEGORY=PATH",
+        help="observed-v0 baseline log root for a category; may be repeated",
+    )
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
     path = build_phase2_equivalence_blocking_unsafety_movement(
         phase1_dir=Path(args.phase1_dir),
         output_dir=Path(args.output_dir),
         current_log_roots=_parse_current_log_roots(args.current_log_root or ()),
+        baseline_log_roots=_parse_current_log_roots(args.baseline_log_root or ()),
     )
     print(path)
     if args.require_ready:
@@ -313,7 +349,10 @@ def _target_representatives(manifest: Mapping[str, Any]) -> Sequence[Mapping[str
     )
 
 
-def _movement_summary(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def _movement_summary(
+    entries: Sequence[Mapping[str, Any]],
+    baseline_gate: Mapping[str, Any],
+) -> Dict[str, Any]:
     entry_ids = {str(entry.get("entry_id") or MISSING_SENTINEL) for entry in entries}
     missing_representatives = sorted(set(TARGET_REPRESENTATIVE_IDS) - entry_ids)
     unexpected_representatives = sorted(entry_ids - set(TARGET_REPRESENTATIVE_IDS))
@@ -325,13 +364,15 @@ def _movement_summary(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         }
         | ({"missing_target_representative"} if missing_representatives else set())
         | ({"unexpected_target_representative"} if unexpected_representatives else set())
+        | set(str(kind) for kind in (baseline_gate.get("failed_kinds") or ()))
     )
     failed_entries = sum(1 for entry in entries if entry.get("movement_status") != "expected_movement")
+    baseline_failures = 0 if baseline_gate.get("passed") is True else 1
     return {
         "target_reason_id": TARGET_REASON_ID,
         "total": len(entries),
         "passed": sum(1 for entry in entries if entry.get("movement_status") == "expected_movement"),
-        "failed": failed_entries + len(missing_representatives) + len(unexpected_representatives),
+        "failed": failed_entries + len(missing_representatives) + len(unexpected_representatives) + baseline_failures,
         "failed_kinds": failed_kinds,
         "expected_representative_ids": list(TARGET_REPRESENTATIVE_IDS),
         "missing_representative_ids": missing_representatives,
@@ -344,6 +385,151 @@ def _movement_summary(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "recovery_action": EXPECTED_RECOVERY_ACTION,
         },
     }
+
+
+def _validate_overall_baseline_comparison(
+    baseline_log_roots: Mapping[str, Path],
+    current_log_roots: Mapping[str, Path],
+) -> Dict[str, Any]:
+    if not baseline_log_roots:
+        return {
+            "passed": False,
+            "failed_kinds": ["baseline_log_root_missing"],
+            "status": "failed",
+        }
+    before_records = aggregate_validation_logs(_log_paths_from_roots(baseline_log_roots)).records
+    after_records = aggregate_validation_logs(_log_paths_from_roots(current_log_roots)).records
+    comparison = compare_validation_baseline_records(before_records, after_records)
+    failed_kinds = _baseline_comparison_failures(comparison)
+    return {
+        "passed": not failed_kinds,
+        "status": "passed" if not failed_kinds else "failed",
+        "failed_kinds": failed_kinds,
+        "before_total_results": comparison.before_total_results,
+        "after_total_results": comparison.after_total_results,
+        "unknown_final_results_delta": comparison.unknown_final_results_delta,
+        "timeout_final_results_delta": comparison.timeout_final_results_delta,
+        "allowed_tuple_movement": {
+            "old": _reason_tuple_to_string(ALLOWED_OLD_REASON_TUPLE),
+            "new": _reason_tuple_to_string(ALLOWED_NEW_REASON_TUPLE),
+        },
+        "unexpected_deltas": _unexpected_baseline_deltas(comparison),
+    }
+
+
+def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> Sequence[str]:
+    failures = []
+    if comparison.before_total_results != comparison.after_total_results:
+        failures.append("total_result_count_delta")
+    if comparison.final_result_counts_delta:
+        failures.append("final_result_count_delta")
+    if comparison.unknown_final_results_delta != 0:
+        failures.append("unknown_final_result_delta")
+    if comparison.timeout_final_results_delta != 0:
+        failures.append("timeout_final_result_delta")
+    if comparison.timeout_class_multiset_delta:
+        failures.append("timeout_class_delta")
+    if comparison.pair_result_multiset_delta:
+        failures.append("pair_result_tuple_delta")
+    if comparison.missing_pair_identities:
+        failures.append("missing_pair_identities")
+    if comparison.added_pair_identities:
+        failures.append("added_pair_identities")
+    if _unexpected_tuple_deltas(
+        comparison.validation_unknown_unit_multiset_delta,
+        "validation_unknown_unit",
+    ):
+        failures.append("unexpected_validation_unknown_unit_delta")
+    if _unexpected_tuple_deltas(
+        comparison.reason_record_multiset_delta,
+        "reason_record",
+    ):
+        failures.append("unexpected_reason_record_delta")
+    if _unexpected_tuple_deltas(
+        comparison.proof_action_multiset_delta,
+        "proof_action",
+    ):
+        failures.append("unexpected_proof_action_delta")
+    return sorted(set(failures))
+
+
+def _unexpected_baseline_deltas(comparison: ValidationBaselineComparison) -> Dict[str, Any]:
+    return {
+        "validation_unknown_unit_multiset_delta": _stringify_delta_mapping(
+            _unexpected_tuple_deltas(
+                comparison.validation_unknown_unit_multiset_delta,
+                "validation_unknown_unit",
+            )
+        ),
+        "reason_record_multiset_delta": _stringify_delta_mapping(
+            _unexpected_tuple_deltas(
+                comparison.reason_record_multiset_delta,
+                "reason_record",
+            )
+        ),
+        "proof_action_multiset_delta": _stringify_delta_mapping(
+            _unexpected_tuple_deltas(
+                comparison.proof_action_multiset_delta,
+                "proof_action",
+            )
+        ),
+        "pair_result_multiset_delta": _stringify_delta_mapping(comparison.pair_result_multiset_delta),
+        "timeout_class_multiset_delta": dict(comparison.timeout_class_multiset_delta),
+        "final_result_counts_delta": dict(comparison.final_result_counts_delta),
+    }
+
+
+def _unexpected_tuple_deltas(
+    deltas: Mapping[Tuple[str, ...], int],
+    count_kind: str,
+) -> Dict[Tuple[str, ...], int]:
+    unexpected = {}
+    for key, value in deltas.items():
+        if _allowed_phase2_tuple_delta(key, value, count_kind):
+            continue
+        unexpected[key] = value
+    return unexpected
+
+
+def _allowed_phase2_tuple_delta(
+    key: Tuple[str, ...],
+    value: int,
+    count_kind: str,
+) -> bool:
+    if value == 0 or not isinstance(key, tuple) or len(key) != 7:
+        return False
+    if key[0] != count_kind:
+        return False
+    reason_tuple = key[1:]
+    if count_kind in {"validation_unknown_unit", "reason_record"}:
+        if reason_tuple == ALLOWED_NEW_REASON_TUPLE:
+            return value > 0
+        if reason_tuple == ALLOWED_OLD_REASON_TUPLE:
+            return value < 0
+        return False
+    if count_kind == "proof_action":
+        return reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0
+    return False
+
+
+def _log_paths_from_roots(log_roots: Mapping[str, Path]) -> Sequence[Path]:
+    paths = []
+    for _category, root in sorted(log_roots.items()):
+        paths.extend(_log_paths(Path(root)))
+    return tuple(paths)
+
+
+def _stringify_delta_mapping(deltas: Mapping[Any, int]) -> Dict[str, int]:
+    return {
+        _reason_tuple_to_string(key): value
+        for key, value in sorted(deltas.items(), key=lambda item: str(item[0]))
+    }
+
+
+def _reason_tuple_to_string(value: Any) -> str:
+    if isinstance(value, tuple):
+        return " | ".join(str(item) for item in value)
+    return str(value)
 
 
 def _unique_failures(rejected_records: Sequence[Mapping[str, Any]]) -> Sequence[str]:

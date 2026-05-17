@@ -8,7 +8,9 @@
     "explained_runner_order_artifact": "fc_is_odd B8_B15 validation_unknown_unit primary record changed because this run used natural B-id orientation while observed-v0 used shell lexicographic orientation for B15_B8; runner default has been restored to baseline lexicographic order for future runs",
     "final_result_count_delta": 0,
     "missing_pair_identities": "ok",
+    "non_target_validation_unknown_unit_delta": "return_coverage_gap +1 / return_coverage_inconclusive -1",
     "pair_result_tuple_delta": "ok",
+    "phase2_gate_status": "failed: unexpected_validation_unknown_unit_delta",
     "timeout_final_result_delta": 0,
     "unknown_final_result_delta": 0
   },
@@ -28,15 +30,17 @@
       "representative-equivalence-blocking-unsafety-dispatch",
       "representative-equivalence-blocking-unsafety-recursive-stress"
     ],
-    "failed": 0,
-    "failed_kinds": [],
+    "failed": 1,
+    "failed_kinds": [
+      "unexpected_validation_unknown_unit_delta"
+    ],
     "missing_representative_ids": [],
     "passed": 3,
     "target_reason_id": "equivalence_blocking_unsafety",
     "total": 3,
     "unexpected_representative_ids": []
   },
-  "phase2_ready": true,
+  "phase2_ready": false,
   "raw_log_count": 2400,
   "raw_log_root": "/mnt/c/Users/saito/Git/ghidra-docker-env/logs/equivalence_all/function_call_test_phase2_full_pre_producer",
   "raw_log_sha256": {
