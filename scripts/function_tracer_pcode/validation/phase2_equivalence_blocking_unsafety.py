@@ -90,6 +90,40 @@ RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE = (
     "return_coverage_smt_disambiguation",
     "planned",
 )
+SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE = (
+    "solver_proven_rewrite_proof_failed",
+    "retryable",
+    "pair",
+    "solver_retry_or_normalization",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
+SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES = {
+    (
+        "solver_proven_rewrite_proof_failed",
+        "retryable",
+        "pair",
+        "solver_retry_or_normalization",
+        "rewrite_proof_recheck",
+        "planned",
+    ),
+    (
+        "solver_proven_rewrite_proof_failed",
+        "retryable",
+        "pair",
+        "solver_retry_or_normalization",
+        "solver_retry",
+        "planned",
+    ),
+}
+SAT_UNSAFETY_REASON_TUPLE = (
+    "sat_unsafety",
+    "blocks_disequivalence",
+    "pair",
+    "none",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
 ALLOWED_EXPOSED_REASON_TUPLES = {
     (
         "return_coverage_gap",
@@ -160,6 +194,7 @@ ALLOWED_PAIR_EXPOSED_REASONS = {
 }
 ALLOWED_PAIR_REMOVED_REASONS = {
     "return_coverage_inconclusive",
+    "solver_proven_rewrite_proof_failed",
     "unresolved_expression",
 }
 
@@ -680,6 +715,8 @@ def _allowed_phase2_tuple_delta(
                 return value < 0
             if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE:
                 return value < 0
+            if reason_tuple == SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE:
+                return value < 0
             if reason_tuple in ALLOWED_EXPOSED_REASON_TUPLES:
                 return (
                     value > 0
@@ -695,6 +732,8 @@ def _allowed_phase2_tuple_delta(
             return True
         if allow_reason_reclassification:
             if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE:
+                return value < 0
+            if reason_tuple in SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES:
                 return value < 0
             if reason_tuple in ALLOWED_EXPOSED_PROOF_ACTION_TUPLES:
                 return (
@@ -732,6 +771,7 @@ def _allows_reason_reclassification(
 
 def _has_allowed_broad_reason_reduction(comparison: ValidationBaselineComparison) -> bool:
     broad_tuples = {
+        SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE,
         UNRESOLVED_EXPRESSION_REASON_TUPLE,
         RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
     }
@@ -821,6 +861,8 @@ def _allowed_pair_reason_reclassification(
         return True
     if "unresolved_expression" in removed:
         return bool(after_reasons)
+    if removed == {"solver_proven_rewrite_proof_failed"}:
+        return added == {"sat_unsafety"}
     if removed == {"return_coverage_inconclusive"}:
         if added == {"return_coverage_gap"}:
             return True
@@ -884,11 +926,23 @@ def _allowed_positive_tuple_deltas(
                 proof_action_deltas,
                 ALLOWED_EXPOSED_PROOF_ACTION_TUPLES,
             )
+        elif _has_solver_proven_rewrite_reduction(reason_record_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.REASON_RECORD.value],
+                reason_record_deltas,
+                {SAT_UNSAFETY_REASON_TUPLE},
+            )
         if _has_allowed_broad_tuple_reduction(validation_unit_deltas):
             _add_positive_tuple_allowance(
                 result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
                 validation_unit_deltas,
                 ALLOWED_EXPOSED_REASON_TUPLES,
+            )
+        elif _has_solver_proven_rewrite_reduction(validation_unit_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
+                validation_unit_deltas,
+                {SAT_UNSAFETY_REASON_TUPLE},
             )
     return result
 
@@ -898,12 +952,18 @@ def _has_allowed_broad_tuple_reduction(
 ) -> bool:
     return any(
         reason_tuple in {
-            UNRESOLVED_EXPRESSION_REASON_TUPLE,
             RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
+            UNRESOLVED_EXPRESSION_REASON_TUPLE,
         }
         and value < 0
         for reason_tuple, value in deltas.items()
     )
+
+
+def _has_solver_proven_rewrite_reduction(
+    deltas: Mapping[Tuple[str, ...], int],
+) -> bool:
+    return int(deltas.get(SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE, 0) or 0) < 0
 
 
 def _add_positive_tuple_allowance(

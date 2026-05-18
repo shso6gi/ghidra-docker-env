@@ -17,6 +17,7 @@ solver_yices2.py
 solver_cvc5.py
 *.txt
 *.log
+logs/equivalence_all/*/phase2_gate/*.json
 .local-ghidra-extract/
 
 # Observed baseline artifacts: commit metadata, keep multi-GB raw logs external.

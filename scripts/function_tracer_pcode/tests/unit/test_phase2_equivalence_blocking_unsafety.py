@@ -498,6 +498,70 @@ def test_phase2_accepts_exposed_reason_addition_when_same_pair_broad_records_dro
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
+def test_phase2_accepts_solver_rewrite_proof_failure_to_sat_unsafety(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_recursive_sum",
+        "B1",
+        "B8",
+        _payload(
+            "fc_recursive_sum",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-gcc-O3",
+            None,
+            [
+                make_unknown_reason(
+                    UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED
+                ),
+                make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION),
+            ],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_recursive_sum",
+        "B1",
+        "B8",
+        _payload(
+            "fc_recursive_sum",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-gcc-O3",
+            None,
+            [
+                make_unknown_reason(UnknownReasonId.SAT_UNSAFETY),
+                make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION),
+            ],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is True
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is True
+    assert manifest["overall_baseline_comparison_gate"]["unexpected_deltas"] == {
+        "final_result_counts_delta": {},
+        "pair_result_multiset_delta": {},
+        "proof_action_multiset_delta": {},
+        "reason_record_multiset_delta": {},
+        "timeout_class_multiset_delta": {},
+        "validation_unknown_unit_multiset_delta": {},
+    }
+    validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
 def test_phase2_accepts_inconclusive_removal_when_gap_remains_for_same_pair(tmp_path):
     phase1_dir = tmp_path / "phase1"
     baseline_root = tmp_path / "baseline" / "function_call"
@@ -555,6 +619,62 @@ def test_phase2_accepts_inconclusive_removal_when_gap_remains_for_same_pair(tmp_
         "validation_unknown_unit_multiset_delta": {},
     }
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_solver_rewrite_proof_failure_to_unrelated_reason(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_recursive_sum",
+        "B1",
+        "B8",
+        _payload(
+            "fc_recursive_sum",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-gcc-O3",
+            None,
+            [
+                make_unknown_reason(
+                    UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED
+                ),
+            ],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_recursive_sum",
+        "B1",
+        "B8",
+        _payload(
+            "fc_recursive_sum",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-gcc-O3",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert "pair_result_tuple_delta" in manifest["movement_summary"]["failed_kinds"]
+    unexpected = manifest["overall_baseline_comparison_gate"]["unexpected_deltas"]
+    assert any(
+        "return_width_bridge_missing" in key
+        for key in unexpected["pair_result_multiset_delta"]
+    )
 
 
 def test_phase2_rejects_unrelated_exposed_reason_record_addition(tmp_path):
