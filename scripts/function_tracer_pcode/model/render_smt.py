@@ -1147,7 +1147,7 @@ def _to_smt_internal(
             return f"(bvneg {operand_smt})"
 
         if expr.operator == "BOOL_NEGATE":
-            return f"(not {operand_smt})"
+            return f"(not {_coerce_expr_to_bool(operand, operand_smt)})"
 
         op = expr._get_smt_operator(expr.operator)
         return f"({op} {operand_smt})"

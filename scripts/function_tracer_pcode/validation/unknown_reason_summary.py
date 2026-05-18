@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
+    UnknownDecisionEffect,
     UnknownReasonClass,
     UnknownReasonId,
     UnknownRecoveryProofKind,
@@ -33,6 +34,13 @@ _FINAL_UNKNOWN_TRANSITIONS = {"UNKNOWN", "TIMEOUT"}
 _PROOF_BACKLOG_CLASSES = {
     UnknownReasonClass.PROOF_OBLIGATION.value,
     UnknownReasonClass.COVERAGE_GAP.value,
+}
+_PRIMARY_DECISION_EFFECT_PRIORITY = {
+    UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value: 0,
+    UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE.value: 1,
+    UnknownDecisionEffect.BLOCKS_DECISION.value: 2,
+    UnknownDecisionEffect.RETRYABLE.value: 3,
+    UnknownDecisionEffect.DIAGNOSTIC_ONLY.value: 4,
 }
 RESULT_JSON_BEGIN = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
 RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
@@ -852,7 +860,7 @@ def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownR
 def _select_primary_records_by_aggregation_unit(
     records: Iterable[UnknownReasonRecord],
 ) -> Tuple[UnknownReasonRecord, ...]:
-    primary_records: Dict[Tuple[str, str], UnknownReasonRecord] = {}
+    grouped_records: Dict[Tuple[str, str], list[UnknownReasonRecord]] = {}
     fallback_index = 0
     for record in records:
         aggregation_key = str(record.aggregation_unit or "result")
@@ -860,8 +868,24 @@ def _select_primary_records_by_aggregation_unit(
         if unit_key is None:
             unit_key = f"record:{fallback_index}"
             fallback_index += 1
-        primary_records.setdefault((aggregation_key, unit_key), record)
-    return tuple(primary_records.values())
+        grouped_records.setdefault((aggregation_key, unit_key), []).append(record)
+    return tuple(
+        min(group, key=_primary_unknown_record_sort_key)
+        for group in grouped_records.values()
+    )
+
+
+def _primary_unknown_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, ...]:
+    return (
+        _PRIMARY_DECISION_EFFECT_PRIORITY.get(str(record.decision_effect), 99),
+        str(record.reason_id),
+        str(record.reason_scope),
+        str(record.recovery_proof_kind),
+        str(record.proof_stage or ""),
+        str(record.action_status or ""),
+        tuple(str(ref) for ref in (record.evidence_refs or ())),
+        str(record.detail or ""),
+    )
 
 
 def _is_proof_backlog(record: UnknownReasonRecord) -> bool:

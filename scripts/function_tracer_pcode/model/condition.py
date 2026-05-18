@@ -34,9 +34,12 @@ class Condition:
         *,
         symbol_name_mapping: Optional[Mapping[str, str]] = None,
     ) -> str:
+        from .render_smt import _coerce_expr_to_bool
+
         expr_smt = self.expression.to_smt(
             symbol_name_mapping=symbol_name_mapping,
         )
+        expr_smt = _coerce_expr_to_bool(self.expression, expr_smt)
         if self.negated:
             return f"(not {expr_smt})"
         return expr_smt

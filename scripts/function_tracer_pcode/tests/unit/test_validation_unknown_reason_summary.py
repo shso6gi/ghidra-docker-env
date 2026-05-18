@@ -483,6 +483,43 @@ def test_validation_summary_classifies_reason_record_aggregation_difference():
     )
 
 
+def test_validation_summary_selects_primary_function_reason_without_order_dependency():
+    gap = make_unknown_reason(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        aggregation_unit="function",
+        stage="S_PAIRWISE",
+        detail="function1:return_coverage_gap",
+        evidence_refs=("function1:return_coverage_gap",),
+    )
+    inconclusive = make_unknown_reason(
+        UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        aggregation_unit="function",
+        stage="S_PAIRWISE",
+        detail="function2:return_coverage_inconclusive",
+        evidence_refs=("function2:return_coverage_inconclusive",),
+    )
+
+    forward = summarize_validation_unknowns(
+        [_payload("fc_is_odd", reasons=[gap, inconclusive])]
+    )
+    reversed_order = summarize_validation_unknowns(
+        [_payload("fc_is_odd", reasons=[inconclusive, gap])]
+    )
+
+    expected_unit_tuple = (
+        UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+        UnknownReasonId.RETURN_COVERAGE_GAP.value,
+        UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value,
+        UnknownReasonScope.FUNCTION.value,
+        UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+        UNKNOWN_TUPLE_MISSING,
+        UNKNOWN_TUPLE_MISSING,
+    )
+    assert forward.validation_unknown_unit_multiset == {expected_unit_tuple: 1}
+    assert reversed_order.validation_unknown_unit_multiset == {expected_unit_tuple: 1}
+    assert forward.reason_record_multiset == reversed_order.reason_record_multiset
+
+
 def test_validation_summary_classifies_proof_action_expansion():
     summary = summarize_validation_unknowns(
         [

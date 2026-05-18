@@ -48,6 +48,26 @@ def test_expression_to_smt_coerces_bool_before_integer_twos_complement():
     )
 
 
+def test_expression_to_smt_coerces_bitvector_before_bool_negate():
+    low_byte = _binary("SUBPIECE", _param("param_1", size=4), _const(0, size=4))
+    low_byte.size = 1
+    expr = Expression.unary_op("BOOL_NEGATE", low_byte)
+
+    smt = expression_to_smt(expr)
+
+    assert smt == "(not (not (= ((_ extract 7 0) param_1) (_ bv0 8))))"
+
+
+def test_condition_to_smt_coerces_bitvector_conditions_to_bool():
+    low_byte = _binary("SUBPIECE", _param("param_1", size=4), _const(0, size=4))
+    low_byte.size = 1
+
+    assert Condition(low_byte).to_smt() == "(not (= ((_ extract 7 0) param_1) (_ bv0 8)))"
+    assert Condition(low_byte, True).to_smt() == (
+        "(not (not (= ((_ extract 7 0) param_1) (_ bv0 8))))"
+    )
+
+
 def test_expression_to_smt_respects_explicit_shift_width_inside_piece():
     shifted = _binary("INT_RIGHT", _const(0x100e68, size=8), _const(56, size=4))
     shifted.size = 1
