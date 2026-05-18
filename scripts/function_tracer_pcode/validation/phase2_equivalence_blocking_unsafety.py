@@ -55,6 +55,102 @@ ALLOWED_OLD_REASON_TUPLE = (
     MISSING_SENTINEL,
     MISSING_SENTINEL,
 )
+UNRESOLVED_EXPRESSION_REASON_TUPLE = (
+    "unresolved_expression",
+    "blocks_decision",
+    "expression",
+    "none",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
+RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
+    "return_coverage_inconclusive",
+    "blocks_decision",
+    "function",
+    "return_coverage_completion",
+    "return_coverage_smt_disambiguation",
+    MISSING_SENTINEL,
+)
+RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE = (
+    "return_coverage_inconclusive",
+    "blocks_decision",
+    "function",
+    "return_coverage_completion",
+    "return_coverage_smt_disambiguation",
+    "planned",
+)
+ALLOWED_EXPOSED_REASON_TUPLES = {
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        MISSING_SENTINEL,
+        MISSING_SENTINEL,
+    ),
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "abi_relation_high_bit_proof",
+        MISSING_SENTINEL,
+        MISSING_SENTINEL,
+    ),
+    (
+        "sat_unsafety",
+        "blocks_disequivalence",
+        "pair",
+        "none",
+        MISSING_SENTINEL,
+        MISSING_SENTINEL,
+    ),
+    ALLOWED_NEW_REASON_TUPLE,
+}
+ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        "return_guard_coverage",
+        "planned",
+    ),
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        "return_partition_extraction",
+        "planned",
+    ),
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "abi_relation_proof",
+        "abi_relation",
+        "planned",
+    ),
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "high_bit_proof",
+        "high_bit_relation",
+        "planned",
+    ),
+    ALLOWED_NEW_REASON_TUPLE,
+}
+ALLOWED_PAIR_EXPOSED_REASONS = {
+    TARGET_REASON_ID,
+    "return_coverage_gap",
+    "return_width_bridge_missing",
+    "sat_unsafety",
+}
+ALLOWED_PAIR_REMOVED_REASONS = {
+    "return_coverage_inconclusive",
+    "unresolved_expression",
+}
 
 
 def build_phase2_equivalence_blocking_unsafety_movement(
@@ -419,6 +515,7 @@ def _validate_overall_baseline_comparison(
 
 def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> Sequence[str]:
     failures = []
+    allow_reason_reclassification = _allows_reason_reclassification(comparison)
     if comparison.before_total_results != comparison.after_total_results:
         failures.append("total_result_count_delta")
     if comparison.final_result_counts_delta:
@@ -429,7 +526,7 @@ def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> S
         failures.append("timeout_final_result_delta")
     if comparison.timeout_class_multiset_delta:
         failures.append("timeout_class_delta")
-    if comparison.pair_result_multiset_delta:
+    if _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta):
         failures.append("pair_result_tuple_delta")
     if comparison.missing_pair_identities:
         failures.append("missing_pair_identities")
@@ -438,16 +535,19 @@ def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> S
     if _unexpected_tuple_deltas(
         comparison.validation_unknown_unit_multiset_delta,
         "validation_unknown_unit",
+        allow_reason_reclassification=allow_reason_reclassification,
     ):
         failures.append("unexpected_validation_unknown_unit_delta")
     if _unexpected_tuple_deltas(
         comparison.reason_record_multiset_delta,
         "reason_record",
+        allow_reason_reclassification=allow_reason_reclassification,
     ):
         failures.append("unexpected_reason_record_delta")
     if _unexpected_tuple_deltas(
         comparison.proof_action_multiset_delta,
         "proof_action",
+        allow_reason_reclassification=allow_reason_reclassification,
     ):
         failures.append("unexpected_proof_action_delta")
     return sorted(set(failures))
@@ -459,21 +559,26 @@ def _unexpected_baseline_deltas(comparison: ValidationBaselineComparison) -> Dic
             _unexpected_tuple_deltas(
                 comparison.validation_unknown_unit_multiset_delta,
                 "validation_unknown_unit",
+                allow_reason_reclassification=_allows_reason_reclassification(comparison),
             )
         ),
         "reason_record_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.reason_record_multiset_delta,
                 "reason_record",
+                allow_reason_reclassification=_allows_reason_reclassification(comparison),
             )
         ),
         "proof_action_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.proof_action_multiset_delta,
                 "proof_action",
+                allow_reason_reclassification=_allows_reason_reclassification(comparison),
             )
         ),
-        "pair_result_multiset_delta": _stringify_delta_mapping(comparison.pair_result_multiset_delta),
+        "pair_result_multiset_delta": _stringify_delta_mapping(
+            _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta)
+        ),
         "timeout_class_multiset_delta": dict(comparison.timeout_class_multiset_delta),
         "final_result_counts_delta": dict(comparison.final_result_counts_delta),
     }
@@ -482,10 +587,17 @@ def _unexpected_baseline_deltas(comparison: ValidationBaselineComparison) -> Dic
 def _unexpected_tuple_deltas(
     deltas: Mapping[Tuple[str, ...], int],
     count_kind: str,
+    *,
+    allow_reason_reclassification: bool = False,
 ) -> Dict[Tuple[str, ...], int]:
     unexpected = {}
     for key, value in deltas.items():
-        if _allowed_phase2_tuple_delta(key, value, count_kind):
+        if _allowed_phase2_tuple_delta(
+            key,
+            value,
+            count_kind,
+            allow_reason_reclassification=allow_reason_reclassification,
+        ):
             continue
         unexpected[key] = value
     return unexpected
@@ -495,6 +607,8 @@ def _allowed_phase2_tuple_delta(
     key: Tuple[str, ...],
     value: int,
     count_kind: str,
+    *,
+    allow_reason_reclassification: bool = False,
 ) -> bool:
     if value == 0 or not isinstance(key, tuple) or len(key) != 7:
         return False
@@ -506,10 +620,135 @@ def _allowed_phase2_tuple_delta(
             return value > 0
         if reason_tuple == ALLOWED_OLD_REASON_TUPLE:
             return value < 0
+        if allow_reason_reclassification:
+            if reason_tuple == UNRESOLVED_EXPRESSION_REASON_TUPLE:
+                return value < 0
+            if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE:
+                return value < 0
+            if reason_tuple in ALLOWED_EXPOSED_REASON_TUPLES:
+                return value > 0
         return False
     if count_kind == "proof_action":
-        return reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0
+        if reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0:
+            return True
+        if allow_reason_reclassification:
+            if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE:
+                return value < 0
+            if reason_tuple in ALLOWED_EXPOSED_PROOF_ACTION_TUPLES:
+                return value > 0
+        return False
     return False
+
+
+def _allows_reason_reclassification(comparison: ValidationBaselineComparison) -> bool:
+    return (
+        comparison.before_total_results == comparison.after_total_results
+        and not comparison.final_result_counts_delta
+        and comparison.unknown_final_results_delta == 0
+        and comparison.timeout_final_results_delta == 0
+        and not comparison.timeout_class_multiset_delta
+        and not comparison.missing_pair_identities
+        and not comparison.added_pair_identities
+        and not _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta)
+        and _has_allowed_broad_reason_reduction(comparison)
+    )
+
+
+def _has_allowed_broad_reason_reduction(comparison: ValidationBaselineComparison) -> bool:
+    broad_tuples = {
+        UNRESOLVED_EXPRESSION_REASON_TUPLE,
+        RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
+    }
+    for deltas in (
+        comparison.validation_unknown_unit_multiset_delta,
+        comparison.reason_record_multiset_delta,
+    ):
+        for key, value in deltas.items():
+            if (
+                isinstance(key, tuple)
+                and len(key) == 7
+                and key[1:] in broad_tuples
+                and value < 0
+            ):
+                return True
+    return False
+
+
+def _unexpected_pair_result_deltas(
+    deltas: Mapping[Tuple[str, ...], int],
+) -> Dict[Tuple[str, ...], int]:
+    unexpected: Dict[Tuple[str, ...], int] = {}
+    grouped: Dict[Tuple[str, str, str, str], Dict[str, list]] = {}
+    for key, value in deltas.items():
+        if not isinstance(key, tuple) or len(key) != 5:
+            unexpected[key] = value
+            continue
+        function_name, binary_pair, status, reasons, timeout_class = key
+        if status != STATUS_UNKNOWN or timeout_class != MISSING_SENTINEL:
+            unexpected[key] = value
+            continue
+        bucket = grouped.setdefault(
+            (function_name, binary_pair, status, timeout_class),
+            {"before": [], "after": []},
+        )
+        if value < 0:
+            bucket["before"].extend([key] * abs(int(value)))
+        elif value > 0:
+            bucket["after"].extend([key] * int(value))
+
+    for bucket in grouped.values():
+        unmatched_after = list(bucket["after"])
+        for before_key in bucket["before"]:
+            match_index = next(
+                (
+                    index
+                    for index, after_key in enumerate(unmatched_after)
+                    if _allowed_pair_reason_reclassification(before_key, after_key)
+                ),
+                None,
+            )
+            if match_index is None:
+                unexpected[before_key] = unexpected.get(before_key, 0) - 1
+                continue
+            unmatched_after.pop(match_index)
+        for after_key in unmatched_after:
+            unexpected[after_key] = unexpected.get(after_key, 0) + 1
+    return {key: value for key, value in unexpected.items() if value}
+
+
+def _allowed_pair_reason_reclassification(
+    before_key: Tuple[str, ...],
+    after_key: Tuple[str, ...],
+) -> bool:
+    if before_key[:3] != after_key[:3] or before_key[4] != after_key[4]:
+        return False
+    before_reasons = _pair_reason_set(before_key[3])
+    after_reasons = _pair_reason_set(after_key[3])
+    removed = before_reasons - after_reasons
+    added = after_reasons - before_reasons
+    if not removed <= ALLOWED_PAIR_REMOVED_REASONS:
+        return False
+    if not added <= ALLOWED_PAIR_EXPOSED_REASONS:
+        return False
+    if "unresolved_expression" in removed and added:
+        return True
+    if "unresolved_expression" in removed:
+        return bool(after_reasons)
+    if removed == {"return_coverage_inconclusive"}:
+        return added == {"return_coverage_gap"}
+    return False
+
+
+def _pair_reason_set(reasons: Any) -> set:
+    if reasons is None:
+        return set()
+    if str(reasons) in {"", MISSING_SENTINEL}:
+        return set()
+    return {
+        item
+        for item in str(reasons).split(",")
+        if item and item != MISSING_SENTINEL
+    }
 
 
 def _log_paths_from_roots(log_roots: Mapping[str, Path]) -> Sequence[Path]:
