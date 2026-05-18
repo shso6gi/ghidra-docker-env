@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -12,18 +13,28 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
+    UnknownCountKind,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
+    build_unknown_recovery_actions,
     coerce_unknown_reason_records,
 )
 from .result_summary import (
     STATUS_EQ,
+    STATUS_ORDER,
+    STATUS_TIMEOUT,
     STATUS_UNKNOWN,
     ValidationBaselineComparison,
     ValidationLogRecord,
     aggregate_validation_logs,
     compare_validation_baseline_records,
+)
+from .unknown_reason_summary import (
+    _extract_final_unknown_reasons,
+    _global_reason_tuple_from_action,
+    _global_reason_tuple_from_record,
+    _select_primary_records_by_aggregation_unit,
 )
 
 
@@ -496,7 +507,7 @@ def _validate_overall_baseline_comparison(
     before_records = aggregate_validation_logs(_log_paths_from_roots(baseline_log_roots)).records
     after_records = aggregate_validation_logs(_log_paths_from_roots(current_log_roots)).records
     comparison = compare_validation_baseline_records(before_records, after_records)
-    failed_kinds = _baseline_comparison_failures(comparison)
+    failed_kinds = _baseline_comparison_failures(comparison, before_records, after_records)
     return {
         "passed": not failed_kinds,
         "status": "passed" if not failed_kinds else "failed",
@@ -509,13 +520,28 @@ def _validate_overall_baseline_comparison(
             "old": _reason_tuple_to_string(ALLOWED_OLD_REASON_TUPLE),
             "new": _reason_tuple_to_string(ALLOWED_NEW_REASON_TUPLE),
         },
-        "unexpected_deltas": _unexpected_baseline_deltas(comparison),
+        "unexpected_deltas": _unexpected_baseline_deltas(
+            comparison,
+            before_records,
+            after_records,
+        ),
     }
 
 
-def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> Sequence[str]:
+def _baseline_comparison_failures(
+    comparison: ValidationBaselineComparison,
+    before_records: Sequence[ValidationLogRecord] = (),
+    after_records: Sequence[ValidationLogRecord] = (),
+) -> Sequence[str]:
     failures = []
-    allow_reason_reclassification = _allows_reason_reclassification(comparison)
+    pair_reason_deltas = _pair_reason_id_deltas(before_records, after_records)
+    allowed_positive_tuple_deltas = _allowed_positive_tuple_deltas(
+        _pair_unknown_tuple_deltas(before_records, after_records)
+    )
+    allow_reason_reclassification = _allows_reason_reclassification(
+        comparison,
+        pair_reason_deltas=pair_reason_deltas,
+    )
     if comparison.before_total_results != comparison.after_total_results:
         failures.append("total_result_count_delta")
     if comparison.final_result_counts_delta:
@@ -526,7 +552,10 @@ def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> S
         failures.append("timeout_final_result_delta")
     if comparison.timeout_class_multiset_delta:
         failures.append("timeout_class_delta")
-    if _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta):
+    if _unexpected_pair_result_deltas(
+        comparison.pair_result_multiset_delta,
+        pair_reason_deltas=pair_reason_deltas,
+    ):
         failures.append("pair_result_tuple_delta")
     if comparison.missing_pair_identities:
         failures.append("missing_pair_identities")
@@ -536,48 +565,69 @@ def _baseline_comparison_failures(comparison: ValidationBaselineComparison) -> S
         comparison.validation_unknown_unit_multiset_delta,
         "validation_unknown_unit",
         allow_reason_reclassification=allow_reason_reclassification,
+        allowed_positive_deltas=allowed_positive_tuple_deltas,
     ):
         failures.append("unexpected_validation_unknown_unit_delta")
     if _unexpected_tuple_deltas(
         comparison.reason_record_multiset_delta,
         "reason_record",
         allow_reason_reclassification=allow_reason_reclassification,
+        allowed_positive_deltas=allowed_positive_tuple_deltas,
     ):
         failures.append("unexpected_reason_record_delta")
     if _unexpected_tuple_deltas(
         comparison.proof_action_multiset_delta,
         "proof_action",
         allow_reason_reclassification=allow_reason_reclassification,
+        allowed_positive_deltas=allowed_positive_tuple_deltas,
     ):
         failures.append("unexpected_proof_action_delta")
     return sorted(set(failures))
 
 
-def _unexpected_baseline_deltas(comparison: ValidationBaselineComparison) -> Dict[str, Any]:
+def _unexpected_baseline_deltas(
+    comparison: ValidationBaselineComparison,
+    before_records: Sequence[ValidationLogRecord] = (),
+    after_records: Sequence[ValidationLogRecord] = (),
+) -> Dict[str, Any]:
+    pair_reason_deltas = _pair_reason_id_deltas(before_records, after_records)
+    allowed_positive_tuple_deltas = _allowed_positive_tuple_deltas(
+        _pair_unknown_tuple_deltas(before_records, after_records)
+    )
+    allow_reason_reclassification = _allows_reason_reclassification(
+        comparison,
+        pair_reason_deltas=pair_reason_deltas,
+    )
     return {
         "validation_unknown_unit_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.validation_unknown_unit_multiset_delta,
                 "validation_unknown_unit",
-                allow_reason_reclassification=_allows_reason_reclassification(comparison),
+                allow_reason_reclassification=allow_reason_reclassification,
+                allowed_positive_deltas=allowed_positive_tuple_deltas,
             )
         ),
         "reason_record_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.reason_record_multiset_delta,
                 "reason_record",
-                allow_reason_reclassification=_allows_reason_reclassification(comparison),
+                allow_reason_reclassification=allow_reason_reclassification,
+                allowed_positive_deltas=allowed_positive_tuple_deltas,
             )
         ),
         "proof_action_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.proof_action_multiset_delta,
                 "proof_action",
-                allow_reason_reclassification=_allows_reason_reclassification(comparison),
+                allow_reason_reclassification=allow_reason_reclassification,
+                allowed_positive_deltas=allowed_positive_tuple_deltas,
             )
         ),
         "pair_result_multiset_delta": _stringify_delta_mapping(
-            _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta)
+            _unexpected_pair_result_deltas(
+                comparison.pair_result_multiset_delta,
+                pair_reason_deltas=pair_reason_deltas,
+            )
         ),
         "timeout_class_multiset_delta": dict(comparison.timeout_class_multiset_delta),
         "final_result_counts_delta": dict(comparison.final_result_counts_delta),
@@ -589,14 +639,17 @@ def _unexpected_tuple_deltas(
     count_kind: str,
     *,
     allow_reason_reclassification: bool = False,
+    allowed_positive_deltas: Optional[Mapping[str, Mapping[Tuple[str, ...], int]]] = None,
 ) -> Dict[Tuple[str, ...], int]:
     unexpected = {}
+    allowed_positive_deltas = allowed_positive_deltas or {}
     for key, value in deltas.items():
         if _allowed_phase2_tuple_delta(
             key,
             value,
             count_kind,
             allow_reason_reclassification=allow_reason_reclassification,
+            allowed_positive_deltas=allowed_positive_deltas,
         ):
             continue
         unexpected[key] = value
@@ -609,7 +662,9 @@ def _allowed_phase2_tuple_delta(
     count_kind: str,
     *,
     allow_reason_reclassification: bool = False,
+    allowed_positive_deltas: Optional[Mapping[str, Mapping[Tuple[str, ...], int]]] = None,
 ) -> bool:
+    allowed_positive_deltas = allowed_positive_deltas or {}
     if value == 0 or not isinstance(key, tuple) or len(key) != 7:
         return False
     if key[0] != count_kind:
@@ -626,7 +681,14 @@ def _allowed_phase2_tuple_delta(
             if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE:
                 return value < 0
             if reason_tuple in ALLOWED_EXPOSED_REASON_TUPLES:
-                return value > 0
+                return (
+                    value > 0
+                    and value
+                    <= int(
+                        allowed_positive_deltas.get(count_kind, {}).get(reason_tuple, 0)
+                        or 0
+                    )
+                )
         return False
     if count_kind == "proof_action":
         if reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0:
@@ -635,12 +697,23 @@ def _allowed_phase2_tuple_delta(
             if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE:
                 return value < 0
             if reason_tuple in ALLOWED_EXPOSED_PROOF_ACTION_TUPLES:
-                return value > 0
+                return (
+                    value > 0
+                    and value
+                    <= int(
+                        allowed_positive_deltas.get(count_kind, {}).get(reason_tuple, 0)
+                        or 0
+                    )
+                )
         return False
     return False
 
 
-def _allows_reason_reclassification(comparison: ValidationBaselineComparison) -> bool:
+def _allows_reason_reclassification(
+    comparison: ValidationBaselineComparison,
+    *,
+    pair_reason_deltas: Optional[Mapping[Tuple[str, str, str, str], Mapping[str, int]]] = None,
+) -> bool:
     return (
         comparison.before_total_results == comparison.after_total_results
         and not comparison.final_result_counts_delta
@@ -649,7 +722,10 @@ def _allows_reason_reclassification(comparison: ValidationBaselineComparison) ->
         and not comparison.timeout_class_multiset_delta
         and not comparison.missing_pair_identities
         and not comparison.added_pair_identities
-        and not _unexpected_pair_result_deltas(comparison.pair_result_multiset_delta)
+        and not _unexpected_pair_result_deltas(
+            comparison.pair_result_multiset_delta,
+            pair_reason_deltas=pair_reason_deltas,
+        )
         and _has_allowed_broad_reason_reduction(comparison)
     )
 
@@ -676,8 +752,11 @@ def _has_allowed_broad_reason_reduction(comparison: ValidationBaselineComparison
 
 def _unexpected_pair_result_deltas(
     deltas: Mapping[Tuple[str, ...], int],
+    *,
+    pair_reason_deltas: Optional[Mapping[Tuple[str, str, str, str], Mapping[str, int]]] = None,
 ) -> Dict[Tuple[str, ...], int]:
     unexpected: Dict[Tuple[str, ...], int] = {}
+    pair_reason_deltas = pair_reason_deltas or {}
     grouped: Dict[Tuple[str, str, str, str], Dict[str, list]] = {}
     for key, value in deltas.items():
         if not isinstance(key, tuple) or len(key) != 5:
@@ -703,7 +782,11 @@ def _unexpected_pair_result_deltas(
                 (
                     index
                     for index, after_key in enumerate(unmatched_after)
-                    if _allowed_pair_reason_reclassification(before_key, after_key)
+                    if _allowed_pair_reason_reclassification(
+                        before_key,
+                        after_key,
+                        pair_reason_deltas.get(before_key[:3] + (before_key[4],), {}),
+                    )
                 ),
                 None,
             )
@@ -719,7 +802,9 @@ def _unexpected_pair_result_deltas(
 def _allowed_pair_reason_reclassification(
     before_key: Tuple[str, ...],
     after_key: Tuple[str, ...],
+    pair_reason_delta: Optional[Mapping[str, int]] = None,
 ) -> bool:
+    pair_reason_delta = pair_reason_delta or {}
     if before_key[:3] != after_key[:3] or before_key[4] != after_key[4]:
         return False
     before_reasons = _pair_reason_set(before_key[3])
@@ -730,13 +815,32 @@ def _allowed_pair_reason_reclassification(
         return False
     if not added <= ALLOWED_PAIR_EXPOSED_REASONS:
         return False
+    if not removed and added and before_reasons & ALLOWED_PAIR_REMOVED_REASONS:
+        return _has_pair_broad_reason_reduction(pair_reason_delta, before_reasons)
     if "unresolved_expression" in removed and added:
         return True
     if "unresolved_expression" in removed:
         return bool(after_reasons)
     if removed == {"return_coverage_inconclusive"}:
-        return added == {"return_coverage_gap"}
+        if added == {"return_coverage_gap"}:
+            return True
+        return (
+            not added
+            and "return_coverage_gap" in after_reasons
+            and int(pair_reason_delta.get("return_coverage_inconclusive", 0) or 0) < 0
+        )
     return False
+
+
+def _has_pair_broad_reason_reduction(
+    pair_reason_delta: Mapping[str, int],
+    before_reasons: set,
+) -> bool:
+    return any(
+        reason_id in before_reasons
+        and int(pair_reason_delta.get(reason_id, 0) or 0) < 0
+        for reason_id in ALLOWED_PAIR_REMOVED_REASONS
+    )
 
 
 def _pair_reason_set(reasons: Any) -> set:
@@ -749,6 +853,229 @@ def _pair_reason_set(reasons: Any) -> set:
         for item in str(reasons).split(",")
         if item and item != MISSING_SENTINEL
     }
+
+
+def _allowed_positive_tuple_deltas(
+    pair_tuple_deltas: Mapping[
+        Tuple[str, str, str, str],
+        Mapping[str, Mapping[Tuple[str, ...], int]],
+    ],
+) -> Dict[str, Counter]:
+    result: Dict[str, Counter] = {
+        UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value: Counter(),
+        UnknownCountKind.REASON_RECORD.value: Counter(),
+        UnknownCountKind.PROOF_ACTION.value: Counter(),
+    }
+    for count_deltas in pair_tuple_deltas.values():
+        reason_record_deltas = count_deltas.get(UnknownCountKind.REASON_RECORD.value, {})
+        validation_unit_deltas = count_deltas.get(
+            UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+            {},
+        )
+        proof_action_deltas = count_deltas.get(UnknownCountKind.PROOF_ACTION.value, {})
+        if _has_allowed_broad_tuple_reduction(reason_record_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.REASON_RECORD.value],
+                reason_record_deltas,
+                ALLOWED_EXPOSED_REASON_TUPLES,
+            )
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.PROOF_ACTION.value],
+                proof_action_deltas,
+                ALLOWED_EXPOSED_PROOF_ACTION_TUPLES,
+            )
+        if _has_allowed_broad_tuple_reduction(validation_unit_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
+                validation_unit_deltas,
+                ALLOWED_EXPOSED_REASON_TUPLES,
+            )
+    return result
+
+
+def _has_allowed_broad_tuple_reduction(
+    deltas: Mapping[Tuple[str, ...], int],
+) -> bool:
+    return any(
+        reason_tuple in {
+            UNRESOLVED_EXPRESSION_REASON_TUPLE,
+            RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
+        }
+        and value < 0
+        for reason_tuple, value in deltas.items()
+    )
+
+
+def _add_positive_tuple_allowance(
+    result: Counter,
+    deltas: Mapping[Tuple[str, ...], int],
+    allowed_tuples: Iterable[Tuple[str, ...]],
+) -> None:
+    allowed = set(allowed_tuples)
+    for reason_tuple, value in deltas.items():
+        if reason_tuple in allowed and value > 0:
+            result[reason_tuple] += int(value)
+
+
+def _pair_unknown_tuple_deltas(
+    before_records: Sequence[ValidationLogRecord],
+    after_records: Sequence[ValidationLogRecord],
+) -> Dict[Tuple[str, str, str, str], Dict[str, Dict[Tuple[str, ...], int]]]:
+    before_counts = _pair_unknown_tuple_counts(before_records)
+    after_counts = _pair_unknown_tuple_counts(after_records)
+    result: Dict[Tuple[str, str, str, str], Dict[str, Dict[Tuple[str, ...], int]]] = {}
+    for pair_key in sorted(set(before_counts) | set(after_counts)):
+        pair_result: Dict[str, Dict[Tuple[str, ...], int]] = {}
+        count_kinds = set(before_counts.get(pair_key, {})) | set(after_counts.get(pair_key, {}))
+        for count_kind in sorted(count_kinds):
+            before_kind_counts = before_counts.get(pair_key, {}).get(count_kind, {})
+            after_kind_counts = after_counts.get(pair_key, {}).get(count_kind, {})
+            reason_tuples = set(before_kind_counts) | set(after_kind_counts)
+            deltas = {
+                reason_tuple: int(after_kind_counts.get(reason_tuple, 0) or 0)
+                - int(before_kind_counts.get(reason_tuple, 0) or 0)
+                for reason_tuple in reason_tuples
+            }
+            pair_result[count_kind] = {
+                reason_tuple: value
+                for reason_tuple, value in deltas.items()
+                if value
+            }
+        result[pair_key] = pair_result
+    return result
+
+
+def _pair_unknown_tuple_counts(
+    records: Sequence[ValidationLogRecord],
+) -> Dict[Tuple[str, str, str, str], Dict[str, Counter]]:
+    result: Dict[Tuple[str, str, str, str], Dict[str, Counter]] = {}
+    for record in records:
+        payload = record.payloads[-1] if record.payloads else {}
+        pair_key = _record_pair_result_bucket(record)
+        if pair_key[2] != STATUS_UNKNOWN or pair_key[3] != MISSING_SENTINEL:
+            continue
+        extracted_records = _extract_final_unknown_reasons(payload)
+        primary_records = _select_primary_records_by_aggregation_unit(extracted_records)
+        pair_counts = result.setdefault(pair_key, {})
+        for reason in extracted_records:
+            _increment_pair_tuple_count(
+                pair_counts,
+                _global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value),
+            )
+            for action in build_unknown_recovery_actions((reason,)):
+                _increment_pair_tuple_count(
+                    pair_counts,
+                    _global_reason_tuple_from_action(action),
+                )
+        for reason in primary_records:
+            _increment_pair_tuple_count(
+                pair_counts,
+                _global_reason_tuple_from_record(
+                    reason,
+                    UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+                ),
+            )
+    return result
+
+
+def _increment_pair_tuple_count(
+    counts: Dict[str, Counter],
+    key: Tuple[str, ...],
+) -> None:
+    if len(key) != 7:
+        return
+    count_kind = str(key[0])
+    counts.setdefault(count_kind, Counter())[key[1:]] += 1
+
+
+def _pair_reason_id_deltas(
+    before_records: Sequence[ValidationLogRecord],
+    after_records: Sequence[ValidationLogRecord],
+) -> Dict[Tuple[str, str, str, str], Dict[str, int]]:
+    before_counts = _pair_reason_id_counts(before_records)
+    after_counts = _pair_reason_id_counts(after_records)
+    result: Dict[Tuple[str, str, str, str], Dict[str, int]] = {}
+    for pair_key in sorted(set(before_counts) | set(after_counts)):
+        reason_ids = set(before_counts.get(pair_key, ())) | set(after_counts.get(pair_key, ()))
+        deltas = {
+            reason_id: int(after_counts.get(pair_key, {}).get(reason_id, 0) or 0)
+            - int(before_counts.get(pair_key, {}).get(reason_id, 0) or 0)
+            for reason_id in reason_ids
+        }
+        result[pair_key] = {
+            reason_id: value
+            for reason_id, value in deltas.items()
+            if value
+        }
+    return result
+
+
+def _pair_reason_id_counts(
+    records: Sequence[ValidationLogRecord],
+) -> Dict[Tuple[str, str, str, str], Counter]:
+    result: Dict[Tuple[str, str, str, str], Counter] = {}
+    for record in records:
+        payload = record.payloads[-1] if record.payloads else {}
+        pair_key = _record_pair_result_bucket(record)
+        if pair_key[2] != STATUS_UNKNOWN or pair_key[3] != MISSING_SENTINEL:
+            continue
+        counts = result.setdefault(pair_key, Counter())
+        for reason in _extract_final_unknown_reasons(payload):
+            counts[str(reason.reason_id)] += 1
+    return result
+
+
+def _record_pair_result_bucket(record: ValidationLogRecord) -> Tuple[str, str, str, str]:
+    payload = record.payloads[-1] if record.payloads else {}
+    function_name = str(
+        payload.get("function1_name")
+        or payload.get("function_name")
+        or record.function_name
+    )
+    left_binary, right_binary = _payload_or_record_binary_ids(payload, record)
+    binary_pair = " ↔ ".join(sorted((left_binary, right_binary)))
+    status = record.status if record.status in STATUS_ORDER else STATUS_UNKNOWN
+    return (
+        function_name,
+        binary_pair,
+        status,
+        _record_timeout_class(payload, status),
+    )
+
+
+def _payload_or_record_binary_ids(
+    payload: Mapping[str, Any],
+    record: ValidationLogRecord,
+) -> Tuple[str, str]:
+    left = payload.get("binary1_name")
+    right = payload.get("binary2_name")
+    if left is not None and right is not None:
+        return _path_name(left), _path_name(right)
+    if "↔" in record.pair_label:
+        raw_left, raw_right = record.pair_label.split("↔", 1)
+        return raw_left.strip(), raw_right.strip()
+    return record.pair_label, record.pair_label
+
+
+def _path_name(value: Any) -> str:
+    text = str(value)
+    return Path(text).name if text else MISSING_SENTINEL
+
+
+def _record_timeout_class(payload: Mapping[str, Any], status: str) -> str:
+    if status != STATUS_TIMEOUT:
+        return MISSING_SENTINEL
+    for key in ("timeout_class", "timeout_reason"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    solver_results = payload.get("solver_results")
+    if isinstance(solver_results, Mapping):
+        all_results = solver_results.get("all_results") or solver_results.get("results") or ()
+        for solver_result in all_results:
+            if isinstance(solver_result, Mapping) and str(solver_result.get("status")) == "TIMEOUT":
+                return str(solver_result.get("reason") or "solver_timeout")
+    return "timeout"
 
 
 def _log_paths_from_roots(log_roots: Mapping[str, Path]) -> Sequence[Path]:
