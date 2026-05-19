@@ -169,6 +169,17 @@ class CheckStrategy(ABC):
         stage: str,
     ):
         typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)
+        if typed_reason_id in {
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        }:
+            return self._make_return_coverage_unknown_reason(
+                typed_reason_id,
+                blocking_reason,
+                analysis1,
+                analysis2,
+                stage=stage,
+            )
         if typed_reason_id != UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY:
             return make_unknown_reason(
                 typed_reason_id,
@@ -213,6 +224,37 @@ class CheckStrategy(ABC):
             object_target_key=object_target_key,
             recovery_action="call_effect_summary_proof_required",
             action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+
+    def _make_return_coverage_unknown_reason(
+        self,
+        typed_reason_id: UnknownReasonId,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        stage: str,
+    ) -> UnknownReasonRecord:
+        object_target_key = self._return_coverage_object_target_key(
+            blocking_reason,
+            analysis1,
+            analysis2,
+        )
+        kwargs: Dict[str, Any] = {}
+        if object_target_key is not None:
+            kwargs.update(
+                {
+                    "object_target_key": object_target_key,
+                    "recovery_action": "return_coverage_proof_required",
+                    "action_status": UnknownRecoveryActionStatus.PENDING_PROOF,
+                }
+            )
+        return make_unknown_reason(
+            typed_reason_id,
+            stage=stage,
+            evidence_refs=(blocking_reason,),
+            detail=blocking_reason,
+            **kwargs,
         )
 
     def _unresolved_equivalence_blocking_unknown_reasons(
@@ -453,6 +495,108 @@ class CheckStrategy(ABC):
             selected_deferred_keys,
             selected_evidence_keys,
             selected_unsupported_keys,
+        )
+
+    def _return_coverage_object_target_key(
+        self,
+        blocking_reason: str,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> Optional[Tuple[Any, ...]]:
+        label, _reason_text = self._split_blocking_reason(blocking_reason)
+        reason_kind = self._blocking_reason_kind(blocking_reason)
+        if reason_kind not in {"return_coverage_gap", "return_coverage_inconclusive"}:
+            return None
+        analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+        if analysis is None:
+            return None
+        return (
+            "return_coverage",
+            label,
+            self._analysis_entry_key(analysis),
+            reason_kind,
+            self._return_storage_object_key(analysis),
+            self._return_partition_object_key(analysis),
+            self._return_guard_disjunction_object_key(analysis),
+        )
+
+    def _return_storage_object_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        surface = None
+        surface_getter = getattr(analysis, "get_comparison_surface", None)
+        if callable(surface_getter):
+            try:
+                surface = surface_getter()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                surface = None
+        return (
+            "return_storage",
+            getattr(surface, "kind", None),
+            getattr(surface, "explicit_bit_width", None),
+            getattr(surface, "use_sign_extension", None),
+            getattr(analysis, "return_type", None),
+        )
+
+    def _return_partition_object_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return (
+            "return_partition",
+            tuple(
+                self._return_case_object_key(index, return_info)
+                for index, return_info in enumerate(getattr(analysis, "returns", ()) or ())
+            ),
+        )
+
+    def _return_case_object_key(self, index: int, return_info: Any) -> Tuple[Any, ...]:
+        pcode_op_ref = getattr(return_info, "pcode_op_ref", None)
+        pcode_key = self._stable_key_or_none(pcode_op_ref)
+        value = getattr(return_info, "value", None)
+        return (
+            "return_case",
+            int(index),
+            getattr(return_info, "address", None),
+            pcode_key,
+            getattr(return_info, "pcode_identity", None),
+            getattr(return_info, "pcode_order", None),
+            self._expression_runtime_object_key(value),
+            tuple(
+                self._return_condition_object_key(condition)
+                for condition in (getattr(return_info, "conditions", None) or ())
+            ),
+        )
+
+    def _return_guard_disjunction_object_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        return (
+            "guard_disjunction",
+            tuple(
+                (
+                    int(index),
+                    tuple(
+                        self._return_condition_object_key(condition)
+                        for condition in (getattr(return_info, "conditions", None) or ())
+                    ),
+                )
+                for index, return_info in enumerate(getattr(analysis, "returns", ()) or ())
+            ),
+        )
+
+    def _return_condition_object_key(self, condition: Any) -> Tuple[Any, ...]:
+        expression = getattr(condition, "expression", None)
+        structural_key = None
+        key_fn = getattr(condition, "structural_key", None)
+        if callable(key_fn):
+            try:
+                structural_key = key_fn(budget=256)
+            except TypeError:
+                try:
+                    structural_key = key_fn()
+                except (AttributeError, TypeError, ValueError, RecursionError):
+                    structural_key = None
+            except (AttributeError, ValueError, RecursionError):
+                structural_key = None
+        return (
+            "return_guard",
+            bool(getattr(condition, "negated", False)),
+            structural_key,
+            self._expression_runtime_object_key(expression),
         )
 
     @staticmethod

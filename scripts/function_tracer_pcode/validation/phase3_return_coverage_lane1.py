@@ -22,6 +22,7 @@ from .unknown_reason_summary import (
 from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
+    build_proof_obligation_id,
     build_unknown_recovery_actions,
 )
 
@@ -36,7 +37,7 @@ RETURN_COVERAGE_GAP_REASON_TUPLE = (
     "function",
     "return_coverage_completion",
     MISSING_SENTINEL,
-    MISSING_SENTINEL,
+    "pending_proof",
 )
 RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE = (
     UnknownCountKind.PROOF_ACTION.value,
@@ -45,7 +46,7 @@ RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE = (
     "function",
     "return_coverage_completion",
     "return_partition_extraction",
-    "planned",
+    "pending_proof",
 )
 RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE = (
     UnknownCountKind.PROOF_ACTION.value,
@@ -54,7 +55,7 @@ RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE = (
     "function",
     "return_coverage_completion",
     "return_guard_coverage",
-    "planned",
+    "pending_proof",
 )
 RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
@@ -63,7 +64,7 @@ RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
     "function",
     "return_coverage_completion",
     "return_coverage_smt_disambiguation",
-    MISSING_SENTINEL,
+    "pending_proof",
 )
 RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE = (
     UnknownCountKind.PROOF_ACTION.value,
@@ -72,7 +73,7 @@ RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE = (
     "function",
     "return_coverage_completion",
     "return_coverage_smt_disambiguation",
-    "planned",
+    "pending_proof",
 )
 FUNCTION_CALL_BINARY_NAMES = {
     "B11": "function_call_test-mips64-clang-O2",
@@ -101,6 +102,7 @@ def _expected_reason_record(
     }
     if expected_evidence_refs is not None:
         movement["expected_evidence_refs"] = list(expected_evidence_refs)
+    movement["required_object_target_kind"] = "return_coverage"
     return movement
 
 
@@ -125,6 +127,8 @@ def _expected_proof_action(
     }
     if expected_evidence_refs is not None:
         movement["expected_evidence_refs"] = list(expected_evidence_refs)
+    movement["required_object_target_kind"] = "return_coverage"
+    movement["require_proof_obligation_id"] = True
     return movement
 
 
@@ -482,6 +486,9 @@ def _reason_record_summary(reason: Any) -> Dict[str, Any]:
         "pair_or_case": reason.pair_or_case or MISSING_SENTINEL,
         "detail": reason.detail or MISSING_SENTINEL,
         "evidence_refs": list(reason.evidence_refs or ()),
+        "object_target_key": reason.object_target_key,
+        "proof_obligation_id": reason.proof_obligation_id,
+        "recovery_action": reason.recovery_action or MISSING_SENTINEL,
         "recovery_proof_obligations": [
             dict(obligation)
             for obligation in (reason.recovery_proof_obligations or ())
@@ -504,6 +511,9 @@ def _proof_action_summary(action: Any) -> Dict[str, Any]:
         "pair_or_case": str(getattr(action, "pair_or_case", MISSING_SENTINEL) or MISSING_SENTINEL),
         "required_evidence": list(getattr(action, "required_evidence", ()) or ()),
         "evidence_kind": str(getattr(action, "evidence_kind", MISSING_SENTINEL) or MISSING_SENTINEL),
+        "object_target_key": getattr(action, "object_target_key", None),
+        "proof_obligation_id": getattr(action, "proof_obligation_id", None),
+        "recovery_action": str(getattr(action, "recovery_action", MISSING_SENTINEL) or MISSING_SENTINEL),
         "evidence_refs": list(getattr(action, "evidence_refs", ()) or ()),
         "detail": str(getattr(action, "detail", MISSING_SENTINEL) or MISSING_SENTINEL),
     }
@@ -614,6 +624,8 @@ def _expected_movement_failures(
                 continue
             if not _matching_record_has_evidence_refs(reason_records, tuple_key, movement):
                 failures.append(f"{label}_expected_reason_evidence_refs_mismatch:{movement_id}")
+            if not _matching_record_has_object_target(reason_records, tuple_key, movement):
+                failures.append(f"{label}_expected_reason_object_target_mismatch:{movement_id}")
         elif count_kind == UnknownCountKind.PROOF_ACTION.value:
             if tuple_key not in proof_tuples:
                 failures.append(f"{label}_expected_proof_action_tuple_missing:{movement_id}")
@@ -629,6 +641,10 @@ def _expected_movement_failures(
                 continue
             if not _matching_record_has_evidence_refs(proof_actions, tuple_key, movement):
                 failures.append(f"{label}_expected_proof_action_evidence_refs_mismatch:{movement_id}")
+            if not _matching_record_has_object_target(proof_actions, tuple_key, movement):
+                failures.append(f"{label}_expected_proof_action_object_target_mismatch:{movement_id}")
+            if not _matching_proof_action_has_proof_id(proof_actions, tuple_key, movement):
+                failures.append(f"{label}_expected_proof_action_id_mismatch:{movement_id}")
         else:
             failures.append(f"{label}_expected_movement_count_kind_invalid:{movement_id}")
     return failures
@@ -730,6 +746,300 @@ def _matching_record_has_evidence_refs(
         actual_refs = tuple(str(ref) for ref in record.get("evidence_refs") or ())
         if actual_refs == normalized_expected_refs:
             return True
+    return False
+
+
+def _matching_record_has_object_target(
+    records: Any,
+    tuple_key: Tuple[str, ...],
+    movement: Mapping[str, Any],
+) -> bool:
+    required_kind = movement.get("required_object_target_kind")
+    if required_kind is None:
+        return True
+    expected_scope = _movement_scope(movement)
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        if tuple(str(item) for item in record.get("tuple") or ()) != tuple_key:
+            continue
+        actual_scope = (
+            _normalize_optional(record.get("aggregation_unit")),
+            _normalize_optional(record.get("stage")),
+            _normalize_optional(record.get("pair_or_case")),
+        )
+        if actual_scope != expected_scope:
+            continue
+        object_target_key = _normalize_nested_tuple(record.get("object_target_key"))
+        if (
+            _nested_tuple_kind(object_target_key) == str(required_kind)
+            and _object_target_key_is_specific(object_target_key)
+        ):
+            return True
+    return False
+
+
+def _matching_proof_action_has_proof_id(
+    proof_actions: Any,
+    tuple_key: Tuple[str, ...],
+    movement: Mapping[str, Any],
+) -> bool:
+    if not movement.get("require_proof_obligation_id"):
+        return True
+    expected_scope = _movement_scope(movement)
+    for action in proof_actions:
+        if not isinstance(action, Mapping):
+            continue
+        if tuple(str(item) for item in action.get("tuple") or ()) != tuple_key:
+            continue
+        actual_scope = (
+            _normalize_optional(action.get("aggregation_unit")),
+            _normalize_optional(action.get("stage")),
+            _normalize_optional(action.get("pair_or_case")),
+        )
+        if actual_scope != expected_scope:
+            continue
+        object_target_key = _normalize_nested_tuple(action.get("object_target_key"))
+        if object_target_key is None or not _object_target_key_is_specific(object_target_key):
+            continue
+        expected_id = build_proof_obligation_id(
+            action.get("reason_id"),
+            action.get("proof_stage"),
+            action.get("proof_kind"),
+            action.get("evidence_kind"),
+            object_target_key,
+        )
+        if _normalize_nested_tuple(action.get("proof_obligation_id")) == expected_id:
+            return True
+    return False
+
+
+def _nested_tuple_kind(value: Any) -> Optional[str]:
+    normalized = _normalize_nested_tuple(value)
+    if isinstance(normalized, tuple) and normalized:
+        return str(normalized[0])
+    return None
+
+
+def _normalize_nested_tuple(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_nested_tuple(item) for item in value)
+    return value
+
+
+def _object_target_key_is_specific(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if not isinstance(normalized, tuple) or not normalized:
+        return False
+    if normalized[0] == "return_coverage":
+        return _return_coverage_key_is_specific(normalized)
+    return False
+
+
+def _return_coverage_key_is_specific(value: Tuple[Any, ...]) -> bool:
+    if len(value) != 7:
+        return False
+    (
+        _kind,
+        side_label,
+        function_key,
+        reason_kind,
+        return_storage_key,
+        return_partition_key,
+        guard_disjunction_key,
+    ) = value
+    return all(
+        (
+            side_label in {"function1", "function2"},
+            _analysis_key_is_specific(function_key),
+            reason_kind in TARGET_REASON_IDS,
+            _return_storage_key_is_specific(return_storage_key),
+            _return_partition_key_is_specific(return_partition_key),
+            _guard_disjunction_key_is_specific(guard_disjunction_key),
+        )
+    )
+
+
+def _analysis_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 2:
+        return False
+    if value[0] == "function_ref":
+        return _function_ref_key_is_specific(value[1])
+    if value[0] == "entry_point":
+        return _address_like_is_specific(value[1])
+    return False
+
+
+def _function_ref_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or not value:
+        return False
+    kind = value[0]
+    if kind == "function":
+        if len(value) < 3:
+            return False
+        return _address_like_is_specific(value[2])
+    if kind == "code_address":
+        if len(value) < 3:
+            return False
+        return _address_like_is_specific(value[2])
+    return False
+
+
+def _return_storage_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 5 or value[0] != "return_storage":
+        return False
+    surface_kind = value[1]
+    bit_width = value[2]
+    if surface_kind not in {"return_value", "memory_effect"}:
+        return False
+    try:
+        return int(bit_width) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _return_partition_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 2 or value[0] != "return_partition":
+        return False
+    cases = value[1]
+    if not isinstance(cases, tuple) or not cases:
+        return False
+    return all(_return_case_key_is_specific(case) for case in cases)
+
+
+def _return_case_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 8 or value[0] != "return_case":
+        return False
+    try:
+        int(value[1])
+    except (TypeError, ValueError):
+        return False
+    pcode_ref = value[3]
+    pcode_identity = value[4]
+    if pcode_ref is not None:
+        if not _pcode_ref_is_specific(pcode_ref):
+            return False
+    elif pcode_identity is not None:
+        if not _pcode_ref_is_specific(pcode_identity):
+            return False
+    else:
+        return False
+    if not _nested_has_specific_leaf(value[6]):
+        return False
+    if _nested_contains_log_prose(value[6]):
+        return False
+    guards = value[7]
+    return isinstance(guards, tuple) and all(_return_guard_key_is_specific(guard) for guard in guards)
+
+
+def _guard_disjunction_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 2 or value[0] != "guard_disjunction":
+        return False
+    cases = value[1]
+    if not isinstance(cases, tuple):
+        return False
+    for case in cases:
+        if not isinstance(case, tuple) or len(case) != 2:
+            return False
+        try:
+            int(case[0])
+        except (TypeError, ValueError):
+            return False
+        guards = case[1]
+        if not isinstance(guards, tuple):
+            return False
+        if not all(_return_guard_key_is_specific(guard) for guard in guards):
+            return False
+    return True
+
+
+def _return_guard_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 4 or value[0] != "return_guard":
+        return False
+    if not isinstance(value[1], bool):
+        return False
+    if _nested_contains_log_prose(value[2]) or _nested_contains_log_prose(value[3]):
+        return False
+    return _nested_has_specific_leaf(value[2]) and _nested_has_specific_leaf(value[3])
+
+
+def _pcode_ref_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or not value or value[0] != "pcode_op":
+        return False
+    if _nested_contains_log_prose(value):
+        return False
+    if len(value) == 6:
+        _kind, address_offset, seq_time, seq_order, block_index, mnemonic = value
+        if not isinstance(mnemonic, str) or not mnemonic:
+            return False
+        return _address_like_is_specific(address_offset) and (
+            _int_like_is_specific(seq_time)
+            or _int_like_is_specific(seq_order)
+            or _int_like_is_specific(block_index)
+        )
+    if len(value) >= 8:
+        _kind, address_space, address_offset, seq_space, seq_offset, seq_order, opcode, local_ordinal = value[:8]
+        if not isinstance(opcode, str) or not opcode:
+            return False
+        return all(
+            (
+                _nested_has_specific_leaf(address_space),
+                _address_like_is_specific(address_offset),
+                _nested_has_specific_leaf(seq_space),
+                _address_like_is_specific(seq_offset),
+                _int_like_is_specific(seq_order),
+                _int_like_is_specific(local_ordinal),
+            )
+        )
+    return False
+
+
+def _address_like_is_specific(value: Any) -> bool:
+    if value is None or value == "" or value == MISSING_SENTINEL:
+        return False
+    if isinstance(value, str):
+        if _nested_contains_log_prose(value):
+            return False
+        text = value.strip()
+        if not text:
+            return False
+        try:
+            int(text, 0)
+            return True
+        except ValueError:
+            return False
+    return _int_like_is_specific(value)
+
+
+def _int_like_is_specific(value: Any) -> bool:
+    if isinstance(value, bool) or value is None or value == "" or value == MISSING_SENTINEL:
+        return False
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _nested_has_specific_leaf(value: Any) -> bool:
+    if value is None or value == "" or value == MISSING_SENTINEL:
+        return False
+    if isinstance(value, tuple):
+        return any(_nested_has_specific_leaf(item) for item in value)
+    if isinstance(value, list):
+        return any(_nested_has_specific_leaf(item) for item in value)
+    return True
+
+
+def _nested_contains_log_prose(value: Any) -> bool:
+    if isinstance(value, str):
+        return any(reason_id in value for reason_id in TARGET_REASON_IDS)
+    if isinstance(value, tuple):
+        return any(_nested_contains_log_prose(item) for item in value)
+    if isinstance(value, list):
+        return any(_nested_contains_log_prose(item) for item in value)
     return False
 
 

@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryProofKind,
     UnknownReasonId,
     build_proof_obligation_id,
+    build_unknown_recovery_actions,
 )
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
@@ -1248,6 +1249,14 @@ def test_monolithic_strategy_does_not_accept_unsat_with_return_coverage_gap():
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
     assert "return_case_coverage_gap" in analysis1.analysis_notes
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+    assert result.unknown_reasons[0].stage == "S_MONOLITHIC_FALLBACK"
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert result.unknown_reasons[0].recovery_action == "return_coverage_proof_required"
+    assert result.unknown_reasons[0].object_target_key[0] == "return_coverage"
+    actions = build_unknown_recovery_actions(result.unknown_reasons)
+    assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
+    assert all(action.proof_obligation_id is not None for action in actions)
 
 
 def test_monolithic_strategy_does_not_accept_unsat_with_incomplete_effect_summary():
@@ -2289,6 +2298,156 @@ def test_blocking_unsafety_reason_mapping_accepts_detail_suffix_for_return_cover
     assert (
         strategy._unknown_reason_id_for_blocking_unsafety("function2:return_coverage_inconclusive:branch=exit")
         == UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE
+    )
+
+
+def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    x = Expression.parameter("x", 0, size=4)
+    return_ref = PcodeOpRef(
+        address_offset=0x401020,
+        seq_time=0x401020,
+        seq_order=3,
+        block_index=1,
+        mnemonic="RETURN",
+        input_sizes=(8, 4),
+    )
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x401000",
+        parameters=[_param("x")],
+        returns=[
+            ReturnInfo(
+                address="0x401020",
+                value=_const(1),
+                conditions=[_eq(x, _const(0))],
+                pcode_op_ref=return_ref,
+            )
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x402000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x402020", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([reason])
+
+    assert reason.reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.recovery_action == "return_coverage_proof_required"
+    assert reason.object_target_key[0] == "return_coverage"
+    assert return_ref.stable_key() in reason.object_target_key[5][1][0]
+    assert ("return_storage", "return_value", 32, None, "int") in reason.object_target_key
+    assert [action.proof_stage for action in actions] == [
+        "return_partition_extraction",
+        "return_guard_coverage",
+    ]
+    assert {action.status for action in actions} == {
+        UnknownRecoveryActionStatus.PENDING_PROOF.value
+    }
+    assert actions[0].proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        "return_partition_extraction",
+        UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+        "missing_return_guard",
+        reason.object_target_key,
+    )
+
+
+def test_return_coverage_object_target_ignores_diagnostic_suffix():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    x = Expression.parameter("x", 0, size=4)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x401000",
+        parameters=[_param("x")],
+        returns=[
+            ReturnInfo(address="0x401020", value=_const(1), conditions=[_eq(x, _const(0))])
+        ],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x402000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x402020", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    plain_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    suffixed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap:case=3",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+
+    assert plain_reason.object_target_key == suffixed_reason.object_target_key
+    assert build_unknown_recovery_actions([plain_reason])[0].proof_obligation_id == (
+        build_unknown_recovery_actions([suffixed_reason])[0].proof_obligation_id
+    )
+
+
+def test_return_coverage_object_target_distinguishes_guard_partitions():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    x = Expression.parameter("x", 0, size=4)
+    left_zero = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x401000",
+        parameters=[_param("x")],
+        returns=[
+            ReturnInfo(address="0x401020", value=_const(1), conditions=[_eq(x, _const(0))])
+        ],
+        return_type="int",
+    )
+    left_one = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x401000",
+        parameters=[_param("x")],
+        returns=[
+            ReturnInfo(address="0x401020", value=_const(1), conditions=[_eq(x, _const(1))])
+        ],
+        return_type="int",
+    )
+    right = FunctionReturnAnalysis(
+        function_name="right",
+        entry_point="0x402000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x402020", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+
+    zero_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        left_zero,
+        right,
+        stage="S_PAIRWISE",
+    )
+    one_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        left_one,
+        right,
+        stage="S_PAIRWISE",
+    )
+
+    assert zero_reason.object_target_key != one_reason.object_target_key
+    assert build_unknown_recovery_actions([zero_reason])[0].proof_obligation_id != (
+        build_unknown_recovery_actions([one_reason])[0].proof_obligation_id
     )
 
 

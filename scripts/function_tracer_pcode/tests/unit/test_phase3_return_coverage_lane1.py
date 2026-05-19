@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownRecoveryActionStatus,
     UnknownReasonId,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 import (
     DEFAULT_REPRESENTATIVES,
     FUNCTION_CALL_BINARY_NAMES,
+    _object_target_key_is_specific,
     build_phase3_return_coverage_lane1_manifest,
     validate_phase3_return_coverage_lane1_manifest,
 )
@@ -102,11 +104,45 @@ def _payload_binary_name(binary_id: str) -> str:
 
 def _reason_from_ref(ref: str):
     reason_id = ref.split(":", 1)[1]
+    side = ref.split(":", 1)[0]
     return make_unknown_reason(
         reason_id,
         stage="S_PAIRWISE",
         detail=ref,
         evidence_refs=(ref,),
+        object_target_key=(
+            "return_coverage",
+            side,
+            ("function_ref", ("function", side, 0x1000)),
+            reason_id,
+            ("return_storage", "return_value", 32, False, "int"),
+            (
+                "return_partition",
+                (
+                    (
+                        "return_case",
+                        0,
+                        "0x1000",
+                        ("pcode_op", "ram", 0x1000, "ram", 0x1004, 0, "RETURN", 0),
+                        None,
+                        0,
+                        ("expression", ("constant", 1, 4)),
+                        (("return_guard", False, ("condition", side), ("expression", ("parameter", "x", 0, 4))),),
+                    ),
+                ),
+            ),
+            (
+                "guard_disjunction",
+                (
+                    (
+                        0,
+                        (("return_guard", False, ("condition", side), ("expression", ("parameter", "x", 0, 4))),),
+                    ),
+                ),
+            ),
+        ),
+        recovery_action="return_coverage_proof_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
     )
 
 
@@ -219,12 +255,17 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
         "function",
         "return_coverage_completion",
         "<missing>",
-        "<missing>",
+        "pending_proof",
     ]
     assert recursive["expected_movements"][0]["expected_evidence_refs"] == [
         "function2:return_coverage_gap"
     ]
     assert recursive["current_observation"]["proof_action_tuples"]
+    action = recursive["current_observation"]["proof_actions"][0]
+    assert action["status"] == "pending_proof"
+    assert action["object_target_key"][0] == "return_coverage"
+    assert action["proof_obligation_id"][0] == "return_coverage_gap"
+    assert action["proof_obligation_id"][3] == "missing_return_guard"
     inconclusive = manifest["entries"][1]
     assert inconclusive["expected_movements"][1]["required_evidence"] == [
         "case_guard_disjunction",
@@ -399,6 +440,346 @@ def test_phase3_return_coverage_manifest_rejects_missing_both_side_gap(tmp_path)
         "baseline_expected_proof_action_evidence_refs_mismatch:gap-return-guard-coverage-function2"
         in failures
     )
+
+
+def test_phase3_return_coverage_manifest_rejects_missing_object_proof_detail(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    legacy_reason = [
+        make_unknown_reason(
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            stage="S_PAIRWISE",
+            detail="function2:return_coverage_gap",
+            evidence_refs=("function2:return_coverage_gap",),
+            recovery_action="return_coverage_proof_required",
+            action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+    ]
+    _write_log(current_root, "fc_recursive_sum", "B11", "B15", legacy_reason)
+    _write_log(baseline_root, "fc_recursive_sum", "B11", "B15", legacy_reason)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
+    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
+
+
+def test_phase3_return_coverage_manifest_rejects_weak_return_coverage_object_key(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    weak_reason = [
+        make_unknown_reason(
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            stage="S_PAIRWISE",
+            detail="function2:return_coverage_gap",
+            evidence_refs=("function2:return_coverage_gap",),
+            object_target_key=("return_coverage", "function2:return_coverage_gap"),
+            recovery_action="return_coverage_proof_required",
+            action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+    ]
+    _write_log(current_root, "fc_recursive_sum", "B11", "B15", weak_reason)
+    _write_log(baseline_root, "fc_recursive_sum", "B11", "B15", weak_reason)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
+    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
+
+
+def test_phase3_return_coverage_manifest_rejects_log_prose_return_coverage_object_key(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    prose_reason = [
+        make_unknown_reason(
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            stage="S_PAIRWISE",
+            detail="function2:return_coverage_gap",
+            evidence_refs=("function2:return_coverage_gap",),
+            object_target_key=(
+                "return_coverage",
+                "function2",
+                ("function_ref", ("function", 2, 0x1000)),
+                "return_coverage_gap",
+                ("return_storage", "return_value", 32, False, "int"),
+                (
+                    "return_partition",
+                    (
+                        (
+                            "return_case",
+                            0,
+                            "function2:return_coverage_gap",
+                            None,
+                            None,
+                            None,
+                            ("expression", "function2:return_coverage_gap"),
+                            (
+                                (
+                                    "return_guard",
+                                    False,
+                                    ("condition", "function2:return_coverage_gap"),
+                                    ("expression", "function2:return_coverage_gap"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                (
+                    "guard_disjunction",
+                    (
+                        (
+                            0,
+                            (
+                                (
+                                    "return_guard",
+                                    False,
+                                    ("condition", "function2:return_coverage_gap"),
+                                    ("expression", "function2:return_coverage_gap"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            recovery_action="return_coverage_proof_required",
+            action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+        )
+    ]
+    _write_log(current_root, "fc_recursive_sum", "B11", "B15", prose_reason)
+    _write_log(baseline_root, "fc_recursive_sum", "B11", "B15", prose_reason)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
+    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
+
+
+def test_return_coverage_object_key_specificity_requires_function_entry_and_pcode_location():
+    weak_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", None, None)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    ("pcode_op", None, None, None, None, "RETURN"),
+                    None,
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    good_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", None, 0x1000)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    ("pcode_op", 0x1010, 0x1010, 3, 1, "RETURN"),
+                    None,
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _object_target_key_is_specific(weak_key) is False
+    assert _object_target_key_is_specific(good_key) is True
+
+
+def test_return_coverage_object_key_specificity_rejects_address_only_return_case():
+    address_only_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", None, 0x1000)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    None,
+                    None,
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    structured_identity_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", None, 0x1000)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    None,
+                    ("pcode_op", 0x1010, 0x1010, 3, 1, "RETURN"),
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _object_target_key_is_specific(address_only_key) is False
+    assert _object_target_key_is_specific(structured_identity_key) is True
 
 
 def test_phase3_return_coverage_manifest_rejects_reversed_log_direction(tmp_path):
