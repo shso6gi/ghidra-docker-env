@@ -34,17 +34,17 @@ class _NoopStrategy(CheckStrategy):
 REPRESENTATIVES = (
     ("fc_recursive_sum", "B11", "B15", ("function2:return_coverage_gap",)),
     (
-        "fc_is_odd",
-        "B11",
-        "B16",
-        ("function1:return_coverage_gap", "function2:return_coverage_inconclusive"),
-    ),
-    (
         "fc_is_even",
         "B11",
         "B12",
         ("function1:return_coverage_gap", "function2:return_coverage_gap"),
     ),
+)
+
+RETIRED_TRANSITIONS = (
+    ("fc_is_odd", "B15", "B8", "B8", "B15"),
+    ("fc_is_odd", "B11", "B16", "B11", "B16"),
+    ("fc_is_odd", "B12", "B16", "B12", "B16"),
 )
 
 
@@ -154,6 +154,16 @@ def _reason_from_ref(ref: str):
     )
 
 
+def _legacy_reason_from_ref(ref: str):
+    reason_id = ref.split(":", 1)[1]
+    return make_unknown_reason(
+        reason_id,
+        stage="S_PAIRWISE",
+        detail=ref,
+        evidence_refs=(ref,),
+    )
+
+
 def _write_log(root: Path, function: str, left: str, right: str, reasons):
     path = root / function / f"{function}_{left}_{right}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +221,30 @@ def _write_representative_logs(root: Path):
         _write_log(root, function, left, right, [_reason_from_ref(ref) for ref in refs])
 
 
+def _write_retired_transition_logs(baseline_root: Path, current_root: Path):
+    for function, baseline_left, baseline_right, current_left, current_right in RETIRED_TRANSITIONS:
+        _write_log(
+            baseline_root,
+            function,
+            baseline_left,
+            baseline_right,
+            [
+                _legacy_reason_from_ref("function1:return_coverage_gap"),
+                _legacy_reason_from_ref("function2:return_coverage_inconclusive"),
+            ],
+        )
+        _write_log(
+            current_root,
+            function,
+            current_left,
+            current_right,
+            [
+                _reason_from_ref("function1:return_coverage_gap"),
+                _reason_from_ref("function2:return_coverage_gap"),
+            ],
+        )
+
+
 def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(tmp_path):
     raw_dir = tmp_path / "baseline" / "raw"
     current_root = tmp_path / "current" / "function_call"
@@ -218,6 +252,7 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
     _write_artifact_manifest(raw_dir)
     _write_representative_logs(current_root)
     _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
 
     path = build_phase3_return_coverage_lane1_manifest(
         baseline_raw_dir=raw_dir,
@@ -229,11 +264,45 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
     manifest = json.loads(path.read_text())
     assert manifest["baseline_id"] == "observed-v0@0a53352"
     assert manifest["phase3_lane1_ready"] is True
-    assert manifest["readiness"]["covered_target_reason_ids"] == [
-        "return_coverage_gap",
-        "return_coverage_inconclusive",
-    ]
+    assert manifest["target_reason_ids"] == ["return_coverage_gap"]
+    assert manifest["retired_reason_ids"] == ["return_coverage_inconclusive"]
+    assert manifest["readiness"]["covered_target_reason_ids"] == ["return_coverage_gap"]
     assert {entry["selection_status"] for entry in manifest["entries"]} == {"ready"}
+    assert {entry["selection_status"] for entry in manifest["retired_transitions"]} == {
+        "retired_by_reclassification"
+    }
+    retired_inventory = manifest["retired_reason_inventory"]["return_coverage_inconclusive"]
+    assert retired_inventory["status"] == "retired_by_reclassification"
+    assert retired_inventory["reason_record"]["baseline_tuple_counts"] == [
+        {
+            "count": 3,
+            "tuple": [
+                "reason_record",
+                "return_coverage_inconclusive",
+                "blocks_decision",
+                "function",
+                "return_coverage_completion",
+                "return_coverage_smt_disambiguation",
+                "<missing>",
+            ],
+        }
+    ]
+    assert retired_inventory["reason_record"]["current_tuple_counts"] == []
+    assert retired_inventory["proof_action"]["baseline_tuple_counts"] == [
+        {
+            "count": 3,
+            "tuple": [
+                "proof_action",
+                "return_coverage_inconclusive",
+                "blocks_decision",
+                "function",
+                "return_coverage_completion",
+                "return_coverage_smt_disambiguation",
+                "planned",
+            ],
+        }
+    ]
+    assert retired_inventory["proof_action"]["current_tuple_counts"] == []
     recursive = manifest["entries"][0]
     assert recursive["function"] == "fc_recursive_sum"
     assert recursive["binary_pair"] == "B11_B15"
@@ -274,31 +343,96 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
     assert action["object_target_key"][0] == "return_coverage"
     assert action["proof_obligation_id"][0] == "return_coverage_gap"
     assert action["proof_obligation_id"][3] == "missing_return_guard"
-    inconclusive = manifest["entries"][1]
-    assert inconclusive["expected_movements"][1]["required_evidence"] == [
-        "case_guard_disjunction",
-        "normalized_guard_formula",
-        "solver_model_or_timeout",
-    ]
+    transition = next(
+        item
+        for item in manifest["retired_transitions"]
+        if item["binary_pair"] == "B8_B15"
+    )
+    assert transition["baseline_observation"]["observed_left_binary_id"] == "B15"
+    assert transition["baseline_observation"]["observed_right_binary_id"] == "B8"
+    assert transition["current_observation"]["observed_reason_ids"] == ["return_coverage_gap"]
+    assert transition["final_result_invariant"] == {
+        "baseline_final_result": "UNKNOWN",
+        "current_final_result": "UNKNOWN",
+        "false_eq": False,
+        "final_result_unchanged_unknown": True,
+        "timeout": False,
+    }
     validate_phase3_return_coverage_lane1_manifest(manifest)
 
 
-def test_phase3_return_coverage_manifest_requires_baseline_and_current_reasons(tmp_path):
+def test_phase3_return_coverage_manifest_allows_legacy_baseline_missing_action_detail(tmp_path):
     raw_dir = tmp_path / "baseline" / "raw"
     current_root = tmp_path / "current" / "function_call"
     baseline_root = tmp_path / "baseline_logs" / "function_call"
     _write_artifact_manifest(raw_dir)
     _write_representative_logs(current_root)
     _write_representative_logs(baseline_root)
-    missing_reason_log = baseline_root / "fc_is_odd" / "fc_is_odd_B11_B16.log"
+    legacy_baseline_reason = [
+        make_unknown_reason(
+            UnknownReasonId.RETURN_COVERAGE_GAP,
+            stage="S_PAIRWISE",
+            detail="function2:return_coverage_gap",
+            evidence_refs=("function2:return_coverage_gap",),
+        )
+    ]
+    _write_log(baseline_root, "fc_recursive_sum", "B11", "B15", legacy_baseline_reason)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is True
+    recursive = manifest["entries"][0]
+    assert recursive["baseline_observation"]["reason_record_tuples"] == [
+        [
+            "reason_record",
+            "return_coverage_gap",
+            "blocks_equivalence",
+            "function",
+            "return_coverage_completion",
+            "<missing>",
+            "<missing>",
+        ]
+    ]
+    assert recursive["current_observation"]["reason_record_tuples"] == [
+        [
+            "reason_record",
+            "return_coverage_gap",
+            "blocks_equivalence",
+            "function",
+            "return_coverage_completion",
+            "<missing>",
+            "pending_proof",
+        ]
+    ]
+    validate_phase3_return_coverage_lane1_manifest(manifest)
+
+
+def test_phase3_return_coverage_manifest_rejects_current_inconclusive_not_retired(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
     _write_log(
-        baseline_root,
+        current_root,
         "fc_is_odd",
         "B11",
         "B16",
-        [make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP)],
+        [
+            _reason_from_ref("function1:return_coverage_gap"),
+            _reason_from_ref("function2:return_coverage_gap"),
+            _reason_from_ref("function2:return_coverage_inconclusive"),
+        ],
     )
-    assert missing_reason_log.is_file()
 
     path = build_phase3_return_coverage_lane1_manifest(
         baseline_raw_dir=raw_dir,
@@ -309,8 +443,72 @@ def test_phase3_return_coverage_manifest_requires_baseline_and_current_reasons(t
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
-    assert "baseline_missing_return_coverage_inconclusive" in manifest["readiness"]["failure_kinds"]
-    with pytest.raises(ValueError, match="baseline_missing_return_coverage_inconclusive"):
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_retired_reason_still_active:return_coverage_inconclusive" in failures
+    assert "retired_reason_inventory_mismatch:return_coverage_inconclusive" in failures
+
+
+def test_phase3_return_coverage_manifest_rejects_retired_baseline_tuple_drift(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_log(
+        baseline_root,
+        "fc_is_odd",
+        "B11",
+        "B16",
+        [
+            _legacy_reason_from_ref("function1:return_coverage_gap"),
+            _reason_from_ref("function2:return_coverage_inconclusive"),
+        ],
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "baseline_retired_reason_tuple_missing:return_coverage_inconclusive" in failures
+    assert "baseline_retired_proof_action_tuple_missing:return_coverage_inconclusive" in failures
+    assert "retired_reason_inventory_mismatch:return_coverage_inconclusive" in failures
+
+
+def test_phase3_return_coverage_manifest_requires_current_active_reason(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_log(
+        current_root,
+        "fc_recursive_sum",
+        "B11",
+        "B15",
+        [make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE)],
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    assert "current_missing_return_coverage_gap" in manifest["readiness"]["failure_kinds"]
+    with pytest.raises(ValueError, match="current_missing_return_coverage_gap"):
         validate_phase3_return_coverage_lane1_manifest(manifest)
 
 
@@ -323,7 +521,7 @@ def test_phase3_return_coverage_manifest_rejects_stale_expected_evidence(tmp_pat
     _write_representative_logs(baseline_root)
     representatives = [dict(entry) for entry in DEFAULT_REPRESENTATIVES]
     movements = [dict(item) for item in representatives[1]["expected_movements"]]
-    movements[1]["required_evidence"] = [
+    movements[2]["required_evidence"] = [
         "normalized_smt_guard",
         "case_guard_disjunction",
         "path_feasibility",
@@ -336,16 +534,13 @@ def test_phase3_return_coverage_manifest_rejects_stale_expected_evidence(tmp_pat
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
         representatives=representatives,
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     assert (
-        "current_expected_proof_action_evidence_mismatch:inconclusive-smt-disambiguation"
-        in manifest["readiness"]["failure_kinds"]
-    )
-    assert (
-        "baseline_expected_proof_action_evidence_mismatch:inconclusive-smt-disambiguation"
+        "current_expected_proof_action_evidence_mismatch:gap-return-partition-extraction-function1"
         in manifest["readiness"]["failure_kinds"]
     )
 
@@ -376,12 +571,12 @@ def test_phase3_return_coverage_manifest_rejects_missing_expected_tuple(tmp_path
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
         representatives=representatives,
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     assert "current_expected_reason_tuple_missing:gap-reason-record" in manifest["readiness"]["failure_kinds"]
-    assert "baseline_expected_reason_tuple_missing:gap-reason-record" in manifest["readiness"]["failure_kinds"]
 
 
 def test_phase3_return_coverage_manifest_rejects_wrong_expected_scope(tmp_path):
@@ -404,17 +599,15 @@ def test_phase3_return_coverage_manifest_rejects_wrong_expected_scope(tmp_path):
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
         representatives=representatives,
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_scope_mismatch:gap-reason-record" in failures
-    assert "baseline_expected_reason_scope_mismatch:gap-reason-record" in failures
     assert "current_expected_proof_action_scope_mismatch:gap-return-partition-extraction" in failures
-    assert "baseline_expected_proof_action_scope_mismatch:gap-return-partition-extraction" in failures
     assert "current_expected_proof_action_scope_mismatch:gap-return-guard-coverage" in failures
-    assert "baseline_expected_proof_action_scope_mismatch:gap-return-guard-coverage" in failures
 
 
 def test_phase3_return_coverage_manifest_rejects_missing_both_side_gap(tmp_path):
@@ -433,21 +626,66 @@ def test_phase3_return_coverage_manifest_rejects_missing_both_side_gap(tmp_path)
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_evidence_refs_mismatch:gap-reason-record-function2" in failures
-    assert "baseline_expected_reason_evidence_refs_mismatch:gap-reason-record-function2" in failures
     assert (
         "current_expected_proof_action_evidence_refs_mismatch:gap-return-partition-extraction-function2"
         in failures
     )
+
+
+def test_phase3_return_coverage_manifest_binds_detail_to_same_side_candidate(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    function2_legacy_reason = make_unknown_reason(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        stage="S_PAIRWISE",
+        detail="function2:return_coverage_gap",
+        evidence_refs=("function2:return_coverage_gap",),
+        recovery_action="return_coverage_proof_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+    _write_log(
+        current_root,
+        "fc_is_even",
+        "B11",
+        "B12",
+        [
+            _reason_from_ref("function1:return_coverage_gap"),
+            function2_legacy_reason,
+        ],
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_reason_object_target_mismatch:gap-reason-record-function2" in failures
     assert (
-        "baseline_expected_proof_action_evidence_refs_mismatch:gap-return-guard-coverage-function2"
+        "current_expected_proof_action_object_target_mismatch:gap-return-partition-extraction-function2"
         in failures
     )
+    assert (
+        "current_expected_proof_action_id_mismatch:gap-return-partition-extraction-function2"
+        in failures
+    )
+    assert "current_expected_reason_object_target_mismatch:gap-reason-record-function1" not in failures
 
 
 def test_phase3_return_coverage_manifest_rejects_missing_object_proof_detail(tmp_path):
@@ -475,13 +713,13 @@ def test_phase3_return_coverage_manifest_rejects_missing_object_proof_detail(tmp
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
-    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
 
 
 def test_phase3_return_coverage_manifest_rejects_weak_return_coverage_object_key(tmp_path):
@@ -510,13 +748,13 @@ def test_phase3_return_coverage_manifest_rejects_weak_return_coverage_object_key
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
-    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
 
 
 def test_phase3_return_coverage_manifest_rejects_log_prose_return_coverage_object_key(tmp_path):
@@ -595,7 +833,6 @@ def test_phase3_return_coverage_manifest_rejects_log_prose_return_coverage_objec
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
-    assert "baseline_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
 
 
 def test_return_coverage_object_key_specificity_requires_function_entry_and_pcode_location():
@@ -806,6 +1043,7 @@ def test_phase3_return_coverage_manifest_rejects_reversed_log_direction(tmp_path
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())
@@ -847,6 +1085,7 @@ def test_phase3_return_coverage_manifest_rejects_reversed_payload_direction(tmp_
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
     )
 
     manifest = json.loads(path.read_text())

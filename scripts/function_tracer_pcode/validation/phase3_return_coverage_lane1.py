@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .result_summary import STATUS_UNKNOWN, classify_result_payload
+from .result_summary import STATUS_EQ, STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload
 from .unknown_reason_summary import (
     _extract_final_unknown_reasons,
     _global_reason_tuple_from_action,
@@ -28,7 +28,9 @@ from ..equivalence.unknown_reason import (
 
 
 MANIFEST_VERSION = 1
-TARGET_REASON_IDS = ("return_coverage_gap", "return_coverage_inconclusive")
+TARGET_REASON_IDS = ("return_coverage_gap",)
+OBSERVED_RETURN_REASON_IDS = ("return_coverage_gap", "return_coverage_inconclusive")
+RETIRED_REASON_IDS = ("return_coverage_inconclusive",)
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
 RETURN_COVERAGE_GAP_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
@@ -57,25 +59,26 @@ RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE = (
     "return_guard_coverage",
     "pending_proof",
 )
-RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
+RETIRED_RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
     "return_coverage_inconclusive",
     "blocks_decision",
     "function",
     "return_coverage_completion",
     "return_coverage_smt_disambiguation",
-    "pending_proof",
+    MISSING_SENTINEL,
 )
-RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE = (
+RETIRED_RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE = (
     UnknownCountKind.PROOF_ACTION.value,
     "return_coverage_inconclusive",
     "blocks_decision",
     "function",
     "return_coverage_completion",
     "return_coverage_smt_disambiguation",
-    "pending_proof",
+    "planned",
 )
 FUNCTION_CALL_BINARY_NAMES = {
+    "B8": "function_call_test-arm64-gcc-O3",
     "B11": "function_call_test-mips64-clang-O2",
     "B12": "function_call_test-mips64-clang-O3",
     "B15": "function_call_test-mips64-gcc-O2",
@@ -132,6 +135,61 @@ def _expected_proof_action(
     return movement
 
 
+def _gap_both_sides_movements() -> Sequence[Mapping[str, Any]]:
+    return [
+        _expected_reason_record(
+            "gap-reason-record-function1",
+            RETURN_COVERAGE_GAP_REASON_TUPLE,
+            expected_evidence_refs=["function1:return_coverage_gap"],
+        ),
+        _expected_reason_record(
+            "gap-reason-record-function2",
+            RETURN_COVERAGE_GAP_REASON_TUPLE,
+            expected_evidence_refs=["function2:return_coverage_gap"],
+        ),
+        _expected_proof_action(
+            "gap-return-partition-extraction-function1",
+            RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE,
+            required_evidence=[
+                "missing_return_guard",
+                "tail_or_default_return_value",
+                "return_storage",
+            ],
+            expected_evidence_refs=["function1:return_coverage_gap"],
+        ),
+        _expected_proof_action(
+            "gap-return-partition-extraction-function2",
+            RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE,
+            required_evidence=[
+                "missing_return_guard",
+                "tail_or_default_return_value",
+                "return_storage",
+            ],
+            expected_evidence_refs=["function2:return_coverage_gap"],
+        ),
+        _expected_proof_action(
+            "gap-return-guard-coverage-function1",
+            RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE,
+            required_evidence=[
+                "case_guard_disjunction",
+                "path_feasibility",
+                "function_precondition",
+            ],
+            expected_evidence_refs=["function1:return_coverage_gap"],
+        ),
+        _expected_proof_action(
+            "gap-return-guard-coverage-function2",
+            RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE,
+            required_evidence=[
+                "case_guard_disjunction",
+                "path_feasibility",
+                "function_precondition",
+            ],
+            expected_evidence_refs=["function2:return_coverage_gap"],
+        ),
+    ]
+
+
 DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
     {
         "id": "representative-return-coverage-gap-recursive-simple",
@@ -171,39 +229,6 @@ DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
         ],
     },
     {
-        "id": "representative-return-coverage-inconclusive-odd",
-        "category": "function_call",
-        "function": "fc_is_odd",
-        "binary_pair": "B11_B16",
-        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B11"],
-        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B16"],
-        "required_reason_ids": ["return_coverage_inconclusive"],
-        "supporting_reason_ids": ["return_coverage_gap"],
-        "role": "inconclusive return coverage near-miss with stable gap co-reason",
-        "expected_movements": [
-            _expected_reason_record(
-                "inconclusive-reason-record",
-                RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
-                expected_evidence_refs=["function2:return_coverage_inconclusive"],
-            ),
-            _expected_proof_action(
-                "inconclusive-smt-disambiguation",
-                RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE,
-                required_evidence=[
-                    "case_guard_disjunction",
-                    "normalized_guard_formula",
-                    "solver_model_or_timeout",
-                ],
-                expected_evidence_refs=["function2:return_coverage_inconclusive"],
-            ),
-            _expected_reason_record(
-                "supporting-gap-reason-record",
-                RETURN_COVERAGE_GAP_REASON_TUPLE,
-                expected_evidence_refs=["function1:return_coverage_gap"],
-            ),
-        ],
-    },
-    {
         "id": "representative-return-coverage-gap-even-both-sides",
         "category": "function_call",
         "function": "fc_is_even",
@@ -212,58 +237,71 @@ DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
         "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B12"],
         "required_reason_ids": ["return_coverage_gap"],
         "role": "return coverage gap present on both sides",
-        "expected_movements": [
-            _expected_reason_record(
-                "gap-reason-record-function1",
-                RETURN_COVERAGE_GAP_REASON_TUPLE,
-                expected_evidence_refs=["function1:return_coverage_gap"],
-            ),
-            _expected_reason_record(
-                "gap-reason-record-function2",
-                RETURN_COVERAGE_GAP_REASON_TUPLE,
-                expected_evidence_refs=["function2:return_coverage_gap"],
-            ),
-            _expected_proof_action(
-                "gap-return-partition-extraction-function1",
-                RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE,
-                required_evidence=[
-                    "missing_return_guard",
-                    "tail_or_default_return_value",
-                    "return_storage",
-                ],
-                expected_evidence_refs=["function1:return_coverage_gap"],
-            ),
-            _expected_proof_action(
-                "gap-return-partition-extraction-function2",
-                RETURN_COVERAGE_GAP_PARTITION_ACTION_TUPLE,
-                required_evidence=[
-                    "missing_return_guard",
-                    "tail_or_default_return_value",
-                    "return_storage",
-                ],
-                expected_evidence_refs=["function2:return_coverage_gap"],
-            ),
-            _expected_proof_action(
-                "gap-return-guard-coverage-function1",
-                RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE,
-                required_evidence=[
-                    "case_guard_disjunction",
-                    "path_feasibility",
-                    "function_precondition",
-                ],
-                expected_evidence_refs=["function1:return_coverage_gap"],
-            ),
-            _expected_proof_action(
-                "gap-return-guard-coverage-function2",
-                RETURN_COVERAGE_GAP_GUARD_ACTION_TUPLE,
-                required_evidence=[
-                    "case_guard_disjunction",
-                    "path_feasibility",
-                    "function_precondition",
-                ],
-                expected_evidence_refs=["function2:return_coverage_gap"],
-            ),
-        ],
+        "expected_movements": _gap_both_sides_movements(),
+    },
+)
+
+
+DEFAULT_RETIRED_TRANSITIONS: Tuple[Mapping[str, Any], ...] = (
+    {
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B8-B15",
+        "category": "function_call",
+        "function": "fc_is_odd",
+        "binary_pair": "B8_B15",
+        "retired_reason_id": "return_coverage_inconclusive",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "transition_status": "retired_inconclusive_reclassified_to_gap",
+        "baseline_expected_reason_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE),
+        "baseline_expected_proof_action_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE),
+        "expected_baseline_observed_left_binary_id": "B15",
+        "expected_baseline_observed_right_binary_id": "B8",
+        "expected_baseline_binary1_name": FUNCTION_CALL_BINARY_NAMES["B15"],
+        "expected_baseline_binary2_name": FUNCTION_CALL_BINARY_NAMES["B8"],
+        "expected_current_observed_left_binary_id": "B8",
+        "expected_current_observed_right_binary_id": "B15",
+        "expected_current_binary1_name": FUNCTION_CALL_BINARY_NAMES["B8"],
+        "expected_current_binary2_name": FUNCTION_CALL_BINARY_NAMES["B15"],
+        "current_expected_movements": _gap_both_sides_movements(),
+    },
+    {
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B11-B16",
+        "category": "function_call",
+        "function": "fc_is_odd",
+        "binary_pair": "B11_B16",
+        "retired_reason_id": "return_coverage_inconclusive",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "transition_status": "retired_inconclusive_reclassified_to_gap",
+        "baseline_expected_reason_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE),
+        "baseline_expected_proof_action_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE),
+        "expected_baseline_observed_left_binary_id": "B11",
+        "expected_baseline_observed_right_binary_id": "B16",
+        "expected_baseline_binary1_name": FUNCTION_CALL_BINARY_NAMES["B11"],
+        "expected_baseline_binary2_name": FUNCTION_CALL_BINARY_NAMES["B16"],
+        "expected_current_observed_left_binary_id": "B11",
+        "expected_current_observed_right_binary_id": "B16",
+        "expected_current_binary1_name": FUNCTION_CALL_BINARY_NAMES["B11"],
+        "expected_current_binary2_name": FUNCTION_CALL_BINARY_NAMES["B16"],
+        "current_expected_movements": _gap_both_sides_movements(),
+    },
+    {
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B12-B16",
+        "category": "function_call",
+        "function": "fc_is_odd",
+        "binary_pair": "B12_B16",
+        "retired_reason_id": "return_coverage_inconclusive",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "transition_status": "retired_inconclusive_reclassified_to_gap",
+        "baseline_expected_reason_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE),
+        "baseline_expected_proof_action_tuple": list(RETIRED_RETURN_COVERAGE_INCONCLUSIVE_ACTION_TUPLE),
+        "expected_baseline_observed_left_binary_id": "B12",
+        "expected_baseline_observed_right_binary_id": "B16",
+        "expected_baseline_binary1_name": FUNCTION_CALL_BINARY_NAMES["B12"],
+        "expected_baseline_binary2_name": FUNCTION_CALL_BINARY_NAMES["B16"],
+        "expected_current_observed_left_binary_id": "B12",
+        "expected_current_observed_right_binary_id": "B16",
+        "expected_current_binary1_name": FUNCTION_CALL_BINARY_NAMES["B12"],
+        "expected_current_binary2_name": FUNCTION_CALL_BINARY_NAMES["B16"],
+        "current_expected_movements": _gap_both_sides_movements(),
     },
 )
 
@@ -278,6 +316,7 @@ def build_phase3_return_coverage_lane1_manifest(
     current_log_roots: Mapping[str, Path],
     baseline_log_roots: Mapping[str, Path],
     representatives: Sequence[Mapping[str, Any]] = DEFAULT_REPRESENTATIVES,
+    retired_transitions: Sequence[Mapping[str, Any]] = DEFAULT_RETIRED_TRANSITIONS,
 ) -> Path:
     raw_dir = Path(baseline_raw_dir)
     output = Path(output_dir)
@@ -289,15 +328,44 @@ def build_phase3_return_coverage_lane1_manifest(
         _materialize_entry(raw_entry, current_records, baseline_records)
         for raw_entry in representatives
     ]
-    readiness = _readiness(entries)
+    transition_entries = [
+        _materialize_retired_transition(raw_entry, current_records, baseline_records)
+        for raw_entry in retired_transitions
+    ]
+    retired_reason_inventory = _retired_reason_inventory(
+        current_records=current_records,
+        baseline_records=baseline_records,
+        transition_entries=transition_entries,
+    )
+    readiness = _readiness(entries, transition_entries, retired_reason_inventory)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "manifest_kind": "phase3_return_coverage_lane1_representatives",
+        "artifact_role": "derived_audit_reclassification_gate",
         "baseline_id": baseline_manifest.get("baseline_id") or MISSING_SENTINEL,
         "baseline_git_head": baseline_manifest.get("git_head") or MISSING_SENTINEL,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "target_reason_ids": list(TARGET_REASON_IDS),
+        "retired_reason_ids": list(RETIRED_REASON_IDS),
         "baseline_raw_artifact_ref": _file_ref(raw_dir / "artifact_manifest.json"),
+        "superseded_phase3_manifest_ref": _file_ref(
+            raw_dir.parent
+            / "phase3"
+            / "return_coverage_lane1"
+            / "return_coverage_lane1_representatives.json"
+        ),
+        "reclassification_rationale": {
+            "summary": (
+                "Current return_coverage_inconclusive representatives are retired because "
+                "the existing logs reclassify them to return_coverage_gap with pending proof "
+                "and object-derived evidence while preserving UNKNOWN final results."
+            ),
+            "retired_status": "retired_inconclusive_reclassified_to_gap",
+            "active_lane_target": "return_coverage_gap",
+            "requires_final_result_unchanged_unknown": True,
+            "requires_no_false_eq": True,
+            "requires_no_timeout": True,
+        },
         "current_log_roots": {
             category: str(path)
             for category, path in sorted(current_log_roots.items())
@@ -313,13 +381,17 @@ def build_phase3_return_coverage_lane1_manifest(
                 "baseline/current UNKNOWN result",
                 "baseline/current required reason records present",
                 "baseline/current payload binary1_name and binary2_name match expected direction",
-                "return_coverage_gap and return_coverage_inconclusive covered",
+                "current expected movement and object detail present",
+                "raw baseline legacy tuples may have missing proof/action detail",
+                "return_coverage_inconclusive is tracked only as retired reclassification input",
                 "avoid semantic decision changes before lane implementation",
             ],
         },
         "readiness": readiness,
         "phase3_lane1_ready": readiness["ready"],
         "entries": entries,
+        "retired_reason_inventory": retired_reason_inventory,
+        "retired_transitions": transition_entries,
     }
     path = output / "return_coverage_lane1_representatives.json"
     _write_json(path, manifest)
@@ -420,10 +492,124 @@ def _materialize_entry(
         for reason_id in required:
             if reason_id not in observed:
                 failures.append(f"{label}_missing_{reason_id}")
-        failures.extend(_expected_movement_failures(entry, observation, label))
+        if label == "current":
+            failures.extend(_expected_movement_failures(entry, observation, label))
     entry["selection_status"] = "ready" if not failures else "failed"
     entry["selection_failures"] = sorted(set(failures))
     return entry
+
+
+def _materialize_retired_transition(
+    raw_entry: Mapping[str, Any],
+    current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    baseline_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Dict[str, Any]:
+    category = str(raw_entry["category"])
+    function = str(raw_entry["function"])
+    binary_pair = _canonical_binary_pair(str(raw_entry["binary_pair"]))
+    key = (category, function, binary_pair)
+    baseline = _observation(baseline_records.get(key))
+    current = _observation(current_records.get(key))
+    entry: Dict[str, Any] = {
+        **dict(raw_entry),
+        "binary_pair": binary_pair,
+        "left_binary_id": binary_pair.split("_", 1)[0],
+        "right_binary_id": binary_pair.split("_", 1)[1],
+        "baseline_observation": baseline,
+        "current_observation": current,
+        "final_result_invariant": {
+            "baseline_final_result": baseline.get("final_result") or MISSING_SENTINEL,
+            "current_final_result": current.get("final_result") or MISSING_SENTINEL,
+            "final_result_unchanged_unknown": (
+                baseline.get("final_result") == STATUS_UNKNOWN
+                and current.get("final_result") == STATUS_UNKNOWN
+            ),
+            "false_eq": (
+                baseline.get("final_result") == STATUS_EQ
+                or current.get("final_result") == STATUS_EQ
+            ),
+            "timeout": (
+                baseline.get("final_result") == STATUS_TIMEOUT
+                or current.get("final_result") == STATUS_TIMEOUT
+            ),
+        },
+    }
+    failures = []
+    retired_reason_id = str(raw_entry.get("retired_reason_id") or MISSING_SENTINEL)
+    reclassified_to_reason_id = str(raw_entry.get("reclassified_to_reason_id") or MISSING_SENTINEL)
+    for label, observation in (("baseline", baseline), ("current", current)):
+        if observation.get("log_status") == "missing":
+            failures.append(f"{label}_log_missing")
+            continue
+        if not _transition_observation_direction_matches(raw_entry, observation, label):
+            failures.append(f"{label}_observed_direction_mismatch")
+        if not _transition_observation_payload_direction_matches(raw_entry, observation, label):
+            failures.append(f"{label}_observed_payload_direction_mismatch")
+        if observation.get("final_result") != STATUS_UNKNOWN:
+            failures.append(f"{label}_not_unknown")
+    baseline_reasons = set(baseline.get("observed_reason_ids") or ())
+    current_reasons = set(current.get("observed_reason_ids") or ())
+    if retired_reason_id not in baseline_reasons:
+        failures.append(f"baseline_missing_retired_{retired_reason_id}")
+    baseline_expected_reason_tuple = _expected_transition_tuple(
+        raw_entry,
+        "baseline_expected_reason_tuple",
+    )
+    if (
+        baseline_expected_reason_tuple is None
+        or baseline_expected_reason_tuple
+        not in _observation_tuple_set(baseline, "reason_record_tuples")
+    ):
+        failures.append(f"baseline_retired_reason_tuple_missing:{retired_reason_id}")
+    baseline_expected_proof_action_tuple = _expected_transition_tuple(
+        raw_entry,
+        "baseline_expected_proof_action_tuple",
+    )
+    if (
+        baseline_expected_proof_action_tuple is None
+        or baseline_expected_proof_action_tuple
+        not in _observation_tuple_set(baseline, "proof_action_tuples")
+    ):
+        failures.append(f"baseline_retired_proof_action_tuple_missing:{retired_reason_id}")
+    if retired_reason_id in current_reasons:
+        failures.append(f"current_retired_reason_still_active:{retired_reason_id}")
+    if baseline_expected_reason_tuple in _observation_tuple_set(current, "reason_record_tuples"):
+        failures.append(f"current_retired_reason_tuple_still_active:{retired_reason_id}")
+    if baseline_expected_proof_action_tuple in _observation_tuple_set(current, "proof_action_tuples"):
+        failures.append(f"current_retired_proof_action_tuple_still_active:{retired_reason_id}")
+    if reclassified_to_reason_id not in current_reasons:
+        failures.append(f"current_missing_reclassified_{reclassified_to_reason_id}")
+    movement_entry = {
+        "expected_movements": raw_entry.get("current_expected_movements") or (),
+    }
+    failures.extend(_expected_movement_failures(movement_entry, current, "current"))
+    entry["selection_status"] = "retired_by_reclassification" if not failures else "failed"
+    entry["selection_failures"] = sorted(set(failures))
+    return entry
+
+
+def _expected_transition_tuple(
+    entry: Mapping[str, Any],
+    field_name: str,
+) -> Optional[Tuple[str, ...]]:
+    value = entry.get(field_name)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    normalized = tuple(str(item) for item in value)
+    if len(normalized) != 7:
+        return None
+    return normalized
+
+
+def _observation_tuple_set(
+    observation: Mapping[str, Any],
+    field_name: str,
+) -> set[Tuple[str, ...]]:
+    return {
+        tuple(str(item) for item in value)
+        for value in observation.get(field_name) or ()
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+    }
 
 
 def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -451,22 +637,22 @@ def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "reason_record_tuples": [
             list(_global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value))
             for reason in reason_records
-            if reason.reason_id in TARGET_REASON_IDS
+            if reason.reason_id in OBSERVED_RETURN_REASON_IDS
         ],
         "reason_records": [
             _reason_record_summary(reason)
             for reason in reason_records
-            if reason.reason_id in TARGET_REASON_IDS
+            if reason.reason_id in OBSERVED_RETURN_REASON_IDS
         ],
         "proof_action_tuples": [
             list(_global_reason_tuple_from_action(action))
             for action in proof_actions
-            if getattr(action, "reason_id", None) in TARGET_REASON_IDS
+            if getattr(action, "reason_id", None) in OBSERVED_RETURN_REASON_IDS
         ],
         "proof_actions": [
             _proof_action_summary(action)
             for action in proof_actions
-            if getattr(action, "reason_id", None) in TARGET_REASON_IDS
+            if getattr(action, "reason_id", None) in OBSERVED_RETURN_REASON_IDS
         ],
         "return_case_grid_diagnostic": _return_case_grid_diagnostic(payload),
     }
@@ -593,16 +779,6 @@ def _expected_movement_failures(
     if not isinstance(movements, Sequence) or isinstance(movements, (str, bytes)) or not movements:
         return ["expected_movements_missing"]
     failures = []
-    reason_tuples = {
-        tuple(item)
-        for item in observation.get("reason_record_tuples") or ()
-        if isinstance(item, Sequence) and not isinstance(item, (str, bytes))
-    }
-    proof_tuples = {
-        tuple(item)
-        for item in observation.get("proof_action_tuples") or ()
-        if isinstance(item, Sequence) and not isinstance(item, (str, bytes))
-    }
     reason_records = observation.get("reason_records") or ()
     proof_actions = observation.get("proof_actions") or ()
     for movement in movements:
@@ -616,34 +792,50 @@ def _expected_movement_failures(
             continue
         count_kind = movement.get("count_kind")
         if count_kind == UnknownCountKind.REASON_RECORD.value:
-            if tuple_key not in reason_tuples:
+            tuple_candidates = _records_matching_tuple(reason_records, tuple_key)
+            if not tuple_candidates:
                 failures.append(f"{label}_expected_reason_tuple_missing:{movement_id}")
                 continue
-            if not _matching_record_has_scope(reason_records, tuple_key, movement):
+            scoped_candidates = _records_matching_scope(tuple_candidates, movement)
+            if not scoped_candidates:
                 failures.append(f"{label}_expected_reason_scope_mismatch:{movement_id}")
                 continue
-            if not _matching_record_has_evidence_refs(reason_records, tuple_key, movement):
+            candidates = _records_matching_evidence_refs(scoped_candidates, movement)
+            if not candidates:
                 failures.append(f"{label}_expected_reason_evidence_refs_mismatch:{movement_id}")
-            if not _matching_record_has_object_target(reason_records, tuple_key, movement):
+                continue
+            if not _single_movement_candidate(candidates):
+                failures.append(f"{label}_expected_reason_candidate_ambiguous:{movement_id}")
+                continue
+            candidate = candidates[0]
+            if not _record_has_object_target(candidate, movement):
                 failures.append(f"{label}_expected_reason_object_target_mismatch:{movement_id}")
         elif count_kind == UnknownCountKind.PROOF_ACTION.value:
-            if tuple_key not in proof_tuples:
+            tuple_candidates = _records_matching_tuple(proof_actions, tuple_key)
+            if not tuple_candidates:
                 failures.append(f"{label}_expected_proof_action_tuple_missing:{movement_id}")
                 continue
             expected_evidence = tuple(str(item) for item in movement.get("required_evidence") or ())
             if not expected_evidence:
                 failures.append(f"{label}_expected_proof_action_evidence_missing:{movement_id}")
                 continue
-            if not _matching_proof_action_has_evidence(proof_actions, tuple_key, expected_evidence):
-                failures.append(f"{label}_expected_proof_action_evidence_mismatch:{movement_id}")
-            if not _matching_record_has_scope(proof_actions, tuple_key, movement):
+            scoped_candidates = _records_matching_scope(tuple_candidates, movement)
+            if not scoped_candidates:
                 failures.append(f"{label}_expected_proof_action_scope_mismatch:{movement_id}")
                 continue
-            if not _matching_record_has_evidence_refs(proof_actions, tuple_key, movement):
+            candidates = _records_matching_evidence_refs(scoped_candidates, movement)
+            if not candidates:
                 failures.append(f"{label}_expected_proof_action_evidence_refs_mismatch:{movement_id}")
-            if not _matching_record_has_object_target(proof_actions, tuple_key, movement):
+                continue
+            if not _single_movement_candidate(candidates):
+                failures.append(f"{label}_expected_proof_action_candidate_ambiguous:{movement_id}")
+                continue
+            candidate = candidates[0]
+            if not _proof_action_has_required_evidence(candidate, expected_evidence):
+                failures.append(f"{label}_expected_proof_action_evidence_mismatch:{movement_id}")
+            if not _record_has_object_target(candidate, movement):
                 failures.append(f"{label}_expected_proof_action_object_target_mismatch:{movement_id}")
-            if not _matching_proof_action_has_proof_id(proof_actions, tuple_key, movement):
+            if not _proof_action_has_proof_id(candidate, movement):
                 failures.append(f"{label}_expected_proof_action_id_mismatch:{movement_id}")
         else:
             failures.append(f"{label}_expected_movement_count_kind_invalid:{movement_id}")
@@ -674,6 +866,32 @@ def _observation_payload_direction_matches(
     )
 
 
+def _transition_observation_direction_matches(
+    entry: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    label: str,
+) -> bool:
+    return (
+        str(observation.get("observed_left_binary_id") or MISSING_SENTINEL)
+        == str(entry.get(f"expected_{label}_observed_left_binary_id") or MISSING_SENTINEL)
+        and str(observation.get("observed_right_binary_id") or MISSING_SENTINEL)
+        == str(entry.get(f"expected_{label}_observed_right_binary_id") or MISSING_SENTINEL)
+    )
+
+
+def _transition_observation_payload_direction_matches(
+    entry: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    label: str,
+) -> bool:
+    return (
+        str(observation.get("observed_binary1_name") or MISSING_SENTINEL)
+        == str(entry.get(f"expected_{label}_binary1_name") or MISSING_SENTINEL)
+        and str(observation.get("observed_binary2_name") or MISSING_SENTINEL)
+        == str(entry.get(f"expected_{label}_binary2_name") or MISSING_SENTINEL)
+    )
+
+
 def _movement_tuple(movement: Mapping[str, Any]) -> Optional[Tuple[str, ...]]:
     tuple_value = movement.get("tuple")
     if not isinstance(tuple_value, Sequence) or isinstance(tuple_value, (str, bytes)):
@@ -684,32 +902,28 @@ def _movement_tuple(movement: Mapping[str, Any]) -> Optional[Tuple[str, ...]]:
     return normalized
 
 
-def _matching_proof_action_has_evidence(
-    proof_actions: Any,
-    tuple_key: Tuple[str, ...],
-    expected_evidence: Tuple[str, ...],
-) -> bool:
-    for action in proof_actions:
-        if not isinstance(action, Mapping):
-            continue
-        if tuple(str(item) for item in action.get("tuple") or ()) != tuple_key:
-            continue
-        actual = tuple(str(item) for item in action.get("required_evidence") or ())
-        if actual == expected_evidence:
-            return True
-    return False
-
-
-def _matching_record_has_scope(
+def _records_matching_tuple(
     records: Any,
     tuple_key: Tuple[str, ...],
-    movement: Mapping[str, Any],
-) -> bool:
-    expected_scope = _movement_scope(movement)
+) -> Sequence[Mapping[str, Any]]:
+    matches = []
     for record in records:
         if not isinstance(record, Mapping):
             continue
         if tuple(str(item) for item in record.get("tuple") or ()) != tuple_key:
+            continue
+        matches.append(record)
+    return matches
+
+
+def _records_matching_scope(
+    records: Any,
+    movement: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    expected_scope = _movement_scope(movement)
+    matches = []
+    for record in records:
+        if not isinstance(record, Mapping):
             continue
         actual_scope = (
             _normalize_optional(record.get("aggregation_unit")),
@@ -717,101 +931,71 @@ def _matching_record_has_scope(
             _normalize_optional(record.get("pair_or_case")),
         )
         if actual_scope == expected_scope:
-            return True
-    return False
+            matches.append(record)
+    return matches
 
 
-def _matching_record_has_evidence_refs(
+def _records_matching_evidence_refs(
     records: Any,
-    tuple_key: Tuple[str, ...],
     movement: Mapping[str, Any],
-) -> bool:
+) -> Sequence[Mapping[str, Any]]:
     expected_refs = movement.get("expected_evidence_refs")
     if expected_refs is None:
-        return True
-    expected_scope = _movement_scope(movement)
+        return tuple(record for record in records if isinstance(record, Mapping))
     normalized_expected_refs = tuple(str(ref) for ref in expected_refs or ())
+    matches = []
     for record in records:
         if not isinstance(record, Mapping):
             continue
-        if tuple(str(item) for item in record.get("tuple") or ()) != tuple_key:
-            continue
-        actual_scope = (
-            _normalize_optional(record.get("aggregation_unit")),
-            _normalize_optional(record.get("stage")),
-            _normalize_optional(record.get("pair_or_case")),
-        )
-        if actual_scope != expected_scope:
-            continue
         actual_refs = tuple(str(ref) for ref in record.get("evidence_refs") or ())
         if actual_refs == normalized_expected_refs:
-            return True
-    return False
+            matches.append(record)
+    return matches
 
 
-def _matching_record_has_object_target(
-    records: Any,
-    tuple_key: Tuple[str, ...],
+def _single_movement_candidate(records: Any) -> bool:
+    return isinstance(records, Sequence) and not isinstance(records, (str, bytes)) and len(records) == 1
+
+
+def _record_has_object_target(
+    record: Mapping[str, Any],
     movement: Mapping[str, Any],
 ) -> bool:
     required_kind = movement.get("required_object_target_kind")
     if required_kind is None:
         return True
-    expected_scope = _movement_scope(movement)
-    for record in records:
-        if not isinstance(record, Mapping):
-            continue
-        if tuple(str(item) for item in record.get("tuple") or ()) != tuple_key:
-            continue
-        actual_scope = (
-            _normalize_optional(record.get("aggregation_unit")),
-            _normalize_optional(record.get("stage")),
-            _normalize_optional(record.get("pair_or_case")),
-        )
-        if actual_scope != expected_scope:
-            continue
-        object_target_key = _normalize_nested_tuple(record.get("object_target_key"))
-        if (
-            _nested_tuple_kind(object_target_key) == str(required_kind)
-            and _object_target_key_is_specific(object_target_key)
-        ):
-            return True
-    return False
+    object_target_key = _normalize_nested_tuple(record.get("object_target_key"))
+    return (
+        _nested_tuple_kind(object_target_key) == str(required_kind)
+        and _object_target_key_is_specific(object_target_key)
+    )
 
 
-def _matching_proof_action_has_proof_id(
-    proof_actions: Any,
-    tuple_key: Tuple[str, ...],
+def _proof_action_has_required_evidence(
+    action: Mapping[str, Any],
+    expected_evidence: Tuple[str, ...],
+) -> bool:
+    actual = tuple(str(item) for item in action.get("required_evidence") or ())
+    return actual == expected_evidence
+
+
+def _proof_action_has_proof_id(
+    action: Mapping[str, Any],
     movement: Mapping[str, Any],
 ) -> bool:
     if not movement.get("require_proof_obligation_id"):
         return True
-    expected_scope = _movement_scope(movement)
-    for action in proof_actions:
-        if not isinstance(action, Mapping):
-            continue
-        if tuple(str(item) for item in action.get("tuple") or ()) != tuple_key:
-            continue
-        actual_scope = (
-            _normalize_optional(action.get("aggregation_unit")),
-            _normalize_optional(action.get("stage")),
-            _normalize_optional(action.get("pair_or_case")),
-        )
-        if actual_scope != expected_scope:
-            continue
-        object_target_key = _normalize_nested_tuple(action.get("object_target_key"))
-        if object_target_key is None or not _object_target_key_is_specific(object_target_key):
-            continue
-        expected_id = build_proof_obligation_id(
-            action.get("reason_id"),
-            action.get("proof_stage"),
-            action.get("proof_kind"),
-            action.get("evidence_kind"),
-            object_target_key,
-        )
-        if _normalize_nested_tuple(action.get("proof_obligation_id")) == expected_id:
-            return True
-    return False
+    object_target_key = _normalize_nested_tuple(action.get("object_target_key"))
+    if object_target_key is None or not _object_target_key_is_specific(object_target_key):
+        return False
+    expected_id = build_proof_obligation_id(
+        action.get("reason_id"),
+        action.get("proof_stage"),
+        action.get("proof_kind"),
+        action.get("evidence_kind"),
+        object_target_key,
+    )
+    return _normalize_nested_tuple(action.get("proof_obligation_id")) == expected_id
 
 
 def _nested_tuple_kind(value: Any) -> Optional[str]:
@@ -1035,7 +1219,7 @@ def _nested_has_specific_leaf(value: Any) -> bool:
 
 def _nested_contains_log_prose(value: Any) -> bool:
     if isinstance(value, str):
-        return any(reason_id in value for reason_id in TARGET_REASON_IDS)
+        return any(reason_id in value for reason_id in OBSERVED_RETURN_REASON_IDS)
     if isinstance(value, tuple):
         return any(_nested_contains_log_prose(item) for item in value)
     if isinstance(value, list):
@@ -1057,12 +1241,144 @@ def _normalize_optional(value: Any) -> str:
     return str(value)
 
 
-def _readiness(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def _retired_reason_inventory(
+    *,
+    current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    baseline_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    baseline_reason_counts = _reason_record_tuple_counts(baseline_records)
+    current_reason_counts = _reason_record_tuple_counts(current_records)
+    baseline_action_counts = _proof_action_tuple_counts(baseline_records)
+    current_action_counts = _proof_action_tuple_counts(current_records)
+    expected_baseline_reason_counts = Counter(
+        expected_tuple
+        for entry in transition_entries
+        for expected_tuple in (_expected_transition_tuple(entry, "baseline_expected_reason_tuple"),)
+        if expected_tuple is not None
+    )
+    expected_baseline_action_counts = Counter(
+        expected_tuple
+        for entry in transition_entries
+        for expected_tuple in (_expected_transition_tuple(entry, "baseline_expected_proof_action_tuple"),)
+        if expected_tuple is not None
+    )
+    expected_current_reason_counts: Counter = Counter()
+    expected_current_action_counts: Counter = Counter()
+    inventory = {}
+    for reason_id in RETIRED_REASON_IDS:
+        baseline_reason_subset = _tuple_counter_for_reason(baseline_reason_counts, reason_id)
+        current_reason_subset = _tuple_counter_for_reason(current_reason_counts, reason_id)
+        expected_baseline_reason_subset = _tuple_counter_for_reason(
+            expected_baseline_reason_counts,
+            reason_id,
+        )
+        expected_current_reason_subset = _tuple_counter_for_reason(
+            expected_current_reason_counts,
+            reason_id,
+        )
+        baseline_action_subset = _tuple_counter_for_reason(baseline_action_counts, reason_id)
+        current_action_subset = _tuple_counter_for_reason(current_action_counts, reason_id)
+        expected_baseline_action_subset = _tuple_counter_for_reason(
+            expected_baseline_action_counts,
+            reason_id,
+        )
+        expected_current_action_subset = _tuple_counter_for_reason(
+            expected_current_action_counts,
+            reason_id,
+        )
+        status_ok = (
+            baseline_reason_subset == expected_baseline_reason_subset
+            and current_reason_subset == expected_current_reason_subset
+            and baseline_action_subset == expected_baseline_action_subset
+            and current_action_subset == expected_current_action_subset
+        )
+        inventory[reason_id] = {
+            "reason_record": {
+                "baseline_tuple_counts": _serialize_tuple_counter(baseline_reason_subset),
+                "current_tuple_counts": _serialize_tuple_counter(current_reason_subset),
+                "expected_baseline_tuple_counts": _serialize_tuple_counter(
+                    expected_baseline_reason_subset
+                ),
+                "expected_current_tuple_counts": _serialize_tuple_counter(
+                    expected_current_reason_subset
+                ),
+            },
+            "proof_action": {
+                "baseline_tuple_counts": _serialize_tuple_counter(baseline_action_subset),
+                "current_tuple_counts": _serialize_tuple_counter(current_action_subset),
+                "expected_baseline_tuple_counts": _serialize_tuple_counter(
+                    expected_baseline_action_subset
+                ),
+                "expected_current_tuple_counts": _serialize_tuple_counter(
+                    expected_current_action_subset
+                ),
+            },
+            "status": "retired_by_reclassification" if status_ok else "failed",
+        }
+    return inventory
+
+
+def _reason_record_tuple_counts(
+    records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Counter:
+    counts: Counter = Counter()
+    for record in records.values():
+        payload = record.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        for reason in _extract_final_unknown_reasons(payload):
+            counts[_global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value)] += 1
+    return counts
+
+
+def _proof_action_tuple_counts(
+    records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Counter:
+    counts: Counter = Counter()
+    for record in records.values():
+        payload = record.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        for reason in _extract_final_unknown_reasons(payload):
+            for action in build_unknown_recovery_actions((reason,)):
+                counts[_global_reason_tuple_from_action(action)] += 1
+    return counts
+
+
+def _tuple_counter_for_reason(counter: Counter, reason_id: str) -> Counter:
+    return Counter({
+        tuple_key: count
+        for tuple_key, count in counter.items()
+        if len(tuple_key) > 1 and str(tuple_key[1]) == reason_id
+    })
+
+
+def _serialize_tuple_counter(counter: Counter) -> Sequence[Mapping[str, Any]]:
+    return [
+        {"tuple": list(tuple_key), "count": int(count)}
+        for tuple_key, count in sorted(counter.items())
+    ]
+
+
+def _readiness(
+    entries: Sequence[Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+    retired_reason_inventory: Mapping[str, Any],
+) -> Dict[str, Any]:
     failures = [
         failure
         for entry in entries
         for failure in (entry.get("selection_failures") or ())
     ]
+    failures.extend(
+        failure
+        for entry in transition_entries
+        for failure in (entry.get("selection_failures") or ())
+    )
+    for reason_id, inventory in retired_reason_inventory.items():
+        if not isinstance(inventory, Mapping) or inventory.get("status") != "retired_by_reclassification":
+            failures.append(f"retired_reason_inventory_mismatch:{reason_id}")
     covered_reasons = sorted(
         {
             reason_id
@@ -1080,6 +1396,16 @@ def _readiness(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "ready": not counts,
         "ready_entries": sum(1 for entry in entries if entry.get("selection_status") == "ready"),
         "failed_entries": sum(1 for entry in entries if entry.get("selection_status") != "ready"),
+        "retired_by_reclassification_entries": sum(
+            1
+            for entry in transition_entries
+            if entry.get("selection_status") == "retired_by_reclassification"
+        ),
+        "failed_retired_transition_entries": sum(
+            1
+            for entry in transition_entries
+            if entry.get("selection_status") != "retired_by_reclassification"
+        ),
         "covered_target_reason_ids": covered_reasons,
         "failure_kinds": sorted(counts),
         "failure_counts": dict(sorted(counts.items())),
