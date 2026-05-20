@@ -270,6 +270,7 @@ class ReturnAnalyzer:
             "pcode_identity": pcode_identity,
             "pcode_order": pcode_order,
             "pcode_time": pcode_time,
+            "pcode_op_ref": PcodeOpRef.from_pcode_op(pcode_op),
         }
 
     def _pcode_op_identity_key(self, pcode_op) -> Optional[Tuple[Any, ...]]:
@@ -311,6 +312,15 @@ class ReturnAnalyzer:
     def _return_site_key(self, ret_info: ReturnInfo) -> str:
         return ret_info.site_key()
 
+    @staticmethod
+    def _return_site_metadata_from_info(info: ReturnInfo) -> Dict[str, Optional[object]]:
+        return {
+            "pcode_identity": info.pcode_identity,
+            "pcode_order": info.pcode_order,
+            "pcode_time": info.pcode_time,
+            "pcode_op_ref": info.pcode_op_ref,
+        }
+
     def _make_return_info(
         self,
         *,
@@ -329,6 +339,7 @@ class ReturnAnalyzer:
             pcode_identity=cast(Optional[str], site_metadata.get("pcode_identity")),
             pcode_order=self._coerce_optional_int(site_metadata.get("pcode_order")),
             pcode_time=self._coerce_optional_int(site_metadata.get("pcode_time")),
+            pcode_op_ref=cast(Optional[PcodeOpRef], site_metadata.get("pcode_op_ref")),
         )
 
     def _expression_contains_equivalent_subexpr(
@@ -1099,6 +1110,7 @@ class ReturnAnalyzer:
                 ),
                 "pcode_time": pcode_time,
                 "pcode_order": pcode_order,
+                "pcode_op_ref": PcodeOpRef.from_pcode_op(return_op),
             },
         )
 
@@ -1166,11 +1178,7 @@ class ReturnAnalyzer:
                     value=info.value,
                     conditions=retained_conditions,
                     branch_index=info.branch_index,
-                    site_metadata={
-                        "pcode_identity": info.pcode_identity,
-                        "pcode_order": info.pcode_order,
-                        "pcode_time": info.pcode_time,
-                    },
+                    site_metadata=self._return_site_metadata_from_info(info),
                 )
             )
 
@@ -1245,11 +1253,7 @@ class ReturnAnalyzer:
                         value=rewritten_value,
                         conditions=rewritten_conditions,
                         branch_index=info.branch_index,
-                        site_metadata={
-                            "pcode_identity": info.pcode_identity,
-                            "pcode_order": info.pcode_order,
-                            "pcode_time": info.pcode_time,
-                        },
+                        site_metadata=self._return_site_metadata_from_info(info),
                     )
                 )
             else:
@@ -8405,11 +8409,7 @@ class ReturnAnalyzer:
                         value=info.value,
                         conditions=region,
                         branch_index=self._split_branch_index(info.branch_index, original_index, split_index),
-                        site_metadata={
-                            "pcode_identity": info.pcode_identity,
-                            "pcode_order": info.pcode_order,
-                            "pcode_time": info.pcode_time,
-                        },
+                        site_metadata=self._return_site_metadata_from_info(info),
                     )
                 )
         return preserved
@@ -8978,11 +8978,7 @@ class ReturnAnalyzer:
             value=primary.value,
             conditions=normalized_conditions,
             branch_index=self._min_branch_index(primary.branch_index, secondary.branch_index),
-            site_metadata={
-                "pcode_identity": primary.pcode_identity,
-                "pcode_order": primary.pcode_order,
-                "pcode_time": primary.pcode_time,
-            },
+            site_metadata=self._return_site_metadata_from_info(primary),
         )
 
     def _min_branch_index(

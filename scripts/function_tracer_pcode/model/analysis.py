@@ -47,8 +47,6 @@ class ReturnInfo:
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""
-        if self.pcode_op_ref is not None:
-            return repr(self.pcode_op_ref.stable_key())
         return self.pcode_identity or self.address
     
     def to_dict(self) -> Dict:

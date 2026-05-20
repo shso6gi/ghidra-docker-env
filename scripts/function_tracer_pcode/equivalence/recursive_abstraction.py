@@ -406,6 +406,7 @@ def _rewrite_analysis_with_abstract_calls(
             pcode_identity=ret.pcode_identity,
             pcode_order=ret.pcode_order,
             pcode_time=ret.pcode_time,
+            pcode_op_ref=getattr(ret, "pcode_op_ref", None),
         )
         for ret in (analysis.returns or [])
     ]

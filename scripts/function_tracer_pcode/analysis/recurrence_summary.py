@@ -887,6 +887,7 @@ class StructuralRecurrenceSummarizer:
         pcode_identity = getattr(anchor, "pcode_identity", None)
         pcode_order = getattr(anchor, "pcode_order", None)
         pcode_time = getattr(anchor, "pcode_time", None)
+        pcode_op_ref = getattr(anchor, "pcode_op_ref", None)
 
         summarized = [
             ReturnInfo(
@@ -897,6 +898,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=pcode_identity,
                 pcode_order=pcode_order,
                 pcode_time=pcode_time,
+                pcode_op_ref=pcode_op_ref,
             )
         ]
         summarized.append(
@@ -908,6 +910,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=pcode_identity,
                 pcode_order=pcode_order,
                 pcode_time=pcode_time,
+                pcode_op_ref=pcode_op_ref,
             )
         )
         loop_case = summarized[-1]
@@ -952,6 +955,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=loop_case.pcode_identity,
                 pcode_order=loop_case.pcode_order,
                 pcode_time=loop_case.pcode_time,
+                pcode_op_ref=getattr(loop_case, "pcode_op_ref", None),
             )
         effective_loop_value = summarized[-1].value
         effective_start_expr = start_expr
@@ -5225,6 +5229,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=base_ret.pcode_identity,
                 pcode_order=base_ret.pcode_order,
                 pcode_time=base_ret.pcode_time,
+                pcode_op_ref=getattr(base_ret, "pcode_op_ref", None),
             ),
             ReturnInfo(
                 address=recursive_ret.address,
@@ -5234,6 +5239,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=recursive_ret.pcode_identity,
                 pcode_order=recursive_ret.pcode_order,
                 pcode_time=recursive_ret.pcode_time,
+                pcode_op_ref=getattr(recursive_ret, "pcode_op_ref", None),
             ),
         ]
 
@@ -13891,6 +13897,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=base_case.pcode_identity,
                 pcode_order=base_case.pcode_order,
                 pcode_time=base_case.pcode_time,
+                pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
             )
         )
         summarized.append(
@@ -13902,6 +13909,7 @@ class StructuralRecurrenceSummarizer:
                 pcode_identity=base_case.pcode_identity,
                 pcode_order=base_case.pcode_order,
                 pcode_time=base_case.pcode_time,
+                pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
             )
         )
         self._debug(
@@ -14140,6 +14148,7 @@ class StructuralRecurrenceSummarizer:
                     pcode_identity=base_case.pcode_identity,
                     pcode_order=base_case.pcode_order,
                     pcode_time=base_case.pcode_time,
+                    pcode_op_ref=getattr(base_case, "pcode_op_ref", None),
                 )
             )
         return synthesized

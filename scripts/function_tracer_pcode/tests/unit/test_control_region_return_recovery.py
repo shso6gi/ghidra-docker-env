@@ -23,10 +23,27 @@ class _FakeSeq:
         return self._order
 
 
+class _FakeAddress:
+    def __init__(self, text="0x401000", offset=0x401000):
+        self._text = text
+        self._offset = offset
+
+    def __str__(self):
+        return self._text
+
+    def getOffset(self):
+        return self._offset
+
+
+class _FakeBlock:
+    def getIndex(self):
+        return 7
+
+
 class _FakeReturnOp:
-    def __init__(self, value_varnode=None):
+    def __init__(self, value_varnode=None, *, target="0x401000"):
         self._value_varnode = value_varnode
-        self._seq = _FakeSeq("0x401000", 9, 2)
+        self._seq = _FakeSeq(target, 9, 2)
 
     def getNumInputs(self):
         return 2 if self._value_varnode is not None else 1
@@ -38,6 +55,15 @@ class _FakeReturnOp:
 
     def getSeqnum(self):
         return self._seq
+
+    def getMnemonic(self):
+        return "RETURN"
+
+    def getParent(self):
+        return _FakeBlock()
+
+    def getOutput(self):
+        return None
 
 
 class _FakeTracer:
@@ -153,6 +179,36 @@ def test_return_infos_have_conflicting_overlap_detects_incompatible_cases():
     )
 
     assert analyzer._return_infos_have_conflicting_overlap([left, right]) is True
+
+
+def test_make_return_info_preserves_object_derived_pcode_op_ref():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    varnode = Mock()
+    varnode.getSize.return_value = 4
+    return_op = _FakeReturnOp(varnode, target=_FakeAddress("ram:00401000", 0x401000))
+
+    site_metadata = analyzer._describe_pcode_site(return_op, "0x401000")
+    ret = analyzer._make_return_info(
+        address="0x401000",
+        value=Expression.constant(0, 4),
+        conditions=[],
+        branch_index=0,
+        site_metadata=site_metadata,
+    )
+
+    assert ret.pcode_identity == "ram:00401000:t9"
+    assert ret.pcode_order == 2
+    assert ret.pcode_time == 9
+    assert ret.site_key() == "ram:00401000:t9"
+    assert ret.pcode_op_ref is not None
+    assert ret.pcode_op_ref.stable_key() == (
+        "pcode_op",
+        0x401000,
+        9,
+        2,
+        7,
+        "RETURN",
+    )
 
 
 def test_recover_control_region_returns_early_prefers_switch_recovery():

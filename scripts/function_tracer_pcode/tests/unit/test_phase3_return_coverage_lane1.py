@@ -5,11 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownReasonId,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.model import Expression, ReturnInfo
+from scripts.function_tracer_pcode.model.runtime_refs import PcodeOpRef
 from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 import (
     DEFAULT_REPRESENTATIVES,
     FUNCTION_CALL_BINARY_NAMES,
@@ -21,6 +24,11 @@ from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
 )
+
+
+class _NoopStrategy(CheckStrategy):
+    def check(self, analysis1, analysis2, save_formula=False):
+        raise NotImplementedError
 
 
 REPRESENTATIVES = (
@@ -846,3 +854,36 @@ def test_phase3_return_coverage_manifest_rejects_reversed_payload_direction(tmp_
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_observed_payload_direction_mismatch" in failures
     assert "baseline_observed_payload_direction_mismatch" in failures
+
+
+def test_return_coverage_object_key_requires_object_derived_pcode_ref():
+    strategy = _NoopStrategy(None, None)
+    legacy_ret = ReturnInfo(
+        address="ram:00401000",
+        value=Expression.constant(0, 4),
+        conditions=[],
+        pcode_identity="ram:00401000:t23:o1",
+        pcode_order=1,
+        pcode_time=23,
+    )
+    object_ret = ReturnInfo(
+        address="ram:00401000",
+        value=Expression.constant(0, 4),
+        conditions=[],
+        pcode_identity="ram:00401000:t23:o1",
+        pcode_order=1,
+        pcode_time=23,
+        pcode_op_ref=PcodeOpRef(
+            address_offset=0x401000,
+            seq_time=23,
+            seq_order=1,
+            block_index=4,
+            mnemonic="RETURN",
+        ),
+    )
+
+    legacy_key = strategy._return_case_object_key(0, legacy_ret)
+    object_key = strategy._return_case_object_key(0, object_ret)
+
+    assert legacy_key[3] is None
+    assert object_key[3] == ("pcode_op", 0x401000, 23, 1, 4, "RETURN")
