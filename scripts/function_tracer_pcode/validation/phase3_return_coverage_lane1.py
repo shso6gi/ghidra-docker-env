@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .result_summary import STATUS_EQ, STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload
+from .result_summary import (
+    STATUS_EQ,
+    STATUS_TIMEOUT,
+    STATUS_UNKNOWN,
+    aggregate_validation_logs,
+    classify_result_payload,
+)
 from .unknown_reason_summary import (
     _extract_final_unknown_reasons,
     _global_reason_tuple_from_action,
@@ -315,6 +321,8 @@ def build_phase3_return_coverage_lane1_manifest(
     output_dir: Path,
     current_log_roots: Mapping[str, Path],
     baseline_log_roots: Mapping[str, Path],
+    phase1_dir: Optional[Path] = None,
+    phase1_current_log_roots: Optional[Mapping[str, Path]] = None,
     representatives: Sequence[Mapping[str, Any]] = DEFAULT_REPRESENTATIVES,
     retired_transitions: Sequence[Mapping[str, Any]] = DEFAULT_RETIRED_TRANSITIONS,
 ) -> Path:
@@ -338,6 +346,16 @@ def build_phase3_return_coverage_lane1_manifest(
         transition_entries=transition_entries,
     )
     readiness = _readiness(entries, transition_entries, retired_reason_inventory)
+    implementation_manifest = _implementation_manifest(entries, transition_entries)
+    pre_fix_gate = _pre_fix_regression_gate(
+        entries=entries,
+        transition_entries=transition_entries,
+        retired_reason_inventory=retired_reason_inventory,
+        phase1_dir=Path(phase1_dir) if phase1_dir is not None else raw_dir.parent / "phase1",
+        current_log_roots=current_log_roots,
+        phase1_current_log_roots=phase1_current_log_roots,
+        baseline_log_roots=baseline_log_roots,
+    )
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "manifest_kind": "phase3_return_coverage_lane1_representatives",
@@ -387,8 +405,10 @@ def build_phase3_return_coverage_lane1_manifest(
                 "avoid semantic decision changes before lane implementation",
             ],
         },
+        "implementation_manifest": implementation_manifest,
+        "pre_fix_regression_gate": pre_fix_gate,
         "readiness": readiness,
-        "phase3_lane1_ready": readiness["ready"],
+        "phase3_lane1_ready": readiness["ready"] and pre_fix_gate["ready"],
         "entries": entries,
         "retired_reason_inventory": retired_reason_inventory,
         "retired_transitions": transition_entries,
@@ -402,9 +422,14 @@ def validate_phase3_return_coverage_lane1_manifest(manifest: Mapping[str, Any]) 
     if manifest.get("phase3_lane1_ready") is True:
         return
     readiness = manifest.get("readiness")
+    pre_fix_gate = manifest.get("pre_fix_regression_gate")
     if not isinstance(readiness, Mapping):
         raise ValueError("Phase 3 lane 1 readiness is false and readiness details are missing")
-    failures = readiness.get("failure_kinds") or ()
+    failures = list(readiness.get("failure_kinds") or ())
+    if isinstance(pre_fix_gate, Mapping):
+        summary = pre_fix_gate.get("summary")
+        if isinstance(summary, Mapping):
+            failures.extend(str(kind) for kind in (summary.get("failed_kinds") or ()))
     if not failures:
         raise ValueError("Phase 3 lane 1 readiness is false without failure details")
     raise ValueError(f"Phase 3 lane 1 representative manifest is not ready: {', '.join(failures)}")
@@ -430,6 +455,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="CATEGORY=PATH",
         help="baseline log root for a category; may be repeated",
     )
+    parser.add_argument(
+        "--phase1-dir",
+        default=None,
+        help="Phase 1 manifest directory for positive/negative representative gates",
+    )
+    parser.add_argument(
+        "--phase1-current-log-root",
+        action="append",
+        default=None,
+        metavar="CATEGORY=PATH",
+        help="current log root for Phase 1 positive/negative gates; defaults to --current-log-root",
+    )
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
     path = build_phase3_return_coverage_lane1_manifest(
@@ -437,11 +474,378 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_dir=Path(args.output_dir),
         current_log_roots=_parse_roots(args.current_log_root),
         baseline_log_roots=_parse_roots(args.baseline_log_root),
+        phase1_dir=Path(args.phase1_dir) if args.phase1_dir else None,
+        phase1_current_log_roots=(
+            _parse_roots(args.phase1_current_log_root)
+            if args.phase1_current_log_root is not None
+            else None
+        ),
     )
     if args.require_ready:
         validate_phase3_return_coverage_lane1_manifest(_read_json(path))
     print(path)
     return 0
+
+
+def _implementation_manifest(
+    entries: Sequence[Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "lane_id": "phase3_return_coverage_lane1",
+        "lane_reason_ids": ["return_coverage_gap", "return_coverage_inconclusive"],
+        "active_target_reason_id": "return_coverage_gap",
+        "retired_reason_id_policy": {
+            "return_coverage_inconclusive": "retired_reclassification_reference_only",
+        },
+        "proof_completion_gate": {
+            "eq_allowed_without_completed_proof": False,
+            "pending_proof_keeps_final_result": STATUS_UNKNOWN,
+            "completion_required_for_recovery": [
+                "return_partition_extraction",
+                "return_guard_coverage",
+            ],
+            "required_recovery_action": "return_coverage_proof_required",
+        },
+        "expected_movement_entries": [
+            {
+                "id": entry.get("id"),
+                "function": entry.get("function"),
+                "binary_pair": entry.get("binary_pair"),
+                "record_case_stage_aggregation_units": _movement_units(entry.get("expected_movements") or ()),
+                "expected_movements": entry.get("expected_movements") or (),
+            }
+            for entry in entries
+        ],
+        "retired_observation_entries": [
+            {
+                "id": entry.get("id"),
+                "function": entry.get("function"),
+                "binary_pair": entry.get("binary_pair"),
+                "retired_reason_id": entry.get("retired_reason_id"),
+                "reclassified_to_reason_id": entry.get("reclassified_to_reason_id"),
+                "record_case_stage_aggregation_units": _movement_units(
+                    entry.get("current_expected_movements") or ()
+                ),
+                "current_expected_movements": entry.get("current_expected_movements") or (),
+            }
+            for entry in transition_entries
+        ],
+    }
+
+
+def _movement_units(movements: Sequence[Any]) -> Sequence[Dict[str, Any]]:
+    units = []
+    for movement in movements:
+        if not isinstance(movement, Mapping):
+            continue
+        units.append(
+            {
+                "movement_id": movement.get("id") or MISSING_SENTINEL,
+                "count_kind": movement.get("count_kind") or MISSING_SENTINEL,
+                "record_or_case": movement.get("pair_or_case") or MISSING_SENTINEL,
+                "stage": movement.get("stage") or MISSING_SENTINEL,
+                "aggregation_unit": movement.get("aggregation_unit") or MISSING_SENTINEL,
+            }
+        )
+    return units
+
+
+def _pre_fix_regression_gate(
+    *,
+    entries: Sequence[Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+    retired_reason_inventory: Mapping[str, Any],
+    phase1_dir: Path,
+    current_log_roots: Mapping[str, Path],
+    phase1_current_log_roots: Optional[Mapping[str, Path]],
+    baseline_log_roots: Mapping[str, Path],
+) -> Dict[str, Any]:
+    phase1_roots = phase1_current_log_roots or current_log_roots
+    checks: list[Dict[str, Any]] = []
+    checks.extend(_lane_manifest_checks(entries, transition_entries, retired_reason_inventory))
+    checks.extend(
+        _phase1_positive_negative_checks(
+            phase1_dir=phase1_dir,
+            current_log_roots=phase1_roots,
+            baseline_log_roots=baseline_log_roots,
+        )
+    )
+    failed = [check for check in checks if check.get("status") == "failed"]
+    return {
+        "gate_kind": "phase3_return_coverage_lane1_pre_fix_regression",
+        "baseline_mode": "current_logs_exact_match_to_implementation_manifest",
+        "phase1_current_log_roots": {
+            category: str(path)
+            for category, path in sorted(phase1_roots.items())
+        },
+        "ready": not failed,
+        "summary": {
+            "total": len(checks),
+            "passed": sum(1 for check in checks if check.get("status") == "ok"),
+            "not_evaluated": sum(1 for check in checks if check.get("status") == "not_evaluated"),
+            "failed": len(failed),
+            "failed_kinds": sorted({str(check.get("kind")) for check in failed}),
+            "locked_gates": [
+                "current_logs_exact_match",
+                "positive_representative_non_regression",
+                "negative_representative_non_regression",
+                "retired_inconclusive_stays_retired",
+                "return_coverage_gap_object_evidence_proof_id",
+                "proof_completion_required_before_eq",
+            ],
+        },
+        "checks": checks,
+    }
+
+
+def _lane_manifest_checks(
+    entries: Sequence[Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+    retired_reason_inventory: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    checks: list[Dict[str, Any]] = []
+    for entry in entries:
+        checks.append(
+            _ok(
+                "current_logs_exact_match",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+            )
+            if entry.get("selection_status") == "ready"
+            else _failed(
+                "current_logs_exact_match",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+                failures=entry.get("selection_failures") or (),
+            )
+        )
+        checks.extend(_object_proof_id_checks(entry))
+        checks.append(
+            _ok(
+                "proof_completion_required_before_eq",
+                entry_id=entry.get("id"),
+                current_result=(entry.get("current_observation") or {}).get("final_result"),
+            )
+            if (entry.get("current_observation") or {}).get("final_result") == STATUS_UNKNOWN
+            else _failed(
+                "proof_completion_required_before_eq",
+                entry_id=entry.get("id"),
+                current_result=(entry.get("current_observation") or {}).get("final_result"),
+            )
+        )
+    for entry in transition_entries:
+        invariant = entry.get("final_result_invariant") or {}
+        checks.append(
+            _ok(
+                "retired_inconclusive_stays_retired",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+            )
+            if entry.get("selection_status") == "retired_by_reclassification"
+            and invariant.get("final_result_unchanged_unknown") is True
+            and invariant.get("false_eq") is False
+            else _failed(
+                "retired_inconclusive_stays_retired",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+                failures=entry.get("selection_failures") or (),
+                final_result_invariant=invariant,
+            )
+        )
+    inventory = retired_reason_inventory.get("return_coverage_inconclusive")
+    checks.append(
+        _ok("retired_inconclusive_inventory")
+        if isinstance(inventory, Mapping) and inventory.get("status") == "retired_by_reclassification"
+        else _failed("retired_inconclusive_inventory", inventory=inventory)
+    )
+    return checks
+
+
+def _object_proof_id_checks(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    checks = []
+    actions = (entry.get("current_observation") or {}).get("proof_actions") or ()
+    for movement in entry.get("expected_movements") or ():
+        if not isinstance(movement, Mapping) or movement.get("count_kind") != UnknownCountKind.PROOF_ACTION.value:
+            continue
+        candidates = _records_matching_evidence_refs(
+            _records_matching_scope(
+                _records_matching_tuple(actions, _movement_tuple(movement) or ()),
+                movement,
+            ),
+            movement,
+        )
+        movement_id = movement.get("id") or MISSING_SENTINEL
+        if len(candidates) != 1:
+            checks.append(
+                _failed(
+                    "return_coverage_gap_object_evidence_proof_id",
+                    entry_id=entry.get("id"),
+                    movement_id=movement_id,
+                    candidate_count=len(candidates),
+                )
+            )
+            continue
+        candidate = candidates[0]
+        checks.append(
+            _ok(
+                "return_coverage_gap_object_evidence_proof_id",
+                entry_id=entry.get("id"),
+                movement_id=movement_id,
+            )
+            if _record_has_object_target(candidate, movement)
+            and _proof_action_has_proof_id(candidate, movement)
+            else _failed(
+                "return_coverage_gap_object_evidence_proof_id",
+                entry_id=entry.get("id"),
+                movement_id=movement_id,
+                object_target_key=candidate.get("object_target_key"),
+                proof_obligation_id=candidate.get("proof_obligation_id"),
+            )
+        )
+    return checks
+
+
+def _phase1_positive_negative_checks(
+    *,
+    phase1_dir: Path,
+    current_log_roots: Mapping[str, Path],
+    baseline_log_roots: Mapping[str, Path],
+) -> Sequence[Dict[str, Any]]:
+    if not phase1_dir.is_dir():
+        return [
+            _failed(
+                "phase1_positive_negative_manifest_available",
+                phase1_dir=str(phase1_dir),
+                error="missing phase1 manifest directory",
+            )
+        ]
+    positive = _read_json(phase1_dir / "positive_manifest.json")
+    negative = _read_json(phase1_dir / "negative_manifest.json")
+    records = _validation_records_by_key(current_log_roots)
+    checks: list[Dict[str, Any]] = []
+    for entry in positive.get("entries") or ():
+        record = records.get(_entry_key(entry))
+        if record is None:
+            checks.append(_failed("positive_representative_non_regression", entry_id=entry.get("id"), error="missing log"))
+        elif record["status"] == STATUS_EQ:
+            checks.append(_ok("positive_representative_non_regression", entry_id=entry.get("id")))
+        else:
+            checks.append(
+                _failed(
+                    "positive_representative_non_regression",
+                    entry_id=entry.get("id"),
+                    expected_result=STATUS_EQ,
+                    current_result=record["status"],
+                )
+            )
+    for entry in negative.get("entries") or ():
+        checks.append(_negative_representative_check(entry, records))
+    return checks
+
+
+def _negative_representative_check(
+    entry: Mapping[str, Any],
+    records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Dict[str, Any]:
+    entry_id = entry.get("id")
+    if entry.get("category") == "synthetic_negative":
+        if entry.get("current_result") == "NOT_EQ" and entry.get("must_not_be_equivalent") is True:
+            return _ok("negative_representative_non_regression", entry_id=entry_id, synthetic=True)
+        return _failed("negative_representative_non_regression", entry_id=entry_id, synthetic=True)
+    record = records.get(_entry_key(entry))
+    if record is None:
+        return _failed("negative_representative_non_regression", entry_id=entry_id, error="missing log")
+    if record["status"] == STATUS_EQ:
+        return _failed(
+            "negative_representative_non_regression",
+            entry_id=entry_id,
+            current_result=record["status"],
+            error="false_eq",
+        )
+    required = set(str(reason) for reason in (entry.get("required_reason_ids") or ()))
+    observed = set(record.get("reason_ids") or ())
+    if required.issubset(observed):
+        return _ok("negative_representative_non_regression", entry_id=entry_id)
+    if (
+        entry_id == "negative-inconclusive-return-coverage-near-miss"
+        and required == {"return_coverage_inconclusive"}
+        and "return_coverage_gap" in observed
+        and record["status"] == STATUS_UNKNOWN
+    ):
+        return _ok(
+            "negative_representative_non_regression",
+            entry_id=entry_id,
+            reclassification="return_coverage_inconclusive_retired_to_return_coverage_gap",
+        )
+    return _failed(
+        "negative_representative_non_regression",
+        entry_id=entry_id,
+        current_result=record["status"],
+        missing_required_reason_ids=sorted(required - observed),
+    )
+
+
+def _validation_records_by_key(
+    current_log_roots: Mapping[str, Path],
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    category_roots = {str(category): Path(path) for category, path in current_log_roots.items()}
+    records = {}
+    for category, root in sorted(category_roots.items()):
+        for record in aggregate_validation_logs(_log_paths(root)).records:
+            records[(category, record.function_name, _canonical_binary_pair(_record_pair_label(record)))] = {
+                "status": record.status,
+                "reason_ids": _validation_record_reason_ids(record),
+            }
+    return records
+
+
+def _entry_key(entry: Mapping[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(entry.get("category") or MISSING_SENTINEL),
+        str(entry.get("function") or MISSING_SENTINEL),
+        _canonical_binary_pair(str(entry.get("binary_pair") or MISSING_SENTINEL)),
+    )
+
+
+def _validation_record_reason_ids(record: Any) -> Sequence[str]:
+    payload = record.payloads[-1] if record.payloads else {}
+    return sorted(
+        {
+            reason.reason_id
+            for reason in _extract_final_unknown_reasons(payload)
+        }
+    )
+
+
+def _record_pair_label(record: Any) -> str:
+    pair_label = str(getattr(record, "pair_label", ""))
+    if "↔" in pair_label:
+        left, right = pair_label.split("↔", 1)
+        return f"{left.strip()}_{right.strip()}"
+    return pair_label
+
+
+def _log_paths(root: Path) -> Sequence[Path]:
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(root.glob("*/*.log"), key=lambda path: str(path)))
+
+
+def _ok(kind: str, **details: Any) -> Dict[str, Any]:
+    result = {"kind": kind, "status": "ok"}
+    result.update(details)
+    return result
+
+
+def _failed(kind: str, **details: Any) -> Dict[str, Any]:
+    result = {"kind": kind, "status": "failed"}
+    result.update(details)
+    return result
 
 
 def _materialize_entry(

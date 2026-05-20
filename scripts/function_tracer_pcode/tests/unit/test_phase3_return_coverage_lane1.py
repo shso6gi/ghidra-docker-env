@@ -186,6 +186,32 @@ def _write_log(root: Path, function: str, left: str, right: str, reasons):
     )
 
 
+def _write_eq_log(root: Path, function: str, left: str, right: str):
+    path = root / function / f"{function}_{left}_{right}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _payload(
+        function,
+        _payload_binary_name(left),
+        _payload_binary_name(right),
+        [],
+    )
+    payload["is_equivalent"] = True
+    payload["debug_trace"]["final_result"] = True
+    payload["debug_trace"]["attempts"][0]["result"] = True
+    payload["unknown_reasons"] = []
+    payload["debug_trace"]["unknown_reasons"] = []
+    path.write_text(
+        "\n".join(
+            [
+                "Result: EQUIVALENT",
+                RESULT_JSON_BEGIN,
+                json.dumps(payload),
+                RESULT_JSON_END,
+            ]
+        )
+    )
+
+
 def _write_log_with_payload_names(
     root: Path,
     function: str,
@@ -245,20 +271,59 @@ def _write_retired_transition_logs(baseline_root: Path, current_root: Path):
         )
 
 
+def _write_minimal_phase1_manifests(phase1_dir: Path):
+    phase1_dir.mkdir(parents=True)
+    (phase1_dir / "positive_manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "positive-fixture-eq",
+                        "category": "function_call",
+                        "function": "fc_positive_fixture",
+                        "binary_pair": "B11_B12",
+                    }
+                ]
+            }
+        )
+    )
+    (phase1_dir / "negative_manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "negative-inconclusive-return-coverage-near-miss",
+                        "category": "function_call",
+                        "function": "fc_is_odd",
+                        "binary_pair": "B11_B16",
+                        "expected_result": "UNKNOWN",
+                        "must_not_be_equivalent": True,
+                        "required_reason_ids": ["return_coverage_inconclusive"],
+                    }
+                ]
+            }
+        )
+    )
+
+
 def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(tmp_path):
     raw_dir = tmp_path / "baseline" / "raw"
     current_root = tmp_path / "current" / "function_call"
     baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
     _write_artifact_manifest(raw_dir)
     _write_representative_logs(current_root)
     _write_representative_logs(baseline_root)
     _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
 
     path = build_phase3_return_coverage_lane1_manifest(
         baseline_raw_dir=raw_dir,
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
     )
 
     manifest = json.loads(path.read_text())
@@ -358,16 +423,188 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
         "final_result_unchanged_unknown": True,
         "timeout": False,
     }
+    implementation = manifest["implementation_manifest"]
+    assert implementation["active_target_reason_id"] == "return_coverage_gap"
+    assert implementation["proof_completion_gate"] == {
+        "completion_required_for_recovery": [
+            "return_partition_extraction",
+            "return_guard_coverage",
+        ],
+        "eq_allowed_without_completed_proof": False,
+        "pending_proof_keeps_final_result": "UNKNOWN",
+        "required_recovery_action": "return_coverage_proof_required",
+    }
+    pre_fix_gate = manifest["pre_fix_regression_gate"]
+    assert pre_fix_gate["ready"] is True
+    assert pre_fix_gate["summary"]["failed_kinds"] == []
+    assert "current_logs_exact_match" in pre_fix_gate["summary"]["locked_gates"]
+    assert "return_coverage_gap_object_evidence_proof_id" in {
+        check["kind"] for check in pre_fix_gate["checks"]
+    }
     validate_phase3_return_coverage_lane1_manifest(manifest)
 
 
-def test_phase3_return_coverage_manifest_allows_legacy_baseline_missing_action_detail(tmp_path):
+def test_phase3_return_coverage_pre_fix_gate_checks_phase1_positive_negative(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+
+    manifest = json.loads(path.read_text())
+    checks = manifest["pre_fix_regression_gate"]["checks"]
+    assert manifest["phase3_lane1_ready"] is True
+    assert {
+        (check["kind"], check.get("entry_id"), check["status"])
+        for check in checks
+        if check["kind"] in {
+            "positive_representative_non_regression",
+            "negative_representative_non_regression",
+        }
+    } == {
+        ("positive_representative_non_regression", "positive-fixture-eq", "ok"),
+        (
+            "negative_representative_non_regression",
+            "negative-inconclusive-return-coverage-near-miss",
+            "ok",
+        ),
+    }
+    negative_check = next(
+        check
+        for check in checks
+        if check.get("entry_id") == "negative-inconclusive-return-coverage-near-miss"
+    )
+    assert (
+        negative_check["reclassification"]
+        == "return_coverage_inconclusive_retired_to_return_coverage_gap"
+    )
+
+
+def test_phase3_return_coverage_pre_fix_gate_rejects_missing_phase1_dir(tmp_path):
     raw_dir = tmp_path / "baseline" / "raw"
     current_root = tmp_path / "current" / "function_call"
     baseline_root = tmp_path / "baseline_logs" / "function_call"
     _write_artifact_manifest(raw_dir)
     _write_representative_logs(current_root)
     _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=tmp_path / "definitely-missing-phase1",
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    assert manifest["pre_fix_regression_gate"]["summary"]["failed_kinds"] == [
+        "phase1_positive_negative_manifest_available"
+    ]
+    with pytest.raises(ValueError, match="phase1_positive_negative_manifest_available"):
+        validate_phase3_return_coverage_lane1_manifest(manifest)
+
+
+def test_phase3_return_coverage_pre_fix_gate_does_not_use_baseline_for_missing_current(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_log(
+        baseline_root,
+        "fc_missing_current_negative",
+        "B11",
+        "B12",
+        [_reason_from_ref("function1:return_coverage_gap")],
+    )
+    phase1_dir.mkdir(parents=True)
+    (phase1_dir / "positive_manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "positive-fixture-eq",
+                        "category": "function_call",
+                        "function": "fc_positive_fixture",
+                        "binary_pair": "B11_B12",
+                    }
+                ]
+            }
+        )
+    )
+    (phase1_dir / "negative_manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "negative-missing-current",
+                        "category": "function_call",
+                        "function": "fc_missing_current_negative",
+                        "binary_pair": "B11_B12",
+                        "expected_result": "UNKNOWN",
+                        "must_not_be_equivalent": True,
+                        "required_reason_ids": ["return_coverage_gap"],
+                    }
+                ]
+            }
+        )
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failed = [
+        check
+        for check in manifest["pre_fix_regression_gate"]["checks"]
+        if check.get("entry_id") == "negative-missing-current"
+    ]
+    assert failed == [
+        {
+            "kind": "negative_representative_non_regression",
+            "status": "failed",
+            "entry_id": "negative-missing-current",
+            "error": "missing log",
+        }
+    ]
+
+
+def test_phase3_return_coverage_manifest_allows_legacy_baseline_missing_action_detail(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    phase1_dir.mkdir(parents=True)
+    (phase1_dir / "positive_manifest.json").write_text(json.dumps({"entries": []}))
+    (phase1_dir / "negative_manifest.json").write_text(json.dumps({"entries": []}))
     legacy_baseline_reason = [
         make_unknown_reason(
             UnknownReasonId.RETURN_COVERAGE_GAP,
@@ -383,6 +620,7 @@ def test_phase3_return_coverage_manifest_allows_legacy_baseline_missing_action_d
         output_dir=tmp_path / "phase3",
         current_log_roots={"function_call": current_root},
         baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
         retired_transitions=(),
     )
 

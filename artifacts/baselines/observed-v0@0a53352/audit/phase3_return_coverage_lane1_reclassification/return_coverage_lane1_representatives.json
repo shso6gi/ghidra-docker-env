@@ -9,7 +9,7 @@
     "path": "artifacts/baselines/observed-v0@0a53352/raw/artifact_manifest.json",
     "sha256": "963aed25d96b8f608073a077654c530bcac10562cbcc55dbeab8dd0a4ef6b557"
   },
-  "created_at": "2026-05-20T11:11:10.239052+00:00",
+  "created_at": "2026-05-20T14:48:12.302742+00:00",
   "current_log_roots": {
     "function_call": "logs/equivalence_all/function_call_test_phase3_lane1_current_20jobs"
   },
@@ -7554,9 +7554,1107 @@
       "selection_status": "ready"
     }
   ],
+  "implementation_manifest": {
+    "active_target_reason_id": "return_coverage_gap",
+    "expected_movement_entries": [
+      {
+        "binary_pair": "B11_B15",
+        "expected_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-reason-record",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "function": "fc_recursive_sum",
+        "id": "representative-return-coverage-gap-recursive-simple",
+        "record_case_stage_aggregation_units": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          }
+        ]
+      },
+      {
+        "binary_pair": "B11_B12",
+        "expected_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function1",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function2",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "function": "fc_is_even",
+        "id": "representative-return-coverage-gap-even-both-sides",
+        "record_case_stage_aggregation_units": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          }
+        ]
+      }
+    ],
+    "lane_id": "phase3_return_coverage_lane1",
+    "lane_reason_ids": [
+      "return_coverage_gap",
+      "return_coverage_inconclusive"
+    ],
+    "proof_completion_gate": {
+      "completion_required_for_recovery": [
+        "return_partition_extraction",
+        "return_guard_coverage"
+      ],
+      "eq_allowed_without_completed_proof": false,
+      "pending_proof_keeps_final_result": "UNKNOWN",
+      "required_recovery_action": "return_coverage_proof_required"
+    },
+    "retired_observation_entries": [
+      {
+        "binary_pair": "B8_B15",
+        "current_expected_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function1",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function2",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "function": "fc_is_odd",
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B8-B15",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "record_case_stage_aggregation_units": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          }
+        ],
+        "retired_reason_id": "return_coverage_inconclusive"
+      },
+      {
+        "binary_pair": "B11_B16",
+        "current_expected_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function1",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function2",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "function": "fc_is_odd",
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B11-B16",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "record_case_stage_aggregation_units": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          }
+        ],
+        "retired_reason_id": "return_coverage_inconclusive"
+      },
+      {
+        "binary_pair": "B12_B16",
+        "current_expected_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function1",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-reason-record-function2",
+            "pair_or_case": "<missing>",
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-partition-extraction-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function1",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function2:return_coverage_gap"
+            ],
+            "id": "gap-return-guard-coverage-function2",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "function": "fc_is_odd",
+        "id": "retired-inconclusive-reclassified-to-gap-odd-B12-B16",
+        "reclassified_to_reason_id": "return_coverage_gap",
+        "record_case_stage_aggregation_units": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "movement_id": "gap-reason-record-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-partition-extraction-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function1",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "movement_id": "gap-return-guard-coverage-function2",
+            "record_or_case": "<missing>",
+            "stage": "S_PAIRWISE"
+          }
+        ],
+        "retired_reason_id": "return_coverage_inconclusive"
+      }
+    ],
+    "retired_reason_id_policy": {
+      "return_coverage_inconclusive": "retired_reclassification_reference_only"
+    }
+  },
   "manifest_kind": "phase3_return_coverage_lane1_representatives",
   "manifest_version": 1,
   "phase3_lane1_ready": true,
+  "pre_fix_regression_gate": {
+    "baseline_mode": "current_logs_exact_match_to_implementation_manifest",
+    "checks": [
+      {
+        "binary_pair": "B11_B15",
+        "entry_id": "representative-return-coverage-gap-recursive-simple",
+        "function": "fc_recursive_sum",
+        "kind": "current_logs_exact_match",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-recursive-simple",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-partition-extraction",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-recursive-simple",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-guard-coverage",
+        "status": "ok"
+      },
+      {
+        "current_result": "UNKNOWN",
+        "entry_id": "representative-return-coverage-gap-recursive-simple",
+        "kind": "proof_completion_required_before_eq",
+        "status": "ok"
+      },
+      {
+        "binary_pair": "B11_B12",
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "function": "fc_is_even",
+        "kind": "current_logs_exact_match",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-partition-extraction-function1",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-partition-extraction-function2",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-guard-coverage-function1",
+        "status": "ok"
+      },
+      {
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "kind": "return_coverage_gap_object_evidence_proof_id",
+        "movement_id": "gap-return-guard-coverage-function2",
+        "status": "ok"
+      },
+      {
+        "current_result": "UNKNOWN",
+        "entry_id": "representative-return-coverage-gap-even-both-sides",
+        "kind": "proof_completion_required_before_eq",
+        "status": "ok"
+      },
+      {
+        "binary_pair": "B8_B15",
+        "entry_id": "retired-inconclusive-reclassified-to-gap-odd-B8-B15",
+        "function": "fc_is_odd",
+        "kind": "retired_inconclusive_stays_retired",
+        "status": "ok"
+      },
+      {
+        "binary_pair": "B11_B16",
+        "entry_id": "retired-inconclusive-reclassified-to-gap-odd-B11-B16",
+        "function": "fc_is_odd",
+        "kind": "retired_inconclusive_stays_retired",
+        "status": "ok"
+      },
+      {
+        "binary_pair": "B12_B16",
+        "entry_id": "retired-inconclusive-reclassified-to-gap-odd-B12-B16",
+        "function": "fc_is_odd",
+        "kind": "retired_inconclusive_stays_retired",
+        "status": "ok"
+      },
+      {
+        "kind": "retired_inconclusive_inventory",
+        "status": "ok"
+      },
+      {
+        "entry_id": "positive-call-chain-existing-eq",
+        "kind": "positive_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "positive-recorded-call-effect-existing-eq",
+        "kind": "positive_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "positive-direct-call-control",
+        "kind": "positive_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "positive-no-call-control",
+        "kind": "positive_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "positive-indirect-deferred-call-existing-eq",
+        "kind": "positive_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-call-memory-side-effect-guard",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-width-high-bit-near-miss",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-return-partition-miss",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-inconclusive-return-coverage-near-miss",
+        "kind": "negative_representative_non_regression",
+        "reclassification": "return_coverage_inconclusive_retired_to_return_coverage_gap",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-method-b-guard-partition-miss",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-readonly-count-mismatch",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "negative-sat-unsafety-guard",
+        "kind": "negative_representative_non_regression",
+        "status": "ok"
+      },
+      {
+        "entry_id": "synthetic-negative-call-target-mismatch",
+        "kind": "negative_representative_non_regression",
+        "status": "ok",
+        "synthetic": true
+      },
+      {
+        "entry_id": "synthetic-negative-argument-storage-mismatch",
+        "kind": "negative_representative_non_regression",
+        "status": "ok",
+        "synthetic": true
+      }
+    ],
+    "gate_kind": "phase3_return_coverage_lane1_pre_fix_regression",
+    "phase1_current_log_roots": {
+      "function_call": "logs/equivalence_all/function_call_test_phase3_lane1_current_20jobs",
+      "loop": "artifacts/baselines/observed-v0@0a53352/raw/logs/loop"
+    },
+    "ready": true,
+    "summary": {
+      "failed": 0,
+      "failed_kinds": [],
+      "locked_gates": [
+        "current_logs_exact_match",
+        "positive_representative_non_regression",
+        "negative_representative_non_regression",
+        "retired_inconclusive_stays_retired",
+        "return_coverage_gap_object_evidence_proof_id",
+        "proof_completion_required_before_eq"
+      ],
+      "not_evaluated": 0,
+      "passed": 28,
+      "total": 28
+    }
+  },
   "readiness": {
     "covered_target_reason_ids": [
       "return_coverage_gap"
