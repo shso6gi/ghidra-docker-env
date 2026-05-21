@@ -80,6 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="等価性判定モード: 2つのバイナリを指定",
     )
     parser.add_argument(
+        "--binary-ids",
+        nargs=2,
+        metavar=("BINARY1_ID", "BINARY2_ID"),
+        default=None,
+        help="等価性判定の canonical binary ID（例: B10 B11）",
+    )
+    parser.add_argument(
         "--equiv-timeout",
         type=int,
         default=10,

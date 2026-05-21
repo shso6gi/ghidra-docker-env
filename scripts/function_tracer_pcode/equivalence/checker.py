@@ -265,7 +265,9 @@ class EquivalenceChecker:
         function_name2: str,
         decompile_timeout: int = 60,
         save_formula: bool = False,
-        retry_with_type_fix: bool = False
+        retry_with_type_fix: bool = False,
+        binary1_id: Optional[str] = None,
+        binary2_id: Optional[str] = None,
     ) -> EquivalenceResult:
         """2つのバイナリから関数を解析して等価性を判定"""
         return run_check_from_binaries(
@@ -277,6 +279,8 @@ class EquivalenceChecker:
             decompile_timeout=decompile_timeout,
             save_formula=save_formula,
             retry_with_type_fix=retry_with_type_fix,
+            binary1_id=binary1_id,
+            binary2_id=binary2_id,
         )
     
     # ★ 新規: 遷移理由を判定

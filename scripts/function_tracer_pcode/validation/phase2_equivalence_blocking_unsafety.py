@@ -455,14 +455,64 @@ def _analysis_key_is_specific(value: Any) -> bool:
     if not isinstance(value, tuple) or not value:
         return False
     if value[0] == "function_ref":
-        return isinstance(value[1] if len(value) > 1 else None, tuple)
+        return _function_ref_key_is_specific(value[1] if len(value) > 1 else None)
     if value[0] == "entry_point":
-        return len(value) > 1 and value[1] is not None
+        return False
     return False
 
 
+def _function_ref_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 3:
+        return False
+    kind, binary_id, address_offset = value[:3]
+    if kind not in {"function", "code_address"}:
+        return False
+    return _binary_id_is_specific(binary_id) and _nonnegative_int_like(address_offset)
+
+
 def _pcode_ref_is_specific(value: Any) -> bool:
-    return isinstance(value, tuple) and len(value) >= 6 and value[0] == "pcode_op"
+    if not isinstance(value, tuple) or len(value) != 8 or value[0] != "pcode_op":
+        return False
+    (
+        _kind,
+        binary_id,
+        function_entry,
+        seq_target,
+        seq_time,
+        seq_order,
+        opcode,
+        local_op_ordinal,
+    ) = value
+    return all(
+        (
+            _binary_id_is_specific(binary_id),
+            _pcode_address_ref_is_specific(function_entry, "function_entry"),
+            _pcode_address_ref_is_specific(seq_target, "seq_target"),
+            _nonnegative_int_like(seq_time),
+            _nonnegative_int_like(seq_order),
+            opcode is not None,
+            _nonnegative_int_like(local_op_ordinal),
+        )
+    )
+
+
+def _binary_id_is_specific(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and not value.strip().isdecimal()
+
+
+def _pcode_address_ref_is_specific(value: Any, expected_kind: str) -> bool:
+    if not isinstance(value, tuple) or len(value) != 3 or value[0] != expected_kind:
+        return False
+    return isinstance(value[1], str) and bool(value[1]) and _nonnegative_int_like(value[2])
+
+
+def _nonnegative_int_like(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        return int(value) >= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _typed_target_expression_is_specific(value: Any) -> bool:

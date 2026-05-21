@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety import (
+    _object_target_key_is_specific,
     build_phase2_equivalence_blocking_unsafety_movement,
     validate_phase2_equivalence_blocking_unsafety_movement,
 )
@@ -138,8 +139,17 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
     target = object_target_key or (
         "unsupported_call_effect",
         "function1",
-        ("function_ref", ("function", 10, 0x401000)),
-        ("pcode_op", "ram", 0x401020, "ram", 0x401020, 7, "CALLIND", 0),
+        ("function_ref", ("function", "B10", 0x401000)),
+        (
+            "pcode_op",
+            "B10",
+            ("function_entry", "ram", 0x401000),
+            ("seq_target", "ram", 0x401020),
+            31,
+            7,
+            8,
+            0,
+        ),
         None,
         ("typed_target_expression", ("storage", ("register", "a0", 8))),
         7,
@@ -157,6 +167,68 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
         recovery_action="call_effect_summary_proof_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
     )
+
+
+def test_phase2_call_effect_specificity_rejects_legacy_pcode_ref():
+    legacy_target = (
+        "unsupported_call_effect",
+        "function1",
+        ("function_ref", ("function", "B10", 0x401000)),
+        ("pcode_op", 0x401020, 31, 7, 0, "CALLIND"),
+        None,
+        ("typed_target_expression", ("storage", ("register", "a0", 8))),
+        7,
+        "target_identity_unavailable",
+    )
+    full_target = (
+        "unsupported_call_effect",
+        "function1",
+        ("function_ref", ("function", "B10", 0x401000)),
+        (
+            "pcode_op",
+            "B10",
+            ("function_entry", "ram", 0x401000),
+            ("seq_target", "ram", 0x401020),
+            31,
+            7,
+            8,
+            0,
+        ),
+        None,
+        ("typed_target_expression", ("storage", ("register", "a0", 8))),
+        7,
+        "target_identity_unavailable",
+    )
+
+    assert _object_target_key_is_specific(legacy_target) is False
+    assert _object_target_key_is_specific(full_target) is True
+
+
+def test_phase2_call_effect_specificity_requires_canonical_function_binary_id():
+    full_target = _pending_reason().object_target_key
+    missing_binary_target = (
+        full_target[0],
+        full_target[1],
+        ("function_ref", ("function", None, 0x401000)),
+        *full_target[3:],
+    )
+    program_uid_target = (
+        full_target[0],
+        full_target[1],
+        ("function_ref", ("function", 10, 0x401000)),
+        *full_target[3:],
+    )
+    code_address_program_uid_target = (
+        full_target[0],
+        full_target[1],
+        ("function_ref", ("code_address", 10, 0x401000)),
+        *full_target[3:],
+    )
+
+    assert _object_target_key_is_specific(missing_binary_target) is False
+    assert _object_target_key_is_specific(program_uid_target) is False
+    assert _object_target_key_is_specific(code_address_program_uid_target) is False
+    assert _object_target_key_is_specific(full_target) is True
 
 
 def _old_blocking_reason():

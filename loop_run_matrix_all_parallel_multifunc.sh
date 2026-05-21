@@ -120,6 +120,7 @@ run_pair() {
 
     python3 -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
+        --binary-ids "$ROW_ID" "$COL_ID" \
         -f "$TARGET_FUNC" -d --emit-result-json \
         > "$LOG_FILE" 2>&1
     local ec=$?

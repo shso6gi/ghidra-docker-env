@@ -743,7 +743,7 @@ class CheckStrategy(ABC):
             self._analysis_entry_key(analysis) if analysis is not None else None,
             self._stable_key_or_none(deferred_ref),
             self._stable_key_or_none(pcode_op_ref),
-            self._stable_key_or_none(target_ref),
+            self._call_target_key_for_analysis(target_ref, analysis),
             target_expr_key,
             tuple(
                 (
@@ -768,7 +768,7 @@ class CheckStrategy(ABC):
             side_label,
             self._analysis_entry_key(analysis) if analysis is not None else None,
             self._stable_key_or_none(evidence),
-            self._stable_key_or_none(getattr(evidence, "target_ref", None)),
+            self._call_target_key_for_analysis(getattr(evidence, "target_ref", None), analysis),
             tuple(
                 (
                     "argument",
@@ -793,7 +793,7 @@ class CheckStrategy(ABC):
             side_label,
             self._analysis_entry_key(analysis) if analysis is not None else None,
             self._stable_key_or_none(getattr(site, "pcode_op_ref", None)),
-            self._stable_key_or_none(getattr(site, "target_ref", None)),
+            self._call_target_key_for_analysis(getattr(site, "target_ref", None), analysis),
             self._typed_target_expression_key(getattr(site, "target_expr", None)),
             int(getattr(site, "order_key", 0) or 0),
             getattr(site, "reason", None),
@@ -807,7 +807,17 @@ class CheckStrategy(ABC):
 
     @staticmethod
     def _analysis_entry_key(analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
+        binary_id = getattr(analysis, "binary_id", None)
         function_ref = getattr(analysis, "function_ref", None)
+        if binary_id and function_ref is not None:
+            entry_offset = getattr(function_ref, "entry_offset", None)
+            if entry_offset is None:
+                entry_offset = getattr(function_ref, "address_offset", None)
+            if entry_offset is not None:
+                try:
+                    return ("function_ref", ("function", str(binary_id), int(entry_offset)))
+                except (TypeError, ValueError):
+                    pass
         stable_key = getattr(function_ref, "stable_key", None)
         if callable(stable_key):
             try:
@@ -817,6 +827,25 @@ class CheckStrategy(ABC):
             except (AttributeError, TypeError, ValueError, RecursionError):
                 pass
         return ("entry_point", getattr(analysis, "entry_point", None))
+
+    @classmethod
+    def _call_target_key_for_analysis(
+        cls,
+        target_ref: Any,
+        analysis: Optional[FunctionReturnAnalysis],
+    ):
+        key = cls._stable_key_or_none(target_ref)
+        binary_id = getattr(analysis, "binary_id", None) if analysis is not None else None
+        if not binary_id or not isinstance(key, tuple) or not key:
+            return key
+        kind = key[0]
+        if kind == "function" and len(key) >= 3 and key[2] is not None:
+            return ("function", str(binary_id), key[2])
+        if kind == "code_address" and len(key) >= 3 and key[2] is not None:
+            return ("code_address", str(binary_id), key[2])
+        if kind == "unknown":
+            return ("unknown", str(binary_id))
+        return key
 
     @staticmethod
     def _stable_key_or_none(value: Any):

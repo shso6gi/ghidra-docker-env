@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
+    summarize_store_effects,
     post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
@@ -22,6 +23,7 @@ from scripts.function_tracer_pcode.model import (
     LoopSummaryRef,
     LoopTermDescriptorRef,
     LoopVariableIdentityRef,
+    PcodeOpRef,
     PostStateReadRef,
     PostStateSnapshotRef,
     ReductionAccumulatorProof,
@@ -45,8 +47,281 @@ from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_iden
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
+class _FakeAddressSpace:
+    def __init__(self, name):
+        self._name = name
+
+    def getName(self):
+        return self._name
+
+
+class _FakeAddress:
+    def __init__(self, space_name, offset):
+        self._space = _FakeAddressSpace(space_name)
+        self._offset = offset
+
+    def getAddressSpace(self):
+        return self._space
+
+    def getOffset(self):
+        return self._offset
+
+
+class _FakeSeqnum:
+    def __init__(self, target, time, order):
+        self._target = target
+        self._time = time
+        self._order = order
+
+    def getTarget(self):
+        return self._target
+
+    def getTime(self):
+        return self._time
+
+    def getOrder(self):
+        return self._order
+
+
+class _FakeVarnode:
+    def __init__(self, size):
+        self._size = size
+
+    def getSize(self):
+        return self._size
+
+
+class _FakePcodeOp:
+    def __init__(
+        self,
+        *,
+        target_offset=0x1010,
+        time=23,
+        order=7,
+        opcode=19,
+        mnemonic="RETURN",
+        parent=None,
+        inputs=None,
+    ):
+        self._seqnum = _FakeSeqnum(_FakeAddress("ram", target_offset), time=time, order=order)
+        self._opcode = opcode
+        self._mnemonic = mnemonic
+        self._inputs = tuple(inputs) if inputs is not None else (_FakeVarnode(8),)
+        self._output = _FakeVarnode(4)
+        self._parent = parent
+
+    def getSeqnum(self):
+        return self._seqnum
+
+    def getOpcode(self):
+        return self._opcode
+
+    def getMnemonic(self):
+        return self._mnemonic
+
+    def getNumInputs(self):
+        return len(self._inputs)
+
+    def getInput(self, index):
+        return self._inputs[index]
+
+    def getOutput(self):
+        return self._output
+
+    def getParent(self):
+        return self._parent
+
+
+class _FakeIterator:
+    def __init__(self, items):
+        self._items = list(items)
+        self._index = 0
+
+    def hasNext(self):
+        return self._index < len(self._items)
+
+    def next(self):
+        item = self._items[self._index]
+        self._index += 1
+        return item
+
+
+class _FakeBlock:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def getIterator(self):
+        return _FakeIterator(self._items)
+
+
+class _FakeEffectBlockInfo:
+    def __init__(self, pcode_ops):
+        self.pcode_ops = list(pcode_ops)
+
+
+class _CompletePathTracker:
+    def get_all_valid_paths_to_block(self, _block_info):
+        return [[]]
+
+
+class _PcodeRefTracer:
+    def __init__(self, pcode_ref):
+        self._pcode_ref = pcode_ref
+
+    def _make_pcode_op_ref(self, pcode_op):
+        return self._pcode_ref
+
+    def resolve_call_target_ref(self, *_args, **_kwargs):
+        return CallTargetRef.from_name("callee", program_id=1, entry_offset=0x401000)
+
+    def trace_varnode(self, *_args, **_kwargs):
+        return Expression.parameter("fp", index=0, size=8, data_type="int (*)(int)")
+
+
 def test_coerce_call_target_ref_rejects_raw_strings():
     assert coerce_call_target_ref("callee") is None
+
+
+def test_pcode_op_ref_full_key_uses_object_context_when_available():
+    ref = PcodeOpRef.from_pcode_op(
+        _FakePcodeOp(),
+        binary_id="B11",
+        function_entry=_FakeAddress("ram", 0x1000),
+        local_op_ordinal=2,
+    )
+
+    assert ref is not None
+    assert ref.stable_key() == (
+        "pcode_op",
+        "B11",
+        ("function_entry", "ram", 0x1000),
+        ("seq_target", "ram", 0x1010),
+        23,
+        7,
+        19,
+        2,
+    )
+    assert ref.to_dict()["function_entry_space"] == "ram"
+    assert ref.to_dict()["target_space"] == "ram"
+
+
+def test_pcode_op_ref_full_key_distinguishes_same_site_local_ordinals():
+    first = PcodeOpRef(
+        binary_id="B11",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=23,
+        seq_order=7,
+        opcode=19,
+        local_op_ordinal=0,
+        mnemonic="RETURN",
+    )
+    second = PcodeOpRef(
+        binary_id="B11",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=23,
+        seq_order=7,
+        opcode=19,
+        local_op_ordinal=1,
+        mnemonic="RETURN",
+    )
+
+    assert first.stable_key() != second.stable_key()
+
+
+def test_pcode_op_ref_full_key_uses_seq_time_and_excludes_program_uid():
+    ref = PcodeOpRef.from_pcode_op(
+        _FakePcodeOp(time=23, order=7),
+        binary_id="B11",
+        program_uid=12345,
+        function_entry=_FakeAddress("ram", 0x1000),
+        local_op_ordinal=2,
+    )
+    same_import_ref = PcodeOpRef.from_pcode_op(
+        _FakePcodeOp(time=23, order=7),
+        binary_id="B11",
+        program_uid=67890,
+        function_entry=_FakeAddress("ram", 0x1000),
+        local_op_ordinal=2,
+    )
+    moved_time_ref = PcodeOpRef.from_pcode_op(
+        _FakePcodeOp(time=24, order=7),
+        binary_id="B11",
+        program_uid=12345,
+        function_entry=_FakeAddress("ram", 0x1000),
+        local_op_ordinal=2,
+    )
+
+    assert ref is not None
+    assert same_import_ref is not None
+    assert moved_time_ref is not None
+    assert ref.stable_key() == same_import_ref.stable_key()
+    assert ref.stable_key() != moved_time_ref.stable_key()
+    assert ref.to_dict()["program_uid"] == 12345
+
+
+def test_pcode_op_ref_derives_local_ordinal_from_equivalent_parent_wrapper():
+    first = _FakePcodeOp(target_offset=0x1000, order=1, opcode=10, mnemonic="COPY")
+    equivalent_wrapper = _FakePcodeOp(target_offset=0x1010, order=7, opcode=19, mnemonic="RETURN")
+    block = _FakeBlock([first, equivalent_wrapper])
+    queried = _FakePcodeOp(target_offset=0x1010, order=7, opcode=19, mnemonic="RETURN", parent=block)
+
+    ref = PcodeOpRef.from_pcode_op(
+        queried,
+        binary_id="B11",
+        function_entry=_FakeAddress("ram", 0x1000),
+    )
+
+    assert ref is not None
+    assert ref.local_op_ordinal == 1
+    assert ref.stable_key() == (
+        "pcode_op",
+        "B11",
+        ("function_entry", "ram", 0x1000),
+        ("seq_target", "ram", 0x1010),
+        23,
+        7,
+        19,
+        1,
+    )
+
+
+def test_unsupported_call_effect_summary_uses_tracer_full_pcode_context():
+    pcode_ref = PcodeOpRef(
+        binary_id="B11",
+        function_entry_space="ram",
+        function_entry_offset=0x400000,
+        target_space="ram",
+        target_offset=0x401020,
+        seq_time=31,
+        seq_order=7,
+        opcode=8,
+        local_op_ordinal=2,
+        mnemonic="CALLIND",
+    )
+    call_op = _FakePcodeOp(
+        target_offset=0x401020,
+        time=31,
+        order=7,
+        opcode=8,
+        mnemonic="CALLIND",
+    )
+    summary = summarize_store_effects(
+        [_FakeEffectBlockInfo([call_op])],
+        _PcodeRefTracer(pcode_ref),
+        _CompletePathTracker(),
+        parameters=[],
+        direct_call_summary=lambda _target_ref, _args: None,
+    )
+
+    assert summary.has_unsupported_call is True
+    assert len(summary.unsupported_call_sites) == 1
+    assert summary.unsupported_call_sites[0].pcode_op_ref.stable_key() == pcode_ref.stable_key()
 
 
 def test_loop_summary_comparator_accepts_pure_object_centric_semantic_key():

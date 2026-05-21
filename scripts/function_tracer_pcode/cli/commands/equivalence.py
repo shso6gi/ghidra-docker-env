@@ -25,6 +25,13 @@ def _safe_close_context(manager) -> None:
         raise
 
 
+def _get_binary_ids_arg(args):
+    value = getattr(args, "binary_ids", None)
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return value[0], value[1]
+    return None, None
+
+
 def run_equivalence_check(args):
     """等価性判定を実行する。"""
     def _get_bool_arg(name: str, default: bool = False) -> bool:
@@ -41,6 +48,7 @@ def run_equivalence_check(args):
     from ...equivalence import EquivalenceChecker, TypeFixerConfig
 
     binary1_path, binary2_path = args.equiv
+    binary1_id, binary2_id = _get_binary_ids_arg(args)
     function_names = get_target_functions(args)
 
     if len(function_names) == 0:
@@ -154,6 +162,8 @@ def run_equivalence_check(args):
                             decompile_timeout=args.timeout,
                             save_formula=args.save_formula,
                             retry_with_type_fix=retry_with_type_fix,
+                            binary1_id=binary1_id,
+                            binary2_id=binary2_id,
                         )
                     finally:
                         _safe_close_context(result2_cm)

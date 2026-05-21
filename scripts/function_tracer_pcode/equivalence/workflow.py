@@ -22,7 +22,9 @@ def run_check_from_binaries(
     function_name2: str,
     decompile_timeout: int = 60,
     save_formula: bool = False,
-    retry_with_type_fix: bool = False
+    retry_with_type_fix: bool = False,
+    binary1_id: str | None = None,
+    binary2_id: str | None = None,
 ):
     """`check_from_binaries()` の phase workflow を実行する"""
     start_time = time.time()
@@ -46,6 +48,8 @@ def run_check_from_binaries(
         function_name2=function_name2,
         binary1_name=binary1_name,
         binary2_name=binary2_name,
+        binary1_id=binary1_id,
+        binary2_id=binary2_id,
         decompile_timeout=decompile_timeout,
         save_formula=save_formula,
         type_fix_result=type_fix_result,

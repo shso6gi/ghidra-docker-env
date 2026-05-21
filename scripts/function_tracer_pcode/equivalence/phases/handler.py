@@ -76,6 +76,8 @@ class PhaseContext:
     type_fix_result: TypeFixResult
     original_signature1: Optional[FunctionSignature]
     original_signature2: Optional[FunctionSignature]
+    binary1_id: Optional[str] = None
+    binary2_id: Optional[str] = None
     analysis1: Optional[FunctionReturnAnalysis] = None
     analysis2: Optional[FunctionReturnAnalysis] = None
 

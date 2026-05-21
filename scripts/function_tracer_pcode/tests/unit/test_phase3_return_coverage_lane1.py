@@ -113,6 +113,7 @@ def _payload_binary_name(binary_id: str) -> str:
 def _reason_from_ref(ref: str):
     reason_id = ref.split(":", 1)[1]
     side = ref.split(":", 1)[0]
+    binary_id = "B11" if side == "function1" else "B15"
     return make_unknown_reason(
         reason_id,
         stage="S_PAIRWISE",
@@ -121,7 +122,7 @@ def _reason_from_ref(ref: str):
         object_target_key=(
             "return_coverage",
             side,
-            ("function_ref", ("function", side, 0x1000)),
+            ("function_ref", ("function", binary_id, 0x1000)),
             reason_id,
             ("return_storage", "return_value", 32, False, "int"),
             (
@@ -131,7 +132,16 @@ def _reason_from_ref(ref: str):
                         "return_case",
                         0,
                         "0x1000",
-                        ("pcode_op", "ram", 0x1000, "ram", 0x1004, 0, "RETURN", 0),
+                        (
+                            "pcode_op",
+                            binary_id,
+                            ("function_entry", "ram", 0x1000),
+                            ("seq_target", "ram", 0x1004),
+                            23,
+                            0,
+                            10,
+                            0,
+                        ),
                         None,
                         0,
                         ("expression", ("constant", 1, 4)),
@@ -1119,7 +1129,7 @@ def test_return_coverage_object_key_specificity_requires_function_entry_and_pcod
             ),
         ),
     )
-    good_key = (
+    legacy_key = (
         "return_coverage",
         "function2",
         ("function_ref", ("function", None, 0x1000)),
@@ -1164,12 +1174,101 @@ def test_return_coverage_object_key_specificity_requires_function_entry_and_pcod
             ),
         ),
     )
+    good_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", "B11", 0x1000)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    (
+                        "pcode_op",
+                        "B11",
+                        ("function_entry", "ram", 0x1000),
+                        ("seq_target", "ram", 0x1010),
+                        3,
+                        1,
+                        10,
+                        0,
+                    ),
+                    None,
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
 
     assert _object_target_key_is_specific(weak_key) is False
+    assert _object_target_key_is_specific(legacy_key) is False
     assert _object_target_key_is_specific(good_key) is True
 
 
-def test_return_coverage_object_key_specificity_rejects_address_only_return_case():
+def test_return_coverage_object_key_specificity_requires_canonical_function_binary_id():
+    good_key = _reason_from_ref("function2:return_coverage_gap").object_target_key
+    missing_binary_key = (
+        good_key[0],
+        good_key[1],
+        ("function_ref", ("function", None, 0x1000)),
+        *good_key[3:],
+    )
+    program_uid_key = (
+        good_key[0],
+        good_key[1],
+        ("function_ref", ("function", 2, 0x1000)),
+        *good_key[3:],
+    )
+    code_address_program_uid_key = (
+        good_key[0],
+        good_key[1],
+        ("function_ref", ("code_address", 2, 0x1000)),
+        *good_key[3:],
+    )
+    code_address_binary_key = (
+        good_key[0],
+        good_key[1],
+        ("function_ref", ("code_address", "B15", 0x1000)),
+        *good_key[3:],
+    )
+
+    assert _object_target_key_is_specific(missing_binary_key) is False
+    assert _object_target_key_is_specific(program_uid_key) is False
+    assert _object_target_key_is_specific(code_address_program_uid_key) is False
+    assert _object_target_key_is_specific(good_key) is True
+    assert _object_target_key_is_specific(code_address_binary_key) is True
+
+
+def test_return_coverage_object_key_specificity_rejects_address_only_or_legacy_return_case():
     address_only_key = (
         "return_coverage",
         "function2",
@@ -1215,7 +1314,7 @@ def test_return_coverage_object_key_specificity_rejects_address_only_return_case
             ),
         ),
     )
-    structured_identity_key = (
+    legacy_identity_key = (
         "return_coverage",
         "function2",
         ("function_ref", ("function", None, 0x1000)),
@@ -1260,9 +1359,64 @@ def test_return_coverage_object_key_specificity_rejects_address_only_return_case
             ),
         ),
     )
+    full_identity_key = (
+        "return_coverage",
+        "function2",
+        ("function_ref", ("function", "B11", 0x1000)),
+        "return_coverage_gap",
+        ("return_storage", "return_value", 32, False, "int"),
+        (
+            "return_partition",
+            (
+                (
+                    "return_case",
+                    0,
+                    "0x1000",
+                    None,
+                    (
+                        "pcode_op",
+                        "B11",
+                        ("function_entry", "ram", 0x1000),
+                        ("seq_target", "ram", 0x1010),
+                        3,
+                        1,
+                        10,
+                        0,
+                    ),
+                    None,
+                    ("expression", ("constant", 1, 4)),
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "guard_disjunction",
+            (
+                (
+                    0,
+                    (
+                        (
+                            "return_guard",
+                            False,
+                            ("condition", ("INT_EQUAL", "x", 0)),
+                            ("expression", ("parameter", "x", 0, 4)),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
 
     assert _object_target_key_is_specific(address_only_key) is False
-    assert _object_target_key_is_specific(structured_identity_key) is True
+    assert _object_target_key_is_specific(legacy_identity_key) is False
+    assert _object_target_key_is_specific(full_identity_key) is True
 
 
 def test_phase3_return_coverage_manifest_rejects_reversed_log_direction(tmp_path):
@@ -1364,3 +1518,40 @@ def test_return_coverage_object_key_requires_object_derived_pcode_ref():
 
     assert legacy_key[3] is None
     assert object_key[3] == ("pcode_op", 0x401000, 23, 1, 4, "RETURN")
+
+
+def test_return_coverage_object_key_carries_full_pcode_ref_context():
+    strategy = _NoopStrategy(None, None)
+    full_ref = PcodeOpRef(
+        address_offset=0x401000,
+        seq_time=23,
+        seq_order=1,
+        block_index=4,
+        mnemonic="RETURN",
+        binary_id="B11",
+        function_entry_space="ram",
+        function_entry_offset=0x400000,
+        target_space="ram",
+        target_offset=0x401000,
+        opcode=62,
+        local_op_ordinal=3,
+    )
+    ret = ReturnInfo(
+        address="ram:00401000",
+        value=Expression.constant(0, 4),
+        conditions=[],
+        pcode_op_ref=full_ref,
+    )
+
+    key = strategy._return_case_object_key(0, ret)
+
+    assert key[3] == (
+        "pcode_op",
+        "B11",
+        ("function_entry", "ram", 0x400000),
+        ("seq_target", "ram", 0x401000),
+        23,
+        1,
+        62,
+        3,
+    )

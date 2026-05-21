@@ -156,9 +156,10 @@ class _EffectRewritePrecision:
 class ReturnAnalyzer:
     """関数のReturn値を解析"""
 
-    def __init__(self, program, debug: bool = False):
+    def __init__(self, program, debug: bool = False, binary_id: Optional[str] = None):
         self.program = program
         self.debug = debug
+        self._binary_id = binary_id
         self._decompiler = None
         self._current_parameters: List[Dict] = []
         self._current_effect_summary: Optional[EffectSummary] = None
@@ -176,6 +177,7 @@ class ReturnAnalyzer:
         self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
         self._last_function_lookup_error: Optional[str] = None
         self._current_function_prototype = None
+        self._current_function_entry_address_value = None
     
     def _debug_print(self, msg: str, indent: int = 0):
         if self.debug:
@@ -194,6 +196,45 @@ class ReturnAnalyzer:
         except Exception:
             return None
         return None
+
+    def _program_identity(self) -> Optional[int]:
+        try:
+            getter = getattr(self.program, "getUniqueProgramID", None)
+            if callable(getter):
+                return int(getter())
+        except Exception:
+            return None
+        return None
+
+    def _current_function_entry_address(self):
+        if self._current_function_entry_address_value is not None:
+            return self._current_function_entry_address_value
+        prototype = self._current_function_prototype
+        for getter_name in ("getFunction", "getFunctionDefinition"):
+            getter = getattr(prototype, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                function = getter()
+            except Exception:
+                function = None
+            entry_getter = getattr(function, "getEntryPoint", None)
+            if callable(entry_getter):
+                try:
+                    return entry_getter()
+                except Exception:
+                    return None
+        return None
+
+    @staticmethod
+    def _function_entry_address(function):
+        entry_getter = getattr(function, "getEntryPoint", None)
+        if not callable(entry_getter):
+            return None
+        try:
+            return entry_getter()
+        except Exception:
+            return None
 
     def _debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
         return summarize_expression(expr, max_depth=max_depth)
@@ -270,7 +311,12 @@ class ReturnAnalyzer:
             "pcode_identity": pcode_identity,
             "pcode_order": pcode_order,
             "pcode_time": pcode_time,
-            "pcode_op_ref": PcodeOpRef.from_pcode_op(pcode_op),
+            "pcode_op_ref": PcodeOpRef.from_pcode_op(
+                pcode_op,
+                binary_id=self._binary_id,
+                program_uid=self._program_identity(),
+                function_entry=self._current_function_entry_address(),
+            ),
         }
 
     def _pcode_op_identity_key(self, pcode_op) -> Optional[Tuple[Any, ...]]:
@@ -368,16 +414,19 @@ class ReturnAnalyzer:
         parameters: List[Dict],
         effect_summary: Optional[EffectSummary],
         function_prototype=None,
+        function_entry_address=None,
     ):
         """Temporarily bind per-analysis state and restore the parent context on exit."""
         previous_parameters = self._current_parameters
         previous_effect_summary = self._current_effect_summary
         previous_deferred_calls = self._current_deferred_calls
         previous_function_prototype = self._current_function_prototype
+        previous_function_entry_address = self._current_function_entry_address_value
         self._current_parameters = parameters
         self._current_effect_summary = effect_summary
         self._current_deferred_calls = {}
         self._current_function_prototype = function_prototype
+        self._current_function_entry_address_value = function_entry_address
         try:
             yield
         finally:
@@ -385,6 +434,7 @@ class ReturnAnalyzer:
             self._current_effect_summary = previous_effect_summary
             self._current_deferred_calls = previous_deferred_calls
             self._current_function_prototype = previous_function_prototype
+            self._current_function_entry_address_value = previous_function_entry_address
     
     def _get_decompiler(self):
         if self._decompiler is None:
@@ -741,7 +791,12 @@ class ReturnAnalyzer:
         except Exception:
             function_prototype = None
 
-        with self._analysis_context(parameters, None, function_prototype=function_prototype):
+        with self._analysis_context(
+            parameters,
+            None,
+            function_prototype=function_prototype,
+            function_entry_address=self._function_entry_address(function),
+        ):
             self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
             image_base = None
             try:
@@ -843,6 +898,7 @@ class ReturnAnalyzer:
                 deferred_calls=dict(self._current_deferred_calls),
                 effect_summary=effect_summary,
                 program_is_big_endian=self._program_is_big_endian(),
+                binary_id=self._binary_id,
             )
             result.unknown_event_count = len(tracer.unknown_tracker.events)
             result.unknown_event_reasons = sorted(
@@ -1043,6 +1099,7 @@ class ReturnAnalyzer:
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,
             program_is_big_endian=self._program_is_big_endian(),
+            binary_id=self._binary_id,
         )
         summarizer = StructuralRecurrenceSummarizer(tracer, debug=self.debug)
         summary = summarizer.try_summarize_pre_return_counted_scalar_loop(
@@ -1068,6 +1125,7 @@ class ReturnAnalyzer:
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,
             program_is_big_endian=self._program_is_big_endian(),
+            binary_id=self._binary_id,
         )
         if summary_note not in result.analysis_notes:
             result.analysis_notes.append(summary_note)
@@ -1110,7 +1168,12 @@ class ReturnAnalyzer:
                 ),
                 "pcode_time": pcode_time,
                 "pcode_order": pcode_order,
-                "pcode_op_ref": PcodeOpRef.from_pcode_op(return_op),
+                "pcode_op_ref": PcodeOpRef.from_pcode_op(
+                    return_op,
+                    binary_id=self._binary_id,
+                    program_uid=self._program_identity(),
+                    function_entry=self._function_entry_address(function),
+                ),
             },
         )
 
@@ -1953,6 +2016,7 @@ class ReturnAnalyzer:
             unknown_event_count=1,
             unknown_event_reasons=["indirect_control_flow_unresolved"],
             program_is_big_endian=self._program_is_big_endian(),
+            binary_id=self._binary_id,
         )
         recovered = self._recover_switch_like_returns_from_pcode(
             placeholder_analysis,
@@ -3067,6 +3131,7 @@ class ReturnAnalyzer:
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
             program_is_big_endian=analysis.program_is_big_endian,
+            binary_id=analysis.binary_id,
         )
         if affected_analysis.has_unknown_return():
             return True
@@ -3107,6 +3172,7 @@ class ReturnAnalyzer:
             unknown_event_count=analysis.unknown_event_count,
             unknown_event_reasons=list(analysis.unknown_event_reasons),
             program_is_big_endian=analysis.program_is_big_endian,
+            binary_id=analysis.binary_id,
         )
         if affected_analysis.has_overlapping_unconditional_returns():
             return True
@@ -4256,6 +4322,7 @@ class ReturnAnalyzer:
                 debug=self.debug,
                 bound_parameter_values=bound_parameter_values,
                 bound_parameter_storage_values=bound_parameter_storage_values,
+                binary_id=self._binary_id,
             )
         except TypeError:
             return PcodeTracer(
@@ -5595,6 +5662,7 @@ class ReturnAnalyzer:
             comparison_surface=analysis.comparison_surface,
             analysis_scope_key=analysis.analysis_scope_key,
             program_is_big_endian=analysis.program_is_big_endian,
+            binary_id=analysis.binary_id,
         )
 
     def _merge_deferred_calls_into_current_analysis(

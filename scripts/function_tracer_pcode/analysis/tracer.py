@@ -112,10 +112,12 @@ class PcodeTracer:
         *,
         bound_parameter_values: Optional[Dict[int, Expression]] = None,
         bound_parameter_storage_values: Optional[Dict[Tuple[Any, ...], Expression]] = None,
+        binary_id: Optional[str] = None,
     ):
         self.program = program
         self.high_function = high_function
         self.debug = debug
+        self._function_binary_id = binary_id
         self.record_deferred_call: Optional[
             Callable[[Any, List[Expression], Optional[Expression], Optional[PcodeOpRef]], Any]
         ] = None
@@ -148,7 +150,11 @@ class PcodeTracer:
             for key, expr in (bound_parameter_storage_values or {}).items()
             if key is not None and expr is not None
         }
-        self._function_program_id, self._function_entry_offset = self._resolve_current_function_scope()
+        (
+            self._function_program_id,
+            self._function_entry_space,
+            self._function_entry_offset,
+        ) = self._resolve_current_function_scope()
         self._parameter_descriptors = self._collect_parameter_descriptors()
         
         self._collect_debug_info()
@@ -249,8 +255,9 @@ class PcodeTracer:
         except Exception:
             return True
 
-    def _resolve_current_function_scope(self) -> Tuple[Optional[int], Optional[int]]:
+    def _resolve_current_function_scope(self) -> Tuple[Optional[int], Optional[str], Optional[int]]:
         program_id = None
+        entry_space = None
         entry_offset = None
 
         try:
@@ -264,11 +271,16 @@ class PcodeTracer:
             if function is not None and hasattr(function, "getEntryPoint"):
                 entry_point = function.getEntryPoint()
                 if entry_point is not None:
+                    try:
+                        entry_space = entry_point.getAddressSpace().getName()
+                    except Exception:
+                        entry_space = None
                     entry_offset = int(entry_point.getOffset())
         except Exception:
+            entry_space = None
             entry_offset = None
 
-        return program_id, entry_offset
+        return program_id, entry_space, entry_offset
 
     def get_parameter_owner_scope(self) -> Dict[str, Optional[int]]:
         return {
@@ -1616,7 +1628,13 @@ class PcodeTracer:
         )
 
     def _make_pcode_op_ref(self, pcode_op) -> Optional[PcodeOpRef]:
-        return PcodeOpRef.from_pcode_op(pcode_op)
+        return PcodeOpRef.from_pcode_op(
+            pcode_op,
+            binary_id=self._function_binary_id,
+            program_uid=self._function_program_id,
+            function_entry_space=self._function_entry_space,
+            function_entry_offset=self._function_entry_offset,
+        )
     
     def _collect_debug_info(self):
         """デバッグ用の情報を収集"""

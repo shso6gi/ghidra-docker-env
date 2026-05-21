@@ -89,6 +89,23 @@ def test_help_does_not_contain_retry_with_int():
             print("\n[HELP CHECK] Verified: --retry-with-int removed, --no-retry-phases present")
 
 
+def test_binary_ids_arg_ignores_mock_attribute_placeholders():
+    """Mock args の未定義 binary_ids 属性は canonical binary ID として扱わない。"""
+    from function_tracer_pcode.cli.commands.equivalence import _get_binary_ids_arg
+
+    mock_args = Mock()
+    assert _get_binary_ids_arg(mock_args) == (None, None)
+
+    mock_args.binary_ids = Mock()
+    assert _get_binary_ids_arg(mock_args) == (None, None)
+
+    mock_args.binary_ids = ("B10",)
+    assert _get_binary_ids_arg(mock_args) == (None, None)
+
+    mock_args.binary_ids = ["B10", "B11"]
+    assert _get_binary_ids_arg(mock_args) == ("B10", "B11")
+
+
 def test_equiv_check_propagates_retry_flag():
     """run_equivalence_check() が retry_with_type_fix を正しく伝播することを確認"""
     from function_tracer_pcode.cli.main import run_equivalence_check

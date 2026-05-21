@@ -2036,57 +2036,12 @@ class StructuralRecurrenceSummarizer:
         return None
 
     def _make_pcode_op_ref(self, pcode_op) -> Optional[PcodeOpRef]:
-        if pcode_op is None:
-            return None
-        address_offset = None
-        seq_time = None
-        seq_order = None
-        try:
-            seq = pcode_op.getSeqnum()
-        except Exception:
-            seq = None
-        if seq is not None:
-            try:
-                target = seq.getTarget()
-                address_offset = int(target.getOffset()) if target is not None else None
-            except Exception:
-                address_offset = None
-            try:
-                seq_time = int(seq.getTime())
-            except Exception:
-                seq_time = None
-            try:
-                seq_order = int(seq.getOrder())
-            except Exception:
-                seq_order = None
-        parent = getattr(pcode_op, "getParent", lambda: None)()
-        block_ref = self._make_pcode_block_ref(parent)
-        input_sizes = []
-        try:
-            num_inputs = int(pcode_op.getNumInputs())
-        except Exception:
-            num_inputs = 0
-        for input_index in range(max(0, num_inputs)):
-            try:
-                input_varnode = pcode_op.getInput(input_index)
-                input_size = int(input_varnode.getSize())
-            except Exception:
-                continue
-            if input_size > 0:
-                input_sizes.append(input_size)
-        try:
-            output_varnode = pcode_op.getOutput()
-            output_size = int(output_varnode.getSize()) if output_varnode is not None else None
-        except Exception:
-            output_size = None
-        return PcodeOpRef(
-            address_offset=address_offset,
-            seq_time=seq_time,
-            seq_order=seq_order,
-            block_index=block_ref.block_index if block_ref is not None else None,
-            mnemonic=getattr(pcode_op, "getMnemonic", lambda: None)(),
-            input_sizes=tuple(input_sizes),
-            output_size=output_size,
+        return PcodeOpRef.from_pcode_op(
+            pcode_op,
+            binary_id=getattr(self.tracer, "_function_binary_id", None),
+            program_uid=getattr(self.tracer, "_function_program_id", None),
+            function_entry_space=getattr(self.tracer, "_function_entry_space", None),
+            function_entry_offset=getattr(self.tracer, "_function_entry_offset", None),
         )
 
     def _make_pcode_block_ref(self, block) -> Optional[PcodeBlockRef]:

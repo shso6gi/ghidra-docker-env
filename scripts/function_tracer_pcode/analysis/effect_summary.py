@@ -74,9 +74,10 @@ class UnsupportedCallEffectRef:
         target_ref: Optional[CallTargetRef],
         target_expr: Optional[Expression] = None,
         reason: str,
+        pcode_op_ref: Optional[PcodeOpRef] = None,
     ) -> "UnsupportedCallEffectRef":
         return cls(
-            pcode_op_ref=PcodeOpRef.from_pcode_op(op),
+            pcode_op_ref=pcode_op_ref if pcode_op_ref is not None else PcodeOpRef.from_pcode_op(op),
             target_ref=target_ref,
             target_expr=target_expr,
             reason=str(reason),
@@ -804,6 +805,28 @@ def summarize_store_effects(
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
 
+    def _unsupported_call_effect_ref(
+        op,
+        *,
+        target_ref: Optional[CallTargetRef],
+        target_expr: Optional[Expression],
+        reason: str,
+    ) -> UnsupportedCallEffectRef:
+        pcode_op_ref = None
+        make_pcode_op_ref = getattr(tracer, "_make_pcode_op_ref", None)
+        if callable(make_pcode_op_ref):
+            try:
+                pcode_op_ref = make_pcode_op_ref(op)
+            except Exception:
+                pcode_op_ref = None
+        return UnsupportedCallEffectRef.from_call_op(
+            op,
+            target_ref=target_ref,
+            target_expr=target_expr,
+            reason=reason,
+            pcode_op_ref=pcode_op_ref,
+        )
+
     for block_info in block_infos:
         coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
         if coverage_status == "complete_unreachable":
@@ -885,7 +908,7 @@ def summarize_store_effects(
             if target_ref is None:
                 has_unsupported_call = True
                 unsupported_call_sites.append(
-                    UnsupportedCallEffectRef.from_call_op(
+                    _unsupported_call_effect_ref(
                         op,
                         target_ref=None,
                         target_expr=target_expr,
@@ -987,7 +1010,7 @@ def summarize_store_effects(
                     if callee_summary is None:
                         has_unsupported_call = True
                         unsupported_call_sites.append(
-                            UnsupportedCallEffectRef.from_call_op(
+                            _unsupported_call_effect_ref(
                                 op,
                                 target_ref=target_ref,
                                 target_expr=target_expr,
@@ -1007,7 +1030,7 @@ def summarize_store_effects(
                     ):
                         has_unsupported_call = True
                         unsupported_call_sites.append(
-                            UnsupportedCallEffectRef.from_call_op(
+                            _unsupported_call_effect_ref(
                                 op,
                                 target_ref=target_ref,
                                 target_expr=target_expr,
@@ -1024,7 +1047,7 @@ def summarize_store_effects(
                     if callee_incomplete_reasons:
                         has_unsupported_call = True
                         unsupported_call_sites.append(
-                            UnsupportedCallEffectRef.from_call_op(
+                            _unsupported_call_effect_ref(
                                 op,
                                 target_ref=target_ref,
                                 target_expr=target_expr,
@@ -1046,7 +1069,7 @@ def summarize_store_effects(
                             ):
                                 has_unsupported_call = True
                                 unsupported_call_sites.append(
-                                    UnsupportedCallEffectRef.from_call_op(
+                                    _unsupported_call_effect_ref(
                                         op,
                                         target_ref=target_ref,
                                         target_expr=target_expr,
@@ -1068,7 +1091,7 @@ def summarize_store_effects(
                     if not is_call_effect_summary_allowed(callee_summary):
                         has_unsupported_call = True
                         unsupported_call_sites.append(
-                            UnsupportedCallEffectRef.from_call_op(
+                            _unsupported_call_effect_ref(
                                 op,
                                 target_ref=target_ref,
                                 target_expr=target_expr,
@@ -1093,7 +1116,7 @@ def summarize_store_effects(
                         if substituted_location is None:
                             has_unsupported_call = True
                             unsupported_call_sites.append(
-                                UnsupportedCallEffectRef.from_call_op(
+                                _unsupported_call_effect_ref(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,

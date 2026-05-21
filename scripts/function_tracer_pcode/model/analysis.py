@@ -537,6 +537,7 @@ class FunctionReturnAnalysis:
     program_is_big_endian: Optional[bool] = None
     completed_recovery_proof_ids: Tuple[Tuple[Any, ...], ...] = ()
     completed_recovery_proof_evidence: Tuple[Dict[str, Any], ...] = ()
+    binary_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -549,7 +550,21 @@ class FunctionReturnAnalysis:
                 self.function_name,
                 entry_offset=entry_offset,
             )
+        if self.binary_id is None:
+            self.binary_id = self._infer_binary_id_from_object_evidence()
         self.normalize_deferred_calls()
+
+    def _infer_binary_id_from_object_evidence(self) -> Optional[str]:
+        for ret in self.returns or ():
+            binary_id = getattr(getattr(ret, "pcode_op_ref", None), "binary_id", None)
+            if binary_id:
+                return str(binary_id)
+        effect_summary = self.effect_summary
+        for site in getattr(effect_summary, "unsupported_call_sites", ()) or ():
+            binary_id = getattr(getattr(site, "pcode_op_ref", None), "binary_id", None)
+            if binary_id:
+                return str(binary_id)
+        return None
 
     def normalize_deferred_calls(self) -> None:
         if not self.deferred_calls:
@@ -567,6 +582,7 @@ class FunctionReturnAnalysis:
         result = {
             "function_name": self.function_name,
             "entry_point": self.entry_point,
+            "binary_id": self.binary_id,
             "function_ref": self.function_ref.to_dict() if self.function_ref is not None else None,
             "parameters": parameters_without_runtime_objects(self.parameters),
             "returns": [r.to_dict() for r in self.returns],

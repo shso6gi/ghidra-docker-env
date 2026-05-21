@@ -1456,23 +1456,17 @@ def _analysis_key_is_specific(value: Any) -> bool:
     if value[0] == "function_ref":
         return _function_ref_key_is_specific(value[1])
     if value[0] == "entry_point":
-        return _address_like_is_specific(value[1])
+        return False
     return False
 
 
 def _function_ref_key_is_specific(value: Any) -> bool:
-    if not isinstance(value, tuple) or not value:
+    if not isinstance(value, tuple) or len(value) < 3:
         return False
-    kind = value[0]
-    if kind == "function":
-        if len(value) < 3:
-            return False
-        return _address_like_is_specific(value[2])
-    if kind == "code_address":
-        if len(value) < 3:
-            return False
-        return _address_like_is_specific(value[2])
-    return False
+    kind, binary_id, address_offset = value[:3]
+    if kind not in {"function", "code_address"}:
+        return False
+    return _binary_id_is_specific(binary_id) and _address_like_is_specific(address_offset)
 
 
 def _return_storage_key_is_specific(value: Any) -> bool:
@@ -1554,34 +1548,41 @@ def _return_guard_key_is_specific(value: Any) -> bool:
 
 
 def _pcode_ref_is_specific(value: Any) -> bool:
-    if not isinstance(value, tuple) or not value or value[0] != "pcode_op":
+    if not isinstance(value, tuple) or len(value) != 8 or value[0] != "pcode_op":
         return False
     if _nested_contains_log_prose(value):
         return False
-    if len(value) == 6:
-        _kind, address_offset, seq_time, seq_order, block_index, mnemonic = value
-        if not isinstance(mnemonic, str) or not mnemonic:
-            return False
-        return _address_like_is_specific(address_offset) and (
-            _int_like_is_specific(seq_time)
-            or _int_like_is_specific(seq_order)
-            or _int_like_is_specific(block_index)
+    (
+        _kind,
+        binary_id,
+        function_entry,
+        seq_target,
+        seq_time,
+        seq_order,
+        opcode,
+        local_ordinal,
+    ) = value
+    return all(
+        (
+            _binary_id_is_specific(binary_id),
+            _pcode_address_ref_is_specific(function_entry, "function_entry"),
+            _pcode_address_ref_is_specific(seq_target, "seq_target"),
+            _int_like_is_specific(seq_time),
+            _int_like_is_specific(seq_order),
+            opcode is not None,
+            _int_like_is_specific(local_ordinal),
         )
-    if len(value) >= 8:
-        _kind, address_space, address_offset, seq_space, seq_offset, seq_order, opcode, local_ordinal = value[:8]
-        if not isinstance(opcode, str) or not opcode:
-            return False
-        return all(
-            (
-                _nested_has_specific_leaf(address_space),
-                _address_like_is_specific(address_offset),
-                _nested_has_specific_leaf(seq_space),
-                _address_like_is_specific(seq_offset),
-                _int_like_is_specific(seq_order),
-                _int_like_is_specific(local_ordinal),
-            )
-        )
-    return False
+    )
+
+
+def _binary_id_is_specific(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and not value.strip().isdecimal()
+
+
+def _pcode_address_ref_is_specific(value: Any, expected_kind: str) -> bool:
+    if not isinstance(value, tuple) or len(value) != 3 or value[0] != expected_kind:
+        return False
+    return isinstance(value[1], str) and bool(value[1]) and _address_like_is_specific(value[2])
 
 
 def _address_like_is_specific(value: Any) -> bool:

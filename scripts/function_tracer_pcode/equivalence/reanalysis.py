@@ -21,7 +21,7 @@ def analyze_and_check_with_analysis(
     start_time = time.time()
 
     checker._debug_print(f"Analyzing function '{ctx.function_name1}' in {ctx.binary1_name}...")
-    analyzer1 = ReturnAnalyzer(ctx.program1, debug=checker.debug)
+    analyzer1 = ReturnAnalyzer(ctx.program1, debug=checker.debug, binary_id=ctx.binary1_id)
     try:
         analysis1 = analyzer1.analyze_function_by_name(
             ctx.function_name1, ctx.decompile_timeout
@@ -40,7 +40,7 @@ def analyze_and_check_with_analysis(
         analyzer1.dispose()
 
     checker._debug_print(f"Analyzing function '{ctx.function_name2}' in {ctx.binary2_name}...")
-    analyzer2 = ReturnAnalyzer(ctx.program2, debug=checker.debug)
+    analyzer2 = ReturnAnalyzer(ctx.program2, debug=checker.debug, binary_id=ctx.binary2_id)
     try:
         analysis2 = analyzer2.analyze_function_by_name(
             ctx.function_name2, ctx.decompile_timeout
@@ -120,7 +120,8 @@ def selective_reanalysis_and_check(
         binary_name: str,
         cached_analysis: FunctionReturnAnalysis,
     ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str]]:
-        analyzer = ReturnAnalyzer(program, debug=checker.debug)
+        binary_id = ctx.binary1_id if program is ctx.program1 else ctx.binary2_id if program is ctx.program2 else None
+        analyzer = ReturnAnalyzer(program, debug=checker.debug, binary_id=binary_id)
         try:
             checker._debug_print(
                 f"Fresh reanalysis requested for {binary_name} after signature-changing retry phase"
