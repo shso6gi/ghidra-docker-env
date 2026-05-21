@@ -230,8 +230,8 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    assert "return_case_coverage_inconclusive" in analysis1.analysis_notes
-    assert "return_case_coverage_inconclusive" in analysis2.analysis_notes
+    assert "return_case_coverage_gap" in analysis1.analysis_notes
+    assert "return_case_coverage_gap" in analysis2.analysis_notes
     strategy.solver_runner.run_sequential.assert_not_called()
 
 

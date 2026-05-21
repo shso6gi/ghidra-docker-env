@@ -6,7 +6,14 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionSimplifier,
     ConditionSMTOracle,
 )
-from scripts.function_tracer_pcode.model import Condition, Expression, ExpressionType, LocationBaseRef
+from scripts.function_tracer_pcode.model import (
+    CanonicalLocation,
+    Condition,
+    Expression,
+    ExpressionType,
+    LocationBaseRef,
+    PostStateReadRef,
+)
 from scripts.function_tracer_pcode.model.storage import StorageInfo
 from scripts.function_tracer_pcode.model.render_smt import normalize_call_symbol_name
 from scripts.function_tracer_pcode.model.render_smt import expression_contains_unsupported_smt_ops
@@ -17,18 +24,27 @@ def _const(value: int, size: int = 4) -> Expression:
 
 
 def _param(name: str, size: int = 4) -> Expression:
-    return Expression.parameter(name, size=size)
+    return Expression.parameter(name, index=-1, size=size, runtime_ref=None)
+
+
+def _indexed_param(name: str, index: int, size: int = 4) -> Expression:
+    return Expression.parameter(
+        name,
+        index=index,
+        size=size,
+        runtime_ref=LocationBaseRef.parameter(name, index=index),
+    )
 
 
 def _deep_selected_branch() -> Expression:
-    acc = _param("param_2")
+    acc = _indexed_param("param_2", 1)
     for value in range(1, 10):
         acc = Expression.binary_op("INT_ADD", acc, _const(value))
     return Expression.binary_op("INT_EQUAL", acc, _const(52))
 
 
 def test_solver_backed_constraint_set_skips_recursive_context_reduction(monkeypatch):
-    selector = Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
+    selector = Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(0))
     unknown_bool = Expression.binary_op("INT_EQUAL", Expression.unknown("phi_circular"), _const(0, 1))
     selected_branch = _deep_selected_branch()
     recursive_phi = Expression.phi(
@@ -55,7 +71,7 @@ def test_solver_backed_constraint_set_skips_recursive_context_reduction(monkeypa
 
 
 def test_solver_backed_implication_handles_phi_with_unknown_branch():
-    selector = Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
+    selector = Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(0))
     selected_branch = _deep_selected_branch()
     unknown_bool = Expression.binary_op("INT_EQUAL", Expression.unknown("phi_circular"), _const(0, 1))
     recursive_phi = Expression.phi(
@@ -83,8 +99,8 @@ def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monk
             "BOOL_NEGATE",
             Expression.binary_op(
                 "BOOL_AND",
-                Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0)),
-                Expression.binary_op("INT_EQUAL", _param("param_2"), _const(1)),
+                Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(0)),
+                Expression.binary_op("INT_EQUAL", _indexed_param("param_2", 1), _const(1)),
             ),
         ),
         False,
@@ -110,7 +126,7 @@ def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monk
 
 
 def test_solver_backed_reasoning_activates_for_non_connective_comparison(monkeypatch):
-    cond = Condition(Expression.binary_op("INT_LESS", _param("param_1"), _const(1)), False)
+    cond = Condition(Expression.binary_op("INT_LESS", _indexed_param("param_1", 0), _const(1)), False)
 
     invoked = {"count": 0}
 
@@ -135,7 +151,7 @@ def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
     cond = Condition(
         Expression.binary_op(
             "INT_EQUAL",
-            Expression.call("callee", [_param("param_1")]),
+            Expression.call("callee", [_indexed_param("param_1", 0)]),
             _const(0),
         ),
         False,
@@ -163,7 +179,7 @@ def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
 def test_call_expression_supported_when_enabled_in_smt_op_filtering():
     expr = Expression.binary_op(
         "INT_EQUAL",
-        Expression.call("callee", [_param("param_1")]),
+        Expression.call("callee", [_indexed_param("param_1", 0)]),
         _const(0),
     )
 
@@ -172,7 +188,7 @@ def test_call_expression_supported_when_enabled_in_smt_op_filtering():
 
 
 def test_reduce_expression_under_conditions_skips_circular_phi_recursion():
-    self_condition = Condition(Expression.binary_op("INT_EQUAL", _param("param_1"), _const(1, 4)), False)
+    self_condition = Condition(Expression.binary_op("INT_EQUAL", _indexed_param("param_1", 0), _const(1, 4)), False)
     circular_phi = Expression.phi([])
     circular_phi.value = [(self_condition, circular_phi)]
 
@@ -201,7 +217,7 @@ def test_solver_backed_script_sanitizes_call_symbols():
     cond = Condition(
         Expression.binary_op(
             "INT_EQUAL",
-            Expression.call("call-foo*", [_param("param_1")]),
+            Expression.call("call-foo*", [_indexed_param("param_1", 0)]),
             _const(0),
         ),
         False,
@@ -247,6 +263,60 @@ def test_smt_oracle_declines_object_identity_unsafe_parameters():
     p0 = Expression.parameter("count", index=-1, size=4)
     cond = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
     usable, script = ConditionSMTOracle._build_script([cond])
+    assert usable is False
+    assert script is None
+    assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
+
+
+def test_smt_oracle_declines_parameter_runtime_ref_without_index():
+    p0 = Expression.parameter(
+        "count",
+        index=-1,
+        size=4,
+        runtime_ref=LocationBaseRef.parameter("count"),
+    )
+    cond = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
+
+    usable, script = ConditionSMTOracle._build_script([cond])
+
+    assert usable is False
+    assert script is None
+    assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
+
+
+def test_smt_oracle_declines_name_only_parameter_nested_in_canonical_location():
+    loc = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("count"),
+        offset=0,
+        size=4,
+    )
+    expr = Expression.variable("post_count", size=4, runtime_ref=loc)
+    cond = Condition(Expression.binary_op("INT_EQUAL", expr, _const(0)), False)
+
+    assert ConditionSMTOracle._build_script([cond]) == (False, None)
+    assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
+
+
+def test_smt_oracle_declines_name_only_parameter_nested_in_post_state_read_ref():
+    loc = CanonicalLocation(
+        base_ref=LocationBaseRef.parameter("count"),
+        offset=0,
+        size=4,
+    )
+    ref = PostStateReadRef(location=loc)
+    expr = Expression.variable("post_count", size=4, runtime_ref=ref)
+    cond = Condition(Expression.binary_op("INT_EQUAL", expr, _const(0)), False)
+
+    assert ConditionSMTOracle._build_script([cond]) == (False, None)
+    assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
+
+
+def test_smt_oracle_declines_param_pattern_without_object_identity():
+    p0 = Expression.parameter("param_1", index=-1, size=4, runtime_ref=None)
+    cond = Condition(Expression.binary_op("INT_EQUAL", p0, _const(0)), False)
+
+    usable, script = ConditionSMTOracle._build_script([cond])
+
     assert usable is False
     assert script is None
     assert ConditionSMTOracle.conjunction_is_unsat([cond]) is None
@@ -308,11 +378,11 @@ def test_smt_oracle_uses_storage_identity_key_for_parameter_without_index():
 
 def test_object_centric_condition_basis_prunes_negated_compound_implied_by_atomic_branch_facts():
     param_1_nonnull = Condition(
-        Expression.binary_op("INT_NOTEQUAL", _param("param_1", size=8), _const(0, size=8)),
+        Expression.binary_op("INT_NOTEQUAL", _indexed_param("param_1", 0, size=8), _const(0, size=8)),
         False,
     )
     param_3_nonzero = Condition(
-        Expression.binary_op("INT_NOTEQUAL", _param("param_3"), _const(0)),
+        Expression.binary_op("INT_NOTEQUAL", _indexed_param("param_3", 2), _const(0)),
         False,
     )
     not_add_branch = Condition(

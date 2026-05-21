@@ -114,6 +114,41 @@ def _runtime_snapshot(expr):
     return getattr(runtime_ref, "snapshot_ref", None)
 
 
+def test_summarize_store_effects_marks_real_op_unknown_order_incomplete():
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        pass
+
+    class FakeStoreOp:
+        __module__ = "ghidra.program.model.pcode"
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getSeqnum(self):
+            raise RuntimeError("seqnum unavailable")
+
+    class FakeBlockInfo:
+        pcode_ops = [FakeStoreOp()]
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo()],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [_param("dst", index=0, size=8)],
+    )
+
+    assert summary.effects == []
+    assert summary.incomplete_reasons == ("effect_order_unavailable",)
+
+
 _LEGACY_TEST_PARAM_INDEX = {
     "a": 0,
     "b": 1,

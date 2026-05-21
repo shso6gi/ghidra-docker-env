@@ -23,8 +23,23 @@ from scripts.function_tracer_pcode.model.runtime_refs import (
 from conftest import create_mock_analysis
 
 
+def _test_parameter_index(name: str) -> int:
+    if name.startswith("param_") and name[len("param_") :].isdigit():
+        return max(0, int(name[len("param_") :]) - 1)
+    value = 0
+    for ch in name:
+        value = ((value * 131) + ord(ch)) & 0xFFFF
+    return 1000 + value
+
+
 def _param(name: str, size: int = 4) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=size)
+    index = _test_parameter_index(name)
+    return Expression.parameter(
+        name,
+        index=index,
+        size=size,
+        runtime_ref=LocationBaseRef.parameter(name, index=index),
+    )
 
 
 def _const(value: int, size: int = 4) -> Expression:

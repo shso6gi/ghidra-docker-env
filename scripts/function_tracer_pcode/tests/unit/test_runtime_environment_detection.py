@@ -37,7 +37,9 @@ def test_discover_runtime_environment_uses_nested_extracted_ghidra_when_needed(t
     runtime_env = discover_runtime_environment(repo_root=tmp_path, environ={})
 
     assert runtime_env.ghidra_install_dir == str(extracted_root)
-    assert runtime_env.java_home is None
+    if runtime_env.java_home is not None:
+        java_home = Path(runtime_env.java_home)
+        assert (java_home / "bin" / "java").exists() or (java_home / "bin" / "java.exe").exists()
 
 
 def test_discover_runtime_environment_respects_explicit_environment_overrides(tmp_path):

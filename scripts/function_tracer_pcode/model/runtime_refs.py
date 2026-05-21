@@ -201,7 +201,13 @@ class LocationBaseRef:
                         int(self.parameter_index),
                     )
                 return ("parameter", int(self.parameter_index))
-            return ("parameter", None)
+            return (
+                "parameter",
+                self.owner_program_id,
+                self.owner_entry_offset,
+                None,
+                self.parameter_name,
+            )
         if self.is_stack_frame():
             return ("stack_frame",)
         if self.storage_identity_key is not None:

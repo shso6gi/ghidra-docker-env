@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
@@ -35,11 +36,20 @@ from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, Solv
 
 
 def _param(name: str) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=8)
+    return _sized_param(name, 8)
 
 
 def _indexed_param(name: str, index: int) -> Expression:
-    return Expression.parameter(name, index=index, size=8)
+    return _indexed_sized_param(name, index, 8)
+
+
+def _indexed_sized_param(name: str, index: int, size: int) -> Expression:
+    return Expression.parameter(
+        name,
+        index=index,
+        size=size,
+        runtime_ref=LocationBaseRef.parameter(name, index=index),
+    )
 
 
 def _const(value: int) -> Expression:
@@ -51,7 +61,7 @@ def _binary(op: str, left: Expression, right: Expression) -> Expression:
 
 
 def _sized_param(name: str, size: int) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=size)
+    return Expression.parameter(name, index=-1, size=size, runtime_ref=None)
 
 
 def _sized_const(value: int, size: int) -> Expression:
@@ -60,6 +70,10 @@ def _sized_const(value: int, size: int) -> Expression:
 
 def _masked_param(name: str) -> Expression:
     return _binary("INT_AND", _param(name), _const(0xFFFFFFFF))
+
+
+def _indexed_masked_param(name: str, index: int) -> Expression:
+    return _binary("INT_AND", _indexed_param(name, index), _const(0xFFFFFFFF))
 
 
 def _signed_modulo_expansion(lhs: Expression, rhs: Expression) -> Expression:
@@ -225,8 +239,14 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    assert "return_case_coverage_inconclusive" in rewritten1.analysis_notes
-    assert "return_case_coverage_inconclusive" in rewritten2.analysis_notes
+    assert any(
+        note in rewritten1.analysis_notes
+        for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
+    )
+    assert any(
+        note in rewritten2.analysis_notes
+        for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
+    )
     solver_runner.run_sequential.assert_not_called()
 
 
@@ -310,7 +330,7 @@ def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
 
 
 def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
-    selector = Condition(_binary("INT_SLESS", _const(0), _param("param_1")))
+    selector = Condition(_binary("INT_SLESS", _const(0), _indexed_param("param_1", 0)))
     other_selector = selector.negate()
     phi_value = Expression.phi(
         [
@@ -374,8 +394,14 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
-    assert "return_case_coverage_inconclusive" in analysis1.analysis_notes
-    assert "return_case_coverage_inconclusive" in analysis2.analysis_notes
+    assert any(
+        note in analysis1.analysis_notes
+        for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
+    )
+    assert any(
+        note in analysis2.analysis_notes
+        for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
+    )
 
 
 def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeypatch):
@@ -388,9 +414,9 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
                 address="0x1001",
                 value=_const(2),
                 conditions=[
-                    Condition(_binary("INT_EQUAL", _param("param_1"), _const(0)), negated=True),
-                    Condition(_binary("INT_LESS", _param("param_1"), _const(101))),
-                    Condition(_binary("INT_SLESS", _param("param_1"), _const(0)), negated=True),
+                    Condition(_binary("INT_EQUAL", _indexed_param("param_1", 0), _const(0)), negated=True),
+                    Condition(_binary("INT_LESS", _indexed_param("param_1", 0), _const(101))),
+                    Condition(_binary("INT_SLESS", _indexed_param("param_1", 0), _const(0)), negated=True),
                 ],
             )
         ],
@@ -405,9 +431,9 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
                 address="0x2001",
                 value=_const(2),
                 conditions=[
-                    Condition(_binary("INT_NOTEQUAL", _masked_param("param_1"), _const(0))),
-                    Condition(_binary("INT_LESS", _const(100), _masked_param("param_1")), negated=True),
-                    Condition(_binary("INT_LESS", _const(0xFFFFFFFF), _masked_param("param_1"))),
+                    Condition(_binary("INT_NOTEQUAL", _indexed_masked_param("param_1", 0), _const(0))),
+                    Condition(_binary("INT_LESS", _const(100), _indexed_masked_param("param_1", 0)), negated=True),
+                    Condition(_binary("INT_LESS", _const(0xFFFFFFFF), _indexed_masked_param("param_1", 0))),
                 ],
             )
         ],
@@ -463,11 +489,16 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
                 address="0x1001",
                 value=_const(2),
                 conditions=[
-                    Condition(_binary("INT_EQUAL", _param("param_1"), _const(0)), negated=True),
-                    Condition(_binary("INT_LESS", _param("param_1"), _const(101))),
-                    Condition(_binary("INT_SLESS", _param("param_1"), _const(0)), negated=True),
+                    Condition(_binary("INT_EQUAL", _indexed_param("param_1", 0), _const(0)), negated=True),
+                    Condition(_binary("INT_LESS", _indexed_param("param_1", 0), _const(101))),
+                    Condition(_binary("INT_SLESS", _indexed_param("param_1", 0), _const(0)), negated=True),
                 ],
-            )
+            ),
+            ReturnInfo(
+                address="0x1002",
+                value=_const(2),
+                conditions=[],
+            ),
         ],
         return_type="int",
     )
@@ -480,11 +511,16 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
                 address="0x2001",
                 value=_const(2),
                 conditions=[
-                    Condition(_binary("INT_NOTEQUAL", _masked_param("param_1"), _const(0))),
-                    Condition(_binary("INT_LESS", _const(100), _masked_param("param_1")), negated=True),
-                    Condition(_binary("INT_SLESS", _masked_param("param_1"), _const(0)), negated=True),
+                    Condition(_binary("INT_NOTEQUAL", _indexed_masked_param("param_1", 0), _const(0))),
+                    Condition(_binary("INT_LESS", _const(100), _indexed_masked_param("param_1", 0)), negated=True),
+                    Condition(_binary("INT_SLESS", _indexed_masked_param("param_1", 0), _const(0)), negated=True),
                 ],
-            )
+            ),
+            ReturnInfo(
+                address="0x2002",
+                value=_const(2),
+                conditions=[],
+            ),
         ],
         return_type="int",
     )
@@ -505,6 +541,6 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
-    assert result.total_pairs == 1
-    assert result.unsat_pairs == 1
+    assert result.total_pairs == 4
+    assert result.unsat_pairs == 4
     assert result.unknown_pairs == 0

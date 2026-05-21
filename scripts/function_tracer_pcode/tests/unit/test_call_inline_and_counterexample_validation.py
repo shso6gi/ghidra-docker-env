@@ -30,7 +30,12 @@ from scripts.function_tracer_pcode.transform.expander import ExpandedValue, Expr
 
 
 def _param_expr(name: str, index: int = 0, size: int = 4) -> Expression:
-    return Expression.parameter(name, index=index, size=size)
+    return Expression.parameter(
+        name,
+        index=index,
+        size=size,
+        runtime_ref=LocationBaseRef.parameter(name, index=index),
+    )
 
 
 def _addr_var(name: str, address_offset: int, size: int = 8) -> Expression:
@@ -5159,7 +5164,7 @@ def test_expand_multiequal_carries_base_conditions_into_predicate_filtering():
     condition_tracker = Mock()
     condition_tracker.get_block_by_hash.return_value = block_info
 
-    param = Expression.parameter("param_1", size=8)
+    param = _param_expr("param_1", index=0, size=8)
     zero = Expression.constant(0, 8)
     base_condition = Condition(Expression.binary_op("INT_SLESSEQUAL", zero, param))
     pred_condition = Condition(Expression.binary_op("INT_SLESSEQUAL", param, Expression.constant(-1, 8)))
@@ -5606,4 +5611,3 @@ def test_validate_counterexample_globally_rejects_return_width_overlap_equality(
     assert not is_decisive
     assert any("return width mismatch" in message for message in strategy.messages)
     assert not any("extract 31 0" in query for query in strategy.solver_runner.queries)
-

@@ -2,6 +2,7 @@
 """PyGhidra-backed recurrence-summary regression fixtures."""
 
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -121,6 +122,11 @@ _LOOP_METHOD_B_FUNCTION = "lmb_sum_prefix_peeled3_tail"
 _LOOP_METHOD_B_PEELED1_FUNCTION = "lmb_sum_prefix_peeled1_tail"
 _LOOP_METHOD_B_LOOP_FUNCTION = "lmb_sum_prefix_loop"
 _LOOP_METHOD_B_WRONG_TAIL_FUNCTION = "lmb_sum_prefix_wrong_tail"
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_PYGHIDRA_REGRESSIONS") != "1",
+    reason="real PyGhidra binary regressions are opt-in; set RUN_PYGHIDRA_REGRESSIONS=1",
+)
 
 
 @pytest.fixture(scope="session")

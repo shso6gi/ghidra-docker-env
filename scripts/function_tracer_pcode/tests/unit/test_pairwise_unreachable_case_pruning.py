@@ -16,13 +16,23 @@ from scripts.function_tracer_pcode.model import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
+    LocationBaseRef,
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
 
 def _param(name: str) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=8)
+    return Expression.parameter(name, index=-1, size=8, runtime_ref=None)
+
+
+def _indexed_param(name: str, index: int) -> Expression:
+    return Expression.parameter(
+        name,
+        index=index,
+        size=8,
+        runtime_ref=LocationBaseRef.parameter(name, index=index),
+    )
 
 
 def _const(value: int) -> Expression:
@@ -50,7 +60,7 @@ def _mock_parallel(status: SolverStatus) -> ParallelResult:
 
 
 def test_pairwise_strategy_prunes_unreachable_unknown_case_before_pairing():
-    phi_selector = Condition(_binary("INT_EQUAL", _param("param_1"), _const(0)))
+    phi_selector = Condition(_binary("INT_EQUAL", _indexed_param("param_1", 0), _const(0)))
     impossible_phi = Expression.phi(
         [
             (phi_selector, _const(1)),

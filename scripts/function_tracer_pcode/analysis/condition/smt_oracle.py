@@ -140,7 +140,7 @@ class ConditionSMTOracle:
                     continue
                 if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
                     identity = cls._expression_identity_key(node)
-                    if identity is None:
+                    if not cls._identity_is_solver_safe(identity):
                         return False, None
                     bit_width = max(1, int(expression_smt_bit_width(node) or 0))
                     if bit_width <= 0:
@@ -212,6 +212,57 @@ class ConditionSMTOracle:
         return str(identity)
 
     @classmethod
+    def _identity_is_solver_safe(cls, identity: Optional[Tuple[Any, ...]]) -> bool:
+        if not isinstance(identity, tuple) or not identity:
+            return False
+        # Name-only parameters are not object identities. They can collide
+        # across distinct storage/index/provenance sources, so SMT-backed
+        # coverage and implication checks must decline instead of proving.
+        if identity[0] == "parameter_name":
+            return False
+        if identity[0] == "parameter_generated_ordinal":
+            return False
+        if cls._identity_contains_unsafe_parameter_key(identity):
+            return False
+        if (
+            identity[0] == "runtime_ref"
+            and len(identity) >= 3
+            and isinstance(identity[2], tuple)
+            and identity[2]
+            and identity[2][0]
+            in {
+                "parameter_without_semantic_identity",
+                "stable_parameter_without_index",
+            }
+        ):
+            return False
+        return True
+
+    @classmethod
+    def _identity_contains_unsafe_parameter_key(cls, value: Any) -> bool:
+        if isinstance(value, tuple):
+            if cls._is_unsafe_parameter_key(value):
+                return True
+            return any(cls._identity_contains_unsafe_parameter_key(item) for item in value)
+        if isinstance(value, (list, set, frozenset)):
+            return any(cls._identity_contains_unsafe_parameter_key(item) for item in value)
+        return False
+
+    @staticmethod
+    def _is_unsafe_parameter_key(value: Tuple[Any, ...]) -> bool:
+        if not value or value[0] != "parameter":
+            return False
+        if len(value) == 1:
+            return True
+        if len(value) == 2:
+            return value[1] is None
+        if len(value) == 3:
+            return value[1] is None or value[2] is None
+        if len(value) >= 4:
+            return value[3] is None
+        return False
+
+    @classmethod
     def _expression_identity_key(cls, expr) -> Optional[Tuple[Any, ...]]:
         expr_type = getattr(expr, "expr_type", None)
         expr_kind = getattr(expr_type, "__class__", None)
@@ -274,13 +325,7 @@ class ConditionSMTOracle:
                         continue
                     if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
                         identity = cls._expression_identity_key(node)
-                        if identity is None:
-                            return False
-                        # A name-only fallback is useful to avoid accidental
-                        # SMT symbol collisions in synthetic expressions, but
-                        # it is not a strong object identity for proving
-                        # coverage completeness.
-                        if identity[0] == "parameter_name":
+                        if not cls._identity_is_solver_safe(identity):
                             return False
             return True
         except Exception:
@@ -290,14 +335,16 @@ class ConditionSMTOracle:
     def _runtime_ref_identity(cls, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
         if runtime_ref is None:
             return None
+        parameter_ref = cls._runtime_ref_is_parameter_ref(runtime_ref)
         semantic_key = getattr(runtime_ref, "semantic_key", None)
+        semantic_identity = None
         if callable(semantic_key):
             try:
-                identity = semantic_key()
+                semantic_identity = semantic_key()
             except Exception:
-                identity = None
-            if identity is not None:
-                return ("semantic", identity)
+                semantic_identity = None
+            if semantic_identity is not None:
+                return ("semantic", semantic_identity)
         stable_key = getattr(runtime_ref, "stable_key", None)
         if callable(stable_key):
             try:
@@ -305,8 +352,30 @@ class ConditionSMTOracle:
             except Exception:
                 identity = None
             if identity is not None:
+                if parameter_ref and semantic_identity is None:
+                    return ("parameter_without_semantic_identity", identity)
                 return ("stable", identity)
+        if parameter_ref and semantic_identity is None:
+            return ("parameter_without_semantic_identity", None)
         return None
+
+    @staticmethod
+    def _runtime_ref_is_parameter_ref(runtime_ref: Any) -> bool:
+        is_parameter = getattr(runtime_ref, "is_parameter", None)
+        if callable(is_parameter):
+            try:
+                return bool(is_parameter())
+            except Exception:
+                return False
+        try:
+            stable_key = runtime_ref.stable_key()
+        except Exception:
+            stable_key = None
+        return (
+            isinstance(stable_key, tuple)
+            and bool(stable_key)
+            and stable_key[0] == "parameter"
+        )
 
     @classmethod
     def _condition_to_smt(
