@@ -211,20 +211,19 @@ class MonolithicStrategy(CheckStrategy):
                 )
             sat_unsafety_reasons.extend(coverage_unsafety_reasons)
             if final_is_equivalent is True and coverage_unsafety_reasons:
-                for reason in coverage_unsafety_reasons:
-                    unknown_reasons.append(
-                        self._make_blocking_unsafety_unknown_reason(
-                            reason,
-                            analysis1,
-                            analysis2,
-                            stage="S_MONOLITHIC_FALLBACK",
-                        )
-                    )
-                self._debug_print(
-                    "Monolithic UNSAT downgraded to UNKNOWN due to incomplete return coverage "
-                    f"({', '.join(coverage_unsafety_reasons)})"
+                coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
+                    coverage_unsafety_reasons,
+                    analysis1,
+                    analysis2,
+                    stage="S_MONOLITHIC_FALLBACK",
                 )
-                final_is_equivalent = None
+                if coverage_unknown_reasons:
+                    unknown_reasons.extend(coverage_unknown_reasons)
+                    self._debug_print(
+                        "Monolithic UNSAT downgraded to UNKNOWN due to incomplete return coverage "
+                        f"({', '.join(coverage_unsafety_reasons)})"
+                    )
+                    final_is_equivalent = None
             if final_is_equivalent is True and equivalence_blocking_reasons:
                 unresolved_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
                     equivalence_blocking_reasons,

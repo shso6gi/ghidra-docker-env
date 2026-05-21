@@ -143,6 +143,53 @@ def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis
     strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
 
 
+def _return_coverage_gap_analyses():
+    x = Expression.parameter("x", 0, size=4)
+    analysis1 = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x, _const(0))])],
+        return_type="int",
+    )
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    return analysis1, analysis2
+
+
+def _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2):
+    case1 = ReturnCase(
+        index=0,
+        conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    strategy._solve_query_twostage = Mock(return_value=QueryResult(is_equivalent=True))
+
+
 def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
     site = UnsupportedCallEffectRef(
         pcode_op_ref=PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND"),
@@ -186,6 +233,7 @@ def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
         "evidence_kind": "call_effect_summary",
         "object_target_key": object_target_key,
     }
+    evidence["proof_obligation_id"] = _expected_call_effect_summary_proof_id(evidence)
     evidence.update(overrides)
     return evidence
 
@@ -211,6 +259,58 @@ def _expected_call_effect_summary_proof_id(evidence):
         evidence["evidence_kind"],
         evidence["object_target_key"],
     )
+
+
+def _return_coverage_completion_evidence(action, **overrides):
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.RETURN_COVERAGE_GAP.value,
+        "recovery_proof_kind": UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+        "proof_stage": action.proof_stage,
+        "evidence_kind": action.evidence_kind,
+        "object_target_key": action.object_target_key,
+        "proof_obligation_id": action.proof_obligation_id,
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _return_coverage_completion_evidence_without_proof_id(action):
+    evidence = _return_coverage_completion_evidence(action)
+    evidence.pop("proof_obligation_id", None)
+    return evidence
+
+
+def _monolithic_return_coverage_gap_setup():
+    class _CoverageGapUnsatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+        def run_sequential(self, query: str):
+            if "Return coverage gap query: function1" in query:
+                return ParallelResult(
+                    results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+                )
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    strategy = MonolithicStrategy(formula_builder, _CoverageGapUnsatSolverRunner(), debug=False)
+    return strategy, analysis1, analysis2
 
 
 def test_function_return_analysis_marks_symbolic_post_state_reads_as_sat_unsafe():
@@ -793,6 +893,132 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     assert "return_case_coverage_gap" in analysis1.analysis_notes
 
 
+def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([pending_reason])
+    analysis1.completed_recovery_proof_evidence = (
+        _return_coverage_completion_evidence(actions[0]),
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+
+
+def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([pending_reason])
+    analysis1.completed_recovery_proof_evidence = tuple(
+        _return_coverage_completion_evidence(action)
+        for action in actions
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert result.unsat_pairs == 1
+    assert result.unknown_pairs == 0
+
+
+def test_pairwise_return_coverage_gap_wrong_completed_proof_id_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([pending_reason])
+    wrong_id = build_proof_obligation_id(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        actions[0].proof_stage,
+        UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+        actions[0].evidence_kind,
+        ("return_coverage", "different-target"),
+    )
+    analysis1.completed_recovery_proof_evidence = (
+        _return_coverage_completion_evidence(actions[0], proof_obligation_id=wrong_id),
+        _return_coverage_completion_evidence(actions[1]),
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+
+
+def test_pairwise_return_coverage_gap_missing_completed_proof_id_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    pending_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    actions = build_unknown_recovery_actions([pending_reason])
+    analysis1.completed_recovery_proof_evidence = tuple(
+        _return_coverage_completion_evidence_without_proof_id(action)
+        for action in actions
+    )
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+
+
 def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summary(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = {
@@ -1033,6 +1259,41 @@ def test_pairwise_call_effect_summary_bare_completed_proof_id_does_not_recover(m
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 
+def test_pairwise_call_effect_summary_missing_completed_proof_id_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    evidence = _call_effect_summary_proof_evidence(
+        object_target_key=completed_reason.object_target_key,
+        proof_obligation_id=completed_reason.proof_obligation_id,
+    )
+    evidence.pop("proof_obligation_id", None)
+    analysis1.completed_recovery_proof_evidence = (evidence,)
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+
+
 def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
@@ -1076,6 +1337,21 @@ def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
     proof_ids = PairwiseStrategy._completed_recovery_proof_ids(analysis)
 
     assert proof_ids == (_expected_call_effect_summary_proof_id(evidence),)
+
+
+def test_call_effect_summary_producer_rejects_missing_full_proof_id():
+    evidence = _call_effect_summary_proof_evidence()
+    evidence.pop("proof_obligation_id", None)
+    analysis = FunctionReturnAnalysis(
+        function_name="func1",
+        entry_point="0x1000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
+        return_type="int",
+        completed_recovery_proof_evidence=(evidence,),
+    )
+
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis) == ()
 
 
 def test_call_effect_summary_producer_rejects_non_object_derived_evidence():
@@ -1257,6 +1533,50 @@ def test_monolithic_strategy_does_not_accept_unsat_with_return_coverage_gap():
     actions = build_unknown_recovery_actions(result.unknown_reasons)
     assert {action.status for action in actions} == {UnknownRecoveryActionStatus.PENDING_PROOF.value}
     assert all(action.proof_obligation_id is not None for action in actions)
+
+
+def test_monolithic_return_coverage_gap_completed_proofs_allow_equivalent():
+    strategy, analysis1, analysis2 = _monolithic_return_coverage_gap_setup()
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    actions = build_unknown_recovery_actions([completed_reason])
+    analysis1.completed_recovery_proof_evidence = tuple(
+        _return_coverage_completion_evidence(action)
+        for action in actions
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
+    assert result.counterexample_raw is None
+
+
+def test_monolithic_return_coverage_gap_missing_completed_proof_id_does_not_recover():
+    strategy, analysis1, analysis2 = _monolithic_return_coverage_gap_setup()
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    actions = build_unknown_recovery_actions([completed_reason])
+    analysis1.completed_recovery_proof_evidence = tuple(
+        _return_coverage_completion_evidence_without_proof_id(action)
+        for action in actions
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+    assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert result.counterexample_raw is None
 
 
 def test_monolithic_strategy_does_not_accept_unsat_with_incomplete_effect_summary():
@@ -1478,6 +1798,57 @@ def test_monolithic_call_effect_summary_bare_completed_proof_id_does_not_recover
         stage="S_MONOLITHIC_FALLBACK",
     )
     analysis1.completed_recovery_proof_ids = (completed_reason.proof_obligation_id,)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+    assert result.counterexample_raw is None
+
+
+def test_monolithic_call_effect_summary_missing_completed_proof_id_does_not_recover():
+    class _UnsatSolverRunner:
+        def __init__(self):
+            self.timeout = 5
+
+        def run_parallel(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+        def run_sequential(self, _query: str):
+            return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
+
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    formula_builder = Mock()
+    formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
+        formula="(set-logic QF_BV)\n(check-sat)",
+        return_var1="return_1",
+        return_var2="return_2",
+        constrained_fragments=[],
+        extra_vars1=[],
+        extra_vars2=[],
+        param_fragment_constrained=[],
+    )
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function1:unsupported_call_effect_summary",
+        analysis1,
+        analysis2,
+        stage="S_MONOLITHIC_FALLBACK",
+    )
+    evidence = _call_effect_summary_proof_evidence(
+        object_target_key=completed_reason.object_target_key,
+        proof_obligation_id=completed_reason.proof_obligation_id,
+    )
+    evidence.pop("proof_obligation_id", None)
+    analysis1.completed_recovery_proof_evidence = (evidence,)
 
     result = strategy.check(analysis1, analysis2)
 

@@ -17,6 +17,7 @@ from ..unknown_reason import (
     UnknownReasonId,
     UnknownReasonRecord,
     build_proof_obligation_id,
+    build_unknown_recovery_actions,
     coerce_unknown_reason_records,
     make_unknown_reason,
 )
@@ -273,7 +274,7 @@ class CheckStrategy(ABC):
                 analysis2,
                 stage=stage,
             )
-            if self._call_effect_summary_proof_is_complete(
+            if self._recovery_proof_is_complete(
                 reason_record,
                 analysis1,
                 analysis2,
@@ -281,6 +282,47 @@ class CheckStrategy(ABC):
                 continue
             unresolved.append(reason_record)
         return unresolved
+
+    def _unresolved_return_coverage_unknown_reasons(
+        self,
+        blocking_reasons: Sequence[str],
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        stage: str,
+    ) -> List[UnknownReasonRecord]:
+        unresolved: List[UnknownReasonRecord] = []
+        for blocking_reason in blocking_reasons:
+            reason_record = self._make_blocking_unsafety_unknown_reason(
+                blocking_reason,
+                analysis1,
+                analysis2,
+                stage=stage,
+            )
+            if self._recovery_proof_is_complete(
+                reason_record,
+                analysis1,
+                analysis2,
+            ):
+                continue
+            unresolved.append(reason_record)
+        return unresolved
+
+    def _recovery_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        return self._call_effect_summary_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
+        ) or self._return_coverage_proof_is_complete(
+            reason_record,
+            analysis1,
+            analysis2,
+        )
 
     def _call_effect_summary_proof_is_complete(
         self,
@@ -297,6 +339,23 @@ class CheckStrategy(ABC):
             return False
         return proof_obligation_id in self._completed_recovery_proof_ids(analysis1, analysis2)
 
+    def _return_coverage_proof_is_complete(
+        self,
+        reason_record: UnknownReasonRecord,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> bool:
+        if reason_record.reason_id != UnknownReasonId.RETURN_COVERAGE_GAP.value:
+            return False
+        completed = set(self._completed_recovery_proof_ids(analysis1, analysis2))
+        required_ids = tuple(
+            self._normalize_nested_tuple(action.proof_obligation_id)
+            for action in build_unknown_recovery_actions([reason_record])
+        )
+        if not required_ids or any(proof_id is None for proof_id in required_ids):
+            return False
+        return all(proof_id in completed for proof_id in required_ids)
+
     @classmethod
     def _completed_recovery_proof_ids(
         cls,
@@ -312,11 +371,15 @@ class CheckStrategy(ABC):
         cls,
         analysis: FunctionReturnAnalysis,
     ) -> Tuple[Tuple[Any, ...], ...]:
-        if cls._analysis_has_active_call_effect_proof_blockers(analysis):
-            return ()
         proof_ids: List[Tuple[Any, ...]] = []
-        for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
-            proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
+        evidence_records = getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+        if not cls._analysis_has_active_call_effect_proof_blockers(analysis):
+            for evidence in evidence_records:
+                proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
+                if proof_id is not None:
+                    proof_ids.append(proof_id)
+        for evidence in evidence_records:
+            proof_id = cls._return_coverage_proof_id_from_evidence(evidence)
             if proof_id is not None:
                 proof_ids.append(proof_id)
         return tuple(proof_ids)
@@ -361,7 +424,51 @@ class CheckStrategy(ABC):
             object_target_key,
         )
         provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
-        if provided_id is not None and provided_id != proof_id:
+        if provided_id is None or provided_id != proof_id:
+            return None
+        return proof_id
+
+    @classmethod
+    def _return_coverage_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:
+        if not cls._evidence_bool(evidence, "object_derived"):
+            return None
+        if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
+            return None
+        if cls._evidence_text(evidence, "reason_id") != UnknownReasonId.RETURN_COVERAGE_GAP.value:
+            return None
+        proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
+        if proof_kind != UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value:
+            return None
+        proof_stage = cls._evidence_text(evidence, "proof_stage")
+        if proof_stage not in {"return_partition_extraction", "return_guard_coverage"}:
+            return None
+        evidence_kind = cls._evidence_text(evidence, "evidence_kind")
+        if not evidence_kind:
+            return None
+        if cls._evidence_has_any(
+            evidence,
+            (
+                "sat_unsafety_reasons",
+                "coverage_gap_reasons",
+                "unsupported_effect_reasons",
+                "active_unsafety_reasons",
+                "active_coverage_gaps",
+                "active_unsupported_effects",
+            ),
+        ):
+            return None
+        object_target_key = cls._normalize_nested_tuple(cls._evidence_get(evidence, "object_target_key"))
+        if not isinstance(object_target_key, tuple):
+            return None
+        proof_id = build_proof_obligation_id(
+            UnknownReasonId.RETURN_COVERAGE_GAP.value,
+            proof_stage,
+            proof_kind,
+            evidence_kind,
+            object_target_key,
+        )
+        provided_id = cls._normalize_nested_tuple(cls._evidence_get(evidence, "proof_obligation_id"))
+        if provided_id is None or provided_id != proof_id:
             return None
         return proof_id
 

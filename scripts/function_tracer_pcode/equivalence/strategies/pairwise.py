@@ -594,15 +594,12 @@ class PairwiseStrategy(CheckStrategy):
             self._debug_print(f"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)")
         elif coverage_unsafety_reasons or equivalence_blocking_reasons:
             self._debug_print("=" * 60)
-            coverage_unknown_reasons = [
-                self._make_blocking_unsafety_unknown_reason(
-                    blocking_reason,
-                    analysis1,
-                    analysis2,
-                    stage="S_PAIRWISE",
-                )
-                for blocking_reason in coverage_unsafety_reasons
-            ]
+            coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
+                coverage_unsafety_reasons,
+                analysis1,
+                analysis2,
+                stage="S_PAIRWISE",
+            )
             unresolved_equivalence_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
                 equivalence_blocking_reasons,
                 analysis1,
@@ -621,7 +618,7 @@ class PairwiseStrategy(CheckStrategy):
             else:
                 final_is_equiv = True
                 self._debug_print(
-                    "Result: EQUIVALENT (all pairs UNSAT; call-effect summary proof complete)"
+                    "Result: EQUIVALENT (all pairs UNSAT; recovery proof complete)"
                 )
         elif unsat_count == total_pairs:
             final_is_equiv = True
