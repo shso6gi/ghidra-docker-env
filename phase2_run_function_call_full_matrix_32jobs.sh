@@ -23,7 +23,14 @@ export OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/equivalence_all/func
 export BASE_PATH="${BASE_PATH:-$SCRIPT_DIR/targets/cate1/function_call_test}"
 export PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 DEFAULT_VALIDATION_BEFORE_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/logs/function_call"
-if [[ -z "${VALIDATION_BEFORE_DIR:-}" && -d "$DEFAULT_VALIDATION_BEFORE_DIR" ]]; then
+
+baseline_log_root_has_pair_logs() {
+    local root="$1"
+    [[ -d "$root" ]] || return 1
+    [[ -n "$(find "$root" -mindepth 2 -maxdepth 2 -type f -name "*.log" -print -quit 2>/dev/null)" ]]
+}
+
+if [[ -z "${VALIDATION_BEFORE_DIR:-}" ]] && baseline_log_root_has_pair_logs "$DEFAULT_VALIDATION_BEFORE_DIR"; then
     export VALIDATION_BEFORE_DIR="$DEFAULT_VALIDATION_BEFORE_DIR"
 fi
 PHASE2_GATE_BASELINE_DIR="${VALIDATION_BEFORE_DIR:-}"
@@ -89,7 +96,7 @@ missing because the high-spec host did not have observed-v0 artifacts, copy the
 raw *.log files anyway. They can be regenerated on the review machine.
 EOF
 
-"$SCRIPT_DIR/func_call_run_matrix_all_parallel_multifunc.sh"
+bash "$SCRIPT_DIR/func_call_run_matrix_all_parallel_multifunc.sh"
 
 PHASE2_GATE_OUTPUT_DIR="${PHASE2_GATE_OUTPUT_DIR:-$OUTPUT_BASE_DIR/phase2_gate}"
 mkdir -p "$PHASE2_GATE_OUTPUT_DIR"
