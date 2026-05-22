@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 impor
     _object_target_key_is_specific,
     build_phase3_return_coverage_lane1_manifest,
     build_phase3_return_coverage_lane1_post_fix_gate,
+    main as phase3_return_coverage_lane1_main,
     validate_phase3_return_coverage_lane1_manifest,
     validate_phase3_return_coverage_lane1_post_fix_gate,
 )
@@ -830,6 +831,23 @@ def test_phase3_return_coverage_post_fix_gate_rejects_phase3_manifest_sha_mismat
     assert "phase3_pre_fix_manifest_sha256" in failed_kinds
     with pytest.raises(ValueError, match="phase3_pre_fix_manifest_sha256"):
         validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_cli_requires_phase3_manifest_sha256(capsys):
+    with pytest.raises(SystemExit) as exc:
+        phase3_return_coverage_lane1_main(
+            [
+                "--gate-stage",
+                "post-fix",
+                "--baseline-raw-dir",
+                "/tmp/nonexistent-baseline/raw",
+                "--output-dir",
+                "/tmp/nonexistent-output",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert "--phase3-manifest-sha256 is required" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

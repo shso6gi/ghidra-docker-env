@@ -609,6 +609,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.phase1_current_log_root is not None
         else None
     )
+    if args.gate_stage == "post-fix" and not args.phase3_manifest_sha256:
+        parser.error("--phase3-manifest-sha256 is required when --gate-stage=post-fix")
     if args.gate_stage == "post-fix":
         path = build_phase3_return_coverage_lane1_post_fix_gate(
             baseline_raw_dir=Path(args.baseline_raw_dir),
