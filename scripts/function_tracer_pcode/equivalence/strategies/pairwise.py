@@ -288,6 +288,8 @@ class PairwiseStrategy(CheckStrategy):
             cases2,
             symbol_replace_fn1,
             symbol_replace_fn2,
+            analysis1,
+            analysis2,
         )
         sat_unsafety_reasons.extend(coverage_unsafety_reasons)
         if "function1:return_coverage_gap" in sat_unsafety_reasons:

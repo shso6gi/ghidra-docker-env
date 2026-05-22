@@ -137,6 +137,8 @@ class MonolithicStrategy(CheckStrategy):
             cases2,
             replace1,
             replace2,
+            analysis1,
+            analysis2,
         )
         self._record_return_coverage_notes(analysis1, analysis2, reasons)
         return reasons

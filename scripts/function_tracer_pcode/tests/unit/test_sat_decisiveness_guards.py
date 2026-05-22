@@ -893,6 +893,50 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     assert "return_case_coverage_gap" in analysis1.analysis_notes
 
 
+def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    solver_runner.run_sequential.return_value = ParallelResult(
+        results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
+    )
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert analysis1.completed_recovery_proof_evidence == ()
+    evidence = analysis2.completed_recovery_proof_evidence
+    assert {item["proof_stage"] for item in evidence} == {
+        "return_partition_extraction",
+        "return_guard_coverage",
+    }
+    assert all(item["object_derived"] is True for item in evidence)
+    assert all(item["coverage_status"] == "covered" for item in evidence)
+
+    completed_reason = strategy._make_blocking_unsafety_unknown_reason(
+        "function2:return_coverage_gap",
+        analysis1,
+        analysis2,
+        stage="S_PAIRWISE",
+    )
+    expected_actions = build_unknown_recovery_actions([completed_reason])
+    assert {
+        tuple(item["proof_obligation_id"])
+        for item in evidence
+    } == {action.proof_obligation_id for action in expected_actions}
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == tuple(
+        action.proof_obligation_id for action in expected_actions
+    )
+
+    strategy.check(analysis1, analysis2)
+
+    assert len(analysis2.completed_recovery_proof_evidence) == 2
+
+
 def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()

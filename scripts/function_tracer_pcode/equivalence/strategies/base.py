@@ -131,11 +131,13 @@ class CheckStrategy(ABC):
         cases2: Sequence[Any],
         param_replace_fn1,
         param_replace_fn2,
+        analysis1: Optional[FunctionReturnAnalysis] = None,
+        analysis2: Optional[FunctionReturnAnalysis] = None,
     ) -> List[str]:
         reasons: List[str] = []
-        for label, cases, replace_fn in (
-            ("function1", cases1, param_replace_fn1),
-            ("function2", cases2, param_replace_fn2),
+        for label, cases, replace_fn, analysis in (
+            ("function1", cases1, param_replace_fn1, analysis1),
+            ("function2", cases2, param_replace_fn2, analysis2),
         ):
             status, detail = self._check_return_case_coverage_gap(
                 base_ctx,
@@ -147,9 +149,92 @@ class CheckStrategy(ABC):
                 reasons.append(f"{label}:return_coverage_gap")
             elif status == "inconclusive":
                 reasons.append(f"{label}:return_coverage_inconclusive")
+            elif (
+                status == "covered"
+                and analysis1 is not None
+                and analysis2 is not None
+                and analysis is not None
+            ):
+                self._record_completed_return_coverage_proof(
+                    label,
+                    analysis,
+                    analysis1,
+                    analysis2,
+                )
             if detail:
                 self._debug_print(detail)
         return reasons
+
+    def _record_completed_return_coverage_proof(
+        self,
+        label: str,
+        analysis: FunctionReturnAnalysis,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+    ) -> None:
+        if self._analysis_has_active_return_coverage_blockers(analysis):
+            return
+        object_target_key = self._return_coverage_object_target_key(
+            f"{label}:return_coverage_gap",
+            analysis1,
+            analysis2,
+        )
+        if object_target_key is None:
+            return
+        proof_kind = UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value
+        stages = (
+            ("return_partition_extraction", "missing_return_guard"),
+            ("return_guard_coverage", "case_guard_disjunction"),
+        )
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        }
+        records: List[Dict[str, Any]] = [
+            dict(item)
+            for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            if isinstance(item, Mapping)
+        ]
+        for proof_stage, evidence_kind in stages:
+            proof_id = build_proof_obligation_id(
+                UnknownReasonId.RETURN_COVERAGE_GAP.value,
+                proof_stage,
+                proof_kind,
+                evidence_kind,
+                object_target_key,
+            )
+            if proof_id in existing_ids:
+                continue
+            records.append(
+                {
+                    "object_derived": True,
+                    "status": "complete",
+                    "reason_id": UnknownReasonId.RETURN_COVERAGE_GAP.value,
+                    "recovery_proof_kind": proof_kind,
+                    "proof_stage": proof_stage,
+                    "evidence_kind": evidence_kind,
+                    "object_target_key": object_target_key,
+                    "proof_obligation_id": proof_id,
+                    "proof_source": "return_case_coverage_check",
+                    "coverage_status": "covered",
+                }
+            )
+            existing_ids.add(proof_id)
+        analysis.completed_recovery_proof_evidence = tuple(records)
+
+    def _analysis_has_active_return_coverage_blockers(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        return any(
+            str(note)
+            in {
+                "return_case_coverage_gap",
+                "return_case_coverage_inconclusive",
+            }
+            for note in getattr(analysis, "analysis_notes", ()) or ()
+        )
 
     def _unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         reason_kind = self._blocking_reason_kind(reason)
