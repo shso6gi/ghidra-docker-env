@@ -169,3 +169,5 @@ class QueryResult:
         self.pair_stage: Optional[str] = None
         self.blocking_reason: Optional[str] = None
         self.blocking_detail: Optional[str] = None
+        self.object_target_key = None
+        self.proof_obligation_id = None

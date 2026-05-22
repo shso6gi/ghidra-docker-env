@@ -312,6 +312,11 @@ class MonolithicStrategy(CheckStrategy):
                         reason_id,
                         stage="S_MONOLITHIC_FALLBACK",
                         evidence_refs=(str(e),),
+                        object_target_key=self._return_width_bridge_object_target_key(
+                            analysis1=analysis1,
+                            analysis2=analysis2,
+                            mismatch=e,
+                        ),
                         detail=str(e),
                     )
                 ],

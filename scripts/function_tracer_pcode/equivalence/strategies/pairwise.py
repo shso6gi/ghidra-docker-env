@@ -235,6 +235,8 @@ class PairwiseStrategy(CheckStrategy):
             solver_analysis1,
             solver_analysis2,
         )
+        base_ctx["analysis1"] = solver_analysis1
+        base_ctx["analysis2"] = solver_analysis2
         safety_checker = ExpressionSafetyChecker(
             solver_runner=self.solver_runner,
             debug_print=self._debug_print,
@@ -546,6 +548,8 @@ class PairwiseStrategy(CheckStrategy):
                         stage="S_PAIRWISE",
                         pair_or_case=pair_id,
                         evidence_refs=(result.pair_stage or "unknown", result.blocking_detail),
+                        object_target_key=getattr(result, "object_target_key", None),
+                        proof_obligation_id=getattr(result, "proof_obligation_id", None),
                         detail=result.blocking_detail,
                     )
                 )

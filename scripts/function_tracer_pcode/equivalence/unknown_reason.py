@@ -1077,7 +1077,6 @@ def build_unknown_recovery_actions(
             if (
                 record.proof_stage is not None
                 or record.evidence_kind is not None
-                or record.object_target_key is not None
                 or record.recovery_action is not None
                 or record.action_status is not None
             ):

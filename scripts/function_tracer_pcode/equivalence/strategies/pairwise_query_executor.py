@@ -20,6 +20,98 @@ def _record_return_width_block(strategy, exc: ReturnWidthMismatchError) -> None:
     stats[reason_id] = int(stats.get(reason_id, 0) or 0) + 1
 
 
+def _fallback_stable_key(value: Any):
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            return stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+    return None
+
+
+def _fallback_return_width_bridge_object_target_key(
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    pair_id: str,
+    exc: ReturnWidthMismatchError,
+) -> Tuple[Any, ...]:
+    def _width(value: Any, fallback: Any) -> Optional[int]:
+        for candidate in (value, fallback):
+            if candidate is None:
+                continue
+            try:
+                bits = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if bits > 0:
+                return bits
+        return None
+
+    return_size1 = _width(getattr(exc, "return_size1", None), base_ctx.get("return_size1"))
+    return_size2 = _width(getattr(exc, "return_size2", None), base_ctx.get("return_size2"))
+    return (
+        "return_width_bridge",
+        ("pair", pair_id),
+        ("return_widths", return_size1, return_size2),
+        _fallback_return_width_side_object_key("left", case1, return_size1),
+        _fallback_return_width_side_object_key("right", case2, return_size2),
+    )
+
+
+def _fallback_return_width_side_object_key(
+    side_label: str,
+    case,
+    return_size: Optional[int],
+) -> Tuple[Any, ...]:
+    return_info = getattr(case, "return_info", None)
+    value_expr = getattr(case, "value_expr", None)
+    try:
+        case_index = int(getattr(case, "index", -1))
+    except (TypeError, ValueError):
+        case_index = None
+    source_indices = []
+    for source_index in getattr(case, "source_indices", ()) or ():
+        try:
+            source_indices.append(int(source_index))
+        except (TypeError, ValueError):
+            continue
+    return (
+        "return_width_side",
+        side_label,
+        None,
+        ("return_size", return_size),
+        None,
+        (
+            "return_case_partition_member",
+            case_index,
+            tuple(source_indices),
+            (
+                "return_case",
+                case_index,
+                getattr(return_info, "address", None),
+                _fallback_stable_key(getattr(return_info, "pcode_op_ref", None)),
+                getattr(return_info, "pcode_identity", None),
+                getattr(return_info, "pcode_order", None),
+            ),
+            (
+                "comparison_surface",
+                getattr(getattr(case, "comparison_surface", None), "kind", None),
+                getattr(getattr(case, "comparison_surface", None), "explicit_bit_width", None),
+                getattr(getattr(case, "comparison_surface", None), "use_sign_extension", None),
+            ),
+            (
+                "value",
+                getattr(getattr(value_expr, "expr_type", None), "name", None),
+                getattr(value_expr, "operator", None),
+                getattr(value_expr, "size", None),
+                _fallback_stable_key(getattr(value_expr, "runtime_ref", None)),
+            ),
+        ),
+    )
+
+
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
     timeout = strategy.per_query_timeout_hard if use_hard_timeout else strategy.per_query_timeout
@@ -133,6 +225,23 @@ def solve_query_twostage(
         result.pair_stage = "return-width-mismatch"
         result.blocking_reason = getattr(exc, "reason_id", "return_width_bridge_missing")
         result.blocking_detail = str(exc)
+        target_key_builder = getattr(strategy, "_return_width_bridge_object_target_key", None)
+        if callable(target_key_builder):
+            result.object_target_key = target_key_builder(
+                base_ctx=base_ctx,
+                case1=case1,
+                case2=case2,
+                pair_id=pair_id,
+                mismatch=exc,
+            )
+        if result.object_target_key is None:
+            result.object_target_key = _fallback_return_width_bridge_object_target_key(
+                base_ctx,
+                case1,
+                case2,
+                pair_id,
+                exc,
+            )
         return result
 
     full_query = strategy._build_pair_query(

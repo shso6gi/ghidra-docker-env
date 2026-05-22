@@ -18,6 +18,10 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult, ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
+from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    build_unknown_recovery_actions,
+    make_unknown_reason,
+)
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CanonicalLocation,
     EffectSummary,
@@ -841,8 +845,35 @@ def test_pairwise_executor_returns_unknown_for_width_mismatch_without_overlap_qu
     assert result.is_equivalent is None
     assert result.pair_stage == "return-width-mismatch"
     assert result.blocking_reason == "return_width_bridge_missing"
+    assert result.object_target_key is not None
+    assert result.object_target_key[0] == "return_width_bridge"
+    assert ("return_widths", 64, 32) in result.object_target_key
+    assert result.object_target_key[3][0] == "return_width_side"
+    assert result.object_target_key[4][0] == "return_width_side"
     assert _Strategy._active_normalization_stats["unknown_results"] == 1
     assert _Strategy._active_normalization_stats["return_width_bridge_missing"] == 1
+
+    reason = make_unknown_reason(
+        result.blocking_reason,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=(result.pair_stage, result.blocking_detail),
+        object_target_key=result.object_target_key,
+        detail=result.blocking_detail,
+    )
+    actions = build_unknown_recovery_actions([reason])
+
+    assert {action.proof_stage for action in actions} == {
+        "abi_relation",
+        "high_bit_relation",
+    }
+    assert {action.proof_kind for action in actions} == {
+        "abi_relation_proof",
+        "high_bit_proof",
+    }
+    assert all(action.object_target_key == result.object_target_key for action in actions)
+    assert all(action.proof_obligation_id is not None for action in actions)
+    assert all(action.proof_obligation_id[-1] == result.object_target_key for action in actions)
 
 
 def test_build_normalized_inequality_query_coerces_normalized_values_to_return_width():

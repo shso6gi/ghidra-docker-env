@@ -712,6 +712,117 @@ class CheckStrategy(ABC):
             self._return_guard_disjunction_object_key(analysis),
         )
 
+    def _return_width_bridge_object_target_key(
+        self,
+        *,
+        analysis1: Optional[FunctionReturnAnalysis] = None,
+        analysis2: Optional[FunctionReturnAnalysis] = None,
+        base_ctx: Optional[Dict[str, Any]] = None,
+        case1: Any = None,
+        case2: Any = None,
+        pair_id: Optional[str] = None,
+        mismatch: Any = None,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for return-width bridge proof backlog."""
+
+        if base_ctx is not None:
+            analysis1 = analysis1 or base_ctx.get("analysis1")
+            analysis2 = analysis2 or base_ctx.get("analysis2")
+        return_size1 = self._coerce_return_width(
+            getattr(mismatch, "return_size1", None)
+            if mismatch is not None
+            else None,
+            (base_ctx or {}).get("return_size1") if base_ctx is not None else None,
+        )
+        return_size2 = self._coerce_return_width(
+            getattr(mismatch, "return_size2", None)
+            if mismatch is not None
+            else None,
+            (base_ctx or {}).get("return_size2") if base_ctx is not None else None,
+        )
+        return (
+            "return_width_bridge",
+            ("pair", pair_id),
+            ("return_widths", return_size1, return_size2),
+            self._return_width_bridge_side_object_key(
+                "left",
+                analysis1,
+                case1,
+                return_size1,
+            ),
+            self._return_width_bridge_side_object_key(
+                "right",
+                analysis2,
+                case2,
+                return_size2,
+            ),
+        )
+
+    @staticmethod
+    def _coerce_return_width(*values: Any) -> Optional[int]:
+        for value in values:
+            if value is None:
+                continue
+            try:
+                bits = int(value)
+            except (TypeError, ValueError):
+                continue
+            if bits > 0:
+                return bits
+        return None
+
+    def _return_width_bridge_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+        case: Any,
+        return_size: Optional[int],
+    ) -> Tuple[Any, ...]:
+        return_info = getattr(case, "return_info", None)
+        return (
+            "return_width_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            ("return_size", return_size),
+            self._return_storage_object_key(analysis) if analysis is not None else None,
+            self._return_case_partition_member_object_key(case, return_info),
+        )
+
+    def _return_case_partition_member_object_key(
+        self,
+        case: Any,
+        return_info: Any,
+    ) -> Tuple[Any, ...]:
+        case_index = getattr(case, "index", None)
+        try:
+            normalized_case_index = int(case_index)
+        except (TypeError, ValueError):
+            normalized_case_index = None
+        source_indices = []
+        for source_index in getattr(case, "source_indices", ()) or ():
+            try:
+                source_indices.append(int(source_index))
+            except (TypeError, ValueError):
+                continue
+        return (
+            "return_case_partition_member",
+            normalized_case_index,
+            tuple(source_indices),
+            self._return_case_object_key(
+                normalized_case_index if normalized_case_index is not None else -1,
+                return_info,
+            )
+            if return_info is not None
+            else None,
+            (
+                "comparison_surface",
+                getattr(getattr(case, "comparison_surface", None), "kind", None),
+                getattr(getattr(case, "comparison_surface", None), "explicit_bit_width", None),
+                getattr(getattr(case, "comparison_surface", None), "use_sign_extension", None),
+            ),
+            ("value", self._expression_runtime_object_key(getattr(case, "value_expr", None))),
+        )
+
     def _return_storage_object_key(self, analysis: FunctionReturnAnalysis) -> Tuple[Any, ...]:
         surface = None
         surface_getter = getattr(analysis, "get_comparison_surface", None)
