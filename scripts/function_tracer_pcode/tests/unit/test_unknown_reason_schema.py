@@ -500,6 +500,38 @@ def test_equivalence_result_allows_equivalent_decision_when_proof_is_complete():
     assert result.unknown_recovery_actions[0].status == UnknownRecoveryActionStatus.PROOF_COMPLETE.value
 
 
+def test_equivalence_result_serializes_completed_recovery_proof_evidence():
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.RETURN_COVERAGE_GAP.value,
+        "recovery_proof_kind": UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+        "proof_stage": "return_guard_coverage",
+        "evidence_kind": "case_guard_disjunction",
+        "object_target_key": ("return_coverage", "function1", ("function_ref", ("function", "B11", 0x1000))),
+        "proof_obligation_id": (
+            UnknownReasonId.RETURN_COVERAGE_GAP.value,
+            "return_guard_coverage",
+            UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+            "case_guard_disjunction",
+            ("return_coverage", "function1", ("function_ref", ("function", "B11", 0x1000))),
+        ),
+    }
+    result = EquivalenceResult(
+        is_equivalent=True,
+        function1_name="left",
+        function2_name="right",
+        binary1_name="left.bin",
+        binary2_name="right.bin",
+        solver_results=_unknown_solver_result(),
+        completed_recovery_proof_evidence=[{"side": "function1", "evidence": evidence}],
+    )
+
+    assert result.to_dict()["completed_recovery_proof_evidence"] == [
+        {"side": "function1", "evidence": evidence}
+    ]
+
+
 class _FakeCase:
     value_expr = Expression.constant(1, size=4)
     conditions = []

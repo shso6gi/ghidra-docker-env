@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -19,7 +20,9 @@ from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 impor
     FUNCTION_CALL_BINARY_NAMES,
     _object_target_key_is_specific,
     build_phase3_return_coverage_lane1_manifest,
+    build_phase3_return_coverage_lane1_post_fix_gate,
     validate_phase3_return_coverage_lane1_manifest,
+    validate_phase3_return_coverage_lane1_post_fix_gate,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
@@ -230,6 +233,115 @@ def _write_eq_log(root: Path, function: str, left: str, right: str):
             ]
         )
     )
+
+
+def _write_completed_eq_log(root: Path, frozen_entry, evidence_updates=None):
+    function = frozen_entry["function"]
+    left = frozen_entry["expected_observed_left_binary_id"]
+    right = frozen_entry["expected_observed_right_binary_id"]
+    path = root / function / f"{function}_{left}_{right}.log"
+    payload = _payload(
+        function,
+        frozen_entry["expected_observed_binary1_name"],
+        frozen_entry["expected_observed_binary2_name"],
+        [],
+    )
+    payload["is_equivalent"] = True
+    payload["decision_gated_by_pending_proof"] = False
+    payload["debug_trace"]["final_result"] = True
+    payload["debug_trace"]["attempts"][0]["result"] = True
+    payload["debug_trace"]["attempts"][0]["unknown_reasons"] = []
+    payload["unknown_reasons"] = []
+    payload["unknown_recovery_actions"] = []
+    evidence_records = []
+    for action in frozen_entry["current_observation"]["proof_actions"]:
+        if action["reason_id"] != "return_coverage_gap":
+            continue
+        evidence = {
+            "object_derived": True,
+            "status": "complete",
+            "reason_id": action["reason_id"],
+            "recovery_proof_kind": action["proof_kind"],
+            "proof_stage": action["proof_stage"],
+            "evidence_kind": action["evidence_kind"],
+            "object_target_key": action["object_target_key"],
+            "proof_obligation_id": action["proof_obligation_id"],
+        }
+        if evidence_updates:
+            evidence.update(evidence_updates)
+        evidence_records.append(
+            {
+                "side": action["object_target_key"][1],
+                "function_name": function,
+                "binary_name": frozen_entry["expected_observed_binary2_name"],
+                "binary_id": action["object_target_key"][2][1][1],
+                "evidence": evidence,
+            }
+        )
+    payload["completed_recovery_proof_evidence"] = evidence_records
+    _write_payload_log(path, payload)
+
+
+def _replace_nested_value(value, old, new):
+    if isinstance(value, list):
+        return [_replace_nested_value(item, old, new) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_nested_value(item, old, new) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _replace_nested_value(item, old, new)
+            for key, item in value.items()
+        }
+    if value == old:
+        return new
+    return value
+
+
+def _sha256_path(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _retarget_frozen_return_coverage_evidence(entry, old_binary_id, new_binary_id):
+    observation = entry["current_observation"]
+    for record in observation["reason_records"]:
+        if record.get("reason_id") == "return_coverage_gap":
+            record["object_target_key"] = _replace_nested_value(
+                record["object_target_key"],
+                old_binary_id,
+                new_binary_id,
+            )
+    for action in observation["proof_actions"]:
+        if action.get("reason_id") == "return_coverage_gap":
+            action["object_target_key"] = _replace_nested_value(
+                action["object_target_key"],
+                old_binary_id,
+                new_binary_id,
+            )
+            action["proof_obligation_id"] = _replace_nested_value(
+                action["proof_obligation_id"],
+                old_binary_id,
+                new_binary_id,
+            )
+
+
+def _retarget_implementation_return_coverage_evidence(
+    manifest,
+    entry_id,
+    old_binary_id,
+    new_binary_id,
+):
+    implementation = manifest["implementation_manifest"]
+    implementation_entry = next(
+        entry
+        for entry in implementation["expected_movement_entries"]
+        if entry["id"] == entry_id
+    )
+    for field_name in ("expected_return_coverage_targets", "required_completion_actions"):
+        implementation_entry[field_name] = _replace_nested_value(
+            implementation_entry[field_name],
+            old_binary_id,
+            new_binary_id,
+        )
 
 
 def _write_log_with_payload_names(
@@ -454,6 +566,17 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
         "pending_proof_keeps_final_result": "UNKNOWN",
         "required_recovery_action": "return_coverage_proof_required",
     }
+    recursive_implementation = next(
+        entry
+        for entry in implementation["expected_movement_entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    assert recursive_implementation["expected_return_coverage_targets"]
+    assert recursive_implementation["required_completion_actions"]
+    assert {
+        action["proof_stage"]
+        for action in recursive_implementation["required_completion_actions"]
+    } == {"return_partition_extraction", "return_guard_coverage"}
     pre_fix_gate = manifest["pre_fix_regression_gate"]
     assert pre_fix_gate["ready"] is True
     assert pre_fix_gate["summary"]["failed_kinds"] == []
@@ -462,6 +585,847 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
         check["kind"] for check in pre_fix_gate["checks"]
     }
     validate_phase3_return_coverage_lane1_manifest(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_accepts_completed_eq_with_frozen_proof_ids(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is True
+    assert manifest["post_fix_regression_gate"]["summary"]["failed_kinds"] == []
+    statuses = {entry["function"]: entry["post_fix_status"] for entry in manifest["entries"]}
+    assert statuses == {
+        "fc_recursive_sum": "completed_recovery",
+        "fc_is_even": "pending_proof",
+    }
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    completed = recursive["current_observation"]["completed_recovery_proof_evidence"]
+    assert {item["proof_stage"] for item in completed} == {
+        "return_partition_extraction",
+        "return_guard_coverage",
+    }
+    assert {
+        json.dumps(item["proof_obligation_id"], sort_keys=True)
+        for item in completed
+    } == {
+        json.dumps(action["proof_obligation_id"], sort_keys=True)
+        for action in frozen_recursive["current_observation"]["proof_actions"]
+    }
+    validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_eq_without_completed_proof(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    _write_eq_log(current_root, "fc_recursive_sum", "B11", "B15")
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "failed"
+    assert "return_coverage_completed_proof_required" in recursive["post_fix_failures"]
+    assert manifest["post_fix_regression_gate"]["summary"]["failed_kinds"] == [
+        "return_coverage_post_fix_expected_movement"
+    ]
+    with pytest.raises(ValueError, match="return_coverage_post_fix_expected_movement"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+@pytest.mark.parametrize("blocker_field", ["active_coverage_gaps", "active_unsupported_effects"])
+def test_phase3_return_coverage_post_fix_gate_rejects_completed_eq_with_active_blockers(
+    tmp_path, blocker_field
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _write_completed_eq_log(
+        current_root,
+        frozen_recursive,
+        evidence_updates={blocker_field: [{"status": "active"}]},
+    )
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "failed"
+    assert {
+        failure.split(":", 1)[0]
+        for failure in recursive["post_fix_failures"]
+    } == {"return_coverage_completed_proof_required"}
+    assert all(
+        item["evidence"][blocker_field] == [{"status": "active"}]
+        for item in recursive["current_observation"]["completed_recovery_proof_evidence"]
+    )
+    assert manifest["post_fix_regression_gate"]["summary"]["failed_kinds"] == [
+        "return_coverage_post_fix_expected_movement"
+    ]
+    with pytest.raises(ValueError, match="return_coverage_post_fix_expected_movement"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_empty_pre_fix_manifest(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    empty_pre_fix_path = tmp_path / "empty_phase3_pre_fix.json"
+    empty_pre_fix_path.write_text(json.dumps({"entries": [], "retired_transitions": []}))
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=empty_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(empty_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    assert manifest["entries"] == []
+    assert manifest["retired_transitions"] == []
+    failed_kinds = set(manifest["post_fix_regression_gate"]["summary"]["failed_kinds"])
+    assert {
+        "phase3_pre_fix_entries_non_empty",
+        "phase3_pre_fix_entries_exact_set",
+        "phase3_pre_fix_implementation_manifest_available",
+        "phase3_pre_fix_manifest_kind",
+        "phase3_pre_fix_manifest_ready",
+        "phase3_pre_fix_retired_transitions_non_empty",
+        "phase3_pre_fix_retired_transitions_exact_set",
+    }.issubset(failed_kinds)
+    with pytest.raises(ValueError, match="phase3_pre_fix_entries_non_empty"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_phase3_manifest_sha_mismatch(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256="definitely-not-the-frozen-manifest-sha256",
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_manifest_sha256" in failed_kinds
+    with pytest.raises(ValueError, match="phase3_pre_fix_manifest_sha256"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation, expected_failure",
+    [
+        (
+            "empty_proof_actions",
+            "phase3_pre_fix_entry_has_proof_actions",
+        ),
+        (
+            "missing_proof_ids",
+            "phase3_pre_fix_entry_has_return_coverage_completion_proof_ids",
+        ),
+    ],
+)
+def test_phase3_return_coverage_post_fix_gate_rejects_pre_fix_manifest_without_frozen_proofs(
+    tmp_path, mutation, expected_failure
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_actions = pre_fix_manifest["entries"][0]["current_observation"]["proof_actions"]
+    if mutation == "empty_proof_actions":
+        pre_fix_manifest["entries"][0]["current_observation"]["proof_actions"] = []
+    else:
+        for action in frozen_actions:
+            action.pop("proof_obligation_id", None)
+            action["raw_proof_obligation_id_present"] = False
+    invalid_pre_fix_path = tmp_path / f"invalid_phase3_pre_fix_{mutation}.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    assert expected_failure in manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match=expected_failure):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_partial_frozen_completion_stage_set(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    frozen_recursive["current_observation"]["proof_actions"] = [
+        action
+        for action in frozen_recursive["current_observation"]["proof_actions"]
+        if action["proof_stage"] == "return_partition_extraction"
+    ]
+    invalid_pre_fix_path = tmp_path / "partial_stage_phase3_pre_fix.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_entry_has_complete_return_coverage_completion_proof_ids" in failed_kinds
+    assert "return_coverage_post_fix_expected_movement" in failed_kinds
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "failed"
+    assert (
+        "return_coverage_completed_proof_required:"
+        "return_guard_coverage:case_guard_disjunction"
+    ) in recursive["post_fix_failures"]
+    completed = recursive["current_observation"]["completed_recovery_proof_evidence"]
+    assert {item["proof_stage"] for item in completed} == {"return_partition_extraction"}
+    with pytest.raises(
+        ValueError,
+        match="phase3_pre_fix_entry_has_complete_return_coverage_completion_proof_ids",
+    ):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_missing_expected_target_ref(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_even = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_is_even"
+    )
+    frozen_even["current_observation"]["reason_records"] = [
+        record
+        for record in frozen_even["current_observation"]["reason_records"]
+        if record["evidence_refs"] != ["function2:return_coverage_gap"]
+    ]
+    frozen_even["current_observation"]["proof_actions"] = [
+        action
+        for action in frozen_even["current_observation"]["proof_actions"]
+        if action["evidence_refs"] != ["function2:return_coverage_gap"]
+    ]
+    invalid_pre_fix_path = tmp_path / "missing_expected_target_phase3_pre_fix.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_entry_expected_return_coverage_targets_resolved" in failed_kinds
+    failed_checks = [
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_entry_expected_return_coverage_targets_resolved"
+        and check["status"] == "failed"
+    ]
+    assert failed_checks[0]["missing_evidence_refs"] == [["function2:return_coverage_gap"]]
+    with pytest.raises(
+        ValueError,
+        match="phase3_pre_fix_entry_expected_return_coverage_targets_resolved",
+    ):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "changed_required_evidence"])
+def test_phase3_return_coverage_post_fix_gate_rejects_mutated_expected_movements_on_eq_path(
+    tmp_path,
+    mutation,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    if mutation == "missing":
+        frozen_recursive["expected_movements"] = []
+    else:
+        movements = [dict(item) for item in frozen_recursive["expected_movements"]]
+        movements[1]["required_evidence"] = [
+            "wrong_evidence",
+            "tail_or_default_return_value",
+            "return_storage",
+        ]
+        frozen_recursive["expected_movements"] = movements
+    invalid_pre_fix_path = tmp_path / f"mutated_expected_movements_{mutation}.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_entry_expected_movements_match_definition" in failed_kinds
+    assert "phase3_pre_fix_entry_expected_movements_match_implementation" in failed_kinds
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "completed_recovery"
+    movement_check = next(
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_entry_expected_movements_match_definition"
+        and check["entry"]["function"] == "fc_recursive_sum"
+    )
+    assert movement_check["status"] == "failed"
+    if mutation == "missing":
+        assert movement_check["actual_count"] == 0
+    else:
+        assert movement_check["actual_movements"][1]["required_evidence"] == [
+            "wrong_evidence",
+            "tail_or_default_return_value",
+            "return_storage",
+        ]
+    with pytest.raises(ValueError, match="phase3_pre_fix_entry_expected_movements_match_definition"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "changed_required_evidence"])
+def test_phase3_return_coverage_post_fix_gate_rejects_mutated_expected_movements_without_implementation_manifest(
+    tmp_path,
+    mutation,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    pre_fix_manifest.pop("implementation_manifest")
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    if mutation == "missing":
+        frozen_recursive["expected_movements"] = []
+    else:
+        movements = [dict(item) for item in frozen_recursive["expected_movements"]]
+        movements[1]["required_evidence"] = [
+            "wrong_evidence",
+            "tail_or_default_return_value",
+            "return_storage",
+        ]
+        frozen_recursive["expected_movements"] = movements
+    invalid_pre_fix_path = (
+        tmp_path / f"missing_implementation_mutated_expected_movements_{mutation}.json"
+    )
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    summary = manifest["post_fix_regression_gate"]["summary"]
+    assert summary["not_evaluated"] == 0
+    failed_kinds = summary["failed_kinds"]
+    assert "phase3_pre_fix_implementation_manifest_available" in failed_kinds
+    assert "phase3_pre_fix_entry_expected_movements_match_definition" in failed_kinds
+    assert "phase3_pre_fix_implementation_expected_movements_match_definition" in failed_kinds
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "completed_recovery"
+    with pytest.raises(ValueError, match="phase3_pre_fix_implementation_manifest_available"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_self_consistent_target_tampering(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _retarget_frozen_return_coverage_evidence(frozen_recursive, "B15", "B16")
+    invalid_pre_fix_path = tmp_path / "retargeted_concrete_evidence_phase3_pre_fix.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_entry_return_coverage_targets_match_implementation" in failed_kinds
+    assert "phase3_pre_fix_entry_required_completion_actions_match_implementation" in failed_kinds
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "completed_recovery"
+    target_check = next(
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_entry_return_coverage_targets_match_implementation"
+        and check["entry"]["function"] == "fc_recursive_sum"
+    )
+    assert target_check["status"] == "failed"
+    assert "B15" in json.dumps(target_check["expected_targets"])
+    assert "B16" in json.dumps(target_check["actual_targets"])
+    with pytest.raises(
+        ValueError,
+        match="phase3_pre_fix_entry_required_completion_actions_match_implementation",
+    ):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_requires_sha_for_self_consistent_manifest_tampering(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _retarget_frozen_return_coverage_evidence(frozen_recursive, "B15", "B16")
+    _retarget_implementation_return_coverage_evidence(
+        pre_fix_manifest,
+        frozen_recursive["id"],
+        "B15",
+        "B16",
+    )
+    invalid_pre_fix_path = (
+        tmp_path / "self_consistent_retargeted_concrete_evidence_phase3_pre_fix.json"
+    )
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_manifest_sha256_required" in failed_kinds
+    assert "phase3_pre_fix_entry_return_coverage_targets_match_implementation" not in failed_kinds
+    assert "phase3_pre_fix_entry_required_completion_actions_match_implementation" not in failed_kinds
+    recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
+    assert recursive["post_fix_status"] == "completed_recovery"
+    with pytest.raises(ValueError, match="phase3_pre_fix_manifest_sha256_required"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_missing_representative_entry(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    pre_fix_manifest["entries"] = [
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] != "fc_is_even"
+    ]
+    invalid_pre_fix_path = tmp_path / "missing_representative_phase3_pre_fix.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+    _write_completed_eq_log(current_root, frozen_recursive)
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_entries_exact_set" in failed_kinds
+    assert "phase3_pre_fix_implementation_entries_consistent" in failed_kinds
+    exact_check = next(
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_entries_exact_set"
+    )
+    assert exact_check["missing"] == [
+        {
+            "id": "representative-return-coverage-gap-even-both-sides",
+            "function": "fc_is_even",
+            "binary_pair": "B11_B12",
+        }
+    ]
+    assert [
+        (entry["id"], entry["post_fix_status"])
+        for entry in manifest["entries"]
+    ] == [("representative-return-coverage-gap-recursive-simple", "completed_recovery")]
+    with pytest.raises(ValueError, match="phase3_pre_fix_entries_exact_set"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_rejects_missing_retired_transition(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    pre_fix_manifest["retired_transitions"] = pre_fix_manifest["retired_transitions"][:1]
+    invalid_pre_fix_path = tmp_path / "missing_retired_transition_phase3_pre_fix.json"
+    invalid_pre_fix_path.write_text(json.dumps(pre_fix_manifest))
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=invalid_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(invalid_pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is False
+    failed_kinds = manifest["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    assert "phase3_pre_fix_retired_transitions_exact_set" in failed_kinds
+    assert "phase3_pre_fix_implementation_retired_transitions_consistent" in failed_kinds
+    exact_check = next(
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_retired_transitions_exact_set"
+    )
+    assert exact_check["missing"] == [
+        {
+            "id": "retired-inconclusive-reclassified-to-gap-odd-B11-B16",
+            "function": "fc_is_odd",
+            "binary_pair": "B11_B16",
+        },
+        {
+            "id": "retired-inconclusive-reclassified-to-gap-odd-B12-B16",
+            "function": "fc_is_odd",
+            "binary_pair": "B12_B16",
+        },
+    ]
+    assert len(manifest["retired_transitions"]) == 1
+    with pytest.raises(ValueError, match="phase3_pre_fix_retired_transitions_exact_set"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
 
 
 def test_phase3_return_coverage_pre_fix_gate_checks_phase1_positive_negative(tmp_path):

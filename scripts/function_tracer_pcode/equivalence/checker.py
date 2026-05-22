@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """等価性判定メインロジック（Stage/Phase ループ骨格版）"""
 
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass
 import time
@@ -920,7 +920,13 @@ class EquivalenceChecker:
                 pairwise_debug_stats=strategy_result.pairwise_debug_stats,
                 unknown_reasons=strategy_result.unknown_reasons,
                 sat_pair_info=strategy_result.sat_pair_info,
-                normalization_rules=strategy_result.normalization_rules
+                normalization_rules=strategy_result.normalization_rules,
+                completed_recovery_proof_evidence=self._completed_recovery_proof_payload(
+                    analysis1,
+                    analysis2,
+                    binary1_name,
+                    binary2_name,
+                ),
             )
         
         except Exception as e:
@@ -935,6 +941,32 @@ class EquivalenceChecker:
                 type_fix_result, retry_count,
                 original_signature1, original_signature2
             )
+
+    def _completed_recovery_proof_payload(
+        self,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        binary1_name: str,
+        binary2_name: str,
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for side, binary_name, analysis in (
+            ("function1", binary1_name, analysis1),
+            ("function2", binary2_name, analysis2),
+        ):
+            for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+                if not isinstance(evidence, Mapping):
+                    continue
+                records.append(
+                    {
+                        "side": side,
+                        "function_name": analysis.function_name,
+                        "binary_name": binary_name,
+                        "binary_id": getattr(analysis, "binary_id", None),
+                        "evidence": dict(evidence),
+                    }
+                )
+        return records
     
     def _format_counterexample(
         self,

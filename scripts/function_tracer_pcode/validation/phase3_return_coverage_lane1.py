@@ -40,6 +40,14 @@ TARGET_REASON_IDS = ("return_coverage_gap",)
 OBSERVED_RETURN_REASON_IDS = ("return_coverage_gap", "return_coverage_inconclusive")
 RETIRED_REASON_IDS = ("return_coverage_inconclusive",)
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
+RETURN_COVERAGE_COMPLETION_PROOF_STAGES = (
+    "return_partition_extraction",
+    "return_guard_coverage",
+)
+RETURN_COVERAGE_COMPLETION_EVIDENCE_KIND_BY_STAGE = {
+    "return_partition_extraction": "missing_return_guard",
+    "return_guard_coverage": "case_guard_disjunction",
+}
 RETURN_COVERAGE_GAP_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
     "return_coverage_gap",
@@ -437,9 +445,122 @@ def validate_phase3_return_coverage_lane1_manifest(manifest: Mapping[str, Any]) 
     raise ValueError(f"Phase 3 lane 1 representative manifest is not ready: {', '.join(failures)}")
 
 
+def build_phase3_return_coverage_lane1_post_fix_gate(
+    *,
+    baseline_raw_dir: Path,
+    output_dir: Path,
+    current_log_roots: Mapping[str, Path],
+    baseline_log_roots: Mapping[str, Path],
+    phase1_dir: Optional[Path] = None,
+    phase1_current_log_roots: Optional[Mapping[str, Path]] = None,
+    phase3_manifest_path: Optional[Path] = None,
+    phase3_manifest_sha256: Optional[str] = None,
+) -> Path:
+    raw_dir = Path(baseline_raw_dir)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    baseline_manifest = _read_json(raw_dir / "artifact_manifest.json")
+    current_records = _records_by_key(current_log_roots)
+    baseline_records = _records_by_key(baseline_log_roots)
+    phase3_manifest, phase3_ref = _load_phase3_lane1_manifest(
+        raw_dir=raw_dir,
+        explicit_path=phase3_manifest_path,
+    )
+    frozen_entries = tuple(phase3_manifest.get("entries") or ())
+    frozen_transitions = tuple(phase3_manifest.get("retired_transitions") or ())
+    phase3_manifest_checks = _phase3_pre_fix_manifest_checks(
+        phase3_manifest=phase3_manifest,
+        phase3_manifest_ref=phase3_ref,
+        expected_phase3_manifest_sha256=phase3_manifest_sha256,
+        frozen_entries=frozen_entries,
+        frozen_transitions=frozen_transitions,
+    )
+    entries = [
+        _materialize_post_fix_entry(raw_entry, current_records)
+        for raw_entry in frozen_entries
+        if isinstance(raw_entry, Mapping)
+    ]
+    transition_entries = [
+        _materialize_retired_transition(raw_entry, current_records, baseline_records)
+        for raw_entry in frozen_transitions
+        if isinstance(raw_entry, Mapping)
+    ]
+    retired_reason_inventory = _retired_reason_inventory(
+        current_records=current_records,
+        baseline_records=baseline_records,
+        transition_entries=transition_entries,
+    )
+    post_fix_gate = _post_fix_regression_gate(
+        entries=entries,
+        transition_entries=transition_entries,
+        retired_reason_inventory=retired_reason_inventory,
+        phase1_dir=Path(phase1_dir) if phase1_dir is not None else raw_dir.parent / "phase1",
+        current_log_roots=current_log_roots,
+        phase1_current_log_roots=phase1_current_log_roots,
+        baseline_log_roots=baseline_log_roots,
+        phase3_manifest_ref=phase3_ref,
+        phase3_manifest_checks=phase3_manifest_checks,
+    )
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "manifest_kind": "phase3_return_coverage_lane1_post_fix_gate",
+        "artifact_role": "derived_audit_post_fix_gate",
+        "baseline_id": baseline_manifest.get("baseline_id") or MISSING_SENTINEL,
+        "baseline_git_head": baseline_manifest.get("git_head") or MISSING_SENTINEL,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "target_reason_ids": list(TARGET_REASON_IDS),
+        "retired_reason_ids": list(RETIRED_REASON_IDS),
+        "baseline_raw_artifact_ref": _file_ref(raw_dir / "artifact_manifest.json"),
+        "phase3_pre_fix_manifest_ref": phase3_ref,
+        "current_log_roots": {
+            category: str(path)
+            for category, path in sorted(current_log_roots.items())
+        },
+        "baseline_log_roots": {
+            category: str(path)
+            for category, path in sorted(baseline_log_roots.items())
+        },
+        "post_fix_policy": {
+            "unknown_with_pending_proof": "accepted_pending_proof",
+            "eq_requires_completed_recovery_proof": True,
+            "completed_proof_id_source": "pre_fix_manifest_current_observation",
+            "reject_eq_with_active_return_coverage_reason": True,
+            "retired_inconclusive_stays_retired": True,
+        },
+        "post_fix_regression_gate": post_fix_gate,
+        "phase3_lane1_post_fix_ready": post_fix_gate["ready"],
+        "entries": entries,
+        "retired_reason_inventory": retired_reason_inventory,
+        "retired_transitions": transition_entries,
+    }
+    path = output / "return_coverage_lane1_post_fix_gate.json"
+    _write_json(path, manifest)
+    return path
+
+
+def validate_phase3_return_coverage_lane1_post_fix_gate(manifest: Mapping[str, Any]) -> None:
+    if manifest.get("phase3_lane1_post_fix_ready") is True:
+        return
+    gate = manifest.get("post_fix_regression_gate")
+    failures = []
+    if isinstance(gate, Mapping):
+        summary = gate.get("summary")
+        if isinstance(summary, Mapping):
+            failures.extend(str(kind) for kind in (summary.get("failed_kinds") or ()))
+    if not failures:
+        raise ValueError("Phase 3 lane 1 post-fix gate is false without failure details")
+    raise ValueError(f"Phase 3 lane 1 post-fix gate is not ready: {', '.join(failures)}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build Phase 3 lane 1 return coverage representative manifest.",
+    )
+    parser.add_argument(
+        "--gate-stage",
+        choices=("pre-fix", "post-fix"),
+        default="pre-fix",
+        help="which Phase 3 lane 1 gate artifact to build",
     )
     parser.add_argument("--baseline-raw-dir", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -469,22 +590,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="CATEGORY=PATH",
         help="current log root for Phase 1 positive/negative gates; defaults to --current-log-root",
     )
+    parser.add_argument(
+        "--phase3-manifest",
+        default=None,
+        help="frozen Phase 3 lane 1 pre-fix manifest used by the post-fix gate",
+    )
+    parser.add_argument(
+        "--phase3-manifest-sha256",
+        default=None,
+        help="required expected sha256 of the frozen Phase 3 lane 1 pre-fix manifest for post-fix gate",
+    )
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
-    path = build_phase3_return_coverage_lane1_manifest(
-        baseline_raw_dir=Path(args.baseline_raw_dir),
-        output_dir=Path(args.output_dir),
-        current_log_roots=_parse_roots(args.current_log_root),
-        baseline_log_roots=_parse_roots(args.baseline_log_root),
-        phase1_dir=Path(args.phase1_dir) if args.phase1_dir else None,
-        phase1_current_log_roots=(
-            _parse_roots(args.phase1_current_log_root)
-            if args.phase1_current_log_root is not None
-            else None
-        ),
+    current_roots = _parse_roots(args.current_log_root)
+    baseline_roots = _parse_roots(args.baseline_log_root)
+    phase1_current_roots = (
+        _parse_roots(args.phase1_current_log_root)
+        if args.phase1_current_log_root is not None
+        else None
     )
+    if args.gate_stage == "post-fix":
+        path = build_phase3_return_coverage_lane1_post_fix_gate(
+            baseline_raw_dir=Path(args.baseline_raw_dir),
+            output_dir=Path(args.output_dir),
+            current_log_roots=current_roots,
+            baseline_log_roots=baseline_roots,
+            phase1_dir=Path(args.phase1_dir) if args.phase1_dir else None,
+            phase1_current_log_roots=phase1_current_roots,
+            phase3_manifest_path=Path(args.phase3_manifest) if args.phase3_manifest else None,
+            phase3_manifest_sha256=args.phase3_manifest_sha256,
+        )
+    else:
+        path = build_phase3_return_coverage_lane1_manifest(
+            baseline_raw_dir=Path(args.baseline_raw_dir),
+            output_dir=Path(args.output_dir),
+            current_log_roots=current_roots,
+            baseline_log_roots=baseline_roots,
+            phase1_dir=Path(args.phase1_dir) if args.phase1_dir else None,
+            phase1_current_log_roots=phase1_current_roots,
+        )
     if args.require_ready:
-        validate_phase3_return_coverage_lane1_manifest(_read_json(path))
+        if args.gate_stage == "post-fix":
+            validate_phase3_return_coverage_lane1_post_fix_gate(_read_json(path))
+        else:
+            validate_phase3_return_coverage_lane1_manifest(_read_json(path))
     print(path)
     return 0
 
@@ -516,6 +665,10 @@ def _implementation_manifest(
                 "binary_pair": entry.get("binary_pair"),
                 "record_case_stage_aggregation_units": _movement_units(entry.get("expected_movements") or ()),
                 "expected_movements": entry.get("expected_movements") or (),
+                "expected_return_coverage_targets": _canonical_return_coverage_targets_for_entry(entry),
+                "required_completion_actions": _canonical_return_coverage_completion_actions(
+                    _frozen_required_return_coverage_actions(entry)
+                ),
             }
             for entry in entries
         ],
@@ -601,6 +754,718 @@ def _pre_fix_regression_gate(
     }
 
 
+def _post_fix_regression_gate(
+    *,
+    entries: Sequence[Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+    retired_reason_inventory: Mapping[str, Any],
+    phase1_dir: Path,
+    current_log_roots: Mapping[str, Path],
+    phase1_current_log_roots: Optional[Mapping[str, Path]],
+    baseline_log_roots: Mapping[str, Path],
+    phase3_manifest_ref: Mapping[str, Any],
+    phase3_manifest_checks: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    phase1_roots = phase1_current_log_roots or current_log_roots
+    checks: list[Dict[str, Any]] = [dict(check) for check in phase3_manifest_checks]
+    for entry in entries:
+        checks.append(
+            _ok(
+                "return_coverage_post_fix_expected_movement",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+                post_fix_status=entry.get("post_fix_status"),
+            )
+            if entry.get("post_fix_status") in {"pending_proof", "completed_recovery"}
+            else _failed(
+                "return_coverage_post_fix_expected_movement",
+                entry_id=entry.get("id"),
+                function=entry.get("function"),
+                binary_pair=entry.get("binary_pair"),
+                failures=entry.get("post_fix_failures") or (),
+                current_result=(entry.get("current_observation") or {}).get("final_result"),
+            )
+        )
+    checks.extend(_retired_transition_invariant_checks(transition_entries, retired_reason_inventory))
+    checks.extend(
+        _phase1_positive_negative_checks(
+            phase1_dir=phase1_dir,
+            current_log_roots=phase1_roots,
+            baseline_log_roots=baseline_log_roots,
+        )
+    )
+    failed = [check for check in checks if check.get("status") == "failed"]
+    return {
+        "gate_kind": "phase3_return_coverage_lane1_post_fix_regression",
+        "baseline_mode": "expected_movement_or_completed_proof_against_pre_fix_manifest",
+        "phase1_current_log_roots": {
+            category: str(path)
+            for category, path in sorted(phase1_roots.items())
+        },
+        "ready": not failed,
+        "summary": {
+            "total": len(checks),
+            "passed": sum(1 for check in checks if check.get("status") == "ok"),
+            "not_evaluated": sum(1 for check in checks if check.get("status") == "not_evaluated"),
+            "failed": len(failed),
+            "failed_kinds": sorted({str(check.get("kind")) for check in failed}),
+            "locked_gates": [
+                "completed_return_coverage_proof_before_eq",
+                "proof_obligation_id_matches_pre_fix_manifest",
+                "positive_representative_non_regression",
+                "negative_representative_non_regression",
+                "retired_inconclusive_stays_retired",
+                "no_pending_proof_gate_on_eq",
+            ],
+        },
+        "checks": checks,
+    }
+
+
+def _phase3_pre_fix_manifest_checks(
+    *,
+    phase3_manifest: Mapping[str, Any],
+    phase3_manifest_ref: Mapping[str, Any],
+    expected_phase3_manifest_sha256: Optional[str],
+    frozen_entries: Sequence[Any],
+    frozen_transitions: Sequence[Any],
+) -> Sequence[Dict[str, Any]]:
+    checks: list[Dict[str, Any]] = []
+    if phase3_manifest_ref.get("sha256") == "__missing__":
+        checks.append(
+            _failed(
+                "phase3_pre_fix_manifest_available",
+                phase3_manifest_ref=dict(phase3_manifest_ref),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "phase3_pre_fix_manifest_available",
+                phase3_manifest_ref=dict(phase3_manifest_ref),
+            )
+        )
+    if expected_phase3_manifest_sha256 is None:
+        checks.append(
+            _failed(
+                "phase3_pre_fix_manifest_sha256_required",
+                actual_sha256=phase3_manifest_ref.get("sha256") or MISSING_SENTINEL,
+            )
+        )
+    else:
+        actual_sha256 = phase3_manifest_ref.get("sha256")
+        checks.append(
+            _ok(
+                "phase3_pre_fix_manifest_sha256",
+                sha256=actual_sha256,
+            )
+            if actual_sha256 == expected_phase3_manifest_sha256
+            else _failed(
+                "phase3_pre_fix_manifest_sha256",
+                expected_sha256=expected_phase3_manifest_sha256,
+                actual_sha256=actual_sha256 or MISSING_SENTINEL,
+            )
+        )
+    expected_kind = "phase3_return_coverage_lane1_representatives"
+    actual_kind = phase3_manifest.get("manifest_kind")
+    checks.append(
+        _ok(
+            "phase3_pre_fix_manifest_kind",
+            manifest_kind=actual_kind,
+        )
+        if actual_kind == expected_kind
+        else _failed(
+            "phase3_pre_fix_manifest_kind",
+            manifest_kind=actual_kind or MISSING_SENTINEL,
+            expected_manifest_kind=expected_kind,
+        )
+    )
+    checks.append(
+        _ok("phase3_pre_fix_manifest_ready")
+        if phase3_manifest.get("phase3_lane1_ready") is True
+        else _failed(
+            "phase3_pre_fix_manifest_ready",
+            phase3_lane1_ready=phase3_manifest.get("phase3_lane1_ready", MISSING_SENTINEL),
+        )
+    )
+    checks.append(
+        _ok("phase3_pre_fix_entries_non_empty", count=len(frozen_entries))
+        if frozen_entries
+        else _failed("phase3_pre_fix_entries_non_empty", count=0)
+    )
+    checks.append(
+        _ok("phase3_pre_fix_retired_transitions_non_empty", count=len(frozen_transitions))
+        if frozen_transitions
+        else _failed("phase3_pre_fix_retired_transitions_non_empty", count=0)
+    )
+    checks.extend(
+        _phase3_pre_fix_manifest_identity_set_checks(
+            phase3_manifest=phase3_manifest,
+            frozen_entries=frozen_entries,
+            frozen_transitions=frozen_transitions,
+        )
+    )
+    for index, entry in enumerate(frozen_entries):
+        if not isinstance(entry, Mapping):
+            checks.append(
+                _failed(
+                    "phase3_pre_fix_entry_mapping",
+                    entry_index=index,
+                    entry_type=type(entry).__name__,
+                )
+            )
+            continue
+        entry_details = {
+            "entry_index": index,
+            "entry_id": entry.get("id"),
+            "function": entry.get("function"),
+            "binary_pair": entry.get("binary_pair"),
+        }
+        frozen_observation = entry.get("current_observation")
+        proof_actions = ()
+        if isinstance(frozen_observation, Mapping):
+            raw_actions = frozen_observation.get("proof_actions")
+            if isinstance(raw_actions, Sequence) and not isinstance(raw_actions, (str, bytes)):
+                proof_actions = tuple(raw_actions)
+        checks.append(
+            _ok(
+                "phase3_pre_fix_entry_has_proof_actions",
+                count=len(proof_actions),
+                **entry_details,
+            )
+            if proof_actions
+            else _failed(
+                "phase3_pre_fix_entry_has_proof_actions",
+                count=0,
+                **entry_details,
+            )
+        )
+        valid_actions = tuple(_frozen_existing_return_coverage_completion_actions(entry))
+        checks.append(
+            _ok(
+                "phase3_pre_fix_entry_has_return_coverage_completion_proof_ids",
+                count=len(valid_actions),
+                **entry_details,
+            )
+            if valid_actions
+            else _failed(
+                "phase3_pre_fix_entry_has_return_coverage_completion_proof_ids",
+                count=0,
+                **entry_details,
+            )
+        )
+        required_targets = tuple(_frozen_return_coverage_targets(entry))
+        checks.append(
+            _ok(
+                "phase3_pre_fix_entry_has_return_coverage_targets",
+                count=len(required_targets),
+                **entry_details,
+            )
+            if required_targets
+            else _failed(
+                "phase3_pre_fix_entry_has_return_coverage_targets",
+                count=0,
+                **entry_details,
+            )
+        )
+        missing_target_refs = tuple(_missing_expected_return_coverage_target_refs(entry))
+        checks.append(
+            _ok(
+                "phase3_pre_fix_entry_expected_return_coverage_targets_resolved",
+                count=len(required_targets),
+                **entry_details,
+            )
+            if not missing_target_refs
+            else _failed(
+                "phase3_pre_fix_entry_expected_return_coverage_targets_resolved",
+                missing_evidence_refs=[list(refs) for refs in missing_target_refs],
+                **entry_details,
+            )
+        )
+        missing_actions = tuple(_missing_frozen_return_coverage_completion_actions(entry))
+        checks.append(
+            _ok(
+                "phase3_pre_fix_entry_has_complete_return_coverage_completion_proof_ids",
+                count=len(_frozen_required_return_coverage_actions(entry)),
+                **entry_details,
+            )
+            if required_targets and not missing_actions
+            else _failed(
+                "phase3_pre_fix_entry_has_complete_return_coverage_completion_proof_ids",
+                missing=[
+                    {
+                        "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+                        "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+                        "object_target_key": action.get("object_target_key"),
+                        "proof_obligation_id": action.get("proof_obligation_id"),
+                    }
+                    for action in missing_actions
+                ],
+                **entry_details,
+            )
+        )
+    return checks
+
+
+def _phase3_pre_fix_manifest_identity_set_checks(
+    *,
+    phase3_manifest: Mapping[str, Any],
+    frozen_entries: Sequence[Any],
+    frozen_transitions: Sequence[Any],
+) -> Sequence[Dict[str, Any]]:
+    checks: list[Dict[str, Any]] = []
+    expected_entries = _phase3_expected_entry_identities(DEFAULT_REPRESENTATIVES)
+    actual_entries = _phase3_manifest_entry_identities(frozen_entries)
+    checks.append(
+        _identity_set_check(
+            "phase3_pre_fix_entries_exact_set",
+            expected=expected_entries,
+            actual=actual_entries,
+        )
+    )
+    expected_transitions = _phase3_expected_entry_identities(DEFAULT_RETIRED_TRANSITIONS)
+    actual_transitions = _phase3_manifest_entry_identities(frozen_transitions)
+    checks.append(
+        _identity_set_check(
+            "phase3_pre_fix_retired_transitions_exact_set",
+            expected=expected_transitions,
+            actual=actual_transitions,
+        )
+    )
+    implementation = phase3_manifest.get("implementation_manifest")
+    if not isinstance(implementation, Mapping):
+        checks.append(
+            _failed(
+                "phase3_pre_fix_implementation_manifest_available",
+                reason="implementation_manifest_missing",
+            )
+        )
+        implementation_entries = ()
+        implementation_transitions = ()
+    else:
+        checks.append(_ok("phase3_pre_fix_implementation_manifest_available"))
+        implementation_entries = implementation.get("expected_movement_entries") or ()
+        implementation_transitions = implementation.get("retired_observation_entries") or ()
+    implementation_entry_identities = _phase3_manifest_entry_identities(
+        implementation_entries
+    )
+    checks.append(
+        _identity_set_check(
+            "phase3_pre_fix_implementation_entries_consistent",
+            expected=implementation_entry_identities,
+            actual=actual_entries,
+        )
+    )
+    implementation_transition_identities = _phase3_manifest_entry_identities(
+        implementation_transitions
+    )
+    checks.append(
+        _identity_set_check(
+            "phase3_pre_fix_implementation_retired_transitions_consistent",
+            expected=implementation_transition_identities,
+            actual=actual_transitions,
+        )
+    )
+    checks.extend(
+        _phase3_pre_fix_representative_movement_checks(
+            frozen_entries=frozen_entries,
+            implementation_entries=implementation_entries,
+        )
+    )
+    checks.extend(
+        _phase3_pre_fix_retired_transition_movement_checks(
+            frozen_transitions=frozen_transitions,
+            implementation_transitions=implementation_transitions,
+        )
+    )
+    return checks
+
+
+def _phase3_pre_fix_representative_movement_checks(
+    *,
+    frozen_entries: Sequence[Any],
+    implementation_entries: Any,
+) -> Sequence[Dict[str, Any]]:
+    expected_entries = _phase3_entry_map(DEFAULT_REPRESENTATIVES)
+    actual_entries = _phase3_entry_map(frozen_entries)
+    implementation_entry_map = _phase3_entry_map(implementation_entries)
+    checks: list[Dict[str, Any]] = []
+    for identity, expected_entry in sorted(expected_entries.items()):
+        actual_entry = actual_entries.get(identity)
+        implementation_entry = implementation_entry_map.get(identity)
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_entry_expected_movements_match_definition",
+                identity=identity,
+                expected_movements=expected_entry.get("expected_movements"),
+                actual_movements=(
+                    actual_entry.get("expected_movements")
+                    if isinstance(actual_entry, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_implementation_expected_movements_match_definition",
+                identity=identity,
+                expected_movements=expected_entry.get("expected_movements"),
+                actual_movements=(
+                    implementation_entry.get("expected_movements")
+                    if isinstance(implementation_entry, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_entry_expected_movements_match_implementation",
+                identity=identity,
+                expected_movements=(
+                    implementation_entry.get("expected_movements")
+                    if isinstance(implementation_entry, Mapping)
+                    else None
+                ),
+                actual_movements=(
+                    actual_entry.get("expected_movements")
+                    if isinstance(actual_entry, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _target_content_check(
+                "phase3_pre_fix_entry_return_coverage_targets_match_implementation",
+                identity=identity,
+                expected_targets=(
+                    implementation_entry.get("expected_return_coverage_targets")
+                    if isinstance(implementation_entry, Mapping)
+                    else None
+                ),
+                actual_targets=(
+                    _frozen_return_coverage_targets(actual_entry)
+                    if isinstance(actual_entry, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _completion_action_content_check(
+                "phase3_pre_fix_entry_required_completion_actions_match_implementation",
+                identity=identity,
+                expected_actions=(
+                    implementation_entry.get("required_completion_actions")
+                    if isinstance(implementation_entry, Mapping)
+                    else None
+                ),
+                actual_actions=(
+                    _frozen_existing_return_coverage_completion_actions(actual_entry)
+                    if isinstance(actual_entry, Mapping)
+                    else None
+                ),
+            )
+        )
+    return checks
+
+
+def _phase3_pre_fix_retired_transition_movement_checks(
+    *,
+    frozen_transitions: Sequence[Any],
+    implementation_transitions: Any,
+) -> Sequence[Dict[str, Any]]:
+    expected_transitions = _phase3_entry_map(DEFAULT_RETIRED_TRANSITIONS)
+    actual_transitions = _phase3_entry_map(frozen_transitions)
+    implementation_transition_map = _phase3_entry_map(implementation_transitions)
+    checks: list[Dict[str, Any]] = []
+    for identity, expected_transition in sorted(expected_transitions.items()):
+        actual_transition = actual_transitions.get(identity)
+        implementation_transition = implementation_transition_map.get(identity)
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_retired_transition_current_expected_movements_match_definition",
+                identity=identity,
+                expected_movements=expected_transition.get("current_expected_movements"),
+                actual_movements=(
+                    actual_transition.get("current_expected_movements")
+                    if isinstance(actual_transition, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_implementation_retired_movements_match_definition",
+                identity=identity,
+                expected_movements=expected_transition.get("current_expected_movements"),
+                actual_movements=(
+                    implementation_transition.get("current_expected_movements")
+                    if isinstance(implementation_transition, Mapping)
+                    else None
+                ),
+            )
+        )
+        checks.append(
+            _movement_content_check(
+                "phase3_pre_fix_retired_transition_current_expected_movements_match_implementation",
+                identity=identity,
+                expected_movements=(
+                    implementation_transition.get("current_expected_movements")
+                    if isinstance(implementation_transition, Mapping)
+                    else None
+                ),
+                actual_movements=(
+                    actual_transition.get("current_expected_movements")
+                    if isinstance(actual_transition, Mapping)
+                    else None
+                ),
+            )
+        )
+    return checks
+
+
+def _movement_content_check(
+    kind: str,
+    *,
+    identity: Tuple[str, str, str],
+    expected_movements: Any,
+    actual_movements: Any,
+) -> Dict[str, Any]:
+    expected = _canonical_phase3_expected_movements(expected_movements)
+    actual = _canonical_phase3_expected_movements(actual_movements)
+    details = {
+        "entry": _identity_to_dict(identity),
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "expected_movements": expected,
+        "actual_movements": actual,
+    }
+    if actual == expected:
+        return _ok(kind, **details)
+    return _failed(kind, **details)
+
+
+def _target_content_check(
+    kind: str,
+    *,
+    identity: Tuple[str, str, str],
+    expected_targets: Any,
+    actual_targets: Any,
+) -> Dict[str, Any]:
+    expected = _canonical_return_coverage_targets(expected_targets)
+    actual = _canonical_return_coverage_targets(actual_targets)
+    details = {
+        "entry": _identity_to_dict(identity),
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "expected_targets": expected,
+        "actual_targets": actual,
+    }
+    if actual == expected:
+        return _ok(kind, **details)
+    return _failed(kind, **details)
+
+
+def _completion_action_content_check(
+    kind: str,
+    *,
+    identity: Tuple[str, str, str],
+    expected_actions: Any,
+    actual_actions: Any,
+) -> Dict[str, Any]:
+    expected = _canonical_return_coverage_completion_actions(expected_actions)
+    actual = _canonical_return_coverage_completion_actions(actual_actions)
+    details = {
+        "entry": _identity_to_dict(identity),
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "expected_actions": expected,
+        "actual_actions": actual,
+    }
+    if actual == expected:
+        return _ok(kind, **details)
+    return _failed(kind, **details)
+
+
+def _canonical_phase3_expected_movements(value: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    movements = []
+    for index, movement in enumerate(value):
+        if not isinstance(movement, Mapping):
+            movements.append(
+                {
+                    "index": index,
+                    "id": MISSING_SENTINEL,
+                    "invalid_type": type(movement).__name__,
+                }
+            )
+            continue
+        movements.append(
+            {
+                "index": index,
+                "id": str(movement.get("id") or MISSING_SENTINEL),
+                "count_kind": str(movement.get("count_kind") or MISSING_SENTINEL),
+                "tuple": _normalized_string_list(movement.get("tuple")),
+                "aggregation_unit": str(movement.get("aggregation_unit") or MISSING_SENTINEL),
+                "stage": str(movement.get("stage") or MISSING_SENTINEL),
+                "pair_or_case": str(movement.get("pair_or_case") or MISSING_SENTINEL),
+                "expected_evidence_refs": _normalized_string_list(
+                    movement.get("expected_evidence_refs")
+                ),
+                "required_evidence": _normalized_string_list(movement.get("required_evidence")),
+                "require_proof_obligation_id": bool(
+                    movement.get("require_proof_obligation_id")
+                ),
+                "required_object_target_kind": str(
+                    movement.get("required_object_target_kind") or MISSING_SENTINEL
+                ),
+            }
+        )
+    return tuple(movements)
+
+
+def _normalized_string_list(value: Any) -> Sequence[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _canonical_return_coverage_targets_for_entry(
+    entry: Mapping[str, Any],
+) -> Sequence[Any]:
+    return _canonical_return_coverage_targets(_frozen_return_coverage_targets(entry))
+
+
+def _canonical_return_coverage_targets(value: Any) -> Sequence[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(_normalize_nested_tuple(item) for item in value)
+
+
+def _canonical_return_coverage_completion_actions(value: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    actions = []
+    for index, action in enumerate(value):
+        if not isinstance(action, Mapping):
+            actions.append(
+                {
+                    "index": index,
+                    "invalid_type": type(action).__name__,
+                }
+            )
+            continue
+        actions.append(
+            {
+                "index": index,
+                "reason_id": str(action.get("reason_id") or MISSING_SENTINEL),
+                "proof_kind": str(action.get("proof_kind") or MISSING_SENTINEL),
+                "proof_stage": str(action.get("proof_stage") or MISSING_SENTINEL),
+                "evidence_kind": str(action.get("evidence_kind") or MISSING_SENTINEL),
+                "object_target_key": _normalize_nested_tuple(action.get("object_target_key")),
+                "proof_obligation_id": _normalize_nested_tuple(action.get("proof_obligation_id")),
+                "raw_proof_obligation_id_present": action.get("raw_proof_obligation_id_present")
+                is True,
+            }
+        )
+    return tuple(actions)
+
+
+def _identity_set_check(
+    kind: str,
+    *,
+    expected: Sequence[Tuple[str, str, str]],
+    actual: Sequence[Tuple[str, str, str]],
+) -> Dict[str, Any]:
+    expected_counts = Counter(expected)
+    actual_counts = Counter(actual)
+    missing = _identity_diff(expected_counts, actual_counts)
+    unexpected = _identity_diff(actual_counts, expected_counts)
+    duplicate_actual = [
+        identity for identity, count in sorted(actual_counts.items()) if count > 1
+    ]
+    details = {
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "expected": [_identity_to_dict(identity) for identity in sorted(expected_counts)],
+        "actual": [_identity_to_dict(identity) for identity in sorted(actual_counts)],
+    }
+    if not missing and not unexpected and not duplicate_actual:
+        return _ok(kind, **details)
+    return _failed(
+        kind,
+        missing=[_identity_to_dict(identity) for identity in missing],
+        unexpected=[_identity_to_dict(identity) for identity in unexpected],
+        duplicate_actual=[_identity_to_dict(identity) for identity in duplicate_actual],
+        **details,
+    )
+
+
+def _identity_diff(
+    left: Counter[Tuple[str, str, str]],
+    right: Counter[Tuple[str, str, str]],
+) -> Sequence[Tuple[str, str, str]]:
+    values = []
+    for identity, count in sorted((left - right).items()):
+        values.extend([identity] * count)
+    return tuple(values)
+
+
+def _phase3_expected_entry_identities(
+    entries: Sequence[Mapping[str, Any]],
+) -> Sequence[Tuple[str, str, str]]:
+    return tuple(_phase3_entry_identity(entry) for entry in entries)
+
+
+def _phase3_manifest_entry_identities(entries: Any) -> Sequence[Tuple[str, str, str]]:
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return ()
+    return tuple(
+        _phase3_entry_identity(entry)
+        for entry in entries
+        if isinstance(entry, Mapping)
+    )
+
+
+def _phase3_entry_map(entries: Any) -> Dict[Tuple[str, str, str], Mapping[str, Any]]:
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return {}
+    result: Dict[Tuple[str, str, str], Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        result[_phase3_entry_identity(entry)] = entry
+    return result
+
+
+def _phase3_entry_identity(entry: Mapping[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(entry.get("id") or MISSING_SENTINEL),
+        str(entry.get("function") or MISSING_SENTINEL),
+        _safe_canonical_binary_pair(entry.get("binary_pair")),
+    )
+
+
+def _safe_canonical_binary_pair(value: Any) -> str:
+    text = str(value or MISSING_SENTINEL)
+    if "_" not in text:
+        return text
+    try:
+        return _canonical_binary_pair(text)
+    except ValueError:
+        return text
+
+
+def _identity_to_dict(identity: Tuple[str, str, str]) -> Dict[str, str]:
+    entry_id, function, binary_pair = identity
+    return {
+        "id": entry_id,
+        "function": function,
+        "binary_pair": binary_pair,
+    }
+
+
 def _lane_manifest_checks(
     entries: Sequence[Mapping[str, Any]],
     transition_entries: Sequence[Mapping[str, Any]],
@@ -638,6 +1503,15 @@ def _lane_manifest_checks(
                 current_result=(entry.get("current_observation") or {}).get("final_result"),
             )
         )
+    checks.extend(_retired_transition_invariant_checks(transition_entries, retired_reason_inventory))
+    return checks
+
+
+def _retired_transition_invariant_checks(
+    transition_entries: Sequence[Mapping[str, Any]],
+    retired_reason_inventory: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    checks: list[Dict[str, Any]] = []
     for entry in transition_entries:
         invariant = entry.get("final_result_invariant") or {}
         checks.append(
@@ -905,6 +1779,335 @@ def _materialize_entry(
     return entry
 
 
+def _materialize_post_fix_entry(
+    raw_entry: Mapping[str, Any],
+    current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+) -> Dict[str, Any]:
+    category = str(raw_entry["category"])
+    function = str(raw_entry["function"])
+    binary_pair = _canonical_binary_pair(str(raw_entry["binary_pair"]))
+    key = (category, function, binary_pair)
+    current = _observation(current_records.get(key))
+    entry: Dict[str, Any] = {
+        **dict(raw_entry),
+        "binary_pair": binary_pair,
+        "left_binary_id": binary_pair.split("_", 1)[0],
+        "right_binary_id": binary_pair.split("_", 1)[1],
+        "expected_observed_left_binary_id": raw_entry.get("expected_observed_left_binary_id")
+        or binary_pair.split("_", 1)[0],
+        "expected_observed_right_binary_id": raw_entry.get("expected_observed_right_binary_id")
+        or binary_pair.split("_", 1)[1],
+        "expected_observed_binary1_name": raw_entry.get("expected_observed_binary1_name")
+        or raw_entry.get("expected_observed_left_binary_id")
+        or binary_pair.split("_", 1)[0],
+        "expected_observed_binary2_name": raw_entry.get("expected_observed_binary2_name")
+        or raw_entry.get("expected_observed_right_binary_id")
+        or binary_pair.split("_", 1)[1],
+        "frozen_pre_fix_observation": raw_entry.get("current_observation") or {},
+        "current_observation": current,
+    }
+    failures = []
+    if current.get("log_status") == "missing":
+        failures.append("current_log_missing")
+    else:
+        if not _observation_direction_matches(entry, current):
+            failures.append("current_observed_direction_mismatch")
+        if not _observation_payload_direction_matches(entry, current):
+            failures.append("current_observed_payload_direction_mismatch")
+        current_result = current.get("final_result")
+        if current_result == STATUS_UNKNOWN:
+            failures.extend(_expected_movement_failures(entry, current, "current"))
+        elif current_result == STATUS_EQ:
+            failures.extend(_completed_recovery_failures(entry, current))
+        elif current_result == STATUS_TIMEOUT:
+            failures.append("current_timeout")
+        else:
+            failures.append(f"current_result_not_accepted:{current_result or MISSING_SENTINEL}")
+    if failures:
+        entry["post_fix_status"] = "failed"
+    elif current.get("final_result") == STATUS_EQ:
+        entry["post_fix_status"] = "completed_recovery"
+    else:
+        entry["post_fix_status"] = "pending_proof"
+    entry["post_fix_failures"] = sorted(set(failures))
+    return entry
+
+
+def _completed_recovery_failures(
+    entry: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> Sequence[str]:
+    failures = []
+    if current.get("decision_gated_by_pending_proof") is True:
+        failures.append("decision_gated_by_pending_proof")
+    active_return_reasons = sorted(
+        reason_id
+        for reason_id in (current.get("observed_reason_ids") or ())
+        if reason_id in OBSERVED_RETURN_REASON_IDS
+    )
+    failures.extend(
+        f"active_return_coverage_reason_not_cleared:{reason_id}"
+        for reason_id in active_return_reasons
+    )
+    pending_actions = [
+        action
+        for action in current.get("proof_actions") or ()
+        if isinstance(action, Mapping)
+        and action.get("reason_id") in OBSERVED_RETURN_REASON_IDS
+        and action.get("status") == "pending_proof"
+    ]
+    if pending_actions:
+        failures.append("pending_return_coverage_proof_action_still_active")
+    required_actions = _frozen_required_return_coverage_actions(entry)
+    if not required_actions:
+        failures.append("frozen_return_coverage_proof_actions_missing")
+        return failures
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    if not completed:
+        failures.append("return_coverage_completed_proof_required")
+        return failures
+    for action in required_actions:
+        if not any(_completed_evidence_matches_action(evidence, action) for evidence in completed):
+            failures.append(
+                "return_coverage_completed_proof_required:"
+                f"{action.get('proof_stage') or MISSING_SENTINEL}:"
+                f"{action.get('evidence_kind') or MISSING_SENTINEL}"
+            )
+    return failures
+
+
+def _frozen_required_return_coverage_actions(entry: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    required = []
+    for target in _frozen_return_coverage_targets(entry):
+        for proof_stage in RETURN_COVERAGE_COMPLETION_PROOF_STAGES:
+            evidence_kind = RETURN_COVERAGE_COMPLETION_EVIDENCE_KIND_BY_STAGE[proof_stage]
+            required.append(
+                {
+                    "reason_id": "return_coverage_gap",
+                    "proof_kind": "return_coverage_completion",
+                    "proof_stage": proof_stage,
+                    "evidence_kind": evidence_kind,
+                    "object_target_key": target,
+                    "proof_obligation_id": build_proof_obligation_id(
+                        "return_coverage_gap",
+                        proof_stage,
+                        "return_coverage_completion",
+                        evidence_kind,
+                        target,
+                    ),
+                    "raw_proof_obligation_id_present": True,
+                }
+            )
+    return tuple(required)
+
+
+def _frozen_existing_return_coverage_completion_actions(
+    entry: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    frozen_observation = entry.get("frozen_pre_fix_observation")
+    if not isinstance(frozen_observation, Mapping):
+        frozen_observation = entry.get("current_observation")
+    actions = []
+    for action in (frozen_observation or {}).get("proof_actions") or ():
+        if not isinstance(action, Mapping):
+            continue
+        if action.get("reason_id") != "return_coverage_gap":
+            continue
+        if action.get("proof_kind") != "return_coverage_completion":
+            continue
+        if action.get("proof_stage") not in RETURN_COVERAGE_COMPLETION_PROOF_STAGES:
+            continue
+        if not _proof_action_has_proof_id(action, {"require_proof_obligation_id": True}):
+            continue
+        actions.append(action)
+    return tuple(actions)
+
+
+def _missing_frozen_return_coverage_completion_actions(
+    entry: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    existing = tuple(_frozen_existing_return_coverage_completion_actions(entry))
+    missing = []
+    for required in _frozen_required_return_coverage_actions(entry):
+        if not any(_frozen_action_matches_required_completion(action, required) for action in existing):
+            missing.append(required)
+    return tuple(missing)
+
+
+def _frozen_action_matches_required_completion(
+    action: Mapping[str, Any],
+    required: Mapping[str, Any],
+) -> bool:
+    return (
+        str(action.get("reason_id") or MISSING_SENTINEL)
+        == str(required.get("reason_id") or MISSING_SENTINEL)
+        and str(action.get("proof_kind") or MISSING_SENTINEL)
+        == str(required.get("proof_kind") or MISSING_SENTINEL)
+        and str(action.get("proof_stage") or MISSING_SENTINEL)
+        == str(required.get("proof_stage") or MISSING_SENTINEL)
+        and str(action.get("evidence_kind") or MISSING_SENTINEL)
+        == str(required.get("evidence_kind") or MISSING_SENTINEL)
+        and _normalize_nested_tuple(action.get("object_target_key"))
+        == _normalize_nested_tuple(required.get("object_target_key"))
+        and _normalize_nested_tuple(action.get("proof_obligation_id"))
+        == _normalize_nested_tuple(required.get("proof_obligation_id"))
+    )
+
+
+def _frozen_return_coverage_targets(entry: Mapping[str, Any]) -> Sequence[Any]:
+    frozen_observation = entry.get("frozen_pre_fix_observation")
+    if not isinstance(frozen_observation, Mapping):
+        frozen_observation = entry.get("current_observation")
+    expected_ref_order = _expected_return_coverage_evidence_ref_order(entry)
+    targets_by_ref: Dict[Tuple[str, ...], Any] = {}
+    fallback_targets: list[Any] = []
+    seen_targets: set[Any] = set()
+    for record in (frozen_observation or {}).get("reason_records") or ():
+        if not isinstance(record, Mapping):
+            continue
+        if record.get("reason_id") != "return_coverage_gap":
+            continue
+        object_target_key = _normalize_nested_tuple(record.get("object_target_key"))
+        if not _object_target_key_is_specific(object_target_key):
+            continue
+        refs = tuple(str(ref) for ref in record.get("evidence_refs") or ())
+        if refs:
+            targets_by_ref[refs] = object_target_key
+        if object_target_key not in seen_targets:
+            fallback_targets.append(object_target_key)
+            seen_targets.add(object_target_key)
+    ordered_targets = []
+    seen_ordered: set[Any] = set()
+    for refs in expected_ref_order:
+        target = targets_by_ref.get(refs)
+        if target is None or target in seen_ordered:
+            continue
+        ordered_targets.append(target)
+        seen_ordered.add(target)
+    for target in fallback_targets:
+        if target not in seen_ordered:
+            ordered_targets.append(target)
+            seen_ordered.add(target)
+    return tuple(ordered_targets)
+
+
+def _expected_return_coverage_evidence_ref_order(entry: Mapping[str, Any]) -> Sequence[Tuple[str, ...]]:
+    refs = []
+    seen = set()
+    for movement in entry.get("expected_movements") or ():
+        if not isinstance(movement, Mapping):
+            continue
+        tuple_key = _movement_tuple(movement)
+        if tuple_key is None:
+            continue
+        if tuple_key[1] != "return_coverage_gap":
+            continue
+        expected_refs = movement.get("expected_evidence_refs")
+        if expected_refs is None:
+            continue
+        normalized = tuple(str(ref) for ref in expected_refs or ())
+        if not normalized or normalized in seen:
+            continue
+        refs.append(normalized)
+        seen.add(normalized)
+    return tuple(refs)
+
+
+def _missing_expected_return_coverage_target_refs(entry: Mapping[str, Any]) -> Sequence[Tuple[str, ...]]:
+    expected_refs = tuple(_expected_return_coverage_evidence_ref_order(entry))
+    if not expected_refs:
+        return ()
+    frozen_observation = entry.get("frozen_pre_fix_observation")
+    if not isinstance(frozen_observation, Mapping):
+        frozen_observation = entry.get("current_observation")
+    resolved_refs = set()
+    for record in (frozen_observation or {}).get("reason_records") or ():
+        if not isinstance(record, Mapping):
+            continue
+        if record.get("reason_id") != "return_coverage_gap":
+            continue
+        object_target_key = _normalize_nested_tuple(record.get("object_target_key"))
+        if not _object_target_key_is_specific(object_target_key):
+            continue
+        refs = tuple(str(ref) for ref in record.get("evidence_refs") or ())
+        if refs:
+            resolved_refs.add(refs)
+    return tuple(refs for refs in expected_refs if refs not in resolved_refs)
+
+
+def _completed_evidence_matches_action(
+    evidence_summary: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> bool:
+    if not isinstance(evidence_summary, Mapping):
+        return False
+    evidence = evidence_summary.get("evidence")
+    if not isinstance(evidence, Mapping):
+        evidence = evidence_summary
+    if evidence_summary.get("object_derived") is not True and evidence.get("object_derived") is not True:
+        return False
+    if str(evidence_summary.get("status") or evidence.get("status") or "") not in {
+        "complete",
+        "completed",
+        "proven",
+    }:
+        return False
+    proof_kind = (
+        evidence_summary.get("proof_kind")
+        or evidence.get("recovery_proof_kind")
+        or evidence.get("proof_kind")
+    )
+    object_target_key = _normalize_nested_tuple(
+        evidence_summary.get("object_target_key") or evidence.get("object_target_key")
+    )
+    if object_target_key != _normalize_nested_tuple(action.get("object_target_key")):
+        return False
+    if not _object_target_key_is_specific(object_target_key):
+        return False
+    if (
+        str(evidence_summary.get("reason_id") or evidence.get("reason_id") or MISSING_SENTINEL)
+        != str(action.get("reason_id") or MISSING_SENTINEL)
+        or str(evidence_summary.get("proof_stage") or evidence.get("proof_stage") or MISSING_SENTINEL)
+        != str(action.get("proof_stage") or MISSING_SENTINEL)
+        or str(proof_kind or MISSING_SENTINEL)
+        != str(action.get("proof_kind") or MISSING_SENTINEL)
+        or str(evidence_summary.get("evidence_kind") or evidence.get("evidence_kind") or MISSING_SENTINEL)
+        != str(action.get("evidence_kind") or MISSING_SENTINEL)
+    ):
+        return False
+    if _completed_evidence_has_active_blocker(evidence):
+        return False
+    expected_id = build_proof_obligation_id(
+        action.get("reason_id"),
+        action.get("proof_stage"),
+        action.get("proof_kind"),
+        action.get("evidence_kind"),
+        object_target_key,
+    )
+    return (
+        _normalize_nested_tuple(evidence_summary.get("proof_obligation_id") or evidence.get("proof_obligation_id"))
+        == expected_id
+        == _normalize_nested_tuple(action.get("proof_obligation_id"))
+    )
+
+
+def _completed_evidence_has_active_blocker(evidence: Mapping[str, Any]) -> bool:
+    for field_name in (
+        "sat_unsafety_reasons",
+        "coverage_gap_reasons",
+        "unsupported_effect_reasons",
+        "active_unsafety_reasons",
+        "active_coverage_gaps",
+        "active_coverage_gap_reasons",
+        "active_unsupported_effects",
+        "unsupported_call_effect_reasons",
+        "unsupported_memory_effect_reasons",
+    ):
+        if evidence.get(field_name):
+            return True
+    return False
+
+
 def _materialize_retired_transition(
     raw_entry: Mapping[str, Any],
     current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
@@ -1040,6 +2243,8 @@ def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "observed_function1_name": payload.get("function1_name") or MISSING_SENTINEL,
         "observed_function2_name": payload.get("function2_name") or MISSING_SENTINEL,
         "final_result": classify_result_payload(payload),
+        "decision_gated_by_pending_proof": bool(payload.get("decision_gated_by_pending_proof")),
+        "completed_recovery_proof_evidence": _completed_recovery_proof_summaries(payload),
         "observed_reason_ids": sorted({reason.reason_id for reason in reason_records}),
         "reason_record_tuples": [
             list(_global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value))
@@ -1066,6 +2271,40 @@ def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         ],
         "return_case_grid_diagnostic": _return_case_grid_diagnostic(payload),
     }
+
+
+def _completed_recovery_proof_summaries(payload: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    raw_items = payload.get("completed_recovery_proof_evidence") or ()
+    if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
+        return ()
+    summaries = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        wrapper = raw_item
+        evidence = raw_item.get("evidence")
+        if not isinstance(evidence, Mapping):
+            evidence = raw_item
+            wrapper = {}
+        proof_kind = evidence.get("recovery_proof_kind") or evidence.get("proof_kind") or MISSING_SENTINEL
+        summaries.append(
+            {
+                "side": wrapper.get("side") or evidence.get("side") or MISSING_SENTINEL,
+                "function_name": wrapper.get("function_name") or evidence.get("function_name") or MISSING_SENTINEL,
+                "binary_name": wrapper.get("binary_name") or evidence.get("binary_name") or MISSING_SENTINEL,
+                "binary_id": wrapper.get("binary_id") or evidence.get("binary_id") or MISSING_SENTINEL,
+                "reason_id": evidence.get("reason_id") or MISSING_SENTINEL,
+                "proof_stage": evidence.get("proof_stage") or MISSING_SENTINEL,
+                "proof_kind": proof_kind,
+                "evidence_kind": evidence.get("evidence_kind") or MISSING_SENTINEL,
+                "status": evidence.get("status") or MISSING_SENTINEL,
+                "object_derived": evidence.get("object_derived") is True,
+                "object_target_key": evidence.get("object_target_key"),
+                "proof_obligation_id": evidence.get("proof_obligation_id"),
+                "evidence": dict(evidence),
+            }
+        )
+    return summaries
 
 
 def _extract_final_unknown_reason_payloads(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
@@ -1941,6 +3180,34 @@ def _records_by_key(roots: Mapping[str, Path]) -> Dict[Tuple[str, str, str], Map
                 "observed_right_binary_id": observed_right,
             }
     return records
+
+
+def _load_phase3_lane1_manifest(
+    *,
+    raw_dir: Path,
+    explicit_path: Optional[Path],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    candidates = []
+    if explicit_path is not None:
+        candidates.append(Path(explicit_path))
+    else:
+        candidates.extend(
+            [
+                raw_dir.parent
+                / "audit"
+                / "phase3_return_coverage_lane1_reclassification"
+                / "return_coverage_lane1_representatives.json",
+                raw_dir.parent
+                / "phase3"
+                / "return_coverage_lane1"
+                / "return_coverage_lane1_representatives.json",
+            ]
+        )
+    for path in candidates:
+        if path.is_file():
+            return _read_json(path), _file_ref(path)
+    fallback = candidates[0] if candidates else raw_dir.parent / "phase3" / "return_coverage_lane1" / "return_coverage_lane1_representatives.json"
+    return {}, {"path": str(fallback), "sha256": "__missing__"}
 
 
 def _identity_from_path(path: Path) -> Tuple[str, str]:
