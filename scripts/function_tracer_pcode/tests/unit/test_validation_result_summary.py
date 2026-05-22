@@ -632,3 +632,21 @@ def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():
     assert "--phase3-manifest-sha256" in script
     assert "--gate-stage post-fix" in script
     assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
+def test_phase3_lane2_representative_wrapper_pins_pair_and_manifest_hash():
+    script = Path("phase3_run_function_call_return_width_bridge_lane2_representatives.sh").read_text()
+
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_apply_indirect}"' in script
+    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_apply_indirect:B10_B13}"' in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_return_width_bridge_lane2/return_width_bridge_lane2_representatives.json" in script
+    assert "93629d92cd8bfcf0431eb8fc6bbd8e1c36dd71d9e4aca97e70bdfd962edf90d0" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 2 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
