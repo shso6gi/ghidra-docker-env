@@ -442,6 +442,9 @@ def test_function_call_runner_supports_full_phase2_parallel_mode():
     assert "manifest_query pairs" in script
     assert "VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}" in script
     assert "VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}" in script
+    assert "FUNCTION_CALL_PAIR_FILTER=${FUNCTION_CALL_PAIR_FILTER:-}" in script
+    assert "function_call_pair_filter_allows" in script
+    assert "validate_function_call_pair_filter" in script
     assert "RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-" in script
     assert 'TMPDIR="$PAIR_TMPDIR" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main' in script
     assert "BINARY_ID_ORDER=(" in script
@@ -475,6 +478,82 @@ def test_function_call_runner_dry_run_uses_baseline_pair_order(tmp_path):
     assert "fc_dummy B1 B2 fc_dummy_B1_B2.log" in result.stdout
     assert "fc_dummy B8 B15 fc_dummy_B8_B15.log" in result.stdout
     assert "fc_dummy B15 B8 fc_dummy_B15_B8.log" not in result.stdout
+
+
+def test_function_call_runner_dry_run_filters_concrete_pairs(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "FUNCTION_CALL_TARGET_SET": "fc_recursive_sum,fc_is_even",
+            "FUNCTION_CALL_PAIR_FILTER": "fc_recursive_sum:B11_B15,fc_is_even:B11_B12",
+            "OUTPUT_BASE_DIR": str(tmp_path / "function_call"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "func_call_run_matrix_all_parallel_multifunc.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "Function/pair filter: fc_recursive_sum:B11_B15,fc_is_even:B11_B12" in result.stdout
+    assert "fc_recursive_sum B11 B15 fc_recursive_sum_B11_B15.log" in result.stdout
+    assert "fc_is_even B11 B12 fc_is_even_B11_B12.log" in result.stdout
+    assert "fc_recursive_sum B1 B2 fc_recursive_sum_B1_B2.log" not in result.stdout
+    assert "fc_is_even B1 B2 fc_is_even_B1_B2.log" not in result.stdout
+
+
+def test_function_call_runner_dry_run_rejects_unmatched_pair_filter(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "FUNCTION_CALL_TARGET_SET": "fc_recursive_sum",
+            "FUNCTION_CALL_PAIR_FILTER": "fc_recursive_sum:B99_B100",
+            "OUTPUT_BASE_DIR": str(tmp_path / "function_call"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "func_call_run_matrix_all_parallel_multifunc.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "FUNCTION_CALL_PAIR_FILTER selected zero pairs for target function: fc_recursive_sum" in result.stderr
+    assert "fc_recursive_sum:B99_B100" in result.stderr
+
+
+def test_function_call_runner_dry_run_rejects_partially_unmatched_pair_filter(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "FUNCTION_CALL_TARGET_SET": "fc_recursive_sum",
+            "FUNCTION_CALL_PAIR_FILTER": "fc_recursive_sum:B11_B15,fc_recursive_sum:B99_B100",
+            "OUTPUT_BASE_DIR": str(tmp_path / "function_call"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "func_call_run_matrix_all_parallel_multifunc.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "FUNCTION_CALL_PAIR_FILTER entry did not match any selected target function pair: fc_recursive_sum:B99_B100" in result.stderr
 
 
 def test_function_call_runner_moves_existing_logs_before_dry_run(tmp_path):
@@ -531,3 +610,25 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert "phase2_equivalence_blocking_unsafety" in script
     assert "--baseline-log-root" in script
     assert "files_to_copy_for_codex.txt" in script
+
+
+def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():
+    script = Path("phase3_run_function_call_return_coverage_lane1_representatives.sh").read_text()
+
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_is_even,fc_is_odd}"' in script
+    assert (
+        'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-'
+        'fc_recursive_sum:B11_B15,fc_is_even:B11_B12,'
+        'fc_is_odd:B8_B15,fc_is_odd:B11_B16,fc_is_odd:B12_B16}"'
+    ) in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json" in script
+    assert "eec876a6473ac4ac344d846bdffb93d7bbcf23d55559d0c6d58ee890304e6f5a" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 1 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script

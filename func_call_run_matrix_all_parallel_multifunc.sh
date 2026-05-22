@@ -118,6 +118,7 @@ VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set
 VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
 VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS=${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}  # Set to 1 for Phase 2 producer reruns.
 VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
+FUNCTION_CALL_PAIR_FILTER=${FUNCTION_CALL_PAIR_FILTER:-}  # Comma-separated function:B1_B2 entries for representative reruns.
 RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-"${TMPDIR:-/tmp}/ghidra-equivalence-function-call.$$"}
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
@@ -219,6 +220,7 @@ echo "Per-pair TMPDIR root: $RUNNER_TMP_ROOT"
 echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
 echo "Require Phase 2 object keys on skipped logs: $VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS"
 echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
+echo "Function/pair filter: ${FUNCTION_CALL_PAIR_FILTER:-<none>}"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 if [[ -n "${VALIDATION_MOVED_OUTPUT_DIR:-}" ]]; then
     echo "Moved old output dir: $VALIDATION_MOVED_OUTPUT_DIR"
@@ -567,11 +569,15 @@ print_pairwise_normalization_summary_block() {
         "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
 
-collect_pair_specs() {
+collect_unfiltered_pair_specs() {
     local target_func="$1"
-    local row_id col_id
+    local row_id col_id manifest_pairs
 
-    if manifest_query pairs "$target_func"; then
+    if manifest_pairs="$(manifest_query pairs "$target_func" 2>/dev/null)" && [[ -n "$manifest_pairs" ]]; then
+        while IFS=$'\t' read -r row_id col_id; do
+            [[ -n "$row_id" && -n "$col_id" ]] || continue
+            printf '%s\t%s\n' "$row_id" "$col_id"
+        done <<< "$manifest_pairs"
         return 0
     fi
 
@@ -581,6 +587,128 @@ collect_pair_specs() {
             col_id="${IDS[$j]}"
             printf '%s\t%s\n' "$row_id" "$col_id"
         done
+    done
+}
+
+collect_pair_specs() {
+    local target_func="$1"
+    local row_id col_id
+
+    while IFS=$'\t' read -r row_id col_id; do
+        [[ -n "$row_id" && -n "$col_id" ]] || continue
+        if function_call_pair_filter_allows "$target_func" "$row_id" "$col_id"; then
+            printf '%s\t%s\n' "$row_id" "$col_id"
+        fi
+    done < <(collect_unfiltered_pair_specs "$target_func")
+}
+
+function_call_pair_filter_entries() {
+    local compact_filter entry
+    local -a raw_entries=()
+
+    compact_filter="${FUNCTION_CALL_PAIR_FILTER//[[:space:]]/}"
+    IFS=',' read -r -a raw_entries <<< "$compact_filter"
+    for entry in "${raw_entries[@]}"; do
+        [[ -n "$entry" ]] || continue
+        printf '%s\n' "$entry"
+    done
+}
+
+function_call_pair_filter_entry_matches() {
+    local entry="$1"
+    local target_func="$2"
+    local row_id="$3"
+    local col_id="$4"
+    local entry_func=""
+    local entry_pair="$entry"
+    local left_id right_id
+
+    if [[ "$entry" == *:* ]]; then
+        entry_func="${entry%%:*}"
+        entry_pair="${entry#*:}"
+        [[ -n "$entry_func" && -n "$entry_pair" ]] || return 1
+        [[ "$entry_func" == "$target_func" ]] || return 1
+    fi
+
+    [[ "$entry_pair" == *_* ]] || return 1
+    left_id="${entry_pair%%_*}"
+    right_id="${entry_pair#*_}"
+    [[ -n "$left_id" && -n "$right_id" ]] || return 1
+
+    if [[ "$left_id" == "$row_id" && "$right_id" == "$col_id" ]]; then
+        return 0
+    fi
+    if [[ "$left_id" == "$col_id" && "$right_id" == "$row_id" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+function_call_pair_filter_allows() {
+    local target_func="$1"
+    local row_id="$2"
+    local col_id="$3"
+    local compact_filter="${FUNCTION_CALL_PAIR_FILTER//[[:space:]]/}"
+    local filter_entry
+
+    if [[ -z "$compact_filter" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r filter_entry; do
+        if function_call_pair_filter_entry_matches "$filter_entry" "$target_func" "$row_id" "$col_id"; then
+            return 0
+        fi
+    done < <(function_call_pair_filter_entries)
+
+    return 1
+}
+
+validate_function_call_pair_filter() {
+    local compact_filter="${FUNCTION_CALL_PAIR_FILTER//[[:space:]]/}"
+    local target_func row_id col_id filter_entry
+    local -a filter_entries=()
+    local -a selected_pairs=()
+    local -A filter_entry_matched=()
+
+    if [[ -z "$compact_filter" ]]; then
+        return 0
+    fi
+
+    mapfile -t filter_entries < <(function_call_pair_filter_entries)
+    if (( ${#filter_entries[@]} == 0 )); then
+        echo "Error: FUNCTION_CALL_PAIR_FILTER did not contain any pair entries: $FUNCTION_CALL_PAIR_FILTER" >&2
+        return 1
+    fi
+
+    for filter_entry in "${filter_entries[@]}"; do
+        filter_entry_matched["$filter_entry"]=0
+    done
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        mapfile -t selected_pairs < <(collect_pair_specs "$target_func")
+        if (( ${#selected_pairs[@]} == 0 )); then
+            echo "Error: FUNCTION_CALL_PAIR_FILTER selected zero pairs for target function: $target_func" >&2
+            echo "  filter: $FUNCTION_CALL_PAIR_FILTER" >&2
+            return 1
+        fi
+
+        while IFS=$'\t' read -r row_id col_id; do
+            [[ -n "$row_id" && -n "$col_id" ]] || continue
+            for filter_entry in "${filter_entries[@]}"; do
+                if function_call_pair_filter_entry_matches "$filter_entry" "$target_func" "$row_id" "$col_id"; then
+                    filter_entry_matched["$filter_entry"]=1
+                fi
+            done
+        done < <(collect_unfiltered_pair_specs "$target_func")
+    done
+
+    for filter_entry in "${filter_entries[@]}"; do
+        if [[ "${filter_entry_matched[$filter_entry]}" != "1" ]]; then
+            echo "Error: FUNCTION_CALL_PAIR_FILTER entry did not match any selected target function pair: $filter_entry" >&2
+            echo "  target functions: ${TARGET_FUNCS[*]}" >&2
+            return 1
+        fi
     done
 }
 
@@ -605,6 +733,10 @@ collect_all_expected_log_files() {
         collect_expected_log_files "${OUTPUT_BASE_DIR}/${target_func}" "$target_func"
     done
 }
+
+if ! validate_function_call_pair_filter; then
+    exit 1
+fi
 
 if [[ "$VALIDATION_RUNNER_DRY_RUN" != "0" ]]; then
     echo "Dry run fixed pair order:"
