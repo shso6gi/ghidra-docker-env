@@ -174,6 +174,36 @@ def _expression_operators(expr: Expression | None) -> set[str]:
     return operators
 
 
+def _eval_bv_expression(expr: Expression, parameters: dict[str, int]) -> int:
+    size = max(1, int(getattr(expr, "size", 0) or 4))
+    mask = (1 << (size * 8)) - 1
+    if expr.expr_type == ExpressionType.CONSTANT:
+        return int(expr.value or 0) & mask
+    if expr.expr_type == ExpressionType.PARAMETER:
+        return int(parameters[expr.name]) & mask
+    if expr.expr_type == ExpressionType.UNARY_OP and expr.operator == "INT_ZEXT":
+        return _eval_bv_expression(expr.operands[0], parameters) & mask
+    if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+        raise AssertionError(f"unsupported expression in test evaluator: {expr.to_string()}")
+
+    left, right = expr.operands
+    if expr.operator == "SUBPIECE":
+        offset = _eval_bv_expression(right, parameters)
+        return (_eval_bv_expression(left, parameters) >> (offset * 8)) & mask
+
+    left_value = _eval_bv_expression(left, parameters)
+    right_value = _eval_bv_expression(right, parameters)
+    if expr.operator == "INT_ADD":
+        return (left_value + right_value) & mask
+    if expr.operator == "INT_SUB":
+        return (left_value - right_value) & mask
+    if expr.operator == "INT_MULT":
+        return (left_value * right_value) & mask
+    if expr.operator == "INT_RIGHT":
+        return (left_value >> right_value) & mask
+    raise AssertionError(f"unsupported operator in test evaluator: {expr.operator}")
+
+
 def test_counted_loop_summary_canonicalizes_zero_contribution_prefix():
     summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
     residue_cases = (
@@ -1588,6 +1618,67 @@ def _build_decrement_accumulator_sum_cfg():
     return _FakeCfgHighFunction([preheader, header, body, exit_block])
 
 
+def _build_latch_exit_decrement_accumulator_sum_cfg():
+    param = _param("param_1")
+    zero_expr = _const(0)
+    one_expr = _const(1)
+
+    precheck = _FakeCfgBlock(0)
+    zero_exit = _FakeCfgBlock(1)
+    header = _FakeCfgBlock(2)
+    latch = _FakeCfgBlock(3)
+    exit_block = _FakeCfgBlock(4)
+
+    precheck.add_edge(header, truth=True)
+    precheck.add_edge(zero_exit, truth=False)
+    header.add_edge(latch)
+    latch.add_edge(header, truth=True)
+    latch.add_edge(exit_block, truth=False)
+
+    param_vn = _FakeVarnode("param", expr=param)
+    zero_vn = _FakeVarnode("zero", expr=zero_expr)
+    one_vn = _FakeVarnode("one", expr=one_expr)
+
+    entry_guard_vn = _FakeVarnode("entry_guard", size=1)
+    state_phi_vn = _FakeVarnode("state_phi")
+    state_next_vn = _FakeVarnode("state_next")
+    guard_state_vn = _FakeVarnode("guard_state")
+    acc_phi_vn = _FakeVarnode("acc_phi")
+    acc_next_vn = _FakeVarnode("acc_next")
+    latch_guard_vn = _FakeVarnode("latch_guard", size=1)
+
+    entry_guard_op = _FakePcodeOp("INT_SLESS", [zero_vn, param_vn], entry_guard_vn)
+    precheck_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("entry_target"), entry_guard_vn], None)
+    precheck._ops[:] = [entry_guard_op, precheck_branch]
+    for op in precheck._ops:
+        op.setParent(precheck)
+
+    state_phi_op = _FakePcodeOp("MULTIEQUAL", [param_vn, state_next_vn], state_phi_vn)
+    acc_phi_op = _FakePcodeOp("MULTIEQUAL", [zero_vn, acc_next_vn], acc_phi_vn)
+    header._ops[:] = [state_phi_op, acc_phi_op]
+    for op in header._ops:
+        op.setParent(header)
+
+    acc_next_op = _FakePcodeOp("INT_ADD", [acc_phi_vn, state_phi_vn], acc_next_vn)
+    state_next_op = _FakePcodeOp("INT_SUB", [state_phi_vn, one_vn], state_next_vn)
+    guard_state_op = _FakePcodeOp("INT_SUB", [state_phi_vn, one_vn], guard_state_vn)
+    latch_guard_op = _FakePcodeOp("INT_NOTEQUAL", [guard_state_vn, zero_vn], latch_guard_vn)
+    latch_branch = _FakePcodeOp("CBRANCH", [_FakeVarnode("latch_target"), latch_guard_vn], None)
+    latch._ops[:] = [acc_next_op, state_next_op, guard_state_op, latch_guard_op, latch_branch]
+    for op in latch._ops:
+        op.setParent(latch)
+
+    zero_return = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), zero_vn], None)
+    zero_exit._ops[:] = [zero_return]
+    zero_return.setParent(zero_exit)
+
+    loop_return = _FakePcodeOp("RETURN", [_FakeVarnode("return_target"), acc_next_vn], None)
+    exit_block._ops[:] = [loop_return]
+    loop_return.setParent(exit_block)
+
+    return _FakeCfgHighFunction([precheck, zero_exit, header, latch, exit_block])
+
+
 def _build_branch_while_state_multi_latch_cfg(*, shift_mnemonic: str = "INT_SRIGHT"):
     param = _param("param_1")
     zero_expr = _const(0)
@@ -1757,6 +1848,90 @@ def test_state_transition_loop_summary_recovers_state_affine_accumulator_sum():
     assert "zero_extend" in positive_smt
     assert "(bvmul ((_ zero_extend" in positive_smt
     assert "extract 31 0" in positive_smt
+
+
+def test_state_transition_loop_summary_recovers_latch_exit_decrement_sum_without_triangular_proof():
+    state_equals_one = Expression.binary_op(
+        "INT_NOTEQUAL",
+        Expression.binary_op("INT_SUB", _param("param_1"), _const(1)),
+        _const(0),
+    )
+    state_equals_one.size = 1
+    analysis = create_mock_analysis(
+        "latch_exit_decrement_sum",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))]),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", _param("param_1"), _const(0)),
+                conditions=[
+                    _cond("INT_SLESS", _const(0), _param("param_1")),
+                    Condition(state_equals_one, negated=True),
+                ],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    summary = summarizer._try_summarize_state_transition_loop(
+        _FakeFunction("latch_exit_decrement_sum"),
+        _build_latch_exit_decrement_accumulator_sum_cfg(),
+        analysis,
+    )
+
+    assert summary is not None
+    summarized_returns, note = summary
+    assert note == "state_transition_loop_summary"
+    assert len(summarized_returns) == 2
+    positive_case = next(ret for ret in summarized_returns if ret.branch_index == 10_300)
+    assert positive_case.conditions[0].to_string() == "(0 < param_1)"
+    assert expression_has_unresolved_value(positive_case.value) is False
+    assert positive_case.value.expr_type != ExpressionType.INTRINSIC
+    positive_smt = expression_to_smt(positive_case.value)
+    assert "rt_state_transition_loop_count_" not in positive_smt
+    assert "(bvmul (bvsub param_1 (_ bv1 32)) (bvsub param_1 (_ bv1 32)))" in positive_smt
+    assert "bvlshr" in positive_smt
+
+
+def test_peeled_decrement_accumulator_sum_keeps_state_width_until_return_truncation():
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+    value = summarizer._build_peeled_decrement_accumulator_sum_value(
+        _param("param_1", size=8),
+        result_size=4,
+    )
+
+    assert value is not None
+    assert value.size == 4
+    n_value = 0x100000001
+    expected_low_sum = ((n_value * (n_value + 1)) // 2) & 0xFFFFFFFF
+    assert expected_low_sum == 0x80000001
+    assert _eval_bv_expression(value, {"param_1": n_value}) == expected_low_sum
+
+
+def test_state_transition_loop_summary_rejects_latch_exit_decrement_sum_without_one_case_witness():
+    analysis = create_mock_analysis(
+        "latch_exit_decrement_sum",
+        return_type="int",
+        parameters=[{"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True}],
+        returns=[
+            ReturnInfo(address="0x1000", value=_const(0), conditions=[_cond("INT_SLESSEQUAL", _param("param_1"), _const(0))]),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.binary_op("INT_ADD", _param("param_1"), _const(0)),
+                conditions=[_cond("INT_SLESS", _const(0), _param("param_1"))],
+            ),
+        ],
+    )
+
+    summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)
+
+    assert summarizer._try_summarize_state_transition_loop(
+        _FakeFunction("latch_exit_decrement_sum"),
+        _build_latch_exit_decrement_accumulator_sum_cfg(),
+        analysis,
+    ) is None
 
 
 def test_state_transition_loop_summary_key_is_object_centric_across_branch_order():

@@ -2062,8 +2062,7 @@ def _completed_evidence_matches_action(
     object_target_key = _normalize_nested_tuple(
         evidence_summary.get("object_target_key") or evidence.get("object_target_key")
     )
-    if object_target_key != _normalize_nested_tuple(action.get("object_target_key")):
-        return False
+    action_target_key = _normalize_nested_tuple(action.get("object_target_key"))
     if not _object_target_key_is_specific(object_target_key):
         return False
     if (
@@ -2086,11 +2085,58 @@ def _completed_evidence_matches_action(
         action.get("evidence_kind"),
         object_target_key,
     )
-    return (
-        _normalize_nested_tuple(evidence_summary.get("proof_obligation_id") or evidence.get("proof_obligation_id"))
-        == expected_id
-        == _normalize_nested_tuple(action.get("proof_obligation_id"))
+    provided_id = _normalize_nested_tuple(
+        evidence_summary.get("proof_obligation_id") or evidence.get("proof_obligation_id")
     )
+    if provided_id != expected_id:
+        return False
+    if object_target_key == action_target_key:
+        return expected_id == _normalize_nested_tuple(action.get("proof_obligation_id"))
+    return _completed_evidence_supersedes_frozen_return_coverage_action(
+        evidence,
+        action,
+        current_target_key=object_target_key,
+        frozen_target_key=action_target_key,
+    )
+
+
+def _completed_evidence_supersedes_frozen_return_coverage_action(
+    evidence: Mapping[str, Any],
+    action: Mapping[str, Any],
+    *,
+    current_target_key: Any,
+    frozen_target_key: Any,
+) -> bool:
+    if not _object_target_key_is_specific(frozen_target_key):
+        return False
+    if not _return_coverage_targets_share_fixed_identity(
+        current_target_key,
+        frozen_target_key,
+    ):
+        return False
+    if str(evidence.get("coverage_status") or MISSING_SENTINEL) != "covered":
+        return False
+    expected_frozen_id = build_proof_obligation_id(
+        action.get("reason_id"),
+        action.get("proof_stage"),
+        action.get("proof_kind"),
+        action.get("evidence_kind"),
+        frozen_target_key,
+    )
+    return _normalize_nested_tuple(action.get("proof_obligation_id")) == expected_frozen_id
+
+
+def _return_coverage_targets_share_fixed_identity(left: Any, right: Any) -> bool:
+    left = _normalize_nested_tuple(left)
+    right = _normalize_nested_tuple(right)
+    if not (
+        isinstance(left, tuple)
+        and isinstance(right, tuple)
+        and len(left) == 7
+        and len(right) == 7
+    ):
+        return False
+    return left[:5] == right[:5]
 
 
 def _completed_evidence_has_active_blocker(evidence: Mapping[str, Any]) -> bool:

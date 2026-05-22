@@ -3812,6 +3812,15 @@ class StructuralRecurrenceSummarizer:
                 result_size=result_size,
             )
             if loop_value is None:
+                latch_exit_returns = self._try_build_latch_exit_decrement_accumulator_sum_returns(
+                    function=function,
+                    model=model,
+                    analysis=analysis,
+                    result_size=result_size,
+                )
+                if latch_exit_returns is not None:
+                    self._debug("Recovered latch-exit decrement accumulator sum summary")
+                    return latch_exit_returns, "state_transition_loop_summary"
                 self._debug(
                     "Declined state-transition loop summary: accumulator delta is not one "
                     "or supported state affine"
@@ -3882,6 +3891,299 @@ class StructuralRecurrenceSummarizer:
         if closed_form is None:
             return None
         return self._truncate_to_width(closed_form, result_size)
+
+    def _try_build_latch_exit_decrement_accumulator_sum_returns(
+        self,
+        *,
+        function,
+        model: StateTransitionLoopModel,
+        analysis,
+        result_size: int,
+    ) -> Optional[List[ReturnInfo]]:
+        if not self._state_guard_is_placeholder_not_equal_one(
+            model.state_guard_expr,
+            model.state_placeholder,
+        ):
+            return None
+        transition_affine = self._extract_affine_placeholder_term(
+            model.state_transition_expr,
+            model.state_placeholder,
+        )
+        if transition_affine != (1, -1):
+            return None
+        delta_affine = self._extract_affine_placeholder_term(
+            model.accumulator_delta_expr,
+            model.state_placeholder,
+        )
+        if delta_affine != (1, 0):
+            return None
+        witnesses = self._find_latch_exit_decrement_sum_witness_returns(
+            analysis=analysis,
+            model=model,
+            result_size=result_size,
+        )
+        if witnesses is None:
+            self._debug(
+                "Declined latch-exit decrement sum: missing n<=0 / n==1 return witness"
+            )
+            return None
+        base_anchor, loop_anchor = witnesses
+        loop_value = self._build_peeled_decrement_accumulator_sum_value(
+            model.state_init_expr,
+            result_size=result_size,
+        )
+        if loop_value is None:
+            return None
+        positive_conditions = self._build_recursive_conditions(model.state_init_expr, 0)
+        base_conditions = self._build_base_conditions(model.state_init_expr, 0)
+        if positive_conditions is None or base_conditions is None:
+            return None
+
+        def metadata(anchor, fallback_op):
+            pcode_ref = getattr(anchor, "pcode_op_ref", None)
+            if pcode_ref is None:
+                pcode_ref = self._make_pcode_op_ref(fallback_op)
+            return {
+                "address": str(
+                    getattr(anchor, "address", None)
+                    or getattr(function, "getEntryPoint", lambda: "state_transition_loop")()
+                ),
+                "pcode_identity": getattr(anchor, "pcode_identity", None),
+                "pcode_order": getattr(anchor, "pcode_order", None),
+                "pcode_time": getattr(anchor, "pcode_time", None),
+                "pcode_op_ref": pcode_ref,
+            }
+
+        base_metadata = metadata(base_anchor, self._find_cbranch_op(model.header_block))
+        loop_metadata = metadata(loop_anchor, self._find_cbranch_op(model.header_block))
+        return [
+            ReturnInfo(
+                value=Expression.constant(0, result_size),
+                conditions=base_conditions,
+                branch_index=getattr(base_anchor, "branch_index", 0),
+                **base_metadata,
+            ),
+            ReturnInfo(
+                value=loop_value,
+                conditions=positive_conditions,
+                branch_index=10_300,
+                **loop_metadata,
+            ),
+        ]
+
+    def _build_peeled_decrement_accumulator_sum_value(
+        self,
+        state_init_expr: Expression,
+        *,
+        result_size: int,
+    ) -> Optional[Expression]:
+        state_size = max(1, int(getattr(state_init_expr, "size", 0) or result_size or 4))
+        state = self._truncate_to_width(state_init_expr, state_size)
+        one = Expression.constant(1, state_size)
+        two = Expression.constant(2, state_size)
+        state_minus_one = Expression.binary_op("INT_SUB", state, one)
+        state_minus_one.size = state_size
+        state_minus_two = Expression.binary_op("INT_SUB", state, two)
+        state_minus_two.size = state_size
+        square = Expression.binary_op("INT_MULT", state_minus_one, state_minus_one)
+        square.size = state_size
+        wide_size = self._summary_working_size(state_size)
+        wide_left = self._zero_extend_bitpattern(state_minus_one, wide_size)
+        wide_right = self._zero_extend_bitpattern(state_minus_two, wide_size)
+        product = Expression.binary_op("INT_MULT", wide_left, wide_right)
+        product.size = wide_size
+        half = Expression.binary_op("INT_RIGHT", product, Expression.constant(1, wide_size))
+        half.size = wide_size
+        half_low = self._truncate_to_width(half, state_size)
+        square_plus_state = Expression.binary_op("INT_ADD", square, state)
+        square_plus_state.size = state_size
+        total = Expression.binary_op("INT_SUB", square_plus_state, half_low)
+        total.size = state_size
+        return self._canonicalize_expression(self._truncate_to_width(total, result_size))
+
+    def _find_latch_exit_decrement_sum_witness_returns(
+        self,
+        *,
+        analysis,
+        model: StateTransitionLoopModel,
+        result_size: int,
+    ) -> Optional[Tuple[ReturnInfo, ReturnInfo]]:
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        if not returns:
+            return None
+        state = self._truncate_to_width(model.state_init_expr, result_size)
+        base_anchor = None
+        peeled_anchor = None
+        for return_info in returns:
+            value = self._canonicalize_expression(getattr(return_info, "value", None))
+            conditions = tuple(getattr(return_info, "conditions", ()) or ())
+            if (
+                self._raw_constant_value(value) == 0
+                and self._conditions_include_nonpositive_state(conditions, model.state_init_expr)
+            ):
+                base_anchor = return_info
+            if (
+                self._extract_affine_placeholder_term(value, state) == (1, 0)
+                and self._conditions_include_positive_state(conditions, model.state_init_expr)
+                and self._conditions_include_state_equals_one(conditions, model.state_init_expr)
+            ):
+                peeled_anchor = return_info
+        if base_anchor is None or peeled_anchor is None:
+            return None
+        return base_anchor, peeled_anchor
+
+    def _state_guard_is_placeholder_not_equal_one(
+        self,
+        state_guard: Optional[Expression],
+        state_placeholder: Expression,
+    ) -> bool:
+        guard = self._canonicalize_expression(state_guard)
+        if guard is None or guard.expr_type != ExpressionType.BINARY_OP or len(guard.operands) != 2:
+            return False
+        if guard.operator != "INT_NOTEQUAL":
+            return False
+        return self._binary_comparison_matches_affine_constant(
+            guard,
+            state_placeholder,
+            coeff=1,
+            bias=-1,
+            constant=0,
+        ) or self._binary_comparison_matches_affine_constant(
+            guard,
+            state_placeholder,
+            coeff=1,
+            bias=0,
+            constant=1,
+        )
+
+    def _conditions_include_positive_state(
+        self,
+        conditions: Sequence[Condition],
+        state_expr: Expression,
+    ) -> bool:
+        return any(self._condition_is_positive_state(condition, state_expr) for condition in conditions or ())
+
+    def _conditions_include_nonpositive_state(
+        self,
+        conditions: Sequence[Condition],
+        state_expr: Expression,
+    ) -> bool:
+        return any(self._condition_is_nonpositive_state(condition, state_expr) for condition in conditions or ())
+
+    def _conditions_include_state_equals_one(
+        self,
+        conditions: Sequence[Condition],
+        state_expr: Expression,
+    ) -> bool:
+        return any(self._condition_is_state_equals_one(condition, state_expr) for condition in conditions or ())
+
+    def _condition_is_positive_state(
+        self,
+        condition: Condition,
+        state_expr: Expression,
+    ) -> bool:
+        expr = self._canonicalize_expression(getattr(condition, "expression", None))
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return False
+        if bool(getattr(condition, "negated", False)):
+            return False
+        if expr.operator == "INT_SLESS":
+            left, right = expr.operands
+            return self._raw_constant_value(left) == 0 and self._expr_matches_placeholder(right, state_expr)
+        if expr.operator == "INT_SLESSEQUAL":
+            left, right = expr.operands
+            return self._raw_constant_value(left) == 1 and self._expr_matches_placeholder(right, state_expr)
+        return False
+
+    def _condition_is_nonpositive_state(
+        self,
+        condition: Condition,
+        state_expr: Expression,
+    ) -> bool:
+        expr = self._canonicalize_expression(getattr(condition, "expression", None))
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return False
+        negated = bool(getattr(condition, "negated", False))
+        left, right = expr.operands
+        if not negated and expr.operator == "INT_SLESSEQUAL":
+            return self._expr_matches_placeholder(left, state_expr) and self._raw_constant_value(right) == 0
+        if not negated and expr.operator == "INT_SLESS":
+            return self._expr_matches_placeholder(left, state_expr) and self._raw_constant_value(right) == 1
+        if negated and expr.operator == "INT_SLESS":
+            return self._raw_constant_value(left) == 0 and self._expr_matches_placeholder(right, state_expr)
+        return False
+
+    def _condition_is_state_equals_one(
+        self,
+        condition: Condition,
+        state_expr: Expression,
+    ) -> bool:
+        expr = self._canonicalize_expression(getattr(condition, "expression", None))
+        if expr is None or expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return False
+        negated = bool(getattr(condition, "negated", False))
+        if expr.operator == "INT_EQUAL" and not negated:
+            return self._binary_comparison_matches_affine_constant(
+                expr,
+                state_expr,
+                coeff=1,
+                bias=0,
+                constant=1,
+            ) or self._binary_comparison_matches_affine_constant(
+                expr,
+                state_expr,
+                coeff=1,
+                bias=-1,
+                constant=0,
+            )
+        if expr.operator == "INT_NOTEQUAL" and negated:
+            return self._binary_comparison_matches_affine_constant(
+                expr,
+                state_expr,
+                coeff=1,
+                bias=0,
+                constant=1,
+            ) or self._binary_comparison_matches_affine_constant(
+                expr,
+                state_expr,
+                coeff=1,
+                bias=-1,
+                constant=0,
+            )
+        return False
+
+    def _binary_comparison_matches_affine_constant(
+        self,
+        expr: Expression,
+        base_expr: Expression,
+        *,
+        coeff: int,
+        bias: int,
+        constant: int,
+    ) -> bool:
+        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return False
+        left, right = expr.operands
+        left_affine = self._extract_affine_placeholder_term(left, base_expr)
+        right_affine = self._extract_affine_placeholder_term(right, base_expr)
+        left_const = self._raw_constant_value(left)
+        right_const = self._raw_constant_value(right)
+        return (
+            left_affine == (coeff, bias)
+            and right_const == constant
+        ) or (
+            right_affine == (coeff, bias)
+            and left_const == constant
+        )
+
+    def _expr_matches_placeholder(self, expr: Optional[Expression], placeholder: Expression) -> bool:
+        expr = self._canonicalize_expression(expr)
+        if expr is None:
+            return False
+        try:
+            return expr.structural_key() == placeholder.structural_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return False
 
     def _find_state_transition_loop_model(
         self,
