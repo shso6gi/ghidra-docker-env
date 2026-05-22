@@ -3757,10 +3757,6 @@ class StructuralRecurrenceSummarizer:
         if self._raw_constant_value(model.accumulator_init_expr) != 0:
             self._debug("Declined state-transition loop summary: accumulator seed is not zero")
             return None
-        if self._raw_constant_value(model.accumulator_delta_expr) != 1:
-            self._debug("Declined state-transition loop summary: accumulator delta is not one")
-            return None
-
         result_size = max(1, int(getattr(model.accumulator_phi_output, "getSize", lambda: 4)() or 4))
         state_size = max(1, int(getattr(model.state_phi_output, "getSize", lambda: 4)() or 4))
         transition_cases = self._state_transition_summary_cases(
@@ -3807,6 +3803,20 @@ class StructuralRecurrenceSummarizer:
                 "pcode_time": pcode_ref.seq_time,
                 "pcode_order": pcode_ref.seq_order,
             }
+        loop_value = None
+        if self._raw_constant_value(model.accumulator_delta_expr) == 1:
+            loop_value = loop_count
+        else:
+            loop_value = self._build_state_decrement_accumulator_sum_value(
+                model=model,
+                result_size=result_size,
+            )
+            if loop_value is None:
+                self._debug(
+                    "Declined state-transition loop summary: accumulator delta is not one "
+                    "or supported state affine"
+                )
+                return None
         returns = [
             ReturnInfo(
                 address=address,
@@ -3817,7 +3827,7 @@ class StructuralRecurrenceSummarizer:
             ),
             ReturnInfo(
                 address=address,
-                value=loop_count,
+                value=loop_value,
                 conditions=[Condition(entry_guard_expr, False)],
                 branch_index=10_200,
                 **site_metadata,
@@ -3825,6 +3835,53 @@ class StructuralRecurrenceSummarizer:
         ]
         self._debug("Recovered state-transition loop summary")
         return returns, "state_transition_loop_summary"
+
+    def _build_state_decrement_accumulator_sum_value(
+        self,
+        *,
+        model: StateTransitionLoopModel,
+        result_size: int,
+    ) -> Optional[Expression]:
+        if not self._state_guard_proves_signed_positive_placeholder(
+            model.state_guard_expr,
+            model.state_placeholder,
+        ):
+            self._debug(
+                "Declined state-affine accumulator sum: state guard is not signed-positive "
+                f"({model.state_guard_expr.to_string()})"
+            )
+            return None
+        transition_affine = self._extract_affine_placeholder_term(
+            model.state_transition_expr,
+            model.state_placeholder,
+        )
+        if transition_affine != (1, -1):
+            self._debug(
+                "Declined state-affine accumulator sum: transition is not unit decrement "
+                f"({model.state_transition_expr.to_string()} -> {transition_affine})"
+            )
+            return None
+        delta_affine = self._extract_affine_placeholder_term(
+            model.accumulator_delta_expr,
+            model.state_placeholder,
+        )
+        if delta_affine is None:
+            self._debug(
+                "Declined state-affine accumulator sum: accumulator delta is not affine in state "
+                f"({model.accumulator_delta_expr.to_string()})"
+            )
+            return None
+        coeff, bias = delta_affine
+        closed_form = self._build_closed_form(
+            model.state_init_expr,
+            lower_bound=0,
+            coeff=coeff,
+            bias=bias,
+            base_value=0,
+        )
+        if closed_form is None:
+            return None
+        return self._truncate_to_width(closed_form, result_size)
 
     def _find_state_transition_loop_model(
         self,
@@ -14618,6 +14675,65 @@ class StructuralRecurrenceSummarizer:
         node_bit_width = bit_width_hint or self._infer_counter_bit_width(expr, param_name)
         left = self._extract_affine_term(expr.operands[0], param_name, bit_width_hint=node_bit_width)
         right = self._extract_affine_term(expr.operands[1], param_name, bit_width_hint=node_bit_width)
+
+        if expr.operator == "INT_ADD" and left is not None and right is not None:
+            return left[0] + right[0], left[1] + right[1]
+        if expr.operator == "INT_SUB" and left is not None and right is not None:
+            return left[0] - right[0], left[1] - right[1]
+        if expr.operator == "INT_MULT":
+            left_const = self._signed_constant_value(expr.operands[0], bit_width_hint=node_bit_width)
+            right_const = self._signed_constant_value(expr.operands[1], bit_width_hint=node_bit_width)
+            if left_const is not None and right is not None:
+                return left_const * right[0], left_const * right[1]
+            if right_const is not None and left is not None:
+                return right_const * left[0], right_const * left[1]
+        return None
+
+    def _extract_affine_placeholder_term(
+        self,
+        expr: Optional[Expression],
+        placeholder: Expression,
+        bit_width_hint: Optional[int] = None,
+    ) -> Optional[Tuple[int, int]]:
+        expr = self._canonicalize_expression(expr)
+        if expr is None:
+            return None
+        if bit_width_hint is None:
+            bit_width_hint = max(1, int(getattr(placeholder, "size", 0) or 4)) * 8
+        try:
+            if expr.structural_key() == placeholder.structural_key():
+                return 1, 0
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            return None
+        if expr.expr_type == ExpressionType.CONSTANT:
+            signed_value = self._signed_constant_value(expr, bit_width_hint=bit_width_hint)
+            if signed_value is None:
+                return None
+            return 0, signed_value
+        if expr.expr_type == ExpressionType.UNARY_OP and expr.operator in {"INT_2COMP", "INT_NEGATE"} and len(expr.operands) == 1:
+            operand = self._extract_affine_placeholder_term(
+                expr.operands[0],
+                placeholder,
+                bit_width_hint=bit_width_hint,
+            )
+            if operand is None:
+                return None
+            coeff, bias = operand
+            return -coeff, -bias
+        if expr.expr_type != ExpressionType.BINARY_OP or len(expr.operands) != 2:
+            return None
+
+        node_bit_width = bit_width_hint or (expr.size * 8 if expr.size else None)
+        left = self._extract_affine_placeholder_term(
+            expr.operands[0],
+            placeholder,
+            bit_width_hint=node_bit_width,
+        )
+        right = self._extract_affine_placeholder_term(
+            expr.operands[1],
+            placeholder,
+            bit_width_hint=node_bit_width,
+        )
 
         if expr.operator == "INT_ADD" and left is not None and right is not None:
             return left[0] + right[0], left[1] + right[1]
