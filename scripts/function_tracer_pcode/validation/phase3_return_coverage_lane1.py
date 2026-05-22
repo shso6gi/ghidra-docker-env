@@ -1733,10 +1733,18 @@ def _retired_reason_inventory(
     baseline_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
     transition_entries: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    baseline_reason_counts = _reason_record_tuple_counts(baseline_records)
-    current_reason_counts = _reason_record_tuple_counts(current_records)
-    baseline_action_counts = _proof_action_tuple_counts(baseline_records)
-    current_action_counts = _proof_action_tuple_counts(current_records)
+    baseline_transition_records = _retired_transition_record_subset(
+        baseline_records,
+        transition_entries,
+    )
+    current_transition_records = _retired_transition_record_subset(
+        current_records,
+        transition_entries,
+    )
+    baseline_reason_counts = _reason_record_tuple_counts(baseline_transition_records)
+    current_reason_counts = _reason_record_tuple_counts(current_transition_records)
+    baseline_action_counts = _proof_action_tuple_counts(baseline_transition_records)
+    current_action_counts = _proof_action_tuple_counts(current_transition_records)
     expected_baseline_reason_counts = Counter(
         expected_tuple
         for entry in transition_entries
@@ -1780,6 +1788,9 @@ def _retired_reason_inventory(
             and current_action_subset == expected_current_action_subset
         )
         inventory[reason_id] = {
+            "inventory_scope": "selected_retired_transitions",
+            "baseline_record_count": len(baseline_transition_records),
+            "current_record_count": len(current_transition_records),
             "reason_record": {
                 "baseline_tuple_counts": _serialize_tuple_counter(baseline_reason_subset),
                 "current_tuple_counts": _serialize_tuple_counter(current_reason_subset),
@@ -1803,6 +1814,21 @@ def _retired_reason_inventory(
             "status": "retired_by_reclassification" if status_ok else "failed",
         }
     return inventory
+
+
+def _retired_transition_record_subset(
+    records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    transition_entries: Sequence[Mapping[str, Any]],
+) -> Dict[Tuple[str, str, str], Mapping[str, Any]]:
+    keys = {
+        (
+            str(entry.get("category") or MISSING_SENTINEL),
+            str(entry.get("function") or MISSING_SENTINEL),
+            _canonical_binary_pair(str(entry.get("binary_pair") or MISSING_SENTINEL)),
+        )
+        for entry in transition_entries
+    }
+    return {key: record for key, record in records.items() if key in keys}
 
 
 def _reason_record_tuple_counts(

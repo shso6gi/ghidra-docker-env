@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownCountKind,
+    UnknownRecoveryAction,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofObligation,
     UnknownReasonRecord,
@@ -159,6 +160,34 @@ def test_plan16_operational_backlog_reasons_have_registered_actions():
         assert all(action.proof_stage != "unspecified" for action in actions)
         assert all(action.required_evidence for action in actions)
         assert {action.target_regression for action in actions} == {reason_id.value}
+
+
+def test_legacy_recovery_action_inherits_known_reason_tuple_defaults():
+    action = UnknownRecoveryAction.from_dict(
+        {
+            "reason_id": UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value,
+            "proof_kind": UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value,
+            "proof_stage": "return_coverage_smt_disambiguation",
+            "status": UnknownRecoveryActionStatus.PLANNED.value,
+            "stage": "S_PAIRWISE",
+            "evidence_refs": ["function2:return_coverage_inconclusive"],
+        }
+    )
+
+    assert action.decision_effect == "blocks_decision"
+    assert action.reason_scope == "function"
+    assert action.aggregation_unit == "function"
+    assert action.target_regression == "return_coverage_inconclusive"
+
+
+def test_unknown_legacy_recovery_action_keeps_diagnostic_defaults():
+    action = UnknownRecoveryAction.from_dict({"proof_stage": "unspecified"})
+
+    assert action.reason_id == UnknownReasonId.UNKNOWN.value
+    assert action.decision_effect == "diagnostic_only"
+    assert action.reason_scope == "global"
+    assert action.aggregation_unit == "result"
+    assert action.target_regression is None
 
 
 def test_recovery_kind_reasons_all_have_registered_plans():

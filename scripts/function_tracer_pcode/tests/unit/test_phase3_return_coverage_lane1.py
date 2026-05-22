@@ -740,6 +740,41 @@ def test_phase3_return_coverage_manifest_rejects_retired_baseline_tuple_drift(tm
     assert "retired_reason_inventory_mismatch:return_coverage_inconclusive" in failures
 
 
+def test_phase3_return_coverage_retired_inventory_is_scoped_to_selected_transitions(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    _write_log(
+        baseline_root,
+        "fc_is_odd_extra",
+        "B11",
+        "B16",
+        [_legacy_reason_from_ref("function2:return_coverage_inconclusive")],
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is True
+    inventory = manifest["retired_reason_inventory"]["return_coverage_inconclusive"]
+    assert inventory["inventory_scope"] == "selected_retired_transitions"
+    assert inventory["reason_record"]["baseline_tuple_counts"][0]["count"] == 3
+    validate_phase3_return_coverage_lane1_manifest(manifest)
+
+
 def test_phase3_return_coverage_manifest_requires_current_active_reason(tmp_path):
     raw_dir = tmp_path / "baseline" / "raw"
     current_root = tmp_path / "current" / "function_call"

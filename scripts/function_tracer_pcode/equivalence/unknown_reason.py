@@ -257,15 +257,39 @@ class UnknownRecoveryAction:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
+        reason_id = normalize_unknown_reason_id(payload.get("reason_id"))
+        definition = get_unknown_reason_definition(reason_id)
+        use_definition_defaults = reason_id != UnknownReasonId.UNKNOWN.value
         return cls(
             count_kind=_enum_value(payload.get("count_kind")) or UnknownCountKind.PROOF_ACTION.value,
-            reason_id=normalize_unknown_reason_id(payload.get("reason_id")),
-            decision_effect=str(payload.get("decision_effect") or UnknownDecisionEffect.DIAGNOSTIC_ONLY.value),
-            reason_scope=str(payload.get("reason_scope") or UnknownReasonScope.GLOBAL.value),
+            reason_id=reason_id,
+            decision_effect=str(
+                payload.get("decision_effect")
+                or (
+                    definition.decision_effect
+                    if use_definition_defaults
+                    else UnknownDecisionEffect.DIAGNOSTIC_ONLY.value
+                )
+            ),
+            reason_scope=str(
+                payload.get("reason_scope")
+                or (
+                    definition.reason_scope
+                    if use_definition_defaults
+                    else UnknownReasonScope.GLOBAL.value
+                )
+            ),
             proof_kind=normalize_recovery_proof_kind(payload.get("proof_kind")) or UnknownRecoveryProofKind.NONE.value,
             proof_stage=str(payload.get("proof_stage") or "unspecified"),
             status=str(payload.get("status") or UnknownRecoveryActionStatus.PLANNED.value),
-            aggregation_unit=str(payload.get("aggregation_unit") or UnknownAggregationUnit.RESULT.value),
+            aggregation_unit=str(
+                payload.get("aggregation_unit")
+                or (
+                    definition.aggregation_unit
+                    if use_definition_defaults
+                    else UnknownAggregationUnit.RESULT.value
+                )
+            ),
             stage=payload.get("stage"),
             pair_or_case=payload.get("pair_or_case"),
             required_evidence=_coerce_evidence_refs(payload.get("required_evidence") or ()),
@@ -274,7 +298,11 @@ class UnknownRecoveryAction:
             object_target_key=_coerce_optional_tuple(payload.get("object_target_key")),
             proof_obligation_id=_coerce_optional_tuple(payload.get("proof_obligation_id")),
             recovery_action=payload.get("recovery_action"),
-            target_regression=payload.get("target_regression"),
+            target_regression=(
+                payload.get("target_regression")
+                if payload.get("target_regression") is not None
+                else definition.target_regression if use_definition_defaults else None
+            ),
             detail=payload.get("detail"),
         )
 
