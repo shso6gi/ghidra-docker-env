@@ -1,6 +1,13 @@
 __pycache__
 *.pytest_cache
 *.egg-info
+.venv
+.venv/
+.venv-pyghidra
+.venv-pyghidra/
+.local-jdk
+.local-jdk/
+.local-jdk.bak-*
 *.smt*
 output
 # targets配下のバイナリファイルを除外

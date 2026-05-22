@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrat
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownReasonId,
+    build_unknown_recovery_actions,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.model import Expression, ReturnInfo
@@ -103,6 +104,9 @@ def _payload(function: str, left_name: str, right_name: str, reasons):
             ],
         },
         "unknown_reasons": [reason.to_dict() for reason in reasons],
+        "unknown_recovery_actions": [
+            action.to_dict() for action in build_unknown_recovery_actions(reasons)
+        ],
     }
 
 
@@ -177,19 +181,25 @@ def _legacy_reason_from_ref(ref: str):
 def _write_log(root: Path, function: str, left: str, right: str, reasons):
     path = root / function / f"{function}_{left}_{right}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
+    _write_payload_log(
+        path,
+        _payload(
+            function,
+            _payload_binary_name(left),
+            _payload_binary_name(right),
+            reasons,
+        )
+    )
+
+
+def _write_payload_log(path: Path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
             [
                 "Result: UNKNOWN",
                 RESULT_JSON_BEGIN,
-                json.dumps(
-                    _payload(
-                        function,
-                        _payload_binary_name(left),
-                        _payload_binary_name(right),
-                        reasons,
-                    )
-                ),
+                json.dumps(payload),
                 RESULT_JSON_END,
             ]
         )
@@ -968,6 +978,78 @@ def test_phase3_return_coverage_manifest_rejects_missing_object_proof_detail(tmp
     assert manifest["phase3_lane1_ready"] is False
     failures = manifest["readiness"]["failure_kinds"]
     assert "current_expected_reason_object_target_mismatch:gap-reason-record" in failures
+
+
+def test_phase3_return_coverage_manifest_rejects_raw_action_without_proof_obligation_id(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    payload = _payload(
+        "fc_recursive_sum",
+        _payload_binary_name("B11"),
+        _payload_binary_name("B15"),
+        [_reason_from_ref("function2:return_coverage_gap")],
+    )
+    payload["unknown_recovery_actions"][0].pop("proof_obligation_id")
+    _write_payload_log(
+        current_root / "fc_recursive_sum" / "fc_recursive_sum_B11_B15.log",
+        payload,
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
+    action = manifest["entries"][0]["current_observation"]["proof_actions"][0]
+    assert action["proof_obligation_id"] is None
+    assert action["raw_proof_obligation_id_present"] is False
+
+
+def test_phase3_return_coverage_manifest_rejects_raw_action_with_null_proof_obligation_id(tmp_path):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    payload = _payload(
+        "fc_recursive_sum",
+        _payload_binary_name("B11"),
+        _payload_binary_name("B15"),
+        [_reason_from_ref("function2:return_coverage_gap")],
+    )
+    payload["unknown_recovery_actions"][0]["proof_obligation_id"] = None
+    _write_payload_log(
+        current_root / "fc_recursive_sum" / "fc_recursive_sum_B11_B15.log",
+        payload,
+    )
+
+    path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        retired_transitions=(),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_ready"] is False
+    failures = manifest["readiness"]["failure_kinds"]
+    assert "current_expected_proof_action_id_mismatch:gap-return-partition-extraction" in failures
+    assert manifest["entries"][0]["current_observation"]["proof_actions"][0][
+        "raw_proof_obligation_id_present"
+    ] is False
 
 
 def test_phase3_return_coverage_manifest_rejects_weak_return_coverage_object_key(tmp_path):

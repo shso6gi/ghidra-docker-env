@@ -20,6 +20,7 @@ from .result_summary import (
     classify_result_payload,
 )
 from .unknown_reason_summary import (
+    _FINAL_UNKNOWN_TRANSITIONS,
     _extract_final_unknown_reasons,
     _global_reason_tuple_from_action,
     _global_reason_tuple_from_record,
@@ -29,6 +30,7 @@ from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
     build_proof_obligation_id,
+    coerce_unknown_recovery_actions,
     build_unknown_recovery_actions,
 )
 
@@ -1020,12 +1022,13 @@ def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if not record:
         return {"log_status": "missing"}
     payload = record["payload"]
+    raw_reason_payloads = _extract_final_unknown_reason_payloads(payload)
     reason_records = _extract_final_unknown_reasons(payload)
-    proof_actions = [
-        action
-        for reason in reason_records
-        for action in build_unknown_recovery_actions((reason,))
-    ]
+    proof_action_records = _proof_action_records(
+        payload,
+        raw_reason_payloads,
+        reason_records,
+    )
     return {
         "log_status": "present",
         "log_path": record["relative_log_path"],
@@ -1044,25 +1047,95 @@ def _observation(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
             if reason.reason_id in OBSERVED_RETURN_REASON_IDS
         ],
         "reason_records": [
-            _reason_record_summary(reason)
-            for reason in reason_records
+            _reason_record_summary(reason, raw_reason_payload=raw_reason)
+            for raw_reason, reason in zip(raw_reason_payloads, reason_records)
             if reason.reason_id in OBSERVED_RETURN_REASON_IDS
         ],
         "proof_action_tuples": [
-            list(_global_reason_tuple_from_action(action))
-            for action in proof_actions
-            if getattr(action, "reason_id", None) in OBSERVED_RETURN_REASON_IDS
+            list(_global_reason_tuple_from_action(record["action"]))
+            for record in proof_action_records
+            if getattr(record["action"], "reason_id", None) in OBSERVED_RETURN_REASON_IDS
         ],
         "proof_actions": [
-            _proof_action_summary(action)
-            for action in proof_actions
-            if getattr(action, "reason_id", None) in OBSERVED_RETURN_REASON_IDS
+            _proof_action_summary(
+                record["action"],
+                raw_proof_obligation_id_present=record["raw_proof_obligation_id_present"],
+            )
+            for record in proof_action_records
+            if getattr(record["action"], "reason_id", None) in OBSERVED_RETURN_REASON_IDS
         ],
         "return_case_grid_diagnostic": _return_case_grid_diagnostic(payload),
     }
 
 
-def _reason_record_summary(reason: Any) -> Dict[str, Any]:
+def _extract_final_unknown_reason_payloads(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
+    debug_trace = payload.get("debug_trace")
+    if isinstance(debug_trace, Mapping) and debug_trace.get("final_result") is None:
+        attempts = debug_trace.get("attempts") or ()
+        for attempt in reversed(tuple(attempts)):
+            if not isinstance(attempt, Mapping):
+                continue
+            if (
+                attempt.get("result") is None
+                and str(attempt.get("transition_reason")) in _FINAL_UNKNOWN_TRANSITIONS
+            ):
+                return tuple(attempt.get("unknown_reasons") or ())
+    return tuple(payload.get("unknown_reasons") or ())
+
+
+def _proof_action_records(
+    payload: Mapping[str, Any],
+    raw_reason_payloads: Sequence[Any],
+    reason_records: Sequence[Any],
+) -> Sequence[Dict[str, Any]]:
+    raw_actions = _extract_final_unknown_recovery_action_payloads(payload)
+    if raw_actions:
+        actions = coerce_unknown_recovery_actions(raw_actions)
+        return [
+            {
+                "action": action,
+                "raw_proof_obligation_id_present": _raw_proof_obligation_id_present(raw_action),
+            }
+            for raw_action, action in zip(raw_actions, actions)
+        ]
+
+    records: list[Dict[str, Any]] = []
+    for raw_reason, reason in zip(raw_reason_payloads, reason_records):
+        for action in build_unknown_recovery_actions((reason,)):
+            records.append(
+                {
+                    "action": action,
+                    "raw_proof_obligation_id_present": False,
+                }
+            )
+    return records
+
+
+def _extract_final_unknown_recovery_action_payloads(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
+    raw_actions = payload.get("unknown_recovery_actions")
+    if isinstance(raw_actions, Sequence) and not isinstance(raw_actions, (str, bytes)) and raw_actions:
+        return tuple(raw_actions)
+    debug_trace = payload.get("debug_trace")
+    if isinstance(debug_trace, Mapping) and debug_trace.get("final_result") is None:
+        debug_actions = debug_trace.get("unknown_recovery_actions")
+        if (
+            isinstance(debug_actions, Sequence)
+            and not isinstance(debug_actions, (str, bytes))
+            and debug_actions
+        ):
+            return tuple(debug_actions)
+    return ()
+
+
+def _raw_proof_obligation_id_present(raw_reason: Any) -> bool:
+    return (
+        isinstance(raw_reason, Mapping)
+        and "proof_obligation_id" in raw_reason
+        and raw_reason.get("proof_obligation_id") is not None
+    )
+
+
+def _reason_record_summary(reason: Any, *, raw_reason_payload: Any = None) -> Dict[str, Any]:
     return {
         "tuple": list(_global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value)),
         "reason_id": reason.reason_id,
@@ -1078,6 +1151,7 @@ def _reason_record_summary(reason: Any) -> Dict[str, Any]:
         "evidence_refs": list(reason.evidence_refs or ()),
         "object_target_key": reason.object_target_key,
         "proof_obligation_id": reason.proof_obligation_id,
+        "raw_proof_obligation_id_present": _raw_proof_obligation_id_present(raw_reason_payload),
         "recovery_action": reason.recovery_action or MISSING_SENTINEL,
         "recovery_proof_obligations": [
             dict(obligation)
@@ -1087,7 +1161,11 @@ def _reason_record_summary(reason: Any) -> Dict[str, Any]:
     }
 
 
-def _proof_action_summary(action: Any) -> Dict[str, Any]:
+def _proof_action_summary(
+    action: Any,
+    *,
+    raw_proof_obligation_id_present: bool = False,
+) -> Dict[str, Any]:
     return {
         "tuple": list(_global_reason_tuple_from_action(action)),
         "reason_id": str(getattr(action, "reason_id", MISSING_SENTINEL)),
@@ -1103,6 +1181,7 @@ def _proof_action_summary(action: Any) -> Dict[str, Any]:
         "evidence_kind": str(getattr(action, "evidence_kind", MISSING_SENTINEL) or MISSING_SENTINEL),
         "object_target_key": getattr(action, "object_target_key", None),
         "proof_obligation_id": getattr(action, "proof_obligation_id", None),
+        "raw_proof_obligation_id_present": raw_proof_obligation_id_present,
         "recovery_action": str(getattr(action, "recovery_action", MISSING_SENTINEL) or MISSING_SENTINEL),
         "evidence_refs": list(getattr(action, "evidence_refs", ()) or ()),
         "detail": str(getattr(action, "detail", MISSING_SENTINEL) or MISSING_SENTINEL),
@@ -1389,6 +1468,8 @@ def _proof_action_has_proof_id(
 ) -> bool:
     if not movement.get("require_proof_obligation_id"):
         return True
+    if action.get("raw_proof_obligation_id_present") is not True:
+        return False
     object_target_key = _normalize_nested_tuple(action.get("object_target_key"))
     if object_target_key is None or not _object_target_key_is_specific(object_target_key):
         return False
