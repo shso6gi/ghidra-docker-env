@@ -419,6 +419,7 @@ def _unsupported_call_effect_key_is_specific(value: Tuple[Any, ...]) -> bool:
             _analysis_key_is_specific(value[2]),
             _pcode_ref_is_specific(value[3]),
             _typed_target_expression_is_specific(value[5]),
+            _nonnegative_int(value[6]),
             value[7] is not None,
         )
     )
@@ -513,6 +514,10 @@ def _nonnegative_int_like(value: Any) -> bool:
         return int(value) >= 0
     except (TypeError, ValueError):
         return False
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _typed_target_expression_is_specific(value: Any) -> bool:

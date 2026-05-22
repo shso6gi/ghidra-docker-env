@@ -42,6 +42,7 @@ else
 fi
 export VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"
 export VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"
+export VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-1}"
 export RUNNER_TMP_ROOT="${RUNNER_TMP_ROOT:-${TMPDIR:-/tmp}/ghidra-equivalence-function-call-full.$$}"
 
 validation_prepare_before_after_logs
@@ -69,6 +70,7 @@ validation_auto_before_snapshot=$VALIDATION_AUTO_BEFORE_SNAPSHOT
 validation_require_before_delta=$VALIDATION_REQUIRE_BEFORE_DELTA
 validation_require_baseline_match=$VALIDATION_REQUIRE_BASELINE_MATCH
 validation_skip_completed=$VALIDATION_SKIP_COMPLETED
+validation_require_phase2_object_keys=$VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS
 validation_before_source=$VALIDATION_BEFORE_SOURCE
 validation_moved_output_dir=${VALIDATION_MOVED_OUTPUT_DIR:-}
 phase2_gate_baseline_dir=${PHASE2_GATE_BASELINE_DIR:-}

@@ -116,6 +116,7 @@ VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
 VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
+VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS=${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}  # Set to 1 for Phase 2 producer reruns.
 VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
 RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-"${TMPDIR:-/tmp}/ghidra-equivalence-function-call.$$"}
 
@@ -216,6 +217,7 @@ echo "Function call manifest: $FUNCTION_CALL_MANIFEST"
 echo "Binary ID order: ${IDS[*]}"
 echo "Per-pair TMPDIR root: $RUNNER_TMP_ROOT"
 echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
+echo "Require Phase 2 object keys on skipped logs: $VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS"
 echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 if [[ -n "${VALIDATION_MOVED_OUTPUT_DIR:-}" ]]; then
@@ -252,22 +254,31 @@ run_pair() {
 
     if [[ "$VALIDATION_SKIP_COMPLETED" != "0" && -f "$LOG_FILE" ]] \
         && grep -q "^=== EQUIVALENCE_RESULT_JSON_END ===" "$LOG_FILE"; then
-        local skipped_status
-        if grep -q "^Result: EQUIVALENT" "$LOG_FILE"; then
-            skipped_status="EQUIVALENT ✓"
-        elif grep -q "^Result: NOT EQUIVALENT" "$LOG_FILE"; then
-            skipped_status="NOT EQUIVALENT ✗"
-        elif grep -q "^Result: ERROR" "$LOG_FILE"; then
-            skipped_status="ERROR !"
-        elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
-            skipped_status="TIMEOUT"
-        elif grep -q "^Result: UNKNOWN" "$LOG_FILE"; then
-            skipped_status="UNKNOWN"
-        else
-            skipped_status="INCOMPLETE"
+        local reuse_gate_args=(--log "$LOG_FILE")
+        if [[ "$VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS" != "0" ]]; then
+            reuse_gate_args+=(--require-phase2-object-keys)
         fi
-        echo "[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $skipped_status (skipped)"
-        return 0
+        local reuse_failure=""
+        if ! reuse_failure="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.log_reuse_gate "${reuse_gate_args[@]}" 2>&1)"; then
+            echo "[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : stale completed log; rerunning (${reuse_failure//$'\n'/, })"
+        else
+            local skipped_status
+            if grep -q "^Result: EQUIVALENT" "$LOG_FILE"; then
+                skipped_status="EQUIVALENT ✓"
+            elif grep -q "^Result: NOT EQUIVALENT" "$LOG_FILE"; then
+                skipped_status="NOT EQUIVALENT ✗"
+            elif grep -q "^Result: ERROR" "$LOG_FILE"; then
+                skipped_status="ERROR !"
+            elif grep -q "^Result: TIMEOUT" "$LOG_FILE"; then
+                skipped_status="TIMEOUT"
+            elif grep -q "^Result: UNKNOWN" "$LOG_FILE"; then
+                skipped_status="UNKNOWN"
+            else
+                skipped_status="INCOMPLETE"
+            fi
+            echo "[$COUNT/$TOTAL] $ROW_ID ↔ $COL_ID : $skipped_status (skipped)"
+            return 0
+        fi
     fi
 
     local PAIR_TMPDIR="${RUNNER_TMP_ROOT}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}"

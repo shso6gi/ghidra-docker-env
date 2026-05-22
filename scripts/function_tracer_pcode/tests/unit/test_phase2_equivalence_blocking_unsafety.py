@@ -231,6 +231,18 @@ def test_phase2_call_effect_specificity_requires_canonical_function_binary_id():
     assert _object_target_key_is_specific(full_target) is True
 
 
+def test_phase2_call_effect_specificity_requires_integer_effect_ordinal():
+    full_target = _pending_reason().object_target_key
+    missing_ordinal_target = full_target[:6] + (None,) + full_target[7:]
+    text_ordinal_target = full_target[:6] + ("7",) + full_target[7:]
+    bool_ordinal_target = full_target[:6] + (True,) + full_target[7:]
+
+    assert _object_target_key_is_specific(missing_ordinal_target) is False
+    assert _object_target_key_is_specific(text_ordinal_target) is False
+    assert _object_target_key_is_specific(bool_ordinal_target) is False
+    assert _object_target_key_is_specific(full_target) is True
+
+
 def _old_blocking_reason():
     return make_unknown_reason(
         UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY,
