@@ -15,7 +15,11 @@ from scripts.function_tracer_pcode.equivalence.formula.types import ParameterInf
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import extract_return_cases
-from scripts.function_tracer_pcode.equivalence.unknown_reason import UnknownReasonId
+from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownReasonId,
+    build_proof_obligation_id,
+    build_unknown_recovery_actions,
+)
 from scripts.function_tracer_pcode.model import (
     COUNTED_LOOP_SUM_OPCODE,
     READONLY_SUM_OPCODE,
@@ -1121,9 +1125,52 @@ def test_readonly_identity_mismatch_emits_typed_recovery_reason():
     assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unknown_pairs == 1
-    assert result.unknown_reasons[0].reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING.value
-    assert result.unknown_reasons[0].recovery_proof_obligations
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING.value
+    assert reason.recovery_proof_obligations
+    assert reason.object_target_key[0] == "readonly_identity"
+    assert reason.object_target_key[1] == ("pair", "(0,0)")
+    assert not any(
+        isinstance(item, tuple) and item[:1] == ("reason",)
+        for item in reason.object_target_key
+    )
+    assert reason.object_target_key[2][0] == "readonly_identity_side"
+    assert reason.object_target_key[3][0] == "readonly_identity_side"
+    assert reason.evidence_kind == "object_storage_identity"
+    assert reason.proof_obligation_id == build_proof_obligation_id(
+        "readonly_identity_missing",
+        "readonly_operand_identity",
+        "storage_backed_identity_propagation",
+        "object_storage_identity",
+        reason.object_target_key,
+    )
+    actions = build_unknown_recovery_actions(result.unknown_reasons)
+    assert len(actions) == 1
+    assert actions[0].status == "planned"
+    assert actions[0].object_target_key == reason.object_target_key
+    assert actions[0].proof_obligation_id == reason.proof_obligation_id
     strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_readonly_identity_proof_target_distinguishes_count_identity():
+    left = _readonly_sum(_readonly_summary(start=0))
+    right_count2 = _readonly_sum_from_ref(replace(left.runtime_ref, count_parameter_index=2))
+    right_count3 = _readonly_sum_from_ref(replace(left.runtime_ref, count_parameter_index=3))
+    strategy = _pairwise_strategy()
+
+    result_count2 = strategy.check(
+        _analysis("readonly_left", [ReturnInfo(address="0x1500", value=left, conditions=[])]),
+        _analysis("readonly_right", [ReturnInfo(address="0x1600", value=right_count2, conditions=[])]),
+    )
+    result_count3 = strategy.check(
+        _analysis("readonly_left", [ReturnInfo(address="0x1500", value=left, conditions=[])]),
+        _analysis("readonly_right", [ReturnInfo(address="0x1600", value=right_count3, conditions=[])]),
+    )
+
+    reason_count2 = result_count2.unknown_reasons[0]
+    reason_count3 = result_count3.unknown_reasons[0]
+    assert reason_count2.object_target_key != reason_count3.object_target_key
+    assert reason_count2.proof_obligation_id != reason_count3.proof_obligation_id
 
 
 def test_exact_prefix_return_matches_wide_abi_summary_count_by_active_parameter_width():

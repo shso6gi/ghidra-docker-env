@@ -413,12 +413,25 @@ class PairwiseStrategy(CheckStrategy):
                         )
                         continue
                     unknown_count += 1
+                    reason_id = self._unknown_reason_id_for_loop_fallback(loop_fallback_reason)
+                    readonly_target_key = None
+                    readonly_evidence_kind = None
+                    if reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
+                        readonly_target_key = self._readonly_identity_object_target_key(
+                            base_ctx=base_ctx,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                        )
+                        readonly_evidence_kind = "object_storage_identity"
                     unknown_reasons.append(
                         make_unknown_reason(
-                            self._unknown_reason_id_for_loop_fallback(loop_fallback_reason),
+                            reason_id,
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(loop_fallback_reason,),
+                            evidence_kind=readonly_evidence_kind,
+                            object_target_key=readonly_target_key,
                             detail=loop_fallback_reason,
                         )
                     )
@@ -1441,6 +1454,150 @@ class PairwiseStrategy(CheckStrategy):
             self._readonly_count_index_identity_key(left_ref),
             self._readonly_count_storage_identity_key(right_ref),
             self._readonly_count_index_identity_key(right_ref),
+        )
+
+    def _readonly_identity_object_target_key(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for readonly operand identity proof backlog."""
+
+        return (
+            "readonly_identity",
+            ("pair", pair_id),
+            self._readonly_identity_side_object_key(
+                "left",
+                base_ctx.get("analysis1"),
+                case1,
+            ),
+            self._readonly_identity_side_object_key(
+                "right",
+                base_ctx.get("analysis2"),
+                case2,
+            ),
+        )
+
+    def _readonly_identity_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+        case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        value_expr = getattr(case, "value_expr", None)
+        readonly_ref = getattr(value_expr, "runtime_ref", None)
+        return (
+            "readonly_identity_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._readonly_return_case_partition_member_object_key(case),
+            self._readonly_reduction_ref_object_key(readonly_ref),
+            (
+                "guards",
+                tuple(
+                    self._return_condition_object_key(condition)
+                    for condition in (getattr(case, "conditions", None) or ())
+                ),
+            ),
+            ("value", self._readonly_value_object_key(value_expr)),
+        )
+
+    def _readonly_return_case_partition_member_object_key(self, case: ReturnCase) -> Tuple[Any, ...]:
+        return_info = getattr(case, "return_info", None)
+        case_index = getattr(case, "index", None)
+        try:
+            normalized_case_index = int(case_index)
+        except (TypeError, ValueError):
+            normalized_case_index = None
+        source_indices = []
+        for source_index in getattr(case, "source_indices", ()) or ():
+            try:
+                source_indices.append(int(source_index))
+            except (TypeError, ValueError):
+                continue
+        surface = getattr(case, "comparison_surface", None)
+        return (
+            "readonly_return_case_partition_member",
+            normalized_case_index,
+            tuple(source_indices),
+            (
+                "return_case",
+                normalized_case_index,
+                getattr(return_info, "address", None),
+                self._stable_key_or_none(getattr(return_info, "pcode_op_ref", None)),
+                getattr(return_info, "pcode_identity", None),
+                getattr(return_info, "pcode_order", None),
+            ),
+            (
+                "comparison_surface",
+                getattr(surface, "kind", None),
+                getattr(surface, "explicit_bit_width", None),
+                getattr(surface, "use_sign_extension", None),
+            ),
+            ("value", self._readonly_value_object_key(getattr(case, "value_expr", None))),
+            (
+                "guards",
+                tuple(
+                    self._return_condition_object_key(condition)
+                    for condition in (getattr(case, "conditions", None) or ())
+                ),
+            ),
+        )
+
+    def _readonly_value_object_key(self, expr: Any) -> Tuple[Any, ...]:
+        readonly_ref = getattr(expr, "runtime_ref", None)
+        if isinstance(readonly_ref, ReadonlyReductionRef):
+            return ("readonly_value", self._readonly_reduction_ref_object_key(readonly_ref))
+        return ("expression", self._expression_runtime_object_key(expr))
+
+    def _readonly_reduction_ref_object_key(self, readonly_ref: Any) -> Tuple[Any, ...]:
+        if not isinstance(readonly_ref, ReadonlyReductionRef):
+            return ("readonly_reduction_ref", None)
+        semantic_key = None
+        semantic_key_fn = getattr(readonly_ref, "semantic_key", None)
+        if callable(semantic_key_fn):
+            try:
+                semantic_key = semantic_key_fn()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                semantic_key = None
+        pointer_base_identity = None
+        pointer_semantic_key_fn = getattr(getattr(readonly_ref, "pointer_base_ref", None), "semantic_key", None)
+        if callable(pointer_semantic_key_fn):
+            try:
+                pointer_base_identity = pointer_semantic_key_fn()
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                pointer_base_identity = None
+        witness_keys = []
+        for witness in getattr(readonly_ref, "semantic_witnesses", ()) or ():
+            witness_key_fn = getattr(witness, "stable_key", None)
+            if not callable(witness_key_fn):
+                continue
+            try:
+                witness_keys.append(witness_key_fn())
+            except (AttributeError, TypeError, ValueError, RecursionError):
+                continue
+        return (
+            "readonly_reduction_ref",
+            getattr(readonly_ref, "reduction_kind", None),
+            ("semantic_key", semantic_key),
+            ("pointer_base_identity", pointer_base_identity),
+            ("count_identities", tuple(sorted(self._readonly_count_identity_keys(readonly_ref), key=repr))),
+            (
+                "term_contract",
+                self._readonly_reduction_term_sequence_contract_key(
+                    readonly_ref,
+                    result_size=getattr(readonly_ref, "result_size", None),
+                ),
+            ),
+            ("result_size", getattr(readonly_ref, "result_size", None)),
+            ("stride", getattr(readonly_ref, "stride", None)),
+            ("element_size", getattr(readonly_ref, "element_size", None)),
+            ("start_offset", getattr(readonly_ref, "start_offset", None)),
+            ("constant_bias", getattr(readonly_ref, "constant_bias", None)),
+            ("semantic_witnesses", tuple(witness_keys)),
         )
 
     def _count_identity_components_compatible(

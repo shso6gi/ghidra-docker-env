@@ -37,13 +37,21 @@ TARGET_FUNCS=(
     # 必要に応じて追加
 )
 
-OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/loop_method_b_test"
-BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/loop_method_b_test"
+LOOP_TARGET_SET=${LOOP_TARGET_SET:-configured}
+if [[ "$LOOP_TARGET_SET" != "configured" ]]; then
+    IFS=',' read -r -a TARGET_FUNCS <<< "$LOOP_TARGET_SET"
+fi
+
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"/workspaces/ghidra-docker-env/logs/equivalence_all/loop_method_b_test"}
+BASE_PATH=${BASE_PATH:-"/workspaces/ghidra-docker-env/targets/cate1/loop_method_b_test"}
+PYTHON_BIN=${PYTHON_BIN:-python3}
 PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
+VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
+LOOP_PAIR_FILTER=${LOOP_PAIR_FILTER:-}  # Comma-separated function:B1_B2 entries for representative reruns.
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
 if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3 ) )); then
@@ -96,7 +104,10 @@ echo "============================================================"
 echo "Target functions: ${TARGET_FUNCS[*]}"
 echo "Number of functions: ${#TARGET_FUNCS[@]}"
 echo "Pairs per function: $TOTAL_PAIRS"
+echo "Python: $PYTHON_BIN"
 echo "Parallel jobs: $PARALLEL_JOBS"
+echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
+echo "Function/pair filter: ${LOOP_PAIR_FILTER:-<none>}"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 if [[ -n "${VALIDATION_MOVED_OUTPUT_DIR:-}" ]]; then
     echo "Moved old output dir: $VALIDATION_MOVED_OUTPUT_DIR"
@@ -118,7 +129,7 @@ run_pair() {
     local OUTPUT_DIR="$8"
     local LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
 
-    python3 -m scripts.function_tracer_pcode.cli.main \
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
         --binary-ids "$ROW_ID" "$COL_ID" \
         -f "$TARGET_FUNC" -d --emit-result-json \
@@ -400,6 +411,189 @@ print_pairwise_normalization_summary_block() {
         "$indent" "$logs" "$attempts" "$changed" "$no_change" "$unsat" "$sat" "$unknown"
 }
 
+collect_unfiltered_pair_specs() {
+    local row_id col_id
+
+    for ((i=0; i<${#IDS[@]}-1; i++)); do
+        row_id="${IDS[$i]}"
+        for ((j=i+1; j<${#IDS[@]}; j++)); do
+            col_id="${IDS[$j]}"
+            printf '%s\t%s\n' "$row_id" "$col_id"
+        done
+    done
+}
+
+collect_pair_specs() {
+    local target_func="$1"
+    local row_id col_id
+
+    while IFS=$'\t' read -r row_id col_id; do
+        [[ -n "$row_id" && -n "$col_id" ]] || continue
+        if loop_pair_filter_allows "$target_func" "$row_id" "$col_id"; then
+            printf '%s\t%s\n' "$row_id" "$col_id"
+        fi
+    done < <(collect_unfiltered_pair_specs)
+}
+
+loop_pair_filter_entries() {
+    local compact_filter entry
+    local -a raw_entries=()
+
+    compact_filter="${LOOP_PAIR_FILTER//[[:space:]]/}"
+    IFS=',' read -r -a raw_entries <<< "$compact_filter"
+    for entry in "${raw_entries[@]}"; do
+        [[ -n "$entry" ]] || continue
+        printf '%s\n' "$entry"
+    done
+}
+
+loop_pair_filter_entry_matches() {
+    local entry="$1"
+    local target_func="$2"
+    local row_id="$3"
+    local col_id="$4"
+    local entry_func=""
+    local entry_pair="$entry"
+    local left_id right_id
+
+    if [[ "$entry" == *:* ]]; then
+        entry_func="${entry%%:*}"
+        entry_pair="${entry#*:}"
+        [[ -n "$entry_func" && -n "$entry_pair" ]] || return 1
+        [[ "$entry_func" == "$target_func" ]] || return 1
+    fi
+
+    [[ "$entry_pair" == *_* ]] || return 1
+    left_id="${entry_pair%%_*}"
+    right_id="${entry_pair#*_}"
+    [[ -n "$left_id" && -n "$right_id" ]] || return 1
+
+    if [[ "$left_id" == "$row_id" && "$right_id" == "$col_id" ]]; then
+        return 0
+    fi
+    if [[ "$left_id" == "$col_id" && "$right_id" == "$row_id" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+loop_pair_filter_allows() {
+    local target_func="$1"
+    local row_id="$2"
+    local col_id="$3"
+    local compact_filter="${LOOP_PAIR_FILTER//[[:space:]]/}"
+    local filter_entry
+
+    if [[ -z "$compact_filter" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r filter_entry; do
+        if loop_pair_filter_entry_matches "$filter_entry" "$target_func" "$row_id" "$col_id"; then
+            return 0
+        fi
+    done < <(loop_pair_filter_entries)
+
+    return 1
+}
+
+validate_loop_pair_filter() {
+    local compact_filter="${LOOP_PAIR_FILTER//[[:space:]]/}"
+    local target_func row_id col_id filter_entry
+    local -a filter_entries=()
+    local -a selected_pairs=()
+    local -A filter_entry_matched=()
+
+    if [[ -z "$compact_filter" ]]; then
+        return 0
+    fi
+
+    mapfile -t filter_entries < <(loop_pair_filter_entries)
+    if (( ${#filter_entries[@]} == 0 )); then
+        echo "Error: LOOP_PAIR_FILTER did not contain any pair entries: $LOOP_PAIR_FILTER" >&2
+        return 1
+    fi
+
+    for filter_entry in "${filter_entries[@]}"; do
+        filter_entry_matched["$filter_entry"]=0
+    done
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        mapfile -t selected_pairs < <(collect_pair_specs "$target_func")
+        if (( ${#selected_pairs[@]} == 0 )); then
+            echo "Error: LOOP_PAIR_FILTER selected zero pairs for target function: $target_func" >&2
+            echo "  filter: $LOOP_PAIR_FILTER" >&2
+            return 1
+        fi
+
+        while IFS=$'\t' read -r row_id col_id; do
+            [[ -n "$row_id" && -n "$col_id" ]] || continue
+            for filter_entry in "${filter_entries[@]}"; do
+                if loop_pair_filter_entry_matches "$filter_entry" "$target_func" "$row_id" "$col_id"; then
+                    filter_entry_matched["$filter_entry"]=1
+                fi
+            done
+        done < <(collect_unfiltered_pair_specs)
+    done
+
+    for filter_entry in "${filter_entries[@]}"; do
+        if [[ "${filter_entry_matched[$filter_entry]}" != "1" ]]; then
+            echo "Error: LOOP_PAIR_FILTER entry did not match any selected target function pair: $filter_entry" >&2
+            echo "  target functions: ${TARGET_FUNCS[*]}" >&2
+            return 1
+        fi
+    done
+}
+
+print_fixed_pair_order() {
+    local target_func row_id col_id count total
+    local -a pair_specs=()
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        count=0
+        mapfile -t pair_specs < <(collect_pair_specs "$target_func")
+        total=${#pair_specs[@]}
+        echo "Function: $target_func"
+        for pair_spec in "${pair_specs[@]}"; do
+            IFS=$'\t' read -r row_id col_id <<< "$pair_spec"
+            count=$((count + 1))
+            printf '  [%d/%d] %s_%s\n' "$count" "$total" "$row_id" "$col_id"
+        done
+    done
+}
+
+collect_expected_log_files() {
+    local output_dir="$1"
+    local target_func="$2"
+    local row_id col_id log_file
+
+    while IFS=$'\t' read -r row_id col_id; do
+        [[ -n "$row_id" && -n "$col_id" ]] || continue
+        log_file="${output_dir}/${target_func}_${row_id}_${col_id}.log"
+        if [[ -f "$log_file" ]]; then
+            printf '%s\n' "$log_file"
+        fi
+    done < <(collect_pair_specs "$target_func")
+}
+
+collect_all_expected_log_files() {
+    local target_func
+
+    for target_func in "${TARGET_FUNCS[@]}"; do
+        collect_expected_log_files "${OUTPUT_BASE_DIR}/${target_func}" "$target_func"
+    done
+}
+
+if ! validate_loop_pair_filter; then
+    exit 1
+fi
+
+if [[ "$VALIDATION_RUNNER_DRY_RUN" != "0" ]]; then
+    echo "Dry run fixed pair order:"
+    print_fixed_pair_order
+    exit 0
+fi
+
 # ---------------------- 関数ごとの処理 ----------------------
 FUNC_INDEX=0
 TOTAL_FUNCS=${#TARGET_FUNCS[@]}
@@ -424,38 +618,49 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     # ---------------------- 並列実行ループ ----------------------
     COUNT=0
     active_jobs=0
+    missing_binary=0
+    mapfile -t PAIR_SPECS < <(collect_pair_specs "$TARGET_FUNC")
+    FUNC_TOTAL_PAIRS=${#PAIR_SPECS[@]}
 
-    for ((i=0; i<${#IDS[@]}-1; i++)); do
-        ROW_ID="${IDS[$i]}"
+    for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+        IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
         BIN1="${BINARY_MAP[$ROW_ID]}"
+        BIN2="${BINARY_MAP[$COL_ID]}"
 
         if [[ ! -f "$BASE_PATH/$BIN1" ]]; then
-            echo "Error: $BASE_PATH/$BIN1 not found – skipping all pairs involving $ROW_ID"
+            echo "Error: $BASE_PATH/$BIN1 not found – skipping $ROW_ID↔$COL_ID"
+            missing_binary=1
             continue
         fi
 
-        for ((j=i+1; j<${#IDS[@]}; j++)); do
-            COL_ID="${IDS[$j]}"
-            BIN2="${BINARY_MAP[$COL_ID]}"
+        if [[ ! -f "$BASE_PATH/$BIN2" ]]; then
+            echo "Error: $BASE_PATH/$BIN2 not found – skipping $ROW_ID↔$COL_ID"
+            missing_binary=1
+            continue
+        fi
 
-            if [[ ! -f "$BASE_PATH/$BIN2" ]]; then
-                echo "Error: $BASE_PATH/$BIN2 not found – skipping $ROW_ID↔$COL_ID"
-                continue
-            fi
+        COUNT=$((COUNT + 1))
 
-            COUNT=$((COUNT + 1))
+        if (( active_jobs >= PARALLEL_JOBS )); then
+            wait -n
+            active_jobs=$(( active_jobs - 1 ))
+        fi
 
-            if (( active_jobs >= PARALLEL_JOBS )); then
-                wait -n
-                active_jobs=$(( active_jobs - 1 ))
-            fi
-
-            run_pair "$ROW_ID" "$COL_ID" "$BIN1" "$BIN2" "$COUNT" "$TOTAL_PAIRS" "$TARGET_FUNC" "$OUTPUT_DIR" &
-            active_jobs=$(( active_jobs + 1 ))
-        done
+        run_pair "$ROW_ID" "$COL_ID" "$BIN1" "$BIN2" "$COUNT" "$FUNC_TOTAL_PAIRS" "$TARGET_FUNC" "$OUTPUT_DIR" &
+        active_jobs=$(( active_jobs + 1 ))
     done
 
     wait
+    if (( missing_binary != 0 )); then
+        echo "Error: one or more selected loop pairs could not run because binaries were missing for $TARGET_FUNC" >&2
+        exit 1
+    fi
+    if (( FUNC_TOTAL_PAIRS > 0 && COUNT != FUNC_TOTAL_PAIRS )); then
+        echo "Error: selected loop pair execution count mismatch for $TARGET_FUNC" >&2
+        echo "  selected: $FUNC_TOTAL_PAIRS" >&2
+        echo "  executed: $COUNT" >&2
+        exit 1
+    fi
     echo ""
     func_end_ts=$(date +%s.%N)
     func_elapsed_seconds=$(calculate_elapsed_seconds "$func_start_ts" "$func_end_ts")
@@ -474,46 +679,54 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     declare -a TIMEOUT_PAIRS=()
     declare -a INCOMPLETE_PAIRS=()
 
-    for ((i=0; i<${#IDS[@]}-1; i++)); do
-        ROW_ID="${IDS[$i]}"
-        for ((j=i+1; j<${#IDS[@]}; j++)); do
-            COL_ID="${IDS[$j]}"
-            LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
+    for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+        IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
+        LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
 
-            if [[ ! -f "$LOG_FILE" ]]; then
-                continue
-            fi
+        if [[ ! -f "$LOG_FILE" ]]; then
+            continue
+        fi
 
-            case "$(classify_log_result "$LOG_FILE")" in
-                EQ)
-                EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                NOT_EQ)
-                NON_EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                ERROR)
-                ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                TIMEOUT)
-                TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                UNKNOWN)
-                UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                INCOMPLETE)
-                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-                *)
-                INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
-                ;;
-            esac
-        done
+        case "$(classify_log_result "$LOG_FILE")" in
+            EQ)
+            EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            NOT_EQ)
+            NON_EQ_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            ERROR)
+            ERROR_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            TIMEOUT)
+            TIMEOUT_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            UNKNOWN)
+            UNKNOWN_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            INCOMPLETE)
+            INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+            *)
+            INCOMPLETE_PAIRS+=("$ROW_ID ↔ $COL_ID")
+            ;;
+        esac
     done
 
     # --- tee を使って画面とファイルの両方に出力 ---
-    shopt -s nullglob
-    FUNC_LOG_FILES=("$OUTPUT_DIR"/*.log)
-    shopt -u nullglob
+    mapfile -t FUNC_LOG_FILES < <(collect_expected_log_files "$OUTPUT_DIR" "$TARGET_FUNC")
+    if (( FUNC_TOTAL_PAIRS > 0 && ${#FUNC_LOG_FILES[@]} != FUNC_TOTAL_PAIRS )); then
+        echo "Error: selected loop pair log count mismatch for $TARGET_FUNC" >&2
+        echo "  selected: $FUNC_TOTAL_PAIRS" >&2
+        echo "  logs    : ${#FUNC_LOG_FILES[@]}" >&2
+        for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+            IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
+            LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
+            if [[ ! -f "$LOG_FILE" ]]; then
+                echo "  missing log: $LOG_FILE" >&2
+            fi
+        done
+        exit 1
+    fi
 
     FUNCTION_SUMMARY_ARGS=(
         --function-summary
@@ -542,7 +755,7 @@ done
 # 全体サマリーの保存先
 SUMMARY_FILE="${OUTPUT_BASE_DIR}/overall_summary.txt"
 
-mapfile -t ALL_LOG_FILES < <(find "$OUTPUT_BASE_DIR" -type f -name "*.log" | sort)
+mapfile -t ALL_LOG_FILES < <(collect_all_expected_log_files | sort)
 
 OVERALL_SUMMARY_ARGS=(--overall-summary)
 if [[ -n "$VALIDATION_BEFORE_DIR" ]]; then

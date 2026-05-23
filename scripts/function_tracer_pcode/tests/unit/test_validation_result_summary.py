@@ -589,6 +589,85 @@ def test_function_call_runner_moves_existing_logs_before_dry_run(tmp_path):
     assert "[auto moved old output]" in result.stdout
 
 
+def test_loop_runner_supports_representative_pair_filter_dry_run(tmp_path):
+    script = Path("loop_run_matrix_all_parallel_multifunc.sh").read_text()
+
+    assert "LOOP_TARGET_SET=${LOOP_TARGET_SET:-configured}" in script
+    assert "LOOP_PAIR_FILTER=${LOOP_PAIR_FILTER:-}" in script
+    assert "VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}" in script
+    assert '"$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main' in script
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "LOOP_TARGET_SET": "lmb_sum_even_index_step2",
+            "LOOP_PAIR_FILTER": "lmb_sum_even_index_step2:B10_B13",
+            "OUTPUT_BASE_DIR": str(tmp_path / "loop"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "loop_run_matrix_all_parallel_multifunc.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "Dry run fixed pair order:" in result.stdout
+    assert "Function: lmb_sum_even_index_step2" in result.stdout
+    assert "B10_B13" in result.stdout
+
+
+def test_loop_runner_rejects_unmatched_pair_filter(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "LOOP_TARGET_SET": "lmb_sum_even_index_step2",
+            "LOOP_PAIR_FILTER": "lmb_sum_even_index_step2:B99_B100",
+            "OUTPUT_BASE_DIR": str(tmp_path / "loop"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "loop_run_matrix_all_parallel_multifunc.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "LOOP_PAIR_FILTER selected zero pairs" in result.stderr
+
+
+def test_loop_runner_rejects_selected_pair_when_binary_is_missing(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "LOOP_TARGET_SET": "lmb_sum_even_index_step2",
+            "LOOP_PAIR_FILTER": "lmb_sum_even_index_step2:B10_B13",
+            "OUTPUT_BASE_DIR": str(tmp_path / "loop"),
+            "BASE_PATH": str(tmp_path / "missing-binaries"),
+            "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+            "VALIDATION_RUNNER_DRY_RUN": "0",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "loop_run_matrix_all_parallel_multifunc.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "could not run because binaries were missing" in result.stderr
+    assert "All compared pairs are EQUIVALENT" not in result.stdout
+
+
 def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     script = Path("phase2_run_function_call_full_matrix_32jobs.sh").read_text()
 
