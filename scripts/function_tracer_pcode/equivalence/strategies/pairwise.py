@@ -414,24 +414,31 @@ class PairwiseStrategy(CheckStrategy):
                         continue
                     unknown_count += 1
                     reason_id = self._unknown_reason_id_for_loop_fallback(loop_fallback_reason)
-                    readonly_target_key = None
-                    readonly_evidence_kind = None
+                    object_target_key = None
+                    evidence_kind = None
                     if reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
-                        readonly_target_key = self._readonly_identity_object_target_key(
+                        object_target_key = self._readonly_identity_object_target_key(
                             base_ctx=base_ctx,
                             case1=case1,
                             case2=case2,
                             pair_id=pair_id,
                         )
-                        readonly_evidence_kind = "object_storage_identity"
+                        evidence_kind = "object_storage_identity"
+                    elif reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED:
+                        object_target_key = self._method_b_closure_object_target_key(
+                            base_ctx=base_ctx,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                        )
                     unknown_reasons.append(
                         make_unknown_reason(
                             reason_id,
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(loop_fallback_reason,),
-                            evidence_kind=readonly_evidence_kind,
-                            object_target_key=readonly_target_key,
+                            evidence_kind=evidence_kind,
+                            object_target_key=object_target_key,
                             detail=loop_fallback_reason,
                         )
                     )
@@ -1479,6 +1486,66 @@ class PairwiseStrategy(CheckStrategy):
                 base_ctx.get("analysis2"),
                 case2,
             ),
+        )
+
+    def _method_b_closure_object_target_key(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for Method-B covering/guard proof backlog."""
+
+        return (
+            "method_b_closure",
+            ("pair", pair_id),
+            self._method_b_closure_side_object_key(
+                "left",
+                base_ctx.get("analysis1"),
+                case1,
+            ),
+            self._method_b_closure_side_object_key(
+                "right",
+                base_ctx.get("analysis2"),
+                case2,
+            ),
+        )
+
+    def _method_b_closure_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+        case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        value_expr = getattr(case, "value_expr", None)
+        return (
+            "method_b_closure_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._readonly_return_case_partition_member_object_key(case),
+            (
+                "loop_value",
+                self._method_b_loop_value_object_key(value_expr),
+            ),
+            (
+                "guards",
+                tuple(
+                    self._return_condition_object_key(condition)
+                    for condition in (getattr(case, "conditions", None) or ())
+                ),
+            ),
+        )
+
+    def _method_b_loop_value_object_key(self, expr: Any) -> Tuple[Any, ...]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        loop_summary = getattr(runtime_ref, "loop_summary", None)
+        return (
+            "method_b_loop_value",
+            self._stable_key_or_none(runtime_ref),
+            self._stable_key_or_none(loop_summary),
+            self._expression_runtime_object_key(expr),
         )
 
     def _readonly_identity_side_object_key(

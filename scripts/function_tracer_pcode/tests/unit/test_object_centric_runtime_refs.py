@@ -41,6 +41,10 @@ from scripts.function_tracer_pcode.equivalence.strategies.pairwise import Pairwi
 from scripts.function_tracer_pcode.equivalence.strategies import pairwise as pairwise_module
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_builder import build_pair_query
+from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownReasonId,
+    build_unknown_recovery_actions,
+)
 from scripts.function_tracer_pcode.equivalence.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.equivalence.formula.returns import _readonly_refs_share_surface
 from scripts.function_tracer_pcode.model.render_smt import _runtime_ref_smt_identity
@@ -1767,6 +1771,14 @@ def _pairwise_strategy_for_full_path() -> PairwiseStrategy:
     return strategy
 
 
+def _nested_has_tag(value, tag):
+    if isinstance(value, tuple):
+        return (bool(value) and value[0] == tag) or any(_nested_has_tag(item, tag) for item in value)
+    if isinstance(value, list):
+        return any(_nested_has_tag(item, tag) for item in value)
+    return False
+
+
 def test_loop_summary_method_b_key_normalizes_seed_compensated_suffix():
     full = _readonly_loop_summary(start=0)
     suffix = _readonly_loop_summary(
@@ -2001,6 +2013,43 @@ def test_pairwise_full_path_falls_back_unknown_for_unproven_loop_summary():
     assert result.unsat_pairs == 0
     assert result.unknown_pairs == 1
     strategy.solver_runner.run_sequential.assert_not_called()
+
+
+def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
+    full = _readonly_sum_expr(_readonly_loop_summary(start=0))
+    suffix_with_gap = _readonly_sum_expr(
+        _readonly_loop_summary(
+            start=3,
+            seed_terms=(
+                ReadonlyReductionTermRef(byte_offset=0, access_size=4),
+                ReadonlyReductionTermRef(byte_offset=4, access_size=4),
+            ),
+        )
+    )
+    strategy = _pairwise_strategy_for_full_path()
+
+    result = strategy.check(
+        _analysis_with_return("full", full),
+        _analysis_with_return("suffix_gap", suffix_with_gap),
+    )
+
+    assert result.is_equivalent is None
+    assert len(result.unknown_reasons) == 1
+    record = result.unknown_reasons[0]
+    assert record.reason_id == UnknownReasonId.METHOD_B_CLOSURE_BLOCKED.value
+    assert record.object_target_key is not None
+    assert record.object_target_key[0] == "method_b_closure"
+    assert not _nested_has_tag(record.object_target_key, "reason")
+
+    actions = build_unknown_recovery_actions(result.unknown_reasons)
+    assert {(action.proof_kind, action.proof_stage, action.evidence_kind) for action in actions} == {
+        ("proof_backed_covering_case", "method_b_covering_case", "seed_compensation"),
+        ("guard_partition_completion", "method_b_guard_partition", "guard_partition"),
+    }
+    for action in actions:
+        assert action.object_target_key == record.object_target_key
+        assert action.proof_obligation_id is not None
+        assert action.proof_obligation_id[-1] == record.object_target_key
 
 
 def test_pairwise_full_path_recursively_falls_back_unknown_for_nested_unproven_loop_summary():
