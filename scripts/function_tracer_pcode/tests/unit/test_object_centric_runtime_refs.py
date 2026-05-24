@@ -2426,6 +2426,33 @@ def test_intrinsic_runtime_values_equivalent_does_not_bypass_path_sensitive_summ
     ) is False
 
 
+def test_method_b_loop_value_target_uses_semantic_runtime_key_not_program_id():
+    class _RuntimeRef:
+        loop_summary = None
+
+        def __init__(self, owner_program_id):
+            self.owner_program_id = owner_program_id
+
+        def stable_key(self):
+            return ("readonly_reduction", ("parameter", self.owner_program_id, 0x401000, 1))
+
+        def pairwise_semantic_key(self):
+            return ("readonly_reduction_semantic", ("parameter", 1))
+
+    strategy = PairwiseStrategy(None, None)
+    left_expr = Mock(runtime_ref=_RuntimeRef(111))
+    right_expr = Mock(runtime_ref=_RuntimeRef(222))
+
+    left_key = strategy._method_b_loop_value_object_key(left_expr)
+    right_key = strategy._method_b_loop_value_object_key(right_expr)
+
+    assert left_key == right_key
+    assert left_key[1] == ("readonly_reduction_semantic", ("parameter", 1))
+    assert left_key[3] == ("runtime_ref", ("readonly_reduction_semantic", ("parameter", 1)))
+    assert "111" not in repr(left_key)
+    assert "222" not in repr(right_key)
+
+
 def test_counted_loop_method_b_match_does_not_bypass_guard_mismatch():
     strategy = PairwiseStrategy(None, None)
     left = _counted_loop_expr(_pure_counted_loop_summary())

@@ -1543,10 +1543,29 @@ class PairwiseStrategy(CheckStrategy):
         loop_summary = getattr(runtime_ref, "loop_summary", None)
         return (
             "method_b_loop_value",
-            self._stable_key_or_none(runtime_ref),
-            self._stable_key_or_none(loop_summary),
-            self._expression_runtime_object_key(expr),
+            self._semantic_key_or_stable_key_or_none(runtime_ref),
+            self._semantic_key_or_stable_key_or_none(loop_summary),
+            self._method_b_expression_runtime_object_key(expr),
         )
+
+    def _method_b_expression_runtime_object_key(self, expr: Any) -> Tuple[Any, ...]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if runtime_ref is not None:
+            return ("runtime_ref", self._semantic_key_or_stable_key_or_none(runtime_ref))
+        return self._expression_runtime_object_key(expr)
+
+    @staticmethod
+    def _semantic_key_or_stable_key_or_none(value: Any):
+        for name in ("pairwise_semantic_key", "semantic_key", "stable_key"):
+            key_fn = getattr(value, name, None)
+            if callable(key_fn):
+                try:
+                    key = key_fn()
+                except (AttributeError, TypeError, ValueError, RecursionError):
+                    key = None
+                if key is not None:
+                    return key
+        return None
 
     def _readonly_identity_side_object_key(
         self,
