@@ -18,6 +18,7 @@ from .phase3_return_width_bridge_lane2 import (
     _entry_details,
     _entry_key,
     _failed,
+    _display_path,
     _file_ref,
     _identity_set_check,
     _jsonable,
@@ -122,10 +123,10 @@ def build_phase3_unresolved_expression_lane6_manifest(
         "target_reason_ids": list(TARGET_REASON_IDS),
         "baseline_raw_artifact_ref": _file_ref(raw_dir / "artifact_manifest.json"),
         "current_log_roots": {
-            category: str(path) for category, path in sorted(current_log_roots.items())
+            category: _display_path(path) for category, path in sorted(current_log_roots.items())
         },
         "baseline_log_roots": {
-            category: str(path) for category, path in sorted(baseline_log_roots.items())
+            category: _display_path(path) for category, path in sorted(baseline_log_roots.items())
         },
         "selection_policy": {
             "representative_count": len(entries),
@@ -198,10 +199,10 @@ def build_phase3_unresolved_expression_lane6_post_fix_gate(
         "phase3_manifest_sha256": phase3_sha,
         "expected_phase3_manifest_sha256": phase3_manifest_sha256 or MISSING_SENTINEL,
         "current_log_roots": {
-            category: str(path) for category, path in sorted(current_log_roots.items())
+            category: _display_path(path) for category, path in sorted(current_log_roots.items())
         },
         "baseline_log_roots": {
-            category: str(path) for category, path in sorted(baseline_log_roots.items())
+            category: _display_path(path) for category, path in sorted(baseline_log_roots.items())
         },
         "phase3_lane6_post_fix_ready": not any(check.get("status") == "failed" for check in checks),
         "post_fix_summary": {

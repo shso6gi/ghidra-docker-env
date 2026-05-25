@@ -33524,6 +33524,7 @@
       {
         "aggregation_unit": "pair",
         "count_kind": "reason_record",
+        "expected_evidence_kind": "unresolved_expression_safety",
         "expected_evidence_refs": [
           "pairwise_unresolved_case_labels"
         ],

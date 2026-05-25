@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
@@ -28,6 +29,7 @@ from scripts.function_tracer_pcode.validation.phase3_solver_rewrite_lane7 import
     _object_target_key_is_specific_solver_rewrite_candidate,
     _post_fix_status,
 )
+from scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2 import _display_path
 
 
 def _param(name: str, index: int = 0, size: int = 4):
@@ -38,6 +40,13 @@ def _param(name: str, index: int = 0, size: int = 4):
         "data_type": "int",
         "is_signed": True,
     }
+
+
+def test_phase3_gate_display_path_uses_repo_relative_paths():
+    repo_root = Path(__file__).resolve().parents[4]
+    absolute_path = repo_root / "logs/equivalence_all/lane7/example.log"
+
+    assert _display_path(absolute_path) == "logs/equivalence_all/lane7/example.log"
 
 
 def _pcode(binary_id: str, offset: int, mnemonic: str = "RETURN") -> PcodeOpRef:

@@ -33,6 +33,7 @@ from ..equivalence.unknown_reason import (
 MANIFEST_VERSION = 1
 TARGET_REASON_IDS = ("return_width_bridge_missing",)
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 RETURN_WIDTH_BRIDGE_PROOF_STAGES = ("abi_relation", "high_bit_relation")
 RETURN_WIDTH_BRIDGE_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
@@ -2018,7 +2019,7 @@ def _add_record_from_path(
         return
     records[(category, function, _canonical_binary_pair(binary_pair))] = {
         "payload": payloads[-1],
-        "relative_log_path": str(path),
+        "relative_log_path": _display_path(path),
         "log_sha256": _sha256_file(path),
         "observed_left_binary_id": observed_left,
         "observed_right_binary_id": observed_right,
@@ -2184,9 +2185,28 @@ def _sha256_file(path: Path) -> str:
 
 def _file_ref(path: Path) -> Dict[str, str]:
     return {
-        "path": str(path),
+        "path": _display_path(path),
         "sha256": _sha256_file(path) if path.is_file() else "__missing__",
     }
+
+
+def _display_path(path: Path) -> str:
+    raw_path = Path(path)
+    try:
+        resolved = raw_path.resolve(strict=False)
+        repo_root = _REPO_ROOT.resolve(strict=False)
+    except OSError:
+        return str(raw_path)
+    try:
+        return resolved.relative_to(repo_root).as_posix()
+    except ValueError:
+        pass
+    resolved_text = resolved.as_posix()
+    repo_text = repo_root.as_posix().rstrip("/")
+    prefix = f"{repo_text}/"
+    if resolved_text.casefold().startswith(prefix.casefold()):
+        return resolved_text[len(prefix):]
+    return str(raw_path)
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:
