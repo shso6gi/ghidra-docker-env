@@ -15,6 +15,88 @@
   },
   "entries": [
     {
+      "accepted_post_fix_reclassification": {
+        "accepted_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_kind": "<missing>",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "solver-rewrite-retired-to-return-coverage-reason-record",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": false,
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_kind": "missing_return_guard",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "solver-rewrite-retired-to-return-coverage-partition-action",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_kind": "case_guard_disjunction",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "solver-rewrite-retired-to-return-coverage-guard-action",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          }
+        ],
+        "reason": "readonly proof guard SMT metadata normalization exposes the existing return coverage proof backlog before solver rewrite retry",
+        "status": "retired_to_return_coverage_gap"
+      },
       "baseline_observation": {
         "final_result": "UNKNOWN",
         "log_path": "artifacts/baselines/observed-v0@0a53352/raw/logs/loop/lmb_sum_prefix_loop/lmb_sum_prefix_loop_B12_B16.log",
@@ -15618,6 +15700,91 @@
     }
   ],
   "implementation_manifest": {
+    "accepted_post_fix_reclassifications": [
+      {
+        "accepted_movements": [
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_kind": "case_guard_disjunction",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "id": "solver-rewrite-retired-to-return-coverage-guard-action",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "case_guard_disjunction",
+              "path_feasibility",
+              "function_precondition"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_guard_coverage",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "proof_action",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "expected_evidence_kind": "missing_return_guard",
+            "id": "solver-rewrite-retired-to-return-coverage-partition-action",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": true,
+            "required_evidence": [
+              "missing_return_guard",
+              "tail_or_default_return_value",
+              "return_storage"
+            ],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "proof_action",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "return_partition_extraction",
+              "pending_proof"
+            ]
+          },
+          {
+            "aggregation_unit": "function",
+            "count_kind": "reason_record",
+            "expected_evidence_refs": [
+              "function1:return_coverage_gap"
+            ],
+            "expected_evidence_kind": "<missing>",
+            "id": "solver-rewrite-retired-to-return-coverage-reason-record",
+            "pair_or_case": "<missing>",
+            "require_proof_obligation_id": false,
+            "required_evidence": [],
+            "required_object_target_kind": "return_coverage",
+            "stage": "S_PAIRWISE",
+            "tuple": [
+              "reason_record",
+              "return_coverage_gap",
+              "blocks_equivalence",
+              "function",
+              "return_coverage_completion",
+              "<missing>",
+              "pending_proof"
+            ]
+          }
+        ],
+        "reason": "readonly proof guard SMT metadata normalization exposes the existing return coverage proof backlog before solver rewrite retry",
+        "status": "retired_to_return_coverage_gap"
+      }
+    ],
     "baseline_mode": "pending_proof_against_pre_fix_manifest",
     "expected_movement_entries": [
       {
@@ -15626,6 +15793,7 @@
         "expected_evidence_refs": [
           "rewrite-no-change"
         ],
+        "expected_evidence_kind": "pre_normalized_query",
         "id": "solver-rewrite-candidate-generation-proof",
         "pair_or_case": "<missing>",
         "require_proof_obligation_id": true,
@@ -15652,6 +15820,7 @@
         "expected_evidence_refs": [
           "rewrite-no-change"
         ],
+        "expected_evidence_kind": "pre_normalized_query",
         "id": "solver-rewrite-no-change-reason-record",
         "pair_or_case": "<missing>",
         "require_proof_obligation_id": true,

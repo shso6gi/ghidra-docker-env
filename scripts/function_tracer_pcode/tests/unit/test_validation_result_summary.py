@@ -774,7 +774,7 @@ def test_phase3_lane7_solver_rewrite_representative_wrapper_pins_pair_and_manife
     assert 'LOOP_PAIR_FILTER="${LOOP_PAIR_FILTER:-lmb_sum_prefix_loop:B12_B16}"' in script
     assert ".venv-pyghidra/bin/python" in script
     assert "phase3_solver_rewrite_lane7/solver_rewrite_lane7_representatives.json" in script
-    assert "2e1e1f41d29b6051e37096bc97882a10f6f65f2c0345150d95d1cff98af58ea2" in script
+    assert "ca0c925863e6d80d5c455deb4b13bd42eddb5bd81afd7e1d1f14d56633cbe488" in script
     assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
     assert "Phase 3 lane 7 dry run finished before post-fix gate." in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script

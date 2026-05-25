@@ -5,6 +5,8 @@ import hashlib
 from typing import List, Dict, Optional, Tuple, Set, Any
 
 from ...model import (
+    Condition,
+    Expression,
     ExpressionType,
     FunctionReturnAnalysis,
     ReadonlyReductionRef,
@@ -48,6 +50,241 @@ from .symbol_replace import build_symbol_replacer
 from ...analysis.memory_resolver import collect_memory_bit_widths_from_analysis
 
 from ..ub.constraints import UbConstraintBuilder
+
+
+def _rewrite_guard_parameter_metadata_for_smt(guard, param_infos):
+    """Align proof/runtime guard parameter widths with active SMT declarations."""
+    if not param_infos:
+        return guard
+    params_by_index, params_by_name = _param_info_lookup(param_infos)
+    if isinstance(guard, Condition):
+        rewritten_expr = _rewrite_expr_parameter_metadata_for_smt(
+            guard.expression,
+            params_by_index,
+            params_by_name,
+        )
+        if rewritten_expr is guard.expression:
+            return guard
+        return Condition(rewritten_expr, guard.negated)
+    if isinstance(guard, Expression):
+        return _rewrite_expr_parameter_metadata_for_smt(
+            guard,
+            params_by_index,
+            params_by_name,
+        )
+    return guard
+
+
+def _param_info_lookup(param_infos) -> Tuple[Dict[int, ParameterInfo], Dict[str, ParameterInfo]]:
+    params_by_index: Dict[int, ParameterInfo] = {}
+    params_by_name: Dict[str, ParameterInfo] = {}
+    for info in param_infos or ():
+        try:
+            index = int(getattr(info, "index"))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            params_by_index[index] = info
+        name = getattr(info, "original_name", None)
+        if isinstance(name, str) and name:
+            params_by_name[name] = info
+    return params_by_index, params_by_name
+
+
+def _rewrite_expr_parameter_metadata_for_smt(
+    expr: Optional[Expression],
+    params_by_index: Dict[int, ParameterInfo],
+    params_by_name: Dict[str, ParameterInfo],
+) -> Optional[Expression]:
+    if expr is None:
+        return expr
+    if expr.expr_type == ExpressionType.PARAMETER:
+        return _rewrite_parameter_leaf_for_smt(expr, params_by_index, params_by_name)
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        changed = False
+        branches = []
+        for condition, value in expr.value:
+            new_condition = None
+            if condition is not None:
+                new_condition_expr = _rewrite_expr_parameter_metadata_for_smt(
+                    condition.expression,
+                    params_by_index,
+                    params_by_name,
+                )
+                changed = changed or (new_condition_expr is not condition.expression)
+                new_condition = Condition(new_condition_expr, condition.negated)
+            new_value = _rewrite_expr_parameter_metadata_for_smt(
+                value,
+                params_by_index,
+                params_by_name,
+            )
+            changed = changed or (new_value is not value)
+            branches.append((new_condition, new_value))
+        if not changed:
+            return expr
+        rebuilt = Expression.phi(branches)
+        rebuilt.size = expr.size
+        rebuilt.data_type = expr.data_type
+        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
+        rebuilt.storage_info = expr.storage_info
+        rebuilt.read_order_key = expr.read_order_key
+        rebuilt.runtime_ref = getattr(expr, "runtime_ref", None)
+        return rebuilt
+
+    operands = getattr(expr, "operands", None) or []
+    if not operands:
+        return expr
+    rewritten_operands = [
+        _rewrite_expr_parameter_metadata_for_smt(operand, params_by_index, params_by_name)
+        for operand in operands
+    ]
+    rewritten_operands = _normalize_guard_operand_widths_for_smt(expr.operator, rewritten_operands)
+    if all(new is old for new, old in zip(rewritten_operands, operands)):
+        return expr
+    return Expression(
+        expr_type=expr.expr_type,
+        value=expr.value,
+        operator=expr.operator,
+        operands=rewritten_operands,
+        size=expr.size,
+        name=expr.name,
+        data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
+    )
+
+
+def _normalize_guard_operand_widths_for_smt(operator, operands):
+    if len(operands) != 2:
+        return operands
+    left, right = operands
+    if operator in {
+        "INT_EQUAL",
+        "INT_NOTEQUAL",
+        "INT_LESS",
+        "INT_SLESS",
+        "INT_LESSEQUAL",
+        "INT_SLESSEQUAL",
+    }:
+        return _normalize_comparison_literal_widths_for_smt(left, right)
+    if operator == "INT_AND":
+        return _normalize_mask_literal_widths_for_smt(left, right)
+    return operands
+
+
+def _normalize_comparison_literal_widths_for_smt(left, right):
+    if _expr_is_constant(left) and _expr_bit_width(right) > 0:
+        narrowed = _narrow_constant_for_guard_smt(left, _expr_bit_width(right))
+        if narrowed is not left:
+            return [narrowed, right]
+    if _expr_is_constant(right) and _expr_bit_width(left) > 0:
+        narrowed = _narrow_constant_for_guard_smt(right, _expr_bit_width(left))
+        if narrowed is not right:
+            return [left, narrowed]
+    return [left, right]
+
+
+def _normalize_mask_literal_widths_for_smt(left, right):
+    if _expr_is_constant(left) and _expr_uses_parameter(right) and _expr_bit_width(right) > 0:
+        narrowed = _narrow_constant_for_guard_smt(left, _expr_bit_width(right))
+        if narrowed is not left:
+            return [narrowed, right]
+    if _expr_is_constant(right) and _expr_uses_parameter(left) and _expr_bit_width(left) > 0:
+        narrowed = _narrow_constant_for_guard_smt(right, _expr_bit_width(left))
+        if narrowed is not right:
+            return [left, narrowed]
+    return [left, right]
+
+
+def _narrow_constant_for_guard_smt(expr, target_bits: int):
+    if not _expr_is_constant(expr) or target_bits <= 0:
+        return expr
+    current_bits = _expr_bit_width(expr)
+    if current_bits <= 0 or current_bits <= target_bits:
+        return expr
+    value = int(expr.value)
+    current_mask = (1 << current_bits) - 1
+    target_mask = (1 << target_bits) - 1
+    value_mod = value & current_mask
+    if value_mod & target_mask != value_mod and value_mod != target_mask:
+        return expr
+    narrowed = value_mod & target_mask
+    return Expression.constant(narrowed, size=max(1, (target_bits + 7) // 8))
+
+
+def _expr_is_constant(expr) -> bool:
+    return getattr(expr, "expr_type", None) == ExpressionType.CONSTANT
+
+
+def _expr_bit_width(expr) -> int:
+    if expr is None:
+        return 0
+    try:
+        return int(expr.get_bit_width())
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _expr_uses_parameter(expr) -> bool:
+    if expr is None:
+        return False
+    if getattr(expr, "expr_type", None) == ExpressionType.PARAMETER:
+        return True
+    if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+        for condition, value in expr.value:
+            if condition is not None and _expr_uses_parameter(getattr(condition, "expression", None)):
+                return True
+            if _expr_uses_parameter(value):
+                return True
+        return False
+    return any(_expr_uses_parameter(operand) for operand in getattr(expr, "operands", None) or [])
+
+
+def _rewrite_parameter_leaf_for_smt(
+    expr: Expression,
+    params_by_index: Dict[int, ParameterInfo],
+    params_by_name: Dict[str, ParameterInfo],
+) -> Expression:
+    info = None
+    try:
+        index = int(getattr(expr, "value"))
+    except (TypeError, ValueError):
+        index = -1
+    if index >= 0:
+        info = params_by_index.get(index)
+    if info is None and expr.name:
+        info = params_by_name.get(expr.name)
+    if info is None:
+        return expr
+
+    try:
+        bit_width = int(getattr(info, "bit_width", 0) or 0)
+    except (TypeError, ValueError):
+        bit_width = 0
+    if bit_width <= 0:
+        return expr
+    desired_size = max(1, (bit_width + 7) // 8)
+    desired_index = getattr(info, "index", expr.value)
+    desired_name = getattr(info, "original_name", None) or expr.name
+    if desired_size == expr.size and desired_index == expr.value and desired_name == expr.name:
+        return expr
+    return Expression(
+        expr_type=expr.expr_type,
+        value=desired_index,
+        operator=expr.operator,
+        operands=list(expr.operands or []),
+        size=desired_size,
+        name=desired_name,
+        data_type=expr.data_type,
+        data_type_obj=getattr(expr, "data_type_obj", None),
+        storage_info=expr.storage_info,
+        read_order_key=expr.read_order_key,
+        runtime_ref=getattr(expr, "runtime_ref", None),
+        opcode=getattr(expr, "opcode", None),
+    )
 
 
 class FormulaBuilder:
@@ -623,6 +860,7 @@ class FormulaBuilder:
                 for axiom in self._readonly_reduction_witness_axioms_for_expr(
                     expr,
                     symbol_name_mapping,
+                    param_infos=param_infos,
                     case_guards=case_guards,
                 ):
                     if axiom in seen:
@@ -689,6 +927,7 @@ class FormulaBuilder:
         expr,
         symbol_name_mapping,
         *,
+        param_infos=(),
         case_guards=(),
     ) -> List[str]:
         if expr is None or getattr(expr, "expr_type", None) != ExpressionType.INTRINSIC:
@@ -720,6 +959,7 @@ class FormulaBuilder:
         guard_terms = self._readonly_witness_guard_smt_terms(
             tuple(case_guards or ()) + proof_guards + loop_guards,
             symbol_name_mapping,
+            param_infos=param_infos,
         )
         if guard_terms is None:
             return []
@@ -753,11 +993,17 @@ class FormulaBuilder:
         self,
         guards,
         symbol_name_mapping,
+        *,
+        param_infos=(),
     ) -> Optional[Tuple[str, ...]]:
         terms: List[str] = []
         seen = set()
         for guard in guards or ():
-            term = self._readonly_guard_to_smt(guard, symbol_name_mapping)
+            term = self._readonly_guard_to_smt(
+                guard,
+                symbol_name_mapping,
+                param_infos=param_infos,
+            )
             if term is None:
                 return None
             if term in {"", "true"} or term in seen:
@@ -770,11 +1016,14 @@ class FormulaBuilder:
         self,
         guard,
         symbol_name_mapping,
+        *,
+        param_infos=(),
     ) -> Optional[str]:
         if guard is None:
             return "true"
         if isinstance(guard, bool):
             return "true" if guard else "false"
+        guard = _rewrite_guard_parameter_metadata_for_smt(guard, param_infos)
         to_smt = getattr(guard, "to_smt", None)
         if callable(to_smt):
             try:
@@ -783,7 +1032,11 @@ class FormulaBuilder:
                 return None
         expression = getattr(guard, "expression", None)
         if expression is not None:
-            return self._readonly_guard_to_smt(expression, symbol_name_mapping)
+            return self._readonly_guard_to_smt(
+                expression,
+                symbol_name_mapping,
+                param_infos=param_infos,
+            )
         return None
 
     def _readonly_witness_antecedent_smt(

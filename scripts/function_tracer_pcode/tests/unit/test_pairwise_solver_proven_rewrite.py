@@ -267,6 +267,78 @@ def test_solver_rewrite_no_change_carries_object_target_and_proof_id():
     assert actions[0].proof_stage == "rewrite_candidate_generation"
 
 
+def test_solver_rewrite_proof_failed_carries_object_target_to_both_actions(monkeypatch):
+    param1 = _param("param_1")
+    param2 = _param("param_2")
+    half_b = Expression.binary_op("INT_SDIV", param2, _const(2))
+    canonical = Expression.binary_op("INT_ADD", param1, half_b)
+    commuted = Expression.binary_op("INT_ADD", half_b, param1)
+    case1 = _case(0, commuted)
+    case2 = _case(1, canonical)
+    target_key = (
+        "solver_rewrite_proof",
+        ("pair", "(0,1)"),
+        ("rewrite_side", "left"),
+        ("rewrite_stage", "rewrite-proof-1"),
+        ("solver_rewrite_side", "left", ("function_ref", ("function", "B1", 0x1000))),
+        ("solver_rewrite_side", "right", ("function_ref", ("function", "B2", 0x2000))),
+        ("original_expression", ("expression", ("binary", "INT_ADD"))),
+        ("rewritten_expression", ("expression", ("binary", "INT_ADD"))),
+    )
+
+    def fake_candidate(expr, settings):
+        if expr is commuted:
+            return canonical
+        return expr
+
+    monkeypatch.setattr(rewrite_module, "_build_rewrite_candidate", fake_candidate)
+
+    class FakeStrategy:
+        solver_proven_rewrite_settings = NormalizationSettings.safe()
+
+        def _solve_query_internal(self, query, pair_id, stage="full", use_hard_timeout=False):
+            assert stage == "rewrite-proof-1"
+            return QueryResult(is_equivalent=None)
+
+        def _solver_rewrite_proof_object_target_key(self, **kwargs):
+            assert kwargs["pair_id"] == "(0,1)"
+            assert kwargs["rewrite_side"] == "left"
+            assert kwargs["rewrite_label"] == "rewrite-proof-1"
+            return target_key
+
+    result = try_solver_proven_rewrite_equivalence(
+        FakeStrategy(),
+        _base_ctx(),
+        case1,
+        case2,
+        lambda obj: obj.to_smt(),
+        lambda obj: obj.to_smt(),
+        "(0,1)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.blocking_reason == "solver_proven_rewrite_proof_failed"
+    assert result.object_target_key == target_key
+
+    record = make_unknown_reason(
+        result.blocking_reason,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_refs=(result.pair_stage, result.blocking_detail),
+        object_target_key=result.object_target_key,
+        detail=result.blocking_detail,
+    )
+    actions = build_unknown_recovery_actions([record])
+    assert record.proof_obligation_id is None
+    assert len(actions) == 2
+    assert {action.proof_stage for action in actions} == {
+        "rewrite_proof_recheck",
+        "solver_retry",
+    }
+    assert all(action.object_target_key == target_key for action in actions)
+    assert all(action.proof_obligation_id is not None for action in actions)
+
+
 def test_solve_query_twostage_propagates_solver_rewrite_object_target():
     param1 = _param("param_1")
     param2 = _param("param_2")

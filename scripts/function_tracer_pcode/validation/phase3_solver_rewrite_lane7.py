@@ -33,6 +33,9 @@ from .phase3_readonly_identity_lane3 import (
     _analysis_entry_key_is_specific,
     _nested_contains_diagnostic_reason,
 )
+from .phase3_return_coverage_lane1 import (
+    _object_target_key_is_specific as _return_coverage_object_target_key_is_specific,
+)
 from .phase3_unresolved_expression_lane6 import (
     _expression_provenance_is_specific,
     _return_guard_like_key_is_specific,
@@ -77,6 +80,33 @@ SOLVER_ACTION_TUPLE = (
     SOLVER_PROOF_STAGE,
     "planned",
 )
+RETURN_COVERAGE_RECLASSIFIED_REASON_TUPLE = (
+    UnknownCountKind.REASON_RECORD.value,
+    "return_coverage_gap",
+    "blocks_equivalence",
+    "function",
+    "return_coverage_completion",
+    MISSING_SENTINEL,
+    "pending_proof",
+)
+RETURN_COVERAGE_RECLASSIFIED_PARTITION_ACTION_TUPLE = (
+    UnknownCountKind.PROOF_ACTION.value,
+    "return_coverage_gap",
+    "blocks_equivalence",
+    "function",
+    "return_coverage_completion",
+    "return_partition_extraction",
+    "pending_proof",
+)
+RETURN_COVERAGE_RECLASSIFIED_GUARD_ACTION_TUPLE = (
+    UnknownCountKind.PROOF_ACTION.value,
+    "return_coverage_gap",
+    "blocks_equivalence",
+    "function",
+    "return_coverage_completion",
+    "return_guard_coverage",
+    "pending_proof",
+)
 LOOP_BINARY_NAMES = {
     "B12": "loop_method_b_test-mips64-clang-O3",
     "B16": "loop_method_b_test-mips64-gcc-O3",
@@ -114,6 +144,57 @@ def _expected_proof_action(movement_id: str) -> Dict[str, Any]:
     }
 
 
+def _accepted_return_coverage_reclassification() -> Sequence[Dict[str, Any]]:
+    return (
+        {
+            "id": "solver-rewrite-retired-to-return-coverage-reason-record",
+            "count_kind": UnknownCountKind.REASON_RECORD.value,
+            "tuple": list(RETURN_COVERAGE_RECLASSIFIED_REASON_TUPLE),
+            "aggregation_unit": "function",
+            "stage": "S_PAIRWISE",
+            "pair_or_case": MISSING_SENTINEL,
+            "expected_evidence_refs": ["function1:return_coverage_gap"],
+            "expected_evidence_kind": MISSING_SENTINEL,
+            "required_object_target_kind": "return_coverage",
+            "require_proof_obligation_id": False,
+        },
+        {
+            "id": "solver-rewrite-retired-to-return-coverage-partition-action",
+            "count_kind": UnknownCountKind.PROOF_ACTION.value,
+            "tuple": list(RETURN_COVERAGE_RECLASSIFIED_PARTITION_ACTION_TUPLE),
+            "aggregation_unit": "function",
+            "stage": "S_PAIRWISE",
+            "pair_or_case": MISSING_SENTINEL,
+            "expected_evidence_refs": ["function1:return_coverage_gap"],
+            "expected_evidence_kind": "missing_return_guard",
+            "required_evidence": [
+                "missing_return_guard",
+                "tail_or_default_return_value",
+                "return_storage",
+            ],
+            "required_object_target_kind": "return_coverage",
+            "require_proof_obligation_id": True,
+        },
+        {
+            "id": "solver-rewrite-retired-to-return-coverage-guard-action",
+            "count_kind": UnknownCountKind.PROOF_ACTION.value,
+            "tuple": list(RETURN_COVERAGE_RECLASSIFIED_GUARD_ACTION_TUPLE),
+            "aggregation_unit": "function",
+            "stage": "S_PAIRWISE",
+            "pair_or_case": MISSING_SENTINEL,
+            "expected_evidence_refs": ["function1:return_coverage_gap"],
+            "expected_evidence_kind": "case_guard_disjunction",
+            "required_evidence": [
+                "case_guard_disjunction",
+                "path_feasibility",
+                "function_precondition",
+            ],
+            "required_object_target_kind": "return_coverage",
+            "require_proof_obligation_id": True,
+        },
+    )
+
+
 DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
     {
         "id": "representative-solver-rewrite-no-change-prefix-loop-mips64",
@@ -128,6 +209,14 @@ DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
             _expected_reason_record("solver-rewrite-no-change-reason-record"),
             _expected_proof_action("solver-rewrite-candidate-generation-proof"),
         ],
+        "accepted_post_fix_reclassification": {
+            "status": "retired_to_return_coverage_gap",
+            "reason": (
+                "readonly proof guard SMT metadata normalization exposes the existing "
+                "return coverage proof backlog before solver rewrite retry"
+            ),
+            "accepted_movements": list(_accepted_return_coverage_reclassification()),
+        },
     },
 )
 
@@ -496,6 +585,12 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
             _failed("solver_rewrite_unexpected_final_result", current_result=result or MISSING_SENTINEL, **details)
         )
         return "failed", failures
+    reclassification_failures = _accepted_reclassification_failures(entry)
+    if reclassification_failures is not None:
+        if not reclassification_failures:
+            return "retired_to_return_coverage_gap", ()
+        failures.extend(reclassification_failures)
+        return "failed", failures
     frozen_targets = _canonical_targets(entry.get("target_object_keys"))
     current_targets = _canonical_targets(_current_targets(entry))
     if not frozen_targets or current_targets != frozen_targets:
@@ -587,6 +682,25 @@ def _post_fix_checks(
             if expected_movements and expected_movements == actual_movements
             else _failed("phase3_pre_fix_implementation_movements_consistent", expected=expected_movements, actual=actual_movements)
         )
+        expected_reclassifications = _canonical_reclassifications(
+            implementation.get("accepted_post_fix_reclassifications")
+        )
+        actual_reclassifications = _canonical_reclassifications(
+            [
+                entry.get("accepted_post_fix_reclassification")
+                for entry in phase3_manifest.get("entries") or ()
+                if isinstance(entry, Mapping) and entry.get("accepted_post_fix_reclassification")
+            ]
+        )
+        checks.append(
+            _ok("phase3_pre_fix_implementation_reclassifications_consistent")
+            if expected_reclassifications and expected_reclassifications == actual_reclassifications
+            else _failed(
+                "phase3_pre_fix_implementation_reclassifications_consistent",
+                expected=expected_reclassifications,
+                actual=actual_reclassifications,
+            )
+        )
     else:
         checks.append(_failed("phase3_pre_fix_implementation_manifest_present"))
     for entry in entries:
@@ -594,7 +708,7 @@ def _post_fix_checks(
             checks.append(failure)
         checks.append(
             _ok("solver_rewrite_post_fix_expected_movement", post_fix_status=entry.get("post_fix_status"), **_entry_details(entry))
-            if entry.get("post_fix_status") == "pending_proof"
+            if entry.get("post_fix_status") in {"pending_proof", "retired_to_return_coverage_gap"}
             else _failed("solver_rewrite_post_fix_expected_movement", post_fix_status=entry.get("post_fix_status") or MISSING_SENTINEL, **_entry_details(entry))
         )
     return checks
@@ -626,7 +740,298 @@ def _implementation_manifest(entries: Sequence[Mapping[str, Any]]) -> Dict[str, 
                 for action in (entry.get("required_completion_actions") or ())
             ]
         ),
+        "accepted_post_fix_reclassifications": _canonical_reclassifications(
+            [
+                entry.get("accepted_post_fix_reclassification")
+                for entry in entries
+                if entry.get("accepted_post_fix_reclassification")
+            ]
+        ),
     }
+
+
+def _accepted_reclassification_failures(entry: Mapping[str, Any]) -> Optional[Sequence[Dict[str, Any]]]:
+    accepted = entry.get("accepted_post_fix_reclassification")
+    if not isinstance(accepted, Mapping):
+        return None
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    details = _entry_details(entry)
+    failures: list[Dict[str, Any]] = []
+    if accepted.get("status") != "retired_to_return_coverage_gap":
+        failures.append(
+            _failed(
+                "solver_rewrite_accepted_reclassification_status",
+                expected="retired_to_return_coverage_gap",
+                actual=accepted.get("status") or MISSING_SENTINEL,
+                **details,
+            )
+        )
+    if _canonical_reclassifications([accepted]) != _canonical_reclassifications(
+        [DEFAULT_REPRESENTATIVES[0].get("accepted_post_fix_reclassification")]
+    ):
+        failures.append(
+            _failed(
+                "solver_rewrite_accepted_reclassification_definition",
+                expected=_canonical_reclassifications(
+                    [DEFAULT_REPRESENTATIVES[0].get("accepted_post_fix_reclassification")]
+                ),
+                actual=_canonical_reclassifications([accepted]),
+                **details,
+            )
+        )
+    observed = set(current.get("observed_reason_ids") or ())
+    if observed != {"return_coverage_gap"}:
+        failures.append(
+            _failed(
+                "solver_rewrite_accepted_reclassification_reason_set",
+                expected=["return_coverage_gap"],
+                actual=sorted(observed),
+                **details,
+            )
+        )
+    expected_movements = accepted.get("accepted_movements") or ()
+    failures.extend(_accepted_reclassification_tuple_failures(current, expected_movements, details))
+    failures.extend(
+        _accepted_reclassification_object_evidence_failures(current, expected_movements, details)
+    )
+    return tuple(failures)
+
+
+def _accepted_reclassification_tuple_failures(
+    current: Mapping[str, Any],
+    expected_movements: Any,
+    details: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    failures: list[Dict[str, Any]] = []
+    movements = tuple(
+        movement for movement in (expected_movements or ()) if isinstance(movement, Mapping)
+    )
+    if not movements:
+        return [_failed("solver_rewrite_accepted_reclassification_movements_missing", **details)]
+    reason_tuples = {tuple(item or ()) for item in current.get("reason_record_tuples") or ()}
+    action_tuples = {tuple(item or ()) for item in current.get("proof_action_tuples") or ()}
+    for movement in movements:
+        expected_tuple = tuple(movement.get("tuple") or ())
+        count_kind = movement.get("count_kind")
+        if count_kind == UnknownCountKind.REASON_RECORD.value:
+            present = expected_tuple in reason_tuples
+        elif count_kind == UnknownCountKind.PROOF_ACTION.value:
+            present = expected_tuple in action_tuples
+        else:
+            present = False
+        if not present:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_tuple_missing",
+                    movement_id=movement.get("id") or MISSING_SENTINEL,
+                    expected_tuple=list(expected_tuple),
+                    **details,
+                )
+            )
+    return tuple(failures)
+
+
+def _accepted_reclassification_object_evidence_failures(
+    current: Mapping[str, Any],
+    expected_movements: Any,
+    details: Mapping[str, Any],
+) -> Sequence[Dict[str, Any]]:
+    failures: list[Dict[str, Any]] = []
+    records = [
+        record
+        for record in current.get("reason_records") or ()
+        if isinstance(record, Mapping) and record.get("reason_id") == "return_coverage_gap"
+    ]
+    if not records:
+        failures.append(_failed("solver_rewrite_accepted_reclassification_record_missing", **details))
+    for record in records:
+        expected_record = _accepted_reclassification_record_definition(record, expected_movements)
+        if not expected_record:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_record_definition_missing",
+                    expected_tuple=list(record.get("tuple") or ()),
+                    **details,
+                )
+            )
+        else:
+            expected_refs = tuple(str(ref) for ref in expected_record.get("expected_evidence_refs") or ())
+            actual_refs = tuple(str(ref) for ref in record.get("evidence_refs") or ())
+            if actual_refs != expected_refs:
+                failures.append(
+                    _failed(
+                        "solver_rewrite_accepted_reclassification_record_evidence_refs",
+                        expected=list(expected_refs),
+                        actual=list(actual_refs),
+                        **details,
+                    )
+                )
+        if not _return_coverage_object_target_key_is_specific(record.get("object_target_key")):
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_record_target",
+                    object_target_key=_jsonable(record.get("object_target_key")),
+                    **details,
+                )
+            )
+    actions = [
+        action
+        for action in current.get("proof_actions") or ()
+        if isinstance(action, Mapping) and action.get("reason_id") == "return_coverage_gap"
+    ]
+    expected_stages = {"return_partition_extraction", "return_guard_coverage"}
+    action_definitions = _accepted_reclassification_action_definitions(expected_movements)
+    observed_stages = {action.get("proof_stage") for action in actions}
+    if not expected_stages.issubset(observed_stages):
+        failures.append(
+            _failed(
+                "solver_rewrite_accepted_reclassification_actions_missing",
+                expected=sorted(expected_stages),
+                actual=sorted(str(stage) for stage in observed_stages),
+                **details,
+            )
+        )
+    for action in actions:
+        if action.get("proof_stage") not in expected_stages:
+            continue
+        expected_action = action_definitions.get(str(action.get("proof_stage")))
+        if not expected_action:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_definition_missing",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    **details,
+                )
+            )
+            continue
+        if tuple(action.get("tuple") or ()) != tuple(expected_action.get("tuple") or ()):
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_tuple",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    expected_tuple=list(expected_action.get("tuple") or ()),
+                    actual_tuple=list(action.get("tuple") or ()),
+                    **details,
+                )
+            )
+        expected_evidence_kind = expected_action.get("expected_evidence_kind") or MISSING_SENTINEL
+        if action.get("evidence_kind") != expected_evidence_kind:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_evidence_kind",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    expected=expected_evidence_kind,
+                    actual=action.get("evidence_kind") or MISSING_SENTINEL,
+                    **details,
+                )
+            )
+        expected_required = tuple(expected_action.get("required_evidence") or ())
+        if tuple(action.get("required_evidence") or ()) != expected_required:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_required_evidence",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    expected=list(expected_required),
+                    actual=list(action.get("required_evidence") or ()),
+                    **details,
+                )
+            )
+        expected_refs = tuple(str(ref) for ref in expected_action.get("expected_evidence_refs") or ())
+        actual_refs = tuple(str(ref) for ref in action.get("evidence_refs") or ())
+        if actual_refs != expected_refs:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_evidence_refs",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    expected=list(expected_refs),
+                    actual=list(actual_refs),
+                    **details,
+                )
+            )
+        if action.get("raw_proof_obligation_id_present") is not True:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_raw_proof_id",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    **details,
+                )
+            )
+        if action.get("raw_object_target_key_present") is not True:
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_raw_target",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    **details,
+                )
+            )
+        if not _return_coverage_object_target_key_is_specific(action.get("object_target_key")):
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_target",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    object_target_key=_jsonable(action.get("object_target_key")),
+                    **details,
+                )
+            )
+        if not _action_has_expected_id(action):
+            failures.append(
+                _failed(
+                    "solver_rewrite_accepted_reclassification_action_proof_id",
+                    proof_stage=action.get("proof_stage") or MISSING_SENTINEL,
+                    proof_obligation_id=_jsonable(action.get("proof_obligation_id")),
+                    **details,
+                )
+            )
+    return tuple(failures)
+
+
+def _accepted_reclassification_record_definition(
+    record: Mapping[str, Any],
+    expected_movements: Any,
+) -> Optional[Mapping[str, Any]]:
+    record_tuple = tuple(record.get("tuple") or ())
+    for movement in expected_movements or ():
+        if not isinstance(movement, Mapping):
+            continue
+        if movement.get("count_kind") != UnknownCountKind.REASON_RECORD.value:
+            continue
+        if tuple(movement.get("tuple") or ()) == record_tuple:
+            return movement
+    return None
+
+
+def _accepted_reclassification_action_definitions(
+    expected_movements: Any,
+) -> Dict[str, Mapping[str, Any]]:
+    definitions: Dict[str, Mapping[str, Any]] = {}
+    for movement in expected_movements or ():
+        if not isinstance(movement, Mapping):
+            continue
+        if movement.get("count_kind") != UnknownCountKind.PROOF_ACTION.value:
+            continue
+        expected_tuple = tuple(movement.get("tuple") or ())
+        if len(expected_tuple) < 6:
+            continue
+        proof_stage = expected_tuple[5]
+        if not isinstance(proof_stage, str) or not proof_stage:
+            continue
+        definitions[proof_stage] = movement
+    return definitions
+
+
+def _canonical_reclassifications(value: Any) -> Tuple[Any, ...]:
+    canonical = []
+    for entry in value or ():
+        if not isinstance(entry, Mapping):
+            continue
+        canonical.append(
+            {
+                "status": entry.get("status"),
+                "reason": entry.get("reason"),
+                "accepted_movements": _canonical_movements(entry.get("accepted_movements")),
+            }
+        )
+    return tuple(sorted(canonical, key=_canonical_json))
 
 
 def _current_targets(entry: Any) -> Sequence[Any]:

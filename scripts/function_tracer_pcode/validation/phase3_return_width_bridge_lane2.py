@@ -1931,6 +1931,7 @@ def _canonical_movements(values: Any) -> Tuple[Dict[str, Any], ...]:
                 "stage": movement.get("stage") or MISSING_SENTINEL,
                 "pair_or_case": movement.get("pair_or_case") or MISSING_SENTINEL,
                 "expected_evidence_refs": list(movement.get("expected_evidence_refs") or ()),
+                "expected_evidence_kind": movement.get("expected_evidence_kind") or MISSING_SENTINEL,
                 "required_evidence": list(movement.get("required_evidence") or ()),
                 "required_object_target_kind": movement.get("required_object_target_kind") or MISSING_SENTINEL,
                 "require_proof_obligation_id": bool(movement.get("require_proof_obligation_id")),
