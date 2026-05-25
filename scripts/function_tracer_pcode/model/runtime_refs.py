@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from .call_target import CallTargetRef, coerce_call_target_ref
 
+_MAX_PARENT_PCODE_OP_SCAN = 10000
+
 
 @dataclass(frozen=True)
 class AddressValueRef:
@@ -512,10 +514,12 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
         return None
     target_signature = _pcode_op_ordinal_signature(pcode_op)
     ordinal = 0
-    while True:
+    while ordinal < _MAX_PARENT_PCODE_OP_SCAN:
         try:
             has_next = iterator.hasNext()
         except Exception:
+            return None
+        if not isinstance(has_next, bool):
             return None
         if not has_next:
             return None
@@ -528,6 +532,7 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
         if _pcode_op_ordinal_signature(candidate) == target_signature:
             return ordinal
         ordinal += 1
+    return None
 
 
 @dataclass(frozen=True)

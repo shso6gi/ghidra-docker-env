@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from copy import deepcopy
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.effect_summary import (
@@ -280,6 +281,76 @@ def _return_coverage_completion_evidence_without_proof_id(action):
     evidence = _return_coverage_completion_evidence(action)
     evidence.pop("proof_obligation_id", None)
     return evidence
+
+
+def _sat_unsafety_resolution_evidence(action, **overrides):
+    evidence = {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": UnknownReasonId.SAT_UNSAFETY.value,
+        "recovery_proof_kind": UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
+        "proof_stage": action.proof_stage,
+        "evidence_kind": action.evidence_kind,
+        "object_target_key": action.object_target_key,
+        "proof_obligation_id": action.proof_obligation_id,
+        "proof_content": {
+            "object_derived": True,
+            "object_target_key": action.object_target_key,
+            "counterexample_replay": {
+                "status": "replayed",
+                "model_ref": ("query_model", "pair", action.pair_or_case),
+            },
+            "active_unsafety_discharge": {
+                "status": "discharged",
+                "discharged_reason_refs": tuple(action.evidence_refs),
+            },
+            "coverage_effect_safety": {
+                "status": "proven",
+                "coverage_status": "covered",
+                "effect_status": "supported",
+            },
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _sat_unsafety_resolution_action():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    reason = strategy._make_sat_unsafety_unknown_reason(
+        ("function1:unsupported_call_effect_summary",),
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    return build_unknown_recovery_actions([reason])[0]
 
 
 def _monolithic_return_coverage_gap_setup():
@@ -1233,6 +1304,228 @@ def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatc
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert result.unknown_reasons[0].proof_obligation_id is not None
+
+
+def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    reason = result.unknown_reasons[0]
+    assert reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert reason.decision_effect == "blocks_disequivalence"
+    assert reason.recovery_proof_kind == UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+    assert reason.recovery_action == "sat_unsafety_resolution_required"
+    assert reason.object_target_key[0] == "sat_unsafety"
+    assert reason.proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.SAT_UNSAFETY,
+        "sat_counterexample_safety",
+        UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+        "active_unsafety_summary",
+        reason.object_target_key,
+    )
+    actions = build_unknown_recovery_actions([reason])
+    assert len(actions) == 1
+    assert actions[0].required_evidence == (
+        "counterexample_replay",
+        "active_unsafety_discharge",
+        "coverage_effect_safety",
+    )
+    assert actions[0].proof_obligation_id == reason.proof_obligation_id
+
+
+def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.equivalence.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_args, **_kwargs: True,
+    )
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+    reason = strategy._make_sat_unsafety_unknown_reason(
+        ("function1:unsupported_call_effect_summary",),
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([reason])[0]
+    analysis1.completed_recovery_proof_evidence = (
+        _sat_unsafety_resolution_evidence(action),
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is False
+    assert result.sat_pairs == 1
+    assert result.unknown_reasons == []
+
+
+def test_sat_unsafety_completed_proof_rejects_active_blocker_fields_on_evidence():
+    action = _sat_unsafety_resolution_action()
+    blocker_fields = (
+        "active_coverage_gap_reasons",
+        "unsupported_call_effect_reasons",
+        "unsupported_memory_effect_reasons",
+    )
+
+    for field_name in blocker_fields:
+        evidence = _sat_unsafety_resolution_evidence(action, **{field_name: ("still-active",)})
+
+        assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
+
+
+def test_sat_unsafety_completed_proof_rejects_active_blocker_fields_inside_proof_content():
+    action = _sat_unsafety_resolution_action()
+    blocker_fields = (
+        "active_coverage_gap_reasons",
+        "unsupported_call_effect_reasons",
+        "unsupported_memory_effect_reasons",
+    )
+
+    for field_name in blocker_fields:
+        evidence = deepcopy(_sat_unsafety_resolution_evidence(action))
+        evidence["proof_content"]["coverage_effect_safety"][field_name] = ("still-active",)
+
+        assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
+
+
+def test_sat_unsafety_completed_proof_requires_object_derived_proof_content():
+    action = _sat_unsafety_resolution_action()
+    evidence = deepcopy(_sat_unsafety_resolution_evidence(action))
+    evidence["proof_content"].pop("object_derived", None)
+
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
+
+
+def test_sat_unsafety_completed_proof_rejects_nested_blocker_fields_inside_proof_content():
+    action = _sat_unsafety_resolution_action()
+    evidence = deepcopy(_sat_unsafety_resolution_evidence(action))
+    evidence["proof_content"]["coverage_effect_safety"]["details"] = {
+        "unsupported_call_effect_reasons": ("still-active",),
+    }
+
+    assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
+
+
+def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(2), conditions=[])],
+        return_type="int",
+    )
+    _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+    pending_reason = strategy._make_sat_unsafety_unknown_reason(
+        ("function1:unsupported_call_effect_summary",),
+        analysis1,
+        analysis2,
+        case1=ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=analysis1.returns[0].value,
+            return_info=analysis1.returns[0],
+            return_type=analysis1.return_type or "int",
+            parameters=analysis1.parameters,
+        ),
+        case2=ReturnCase(
+            index=0,
+            conditions=[],
+            value_expr=analysis2.returns[0].value,
+            return_info=analysis2.returns[0],
+            return_type=analysis2.return_type or "int",
+            parameters=analysis2.parameters,
+        ),
+        pair_id="(0,0)",
+        stage="S_PAIRWISE",
+    )
+    action = build_unknown_recovery_actions([pending_reason])[0]
+    evidence = _sat_unsafety_resolution_evidence(action)
+    evidence.pop("proof_content", None)
+    analysis1.completed_recovery_proof_evidence = (evidence,)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_UNSAFETY.value
 
 
 def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatch):

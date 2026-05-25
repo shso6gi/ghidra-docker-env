@@ -116,14 +116,48 @@ SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES = {
         "planned",
     ),
 }
+SAT_UNSAFETY_PROOF_KIND = UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value
+SAT_UNSAFETY_PROOF_STAGE = "sat_counterexample_safety"
 SAT_UNSAFETY_REASON_TUPLE = (
     "sat_unsafety",
     "blocks_disequivalence",
     "pair",
-    "none",
-    MISSING_SENTINEL,
+    SAT_UNSAFETY_PROOF_KIND,
+    SAT_UNSAFETY_PROOF_STAGE,
     MISSING_SENTINEL,
 )
+SAT_UNSAFETY_PENDING_REASON_TUPLE = (
+    "sat_unsafety",
+    "blocks_disequivalence",
+    "pair",
+    SAT_UNSAFETY_PROOF_KIND,
+    SAT_UNSAFETY_PROOF_STAGE,
+    UnknownRecoveryActionStatus.PENDING_PROOF.value,
+)
+SAT_UNSAFETY_REASON_TUPLES = {
+    SAT_UNSAFETY_REASON_TUPLE,
+    SAT_UNSAFETY_PENDING_REASON_TUPLE,
+}
+SAT_UNSAFETY_PROOF_ACTION_TUPLE = (
+    "sat_unsafety",
+    "blocks_disequivalence",
+    "pair",
+    SAT_UNSAFETY_PROOF_KIND,
+    SAT_UNSAFETY_PROOF_STAGE,
+    UnknownRecoveryActionStatus.PLANNED.value,
+)
+SAT_UNSAFETY_PENDING_PROOF_ACTION_TUPLE = (
+    "sat_unsafety",
+    "blocks_disequivalence",
+    "pair",
+    SAT_UNSAFETY_PROOF_KIND,
+    SAT_UNSAFETY_PROOF_STAGE,
+    UnknownRecoveryActionStatus.PENDING_PROOF.value,
+)
+SAT_UNSAFETY_PROOF_ACTION_TUPLES = {
+    SAT_UNSAFETY_PROOF_ACTION_TUPLE,
+    SAT_UNSAFETY_PENDING_PROOF_ACTION_TUPLE,
+}
 ALLOWED_EXPOSED_REASON_TUPLES = {
     (
         "return_coverage_gap",
@@ -141,16 +175,8 @@ ALLOWED_EXPOSED_REASON_TUPLES = {
         MISSING_SENTINEL,
         MISSING_SENTINEL,
     ),
-    (
-        "sat_unsafety",
-        "blocks_disequivalence",
-        "pair",
-        "none",
-        MISSING_SENTINEL,
-        MISSING_SENTINEL,
-    ),
     ALLOWED_NEW_REASON_TUPLE,
-}
+} | SAT_UNSAFETY_REASON_TUPLES
 ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
     (
         "return_coverage_gap",
@@ -185,7 +211,7 @@ ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
         "planned",
     ),
     ALLOWED_NEW_REASON_TUPLE,
-}
+} | SAT_UNSAFETY_PROOF_ACTION_TUPLES
 ALLOWED_PAIR_EXPOSED_REASONS = {
     TARGET_REASON_ID,
     "return_coverage_gap",
@@ -985,7 +1011,12 @@ def _allowed_positive_tuple_deltas(
             _add_positive_tuple_allowance(
                 result[UnknownCountKind.REASON_RECORD.value],
                 reason_record_deltas,
-                {SAT_UNSAFETY_REASON_TUPLE},
+                SAT_UNSAFETY_REASON_TUPLES,
+            )
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.PROOF_ACTION.value],
+                proof_action_deltas,
+                SAT_UNSAFETY_PROOF_ACTION_TUPLES,
             )
         if _has_allowed_broad_tuple_reduction(validation_unit_deltas):
             _add_positive_tuple_allowance(
@@ -997,7 +1028,7 @@ def _allowed_positive_tuple_deltas(
             _add_positive_tuple_allowance(
                 result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
                 validation_unit_deltas,
-                {SAT_UNSAFETY_REASON_TUPLE},
+                SAT_UNSAFETY_REASON_TUPLES,
             )
     return result
 

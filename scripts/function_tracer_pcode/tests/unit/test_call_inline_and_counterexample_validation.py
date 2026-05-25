@@ -3947,14 +3947,22 @@ def test_return_analyzer_restores_parent_analysis_context_after_nested_call():
             {"name": "param_2", "index": 1, "size": 4},
         ]
 
-    def _build_effect_summary(function, _high_function, _tracer, _condition_tracker, _parameters, active_functions):
+    def _build_effect_summary(
+        function,
+        _high_function,
+        _tracer,
+        _condition_tracker,
+        _parameters,
+        active_functions,
+        **_kwargs,
+    ):
         assert all(isinstance(entry, tuple) for entry in active_functions)
         if function.getName() == "parent":
             child_analysis = analyzer.analyze_function(child, active_functions=active_functions)
             assert child_analysis is not None
             observed["after_child_params"] = [param["name"] for param in analyzer._current_parameters]
             observed["after_child_effect_summary"] = analyzer._current_effect_summary
-        return Mock(synthetic_expr=None, has_unsupported_call=False)
+        return Mock(synthetic_expr=None, has_unsupported_call=False, unsupported_call_sites=())
 
     with patch("scripts.function_tracer_pcode.analysis.analyzer.PcodeTracer", _FakeTracer), patch(
         "scripts.function_tracer_pcode.analysis.analyzer.ConditionTracker",

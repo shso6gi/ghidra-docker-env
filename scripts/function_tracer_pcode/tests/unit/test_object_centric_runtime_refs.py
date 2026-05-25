@@ -295,6 +295,21 @@ def test_pcode_op_ref_derives_local_ordinal_from_equivalent_parent_wrapper():
     )
 
 
+def test_pcode_op_ref_ignores_mock_parent_iterator_with_non_boolean_has_next():
+    parent = Mock()
+    parent.getIterator.return_value = Mock()
+    queried = _FakePcodeOp(target_offset=0x1010, order=7, opcode=19, mnemonic="RETURN", parent=parent)
+
+    ref = PcodeOpRef.from_pcode_op(
+        queried,
+        binary_id="B11",
+        function_entry=_FakeAddress("ram", 0x1000),
+    )
+
+    assert ref is not None
+    assert ref.local_op_ordinal is None
+
+
 def test_unsupported_call_effect_summary_uses_tracer_full_pcode_context():
     pcode_ref = PcodeOpRef(
         binary_id="B11",

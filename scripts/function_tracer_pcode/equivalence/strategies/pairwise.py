@@ -492,22 +492,28 @@ class PairwiseStrategy(CheckStrategy):
 
                 if result.is_equivalent is False:
                     if sat_unsafety_reasons:
-                        unknown_count += 1
-                        unknown_reasons.append(
-                            make_unknown_reason(
-                                UnknownReasonId.SAT_UNSAFETY,
-                                stage="S_PAIRWISE",
-                                pair_or_case=pair_id,
-                                evidence_refs=tuple(sat_unsafety_reasons),
-                                detail=", ".join(sat_unsafety_reasons),
+                        sat_unsafety_reason = self._make_sat_unsafety_unknown_reason(
+                            sat_unsafety_reasons,
+                            analysis1,
+                            analysis2,
+                            case1=case1,
+                            case2=case2,
+                            pair_id=pair_id,
+                            stage="S_PAIRWISE",
+                        )
+                        if not self._sat_unsafety_resolution_proof_is_complete(
+                            sat_unsafety_reason,
+                            analysis1,
+                            analysis2,
+                        ):
+                            unknown_count += 1
+                            unknown_reasons.append(sat_unsafety_reason)
+                            self._debug_print(
+                                "  Pair "
+                                f"{pair_id}: SAT downgraded to UNKNOWN due to unsafe analysis "
+                                f"summary ({', '.join(sat_unsafety_reasons)})"
                             )
-                        )
-                        self._debug_print(
-                            "  Pair "
-                            f"{pair_id}: SAT downgraded to UNKNOWN due to unsafe analysis "
-                            f"summary ({', '.join(sat_unsafety_reasons)})"
-                        )
-                        continue
+                            continue
 
                     is_decisive = validate_counterexample_across_cases(
                         self,

@@ -88,6 +88,7 @@ class UnknownRecoveryProofKind(str, Enum):
     STORAGE_BACKED_IDENTITY_PROPAGATION = "storage_backed_identity_propagation"
     PROOF_BACKED_COVERING_CASE = "proof_backed_covering_case"
     GUARD_PARTITION_COMPLETION = "guard_partition_completion"
+    SAT_UNSAFETY_RESOLUTION = "sat_unsafety_resolution"
     SOLVER_RETRY_OR_NORMALIZATION = "solver_retry_or_normalization"
     RETURN_COVERAGE_COMPLETION = "return_coverage_completion"
 
@@ -432,6 +433,8 @@ def _register_defaults() -> None:
             UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE,
             UnknownReasonScope.PAIR,
             UnknownAggregationUnit.PAIR,
+            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+            target_regression="sat_unsafety",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,
@@ -676,6 +679,26 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="return_coverage_inconclusive",
             description="Recover inconclusive coverage by proving or refuting the uncovered guard.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SAT_UNSAFETY,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+                    "sat_counterexample_safety",
+                    required_evidence=(
+                        "counterexample_replay",
+                        "active_unsafety_discharge",
+                        "coverage_effect_safety",
+                    ),
+                    description=(
+                        "Accept a SAT counterexample only after replay and all active "
+                        "coverage/effect unsafety blockers are discharged."
+                    ),
+                ),
+            ),
+            target_regression="sat_unsafety",
+            description="Recover SAT unsafety only with replay plus coverage/effect safety proof.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,

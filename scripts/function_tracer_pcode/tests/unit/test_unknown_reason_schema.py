@@ -109,6 +109,7 @@ def test_plan15_recovery_plan_maps_core_reasons_to_required_proofs():
     recoverable_partial = get_unknown_recovery_plan(UnknownReasonId.RECOVERABLE_PARTIAL)
     readonly_identity = get_unknown_recovery_plan(UnknownReasonId.READONLY_IDENTITY_MISSING)
     method_b = get_unknown_recovery_plan(UnknownReasonId.METHOD_B_CLOSURE_BLOCKED)
+    sat_unsafety = get_unknown_recovery_plan(UnknownReasonId.SAT_UNSAFETY)
 
     assert [obligation.proof_kind for obligation in return_width.proof_obligations] == [
         UnknownRecoveryProofKind.ABI_RELATION_PROOF.value,
@@ -138,6 +139,12 @@ def test_plan15_recovery_plan_maps_core_reasons_to_required_proofs():
         ("seed_compensation", "term_sequence", "pure_side_effect_profile"),
         ("guard_partition", "partition_coverage_proof"),
     ]
+    assert [obligation.proof_kind for obligation in sat_unsafety.proof_obligations] == [
+        UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
+    ]
+    assert [obligation.required_evidence for obligation in sat_unsafety.proof_obligations] == [
+        ("counterexample_replay", "active_unsafety_discharge", "coverage_effect_safety"),
+    ]
 
 
 def test_plan16_operational_backlog_reasons_have_registered_actions():
@@ -145,6 +152,7 @@ def test_plan16_operational_backlog_reasons_have_registered_actions():
         UnknownReasonId.LOOP_SUMMARY_PROOF_MISSING,
         UnknownReasonId.RETURN_COVERAGE_GAP,
         UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
+        UnknownReasonId.SAT_UNSAFETY,
         UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
         UnknownReasonId.NORMALIZATION_NO_CHANGE,
         UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE,
