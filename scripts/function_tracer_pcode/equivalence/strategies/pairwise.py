@@ -463,12 +463,21 @@ class PairwiseStrategy(CheckStrategy):
                     query_label=f"{pair_id}:case2",
                 ):
                     unknown_count += 1
+                    object_target_key = self._unresolved_expression_object_target_key(
+                        base_ctx=base_ctx,
+                        case1=case1,
+                        case2=case2,
+                        pair_id=pair_id,
+                    )
                     unknown_reasons.append(
                         make_unknown_reason(
                             UnknownReasonId.UNRESOLVED_EXPRESSION,
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
+                            evidence_kind="unresolved_expression_safety",
+                            object_target_key=object_target_key,
+                            detail="pairwise case contains solver-unresolved expression evidence",
                         )
                     )
                     self._debug_print(
@@ -1518,6 +1527,81 @@ class PairwiseStrategy(CheckStrategy):
                 case2,
             ),
         )
+
+    def _unresolved_expression_object_target_key(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for unresolved-expression diagnostics."""
+
+        return (
+            "unresolved_expression",
+            ("pair", pair_id),
+            self._unresolved_expression_side_object_key(
+                "left",
+                base_ctx.get("analysis1"),
+                case1,
+            ),
+            self._unresolved_expression_side_object_key(
+                "right",
+                base_ctx.get("analysis2"),
+                case2,
+            ),
+        )
+
+    def _unresolved_expression_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+        case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        target = (
+            "unresolved_expression_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._return_storage_object_key(analysis) if analysis is not None else None,
+            self._return_case_partition_member_object_key(
+                case,
+                getattr(case, "return_info", None),
+            ),
+            (
+                "unresolved_locations",
+                tuple(self._unresolved_expression_locations(case)),
+            ),
+        )
+        if analysis is not None:
+            return self._artifact_stable_key_for_analysis(target, analysis)
+        return target
+
+    def _unresolved_expression_locations(self, case: ReturnCase) -> Tuple[Any, ...]:
+        locations: List[Tuple[Any, ...]] = []
+        value_expr = getattr(case, "value_expr", None)
+        if self._expression_contains_unresolved(value_expr):
+            locations.append(
+                (
+                    "unresolved_location",
+                    "return_value",
+                    self._expression_runtime_object_key(value_expr),
+                )
+            )
+        for index, condition in enumerate(getattr(case, "conditions", None) or ()):
+            expression = getattr(condition, "expression", None)
+            if not self._expression_contains_unresolved(expression):
+                continue
+            locations.append(
+                (
+                    "unresolved_location",
+                    "guard_condition",
+                    int(index),
+                    bool(getattr(condition, "negated", False)),
+                    self._return_condition_object_key(condition),
+                )
+            )
+        return tuple(locations)
 
     def _method_b_closure_side_object_key(
         self,
