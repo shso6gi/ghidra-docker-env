@@ -583,6 +583,7 @@ class PairwiseStrategy(CheckStrategy):
                         stage="S_PAIRWISE",
                         pair_or_case=pair_id,
                         evidence_refs=(result.pair_stage or "unknown", result.blocking_detail),
+                        evidence_kind=getattr(result, "evidence_kind", None),
                         object_target_key=getattr(result, "object_target_key", None),
                         proof_obligation_id=getattr(result, "proof_obligation_id", None),
                         detail=result.blocking_detail,
@@ -1552,6 +1553,93 @@ class PairwiseStrategy(CheckStrategy):
                 case2,
             ),
         )
+
+    def _solver_rewrite_candidate_object_target_key(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for solver rewrite candidate generation."""
+
+        return (
+            "solver_rewrite_candidate",
+            ("pair", pair_id),
+            ("rewrite_stage", "rewrite_candidate_generation"),
+            self._solver_rewrite_side_object_key(
+                "left",
+                base_ctx.get("analysis1"),
+                case1,
+            ),
+            self._solver_rewrite_side_object_key(
+                "right",
+                base_ctx.get("analysis2"),
+                case2,
+            ),
+        )
+
+    def _solver_rewrite_proof_object_target_key(
+        self,
+        *,
+        base_ctx: Dict[str, Any],
+        case1: ReturnCase,
+        case2: ReturnCase,
+        pair_id: str,
+        rewrite_side: str,
+        original_expr: Any,
+        rewritten_expr: Any,
+        rewrite_label: str,
+    ) -> Tuple[Any, ...]:
+        """Object-derived target key for solver rewrite proof recheck backlog."""
+
+        return (
+            "solver_rewrite_proof",
+            ("pair", pair_id),
+            ("rewrite_side", rewrite_side),
+            ("rewrite_stage", rewrite_label),
+            self._solver_rewrite_side_object_key(
+                "left",
+                base_ctx.get("analysis1"),
+                case1,
+            ),
+            self._solver_rewrite_side_object_key(
+                "right",
+                base_ctx.get("analysis2"),
+                case2,
+            ),
+            ("original_expression", self._expression_runtime_object_key(original_expr)),
+            ("rewritten_expression", self._expression_runtime_object_key(rewritten_expr)),
+        )
+
+    def _solver_rewrite_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+        case: ReturnCase,
+    ) -> Tuple[Any, ...]:
+        target = (
+            "solver_rewrite_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._return_storage_object_key(analysis) if analysis is not None else None,
+            self._return_case_partition_member_object_key(
+                case,
+                getattr(case, "return_info", None),
+            ),
+            ("typed_expression_key", self._expression_runtime_object_key(getattr(case, "value_expr", None))),
+            (
+                "guards",
+                tuple(
+                    self._return_condition_object_key(condition)
+                    for condition in (getattr(case, "conditions", None) or ())
+                ),
+            ),
+        )
+        if analysis is not None:
+            return self._artifact_stable_key_for_analysis(target, analysis)
+        return target
 
     def _unresolved_expression_side_object_key(
         self,

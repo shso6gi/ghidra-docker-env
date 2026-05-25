@@ -287,6 +287,9 @@ def solve_query_twostage(
             stage2_result.blocking_reason = rewrite_result.blocking_reason
             stage2_result.blocking_detail = rewrite_result.blocking_detail
             stage2_result.pair_stage = rewrite_result.pair_stage or stage2_result.pair_stage
+            stage2_result.evidence_kind = getattr(rewrite_result, "evidence_kind", None)
+            stage2_result.object_target_key = getattr(rewrite_result, "object_target_key", None)
+            stage2_result.proof_obligation_id = getattr(rewrite_result, "proof_obligation_id", None)
         if getattr(strategy, "_active_normalization_stats", None) is not None:
             strategy._active_normalization_stats["solver_proven_rewrite_failures"] += 1
 

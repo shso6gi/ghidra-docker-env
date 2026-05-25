@@ -40,6 +40,15 @@ def try_solver_proven_rewrite_equivalence(
         result.pair_stage = "rewrite-no-change"
         result.blocking_reason = "solver_proven_rewrite_no_change"
         result.blocking_detail = "solver-proven rewrite produced no candidate rewrite"
+        result.evidence_kind = "pre_normalized_query"
+        target_builder = getattr(strategy, "_solver_rewrite_candidate_object_target_key", None)
+        if callable(target_builder):
+            result.object_target_key = target_builder(
+                base_ctx=base_ctx,
+                case1=case1,
+                case2=case2,
+                pair_id=pair_id,
+            )
         return result
 
     if changed1:
@@ -56,6 +65,18 @@ def try_solver_proven_rewrite_equivalence(
             result.pair_stage = "rewrite-proof-1"
             result.blocking_reason = "solver_proven_rewrite_proof_failed"
             result.blocking_detail = "left rewrite candidate could not be proven equivalent"
+            target_builder = getattr(strategy, "_solver_rewrite_proof_object_target_key", None)
+            if callable(target_builder):
+                result.object_target_key = target_builder(
+                    base_ctx=base_ctx,
+                    case1=case1,
+                    case2=case2,
+                    pair_id=pair_id,
+                    rewrite_side="left",
+                    original_expr=case1.value_expr,
+                    rewritten_expr=rewritten_expr1,
+                    rewrite_label="rewrite-proof-1",
+                )
             return result
     else:
         rewritten_expr1 = case1.value_expr
@@ -74,6 +95,18 @@ def try_solver_proven_rewrite_equivalence(
             result.pair_stage = "rewrite-proof-2"
             result.blocking_reason = "solver_proven_rewrite_proof_failed"
             result.blocking_detail = "right rewrite candidate could not be proven equivalent"
+            target_builder = getattr(strategy, "_solver_rewrite_proof_object_target_key", None)
+            if callable(target_builder):
+                result.object_target_key = target_builder(
+                    base_ctx=base_ctx,
+                    case1=case1,
+                    case2=case2,
+                    pair_id=pair_id,
+                    rewrite_side="right",
+                    original_expr=case2.value_expr,
+                    rewritten_expr=rewritten_expr2,
+                    rewrite_label="rewrite-proof-2",
+                )
             return result
     else:
         rewritten_expr2 = case2.value_expr

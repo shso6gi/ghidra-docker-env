@@ -765,3 +765,21 @@ def test_phase3_lane5_sat_unsafety_representative_wrapper_pins_pair_and_manifest
     assert "--phase3-manifest-sha256" in script
     assert "--gate-stage post-fix" in script
     assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
+def test_phase3_lane7_solver_rewrite_representative_wrapper_pins_pair_and_manifest_hash():
+    script = Path("phase3_run_loop_solver_rewrite_lane7_representatives.sh").read_text()
+
+    assert 'LOOP_TARGET_SET="${LOOP_TARGET_SET:-lmb_sum_prefix_loop}"' in script
+    assert 'LOOP_PAIR_FILTER="${LOOP_PAIR_FILTER:-lmb_sum_prefix_loop:B12_B16}"' in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_solver_rewrite_lane7/solver_rewrite_lane7_representatives.json" in script
+    assert "2e1e1f41d29b6051e37096bc97882a10f6f65f2c0345150d95d1cff98af58ea2" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 7 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_LOOP_LOG_ROOT="${BASELINE_LOOP_LOG_ROOT:-$BASELINE_RAW_DIR/logs/loop}"' in script
+    assert '--baseline-log-root "loop=$BASELINE_LOOP_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
