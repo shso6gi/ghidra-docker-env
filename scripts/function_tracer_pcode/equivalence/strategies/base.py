@@ -1415,6 +1415,9 @@ class CheckStrategy(ABC):
         if not rewritten:
             return rewritten
         tag = rewritten[0]
+        atom_rewritten = cls._rewrite_atom_encoded_program_identity_key(rewritten, binary_id)
+        if atom_rewritten is not None:
+            return atom_rewritten
         if tag in {"function", "code_address"} and len(rewritten) >= 3 and cls._program_id_like(rewritten[1]):
             return (tag, binary_id, rewritten[2], *rewritten[3:])
         if tag == "deferred_call_site" and len(rewritten) == 6 and cls._program_id_like(rewritten[1]):
@@ -1434,9 +1437,56 @@ class CheckStrategy(ABC):
             )
         return rewritten
 
+    @classmethod
+    def _rewrite_atom_encoded_program_identity_key(
+        cls,
+        rewritten: Tuple[Any, ...],
+        binary_id: str,
+    ) -> Optional[Tuple[Any, ...]]:
+        """Normalize program ids inside structural._atom_key encoded tuples.
+
+        expression_provenance_key() preserves runtime_ref.stable_key() through
+        _atom_key(), so CallTargetRef / DeferredCallRef identities can appear as
+        ("tuple", (("str", "function"), ("int", program_id), ...)) rather than
+        raw ("function", program_id, ...).  These ids are Ghidra session-local
+        and must not become proof target identity.
+        """
+
+        if len(rewritten) != 2 or rewritten[0] != "tuple" or not isinstance(rewritten[1], tuple):
+            return None
+        items = rewritten[1]
+        if not items or not cls._atom_str_is(items[0], None):
+            return None
+        atom_tag = items[0][1]
+        if atom_tag in {"function", "code_address"} and len(items) >= 3 and cls._atom_program_id_like(items[1]):
+            return ("tuple", (items[0], ("str", binary_id), items[2], *items[3:]))
+        if atom_tag == "unknown" and len(items) >= 2 and cls._atom_program_id_like(items[1]):
+            return ("tuple", (items[0], ("str", binary_id), *items[2:]))
+        if atom_tag == "deferred_call_site" and len(items) == 6 and cls._atom_program_id_like(items[1]):
+            return ("tuple", (items[0], ("str", binary_id), items[2], items[3], items[4], items[5]))
+        return None
+
     @staticmethod
     def _program_id_like(value: Any) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
+
+    @classmethod
+    def _atom_program_id_like(cls, value: Any) -> bool:
+        return (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and value[0] == "int"
+            and cls._program_id_like(value[1])
+        )
+
+    @staticmethod
+    def _atom_str_is(value: Any, expected: Optional[str]) -> bool:
+        return (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and value[0] == "str"
+            and (expected is None or value[1] == expected)
+        )
 
     @classmethod
     def _typed_target_expression_key(cls, expr: Any) -> Optional[Tuple[Any, ...]]:

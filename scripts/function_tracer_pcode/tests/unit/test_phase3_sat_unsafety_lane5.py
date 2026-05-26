@@ -15,8 +15,10 @@ from scripts.function_tracer_pcode.model import (
     DeferredCallRef,
     Expression,
     FunctionReturnAnalysis,
+    UnknownValueRef,
     PcodeOpRef,
     ReturnInfo,
+    expression_provenance_key,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import _global_reason_tuple_from_action
 from scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5 import (
@@ -222,6 +224,29 @@ def test_sat_unsafety_target_normalizes_ghidra_program_ids_out_of_deferred_calls
     assert not _nested_contains(reason_a.object_target_key, 3732166838612569888)
     assert not _nested_contains(reason_a.object_target_key, 3732174609056778976)
     assert _object_target_key_is_specific_sat_unsafety(reason_a.object_target_key)
+
+
+def test_sat_unsafety_artifact_key_rewrites_atom_encoded_runtime_ref_program_ids():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    program_id = 3732174609056778976
+    analysis, _case = _analysis_with_deferred_call_program_id(program_id)
+    deferred = next(iter(analysis.deferred_calls.values()))
+    runtime_expr = Expression.unknown(
+        "indirect",
+        runtime_ref=UnknownValueRef.deferred_call(
+            deferred_call_ref=deferred.deferred_call_ref,
+            target_ref=deferred.target_ref,
+            placeholder_name="indirect",
+        ),
+    )
+
+    normalized = strategy._artifact_stable_key_for_analysis(
+        ("typed_target_expression", expression_provenance_key(runtime_expr)),
+        analysis,
+    )
+
+    assert not _nested_contains(normalized, program_id)
+    assert _nested_contains(normalized, "B10")
 
 
 def test_sat_unsafety_target_rejects_nested_diagnostic_reason():
