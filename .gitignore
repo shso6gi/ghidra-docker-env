@@ -26,6 +26,7 @@ solver_cvc5.py
 *.log
 logs/equivalence_all/*/phase2_gate/*.json
 logs/equivalence_all/*/phase3_*_gate/*.json
+logs/equivalence_all/phase3_lane_index/*.json
 .local-ghidra-extract/
 
 # Observed baseline artifacts: commit metadata, keep multi-GB raw logs external.
