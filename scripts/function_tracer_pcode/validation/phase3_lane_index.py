@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,7 @@ class Phase3LaneSpec:
     lane_id: str
     target_reason_ids: Sequence[str]
     manifest_relpath: str
+    runner_relpath: str
     manifest_kind: str
     ready_key: str
     validator: Optional[LaneValidator] = None
@@ -51,6 +53,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_return_coverage_lane1",
         target_reason_ids=("return_coverage_gap",),
         manifest_relpath="audit/phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json",
+        runner_relpath="phase3_run_function_call_return_coverage_lane1_representatives.sh",
         manifest_kind="phase3_return_coverage_lane1_representatives",
         ready_key="phase3_lane1_ready",
         validator=validate_phase3_return_coverage_lane1_manifest,
@@ -60,6 +63,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_return_width_bridge_lane2",
         target_reason_ids=("return_width_bridge_missing",),
         manifest_relpath="audit/phase3_return_width_bridge_lane2/return_width_bridge_lane2_representatives.json",
+        runner_relpath="phase3_run_function_call_return_width_bridge_lane2_representatives.sh",
         manifest_kind="phase3_return_width_bridge_lane2_representatives",
         ready_key="phase3_lane2_ready",
         validator=validate_phase3_return_width_bridge_lane2_manifest,
@@ -69,6 +73,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_readonly_identity_lane3",
         target_reason_ids=("readonly_identity_missing",),
         manifest_relpath="audit/phase3_readonly_identity_lane3/readonly_identity_lane3_representatives.json",
+        runner_relpath="phase3_run_loop_readonly_identity_lane3_representatives.sh",
         manifest_kind="phase3_readonly_identity_lane3_representatives",
         ready_key="phase3_lane3_ready",
         validator=validate_phase3_readonly_identity_lane3_manifest,
@@ -78,6 +83,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_method_b_closure_lane4",
         target_reason_ids=("method_b_closure_blocked",),
         manifest_relpath="audit/phase3_method_b_closure_lane4/method_b_closure_lane4_representatives.json",
+        runner_relpath="phase3_run_loop_method_b_closure_lane4_representatives.sh",
         manifest_kind="phase3_method_b_closure_lane4_representatives",
         ready_key="phase3_lane4_ready",
         validator=validate_phase3_method_b_closure_lane4_manifest,
@@ -87,6 +93,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_sat_unsafety_lane5",
         target_reason_ids=("sat_unsafety",),
         manifest_relpath="audit/phase3_sat_unsafety_lane5/sat_unsafety_lane5_representatives.json",
+        runner_relpath="phase3_run_function_call_sat_unsafety_lane5_representatives.sh",
         manifest_kind="phase3_sat_unsafety_lane5_representatives",
         ready_key="phase3_lane5_ready",
         validator=validate_phase3_sat_unsafety_lane5_manifest,
@@ -96,6 +103,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_unresolved_expression_lane6",
         target_reason_ids=("unresolved_expression",),
         manifest_relpath="audit/phase3_unresolved_expression_lane6/unresolved_expression_lane6_representatives.json",
+        runner_relpath="phase3_run_function_call_unresolved_expression_lane6_representatives.sh",
         manifest_kind="phase3_unresolved_expression_lane6_representatives",
         ready_key="phase3_lane6_ready",
         validator=validate_phase3_unresolved_expression_lane6_manifest,
@@ -105,6 +113,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_solver_rewrite_lane7",
         target_reason_ids=("solver_proven_rewrite_no_change",),
         manifest_relpath="audit/phase3_solver_rewrite_lane7/solver_rewrite_lane7_representatives.json",
+        runner_relpath="phase3_run_loop_solver_rewrite_lane7_representatives.sh",
         manifest_kind="phase3_solver_rewrite_lane7_representatives",
         ready_key="phase3_lane7_ready",
         validator=validate_phase3_solver_rewrite_lane7_manifest,
@@ -114,6 +123,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_solver_rewrite_proof_lane8",
         target_reason_ids=("solver_proven_rewrite_proof_failed",),
         manifest_relpath="audit/phase3_solver_rewrite_proof_lane8/solver_rewrite_proof_lane8_representatives.json",
+        runner_relpath="phase3_run_function_call_solver_rewrite_proof_lane8_representatives.sh",
         manifest_kind="phase3_solver_rewrite_proof_lane8_representatives",
         ready_key="phase3_lane8_ready",
         validator=validate_phase3_solver_rewrite_proof_lane8_manifest,
@@ -123,6 +133,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_id="phase3_solver_timeout_lane9",
         target_reason_ids=("solver_unknown_timeout",),
         manifest_relpath="audit/phase3_solver_timeout_lane9/solver_timeout_lane9_representatives.json",
+        runner_relpath="phase3_run_function_call_solver_timeout_lane9_representatives.sh",
         manifest_kind="phase3_solver_timeout_lane9_representatives",
         ready_key="phase3_lane9_ready",
         validator=validate_phase3_solver_timeout_lane9_manifest,
@@ -134,15 +145,17 @@ def build_phase3_lane_index(
     *,
     baseline_root: Path,
     output_dir: Path,
+    repo_root: Optional[Path] = None,
     lane_specs: Sequence[Phase3LaneSpec] = DEFAULT_PHASE3_LANE_SPECS,
 ) -> Path:
     """Write a Phase 3 lane index manifest and return its path."""
 
     root = Path(baseline_root)
+    repo = Path(repo_root) if repo_root is not None else Path.cwd()
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     baseline_manifest = _read_json(root / "raw" / "artifact_manifest.json")
-    lanes = [_materialize_lane(root, spec) for spec in lane_specs]
+    lanes = [_materialize_lane(root, repo, spec) for spec in lane_specs]
     checks = _index_checks(baseline_manifest, lane_specs, lanes)
     summary = _summary(checks)
     manifest = {
@@ -153,6 +166,7 @@ def build_phase3_lane_index(
         "baseline_git_head": baseline_manifest.get("git_head") or MISSING_SENTINEL,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "baseline_raw_artifact_ref": _file_ref(root / "raw" / "artifact_manifest.json"),
+        "repo_root": str(repo),
         "phase3_lanes_ready": summary["failed"] == 0,
         "summary": summary,
         "lanes": lanes,
@@ -175,14 +189,17 @@ def validate_phase3_lane_index(manifest: Mapping[str, Any]) -> None:
     raise ValueError(f"Phase 3 lane index failed: {', '.join(map(str, failed))}")
 
 
-def _materialize_lane(root: Path, spec: Phase3LaneSpec) -> Dict[str, Any]:
+def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str, Any]:
     path = root / spec.manifest_relpath
+    runner_path = repo / spec.runner_relpath
     lane: Dict[str, Any] = {
         "lane_number": spec.lane_number,
         "lane_id": spec.lane_id,
         "target_reason_ids": list(spec.target_reason_ids),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
+        "runner_ref": _file_ref(runner_path),
+        "runner_relpath": spec.runner_relpath,
         "expected_manifest_kind": spec.manifest_kind,
         "ready_key": spec.ready_key,
         "status": "missing",
@@ -190,7 +207,15 @@ def _materialize_lane(root: Path, spec: Phase3LaneSpec) -> Dict[str, Any]:
         "observed_manifest_kind": MISSING_SENTINEL,
         "ready_value": MISSING_SENTINEL,
         "validator_status": "not_run",
+        "runner_status": "missing",
+        "runner_sha256": MISSING_SENTINEL,
+        "runner_executable": False,
     }
+    if runner_path.exists():
+        lane["runner_status"] = "present" if runner_path.is_file() else "not_file"
+        if runner_path.is_file():
+            lane["runner_sha256"] = _sha256_file(runner_path)
+            lane["runner_executable"] = os.access(runner_path, os.X_OK)
     if not path.exists():
         return lane
     lane["status"] = "present"
@@ -247,6 +272,7 @@ def _index_checks(
             "lane_number": lane.get("lane_number"),
             "lane_id": lane.get("lane_id"),
             "manifest_relpath": lane.get("manifest_relpath"),
+            "runner_relpath": lane.get("runner_relpath"),
         }
         lane_id = lane.get("lane_id")
         checks.append(
@@ -259,6 +285,21 @@ def _index_checks(
             _ok("phase3_lane_manifest_present", **details)
             if lane.get("status") == "present"
             else _failed("phase3_lane_manifest_present", manifest_status=lane.get("status"), **details)
+        )
+        checks.append(
+            _ok("phase3_lane_runner_present", **details)
+            if lane.get("runner_status") == "present"
+            else _failed("phase3_lane_runner_present", runner_status=lane.get("runner_status"), **details)
+        )
+        checks.append(
+            _ok("phase3_lane_runner_executable", **details)
+            if lane.get("runner_executable") is True
+            else _failed(
+                "phase3_lane_runner_executable",
+                runner_status=lane.get("runner_status"),
+                runner_executable=lane.get("runner_executable"),
+                **details,
+            )
         )
         checks.append(
             _ok("phase3_lane_manifest_kind", **details)
@@ -316,6 +357,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=Path("artifacts/baselines/observed-v0@0a53352"),
         help="baseline artifact root containing raw/ and audit/",
     )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="repository root containing Phase 3 representative runner scripts",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
@@ -323,6 +370,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     path = build_phase3_lane_index(
         baseline_root=args.baseline_root,
         output_dir=args.output_dir,
+        repo_root=args.repo_root,
     )
     print(path)
     if args.require_ready:

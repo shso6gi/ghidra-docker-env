@@ -20,6 +20,7 @@ mkdir -p "$OUTPUT_DIR"
 
 ARGS=(
     --baseline-root "$BASELINE_ROOT"
+    --repo-root "$SCRIPT_DIR"
     --output-dir "$OUTPUT_DIR"
 )
 
