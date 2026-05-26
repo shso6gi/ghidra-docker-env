@@ -46,6 +46,9 @@ class Phase3LaneSpec:
     ready_key: str
     validator: Optional[LaneValidator] = None
     lane_reason_ids: Optional[Sequence[str]] = None
+    pending_proof_keeps_final_result: Optional[str] = None
+    completion_required_for_recovery: Optional[Sequence[str]] = None
+    required_recovery_actions: Optional[Sequence[str]] = None
 
 
 DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
@@ -59,6 +62,9 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_return_coverage_lane1_representatives",
         ready_key="phase3_lane1_ready",
         validator=validate_phase3_return_coverage_lane1_manifest,
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("return_partition_extraction", "return_guard_coverage"),
+        required_recovery_actions=("return_coverage_proof_required",),
     ),
     Phase3LaneSpec(
         lane_number=2,
@@ -69,6 +75,9 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_return_width_bridge_lane2_representatives",
         ready_key="phase3_lane2_ready",
         validator=validate_phase3_return_width_bridge_lane2_manifest,
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("abi_relation", "high_bit_relation"),
+        required_recovery_actions=("abi_relation", "high_bit_relation"),
     ),
     Phase3LaneSpec(
         lane_number=3,
@@ -79,6 +88,9 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_readonly_identity_lane3_representatives",
         ready_key="phase3_lane3_ready",
         validator=validate_phase3_readonly_identity_lane3_manifest,
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("readonly_operand_identity",),
+        required_recovery_actions=("readonly_operand_identity",),
     ),
     Phase3LaneSpec(
         lane_number=4,
@@ -89,6 +101,9 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_method_b_closure_lane4_representatives",
         ready_key="phase3_lane4_ready",
         validator=validate_phase3_method_b_closure_lane4_manifest,
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("method_b_covering_case", "method_b_guard_partition"),
+        required_recovery_actions=("method_b_covering_case", "method_b_guard_partition"),
     ),
     Phase3LaneSpec(
         lane_number=5,
@@ -139,6 +154,9 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_solver_timeout_lane9_representatives",
         ready_key="phase3_lane9_ready",
         validator=validate_phase3_solver_timeout_lane9_manifest,
+        pending_proof_keeps_final_result="TIMEOUT",
+        completion_required_for_recovery=("solver_timeout_retry",),
+        required_recovery_actions=("solver_timeout_retry",),
     ),
 )
 
@@ -199,6 +217,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "lane_id": spec.lane_id,
         "target_reason_ids": list(spec.target_reason_ids),
         "lane_reason_ids": list(_lane_reason_ids(spec)),
+        "expected_proof_completion_gate": _expected_proof_completion_gate(spec),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
         "runner_ref": _file_ref(runner_path),
@@ -244,6 +263,9 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             "implementation_reason_ids": list(implementation_reason_ids),
             "baseline_mode": implementation.get("baseline_mode") or MISSING_SENTINEL,
         }
+        proof_gate = implementation.get("proof_completion_gate")
+        if isinstance(proof_gate, Mapping):
+            lane["proof_completion_gate"] = _materialize_proof_completion_gate(proof_gate)
     if spec.validator is not None:
         try:
             spec.validator(manifest)
@@ -373,6 +395,19 @@ def _index_checks(
                 **details,
             )
         )
+        expected_proof_gate = lane.get("expected_proof_completion_gate")
+        if isinstance(expected_proof_gate, Mapping):
+            observed_proof_gate = lane.get("proof_completion_gate")
+            checks.append(
+                _ok("phase3_lane_proof_completion_gate", **details)
+                if observed_proof_gate == expected_proof_gate
+                else _failed(
+                    "phase3_lane_proof_completion_gate",
+                    expected=expected_proof_gate,
+                    actual=observed_proof_gate or MISSING_SENTINEL,
+                    **details,
+                )
+            )
     return tuple(checks)
 
 
@@ -403,6 +438,47 @@ def _implementation_reason_ids(implementation: Mapping[str, Any]) -> tuple[str, 
 
 def _lane_reason_ids(spec: Phase3LaneSpec) -> tuple[str, ...]:
     return tuple(spec.lane_reason_ids or spec.target_reason_ids)
+
+
+def _expected_proof_completion_gate(spec: Phase3LaneSpec) -> Optional[Dict[str, Any]]:
+    if spec.pending_proof_keeps_final_result is None:
+        return None
+    return {
+        "eq_allowed_without_completed_proof": False,
+        "pending_proof_keeps_final_result": spec.pending_proof_keeps_final_result,
+        "completion_required_for_recovery": list(spec.completion_required_for_recovery or ()),
+        "required_recovery_actions": list(spec.required_recovery_actions or ()),
+    }
+
+
+def _materialize_proof_completion_gate(proof_gate: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "eq_allowed_without_completed_proof": proof_gate.get("eq_allowed_without_completed_proof", MISSING_SENTINEL),
+        "pending_proof_keeps_final_result": proof_gate.get("pending_proof_keeps_final_result") or MISSING_SENTINEL,
+        "completion_required_for_recovery": _string_list(proof_gate.get("completion_required_for_recovery")),
+        "required_recovery_actions": _required_recovery_actions(proof_gate),
+    }
+
+
+def _required_recovery_actions(proof_gate: Mapping[str, Any]) -> list[str]:
+    actions = proof_gate.get("required_recovery_actions")
+    if actions is not None:
+        return _string_list(actions)
+    action = proof_gate.get("required_recovery_action")
+    if action:
+        return [str(action)]
+    return []
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    try:
+        return [str(item) for item in value if item]
+    except TypeError:
+        return [str(value)]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

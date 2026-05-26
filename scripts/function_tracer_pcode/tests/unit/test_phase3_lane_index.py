@@ -38,6 +38,7 @@ def _write_manifest(
     implementation_lane_id=None,
     implementation_target_reason_id=None,
     implementation_lane_reason_ids=None,
+    proof_completion_gate=None,
 ) -> None:
     path = root / spec.manifest_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,22 +47,32 @@ def _write_manifest(
         if implementation_target_reason_id is not None
         else next(iter(spec.target_reason_ids), "<missing>")
     )
+    implementation_manifest = {
+        "lane_id": implementation_lane_id or spec.lane_id,
+        "target_reason_id": impl_target,
+        "lane_reason_ids": list(
+            implementation_lane_reason_ids
+            if implementation_lane_reason_ids is not None
+            else spec.target_reason_ids
+        ),
+        "baseline_mode": "unit-test",
+    }
+    if proof_completion_gate is not None:
+        implementation_manifest["proof_completion_gate"] = proof_completion_gate
+    elif spec.pending_proof_keeps_final_result is not None:
+        implementation_manifest["proof_completion_gate"] = {
+            "eq_allowed_without_completed_proof": False,
+            "pending_proof_keeps_final_result": spec.pending_proof_keeps_final_result,
+            "completion_required_for_recovery": list(spec.completion_required_for_recovery or ()),
+            "required_recovery_actions": list(spec.required_recovery_actions or ()),
+        }
     path.write_text(
         json.dumps(
             {
                 "manifest_kind": spec.manifest_kind,
                 spec.ready_key: ready,
                 "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
-                "implementation_manifest": {
-                    "lane_id": implementation_lane_id or spec.lane_id,
-                    "target_reason_id": impl_target,
-                    "lane_reason_ids": list(
-                        implementation_lane_reason_ids
-                        if implementation_lane_reason_ids is not None
-                        else spec.target_reason_ids
-                    ),
-                    "baseline_mode": "unit-test",
-                },
+                "implementation_manifest": implementation_manifest,
             },
             sort_keys=True,
         )
@@ -159,6 +170,10 @@ def test_phase3_lane_index_default_specs_cover_all_plan_lanes():
         "return_coverage_inconclusive",
     )
     assert all(spec.lane_reason_ids is None for spec in DEFAULT_PHASE3_LANE_SPECS[1:])
+    assert DEFAULT_PHASE3_LANE_SPECS[0].pending_proof_keeps_final_result == "UNKNOWN"
+    assert DEFAULT_PHASE3_LANE_SPECS[8].pending_proof_keeps_final_result == "TIMEOUT"
+    assert DEFAULT_PHASE3_LANE_SPECS[0].required_recovery_actions == ("return_coverage_proof_required",)
+    assert DEFAULT_PHASE3_LANE_SPECS[8].required_recovery_actions == ("solver_timeout_retry",)
 
 
 def test_phase3_lane_index_type_hints_resolve():
@@ -294,6 +309,132 @@ def test_phase3_lane_index_rejects_implementation_lane_id_drift(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_implementation_lane_id" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_accepts_expected_proof_completion_gate(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="proof_lane",
+        target_reason_ids=("proof_reason",),
+        manifest_relpath="audit/proof_lane/manifest.json",
+        runner_relpath="run_proof_lane.sh",
+        manifest_kind="proof_lane_manifest",
+        ready_key="proof_lane_ready",
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("stage_one",),
+        required_recovery_actions=("action_one",),
+    )
+    _write_manifest(
+        baseline,
+        spec,
+        proof_completion_gate={
+            "eq_allowed_without_completed_proof": False,
+            "pending_proof_keeps_final_result": "UNKNOWN",
+            "completion_required_for_recovery": ["stage_one"],
+            "required_recovery_action": "action_one",
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is True
+    assert manifest["lanes"][0]["proof_completion_gate"] == {
+        "eq_allowed_without_completed_proof": False,
+        "pending_proof_keeps_final_result": "UNKNOWN",
+        "completion_required_for_recovery": ["stage_one"],
+        "required_recovery_actions": ["action_one"],
+    }
+    validate_phase3_lane_index(manifest)
+
+
+def test_phase3_lane_index_rejects_proof_completion_gate_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="timeout_lane",
+        target_reason_ids=("solver_unknown_timeout",),
+        manifest_relpath="audit/timeout_lane/manifest.json",
+        runner_relpath="run_timeout_lane.sh",
+        manifest_kind="timeout_lane_manifest",
+        ready_key="timeout_lane_ready",
+        pending_proof_keeps_final_result="TIMEOUT",
+        completion_required_for_recovery=("solver_timeout_retry",),
+        required_recovery_actions=("solver_timeout_retry",),
+    )
+    _write_manifest(
+        baseline,
+        spec,
+        proof_completion_gate={
+            "eq_allowed_without_completed_proof": False,
+            "pending_proof_keeps_final_result": "UNKNOWN",
+            "completion_required_for_recovery": ["solver_timeout_retry"],
+            "required_recovery_actions": ["solver_timeout_retry"],
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_proof_completion_gate" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_proof_completion_gate_eq_without_proof(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="proof_lane",
+        target_reason_ids=("proof_reason",),
+        manifest_relpath="audit/proof_lane/manifest.json",
+        runner_relpath="run_proof_lane.sh",
+        manifest_kind="proof_lane_manifest",
+        ready_key="proof_lane_ready",
+        pending_proof_keeps_final_result="UNKNOWN",
+        completion_required_for_recovery=("stage_one",),
+        required_recovery_actions=("action_one",),
+    )
+    _write_manifest(
+        baseline,
+        spec,
+        proof_completion_gate={
+            "eq_allowed_without_completed_proof": True,
+            "pending_proof_keeps_final_result": "UNKNOWN",
+            "completion_required_for_recovery": ["stage_one"],
+            "required_recovery_actions": ["action_one"],
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_proof_completion_gate" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_validator_failure(tmp_path):
