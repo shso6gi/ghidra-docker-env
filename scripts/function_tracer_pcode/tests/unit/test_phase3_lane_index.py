@@ -39,6 +39,7 @@ def _write_manifest(
     implementation_target_reason_id=None,
     implementation_lane_reason_ids=None,
     proof_completion_gate=None,
+    entries=None,
 ) -> None:
     path = root / spec.manifest_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +73,17 @@ def _write_manifest(
                 "manifest_kind": spec.manifest_kind,
                 spec.ready_key: ready,
                 "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
+                "entries": list(
+                    entries
+                    if entries is not None
+                    else (
+                        {
+                            "id": f"{spec.lane_id}-representative",
+                            "function": f"{spec.lane_id}_function",
+                            "binary_pair": "B1_B2",
+                        },
+                    )
+                ),
                 "implementation_manifest": implementation_manifest,
             },
             sort_keys=True,
@@ -309,6 +321,60 @@ def test_phase3_lane_index_rejects_implementation_lane_id_drift(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_implementation_lane_id" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_missing_representative_entries(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            entries=[] if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_representative_entries_present" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_incomplete_representative_entries(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            entries=(
+                [{"id": "missing-binary-pair", "function": "sample"}]
+                if spec.lane_id == "lane_two"
+                else None
+            ),
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_representative_entries_concrete" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_accepts_expected_proof_completion_gate(tmp_path):

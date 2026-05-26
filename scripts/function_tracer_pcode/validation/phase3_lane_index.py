@@ -252,6 +252,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["observed_manifest_kind"] = manifest.get("manifest_kind") or MISSING_SENTINEL
     lane["ready_value"] = manifest.get(spec.ready_key, MISSING_SENTINEL)
     lane["observed_target_reason_ids"] = list(manifest.get("target_reason_ids") or ())
+    lane["representative_entries"] = _representative_entries(manifest.get("entries"))
     implementation = manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):
         implementation_reason_ids = _implementation_reason_ids(implementation)
@@ -350,6 +351,34 @@ def _index_checks(
             if lane.get("validator_status") in {"passed", "not_run"}
             else _failed("phase3_lane_validator", error=lane.get("validator_error"), **details)
         )
+        representative_entries = lane.get("representative_entries")
+        checks.append(
+            _ok(
+                "phase3_lane_representative_entries_present",
+                representative_count=len(representative_entries),
+                **details,
+            )
+            if isinstance(representative_entries, list) and len(representative_entries) > 0
+            else _failed(
+                "phase3_lane_representative_entries_present",
+                representative_count=0,
+                **details,
+            )
+        )
+        incomplete_representatives = [
+            entry
+            for entry in representative_entries
+            if isinstance(entry, Mapping) and not _representative_entry_is_concrete(entry)
+        ] if isinstance(representative_entries, list) else []
+        checks.append(
+            _ok("phase3_lane_representative_entries_concrete", **details)
+            if not incomplete_representatives
+            else _failed(
+                "phase3_lane_representative_entries_concrete",
+                incomplete=incomplete_representatives,
+                **details,
+            )
+        )
         expected_reasons = tuple(lane.get("target_reason_ids") or ())
         observed_reasons = tuple(lane.get("observed_target_reason_ids") or ())
         checks.append(
@@ -434,6 +463,36 @@ def _implementation_reason_ids(implementation: Mapping[str, Any]) -> tuple[str, 
         if value:
             reasons.append(str(value))
     return tuple(dict.fromkeys(reasons))
+
+
+def _representative_entries(entries: Any) -> list[Dict[str, Any]]:
+    if not isinstance(entries, (list, tuple)):
+        return []
+    representatives: list[Dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            representatives.append(
+                {
+                    "index": index,
+                    "id": MISSING_SENTINEL,
+                    "function": MISSING_SENTINEL,
+                    "binary_pair": MISSING_SENTINEL,
+                }
+            )
+            continue
+        representatives.append(
+            {
+                "index": index,
+                "id": entry.get("id") or MISSING_SENTINEL,
+                "function": entry.get("function") or MISSING_SENTINEL,
+                "binary_pair": entry.get("binary_pair") or MISSING_SENTINEL,
+            }
+        )
+    return representatives
+
+
+def _representative_entry_is_concrete(entry: Mapping[str, Any]) -> bool:
+    return all(entry.get(key) not in {None, "", MISSING_SENTINEL} for key in ("id", "function", "binary_pair"))
 
 
 def _lane_reason_ids(spec: Phase3LaneSpec) -> tuple[str, ...]:
