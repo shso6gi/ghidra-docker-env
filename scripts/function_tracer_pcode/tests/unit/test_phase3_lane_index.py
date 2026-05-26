@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 
 import json
+import typing
 from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.validation import phase3_lane_index
 from scripts.function_tracer_pcode.validation.phase3_lane_index import (
     DEFAULT_PHASE3_LANE_SPECS,
     Phase3LaneSpec,
@@ -27,9 +29,23 @@ def _write_baseline(root: Path, *, baseline_id: str = "observed-v0@0a53352") -> 
     )
 
 
-def _write_manifest(root: Path, spec: Phase3LaneSpec, *, ready=True, target_reason_ids=None) -> None:
+def _write_manifest(
+    root: Path,
+    spec: Phase3LaneSpec,
+    *,
+    ready=True,
+    target_reason_ids=None,
+    implementation_lane_id=None,
+    implementation_target_reason_id=None,
+    implementation_lane_reason_ids=None,
+) -> None:
     path = root / spec.manifest_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
+    impl_target = (
+        implementation_target_reason_id
+        if implementation_target_reason_id is not None
+        else next(iter(spec.target_reason_ids), "<missing>")
+    )
     path.write_text(
         json.dumps(
             {
@@ -37,8 +53,13 @@ def _write_manifest(root: Path, spec: Phase3LaneSpec, *, ready=True, target_reas
                 spec.ready_key: ready,
                 "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
                 "implementation_manifest": {
-                    "lane_id": spec.lane_id,
-                    "target_reason_id": next(iter(spec.target_reason_ids), "<missing>"),
+                    "lane_id": implementation_lane_id or spec.lane_id,
+                    "target_reason_id": impl_target,
+                    "lane_reason_ids": list(
+                        implementation_lane_reason_ids
+                        if implementation_lane_reason_ids is not None
+                        else spec.target_reason_ids
+                    ),
                     "baseline_mode": "unit-test",
                 },
             },
@@ -134,6 +155,12 @@ def test_phase3_lane_index_default_specs_cover_all_plan_lanes():
     ]
 
 
+def test_phase3_lane_index_type_hints_resolve():
+    hints = typing.get_type_hints(phase3_lane_index._implementation_reason_ids)
+
+    assert hints["return"] == tuple[str, ...]
+
+
 def test_phase3_lane_index_rejects_missing_manifest(tmp_path):
     baseline = tmp_path / "baseline"
     repo = tmp_path / "repo"
@@ -179,6 +206,58 @@ def test_phase3_lane_index_rejects_target_reason_drift(tmp_path):
     manifest = json.loads(path.read_text())
 
     assert "phase3_lane_target_reason_ids" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_implementation_reason_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            implementation_target_reason_id="wrong_reason" if spec.lane_id == "lane_two" else None,
+            implementation_lane_reason_ids=("wrong_reason",) if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_implementation_reason_ids" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_target_reason_ids" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_implementation_lane_id_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            implementation_lane_id="wrong_lane" if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_implementation_lane_id" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_validator_failure(tmp_path):

@@ -232,9 +232,13 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["observed_target_reason_ids"] = list(manifest.get("target_reason_ids") or ())
     implementation = manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):
+        implementation_reason_ids = _implementation_reason_ids(implementation)
         lane["implementation_manifest"] = {
             "lane_id": implementation.get("lane_id") or MISSING_SENTINEL,
             "target_reason_id": implementation.get("target_reason_id") or MISSING_SENTINEL,
+            "active_target_reason_id": implementation.get("active_target_reason_id") or MISSING_SENTINEL,
+            "lane_reason_ids": list(implementation.get("lane_reason_ids") or ()),
+            "implementation_reason_ids": list(implementation_reason_ids),
             "baseline_mode": implementation.get("baseline_mode") or MISSING_SENTINEL,
         }
     if spec.validator is not None:
@@ -333,6 +337,42 @@ def _index_checks(
                 **details,
             )
         )
+        implementation = lane.get("implementation_manifest")
+        checks.append(
+            _ok("phase3_lane_implementation_manifest", **details)
+            if isinstance(implementation, Mapping)
+            else _failed("phase3_lane_implementation_manifest", **details)
+        )
+        implementation_lane_id = implementation.get("lane_id") if isinstance(implementation, Mapping) else None
+        checks.append(
+            _ok("phase3_lane_implementation_lane_id", **details)
+            if implementation_lane_id == lane_id
+            else _failed(
+                "phase3_lane_implementation_lane_id",
+                expected=lane_id,
+                actual=implementation_lane_id or MISSING_SENTINEL,
+                **details,
+            )
+        )
+        implementation_reasons = (
+            tuple(implementation.get("implementation_reason_ids") or ())
+            if isinstance(implementation, Mapping)
+            else ()
+        )
+        missing_implementation_reasons = [
+            reason for reason in expected_reasons if reason not in implementation_reasons
+        ]
+        checks.append(
+            _ok("phase3_lane_implementation_reason_ids", **details)
+            if not missing_implementation_reasons
+            else _failed(
+                "phase3_lane_implementation_reason_ids",
+                expected=list(expected_reasons),
+                actual=list(implementation_reasons),
+                missing=missing_implementation_reasons,
+                **details,
+            )
+        )
     return tuple(checks)
 
 
@@ -347,6 +387,18 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": len(failed),
         "failed_kinds": [check.get("kind") for check in failed],
     }
+
+
+def _implementation_reason_ids(implementation: Mapping[str, Any]) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for key in ("target_reason_id", "active_target_reason_id"):
+        value = implementation.get(key)
+        if value:
+            reasons.append(str(value))
+    for value in implementation.get("lane_reason_ids") or ():
+        if value:
+            reasons.append(str(value))
+    return tuple(dict.fromkeys(reasons))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
