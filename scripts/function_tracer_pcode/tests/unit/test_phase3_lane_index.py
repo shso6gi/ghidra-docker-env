@@ -109,6 +109,9 @@ def _write_runner(
     pair_category=None,
     base_category=None,
     matrix_category=None,
+    safety_defaults=None,
+    require_ready_arg=False,
+    invoke_gate_args=False,
     target_functions=None,
     pair_filter=None,
 ) -> None:
@@ -126,6 +129,10 @@ def _write_runner(
                 f'PHASE3_MANIFEST_SHA256="${{PHASE3_MANIFEST_SHA256:-{manifest_sha256}}}"',
             ]
         )
+    if safety_defaults is not None:
+        for name, value in safety_defaults.items():
+            prefix = "export " if name != "PHASE3_REQUIRE_READY" else ""
+            lines.append(f'{prefix}{name}="${{{name}:-{value}}}"')
     if target_category is not None:
         if target_category == "function_call":
             target_var = "FUNCTION_CALL_TARGET_SET"
@@ -144,8 +151,37 @@ def _write_runner(
             ]
         )
         lines.append(f'bash "$SCRIPT_DIR/{_matrix_script_for_category(matrix_category or target_category)}"')
+    if require_ready_arg:
+        lines.extend(
+            [
+                'if [[ "$PHASE3_REQUIRE_READY" != "0" ]]; then',
+                "    PHASE3_GATE_ARGS+=(--require-ready)",
+                "fi",
+            ]
+        )
+    if invoke_gate_args:
+        lines.extend(
+            [
+                '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase3_runner_safety_lane \\',
+                '    "${PHASE3_GATE_ARGS[@]}"',
+            ]
+        )
     path.write_text("\n".join(lines) + "\n")
     path.chmod(0o755 if executable else 0o644)
+
+
+def _safety_defaults(**overrides):
+    defaults = {
+        "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+        "VALIDATION_REQUIRE_BEFORE_DELTA": "0",
+        "VALIDATION_REQUIRE_BASELINE_MATCH": "0",
+        "VALIDATION_SKIP_COMPLETED": "0",
+        "VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS": "1",
+        "VALIDATION_RUNNER_DRY_RUN": "0",
+        "PHASE3_REQUIRE_READY": "1",
+    }
+    defaults.update(overrides)
+    return defaults
 
 
 def _base_path_for_category(category: str) -> str:
@@ -248,6 +284,9 @@ def test_phase3_lane_index_default_specs_cover_all_plan_lanes():
     assert DEFAULT_PHASE3_LANE_SPECS[8].pending_proof_keeps_final_result == "TIMEOUT"
     assert DEFAULT_PHASE3_LANE_SPECS[0].required_recovery_actions == ("return_coverage_proof_required",)
     assert DEFAULT_PHASE3_LANE_SPECS[8].required_recovery_actions == ("solver_timeout_retry",)
+    assert all(spec.require_runner_manifest_ref for spec in DEFAULT_PHASE3_LANE_SPECS)
+    assert all(spec.require_runner_target_filter for spec in DEFAULT_PHASE3_LANE_SPECS)
+    assert all(spec.require_runner_safety_defaults for spec in DEFAULT_PHASE3_LANE_SPECS)
 
 
 def test_phase3_lane_index_type_hints_resolve():
@@ -660,6 +699,267 @@ def test_phase3_lane_index_rejects_runner_target_category_drift(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_runner_target_category" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is True
+    lane = manifest["lanes"][0]
+    assert lane["runner_safety_defaults"] == _safety_defaults()
+    assert lane["runner_safety_duplicate_vars"] == []
+    assert lane["runner_require_ready_arg_present"] is True
+    assert lane["runner_gate_args_invoked"] is True
+
+
+def test_phase3_lane_index_rejects_runner_safety_default_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="0"),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_safety_defaults" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_missing_require_ready_arg(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=False, invoke_gate_args=True)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_require_ready_arg" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_commented_safety_defaults(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    path = repo / spec.runner_relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                '# export VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"',
+                '# PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"',
+                "# PHASE3_GATE_ARGS+=(--require-ready)",
+                '# "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase3_runner_safety_lane \\',
+                '#     "${PHASE3_GATE_ARGS[@]}"',
+            ]
+        )
+        + "\n"
+    )
+    path.chmod(0o755)
+
+    index_path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(index_path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_safety_defaults"] == {}
+    assert lane["runner_require_ready_arg_present"] is False
+    assert lane["runner_gate_args_invoked"] is False
+    assert "phase3_lane_runner_safety_defaults" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_require_ready_arg" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_duplicate_safety_defaults(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write('export VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"\n')
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert manifest["lanes"][0]["runner_safety_duplicate_vars"] == ["VALIDATION_RUNNER_DRY_RUN"]
+    assert "phase3_lane_runner_safety_defaults_unique" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_gate_args_not_invoked(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=True, invoke_gate_args=False)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "fake_command",
+    (
+        'echo \'"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"\'',
+        'GATE_CALL=\'"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"\'',
+    ),
+)
+def test_phase3_lane_index_rejects_non_executed_gate_args_strings(tmp_path, fake_command):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=True, invoke_gate_args=False)
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(fake_command + "\n")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert manifest["lanes"][0]["runner_gate_args_invoked"] is False
+    assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
 
 
 @pytest.mark.parametrize(

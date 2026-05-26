@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,31 @@ _RUNNER_BASE_PATH_RE = re.compile(
 _RUNNER_MATRIX_SCRIPT_RE = re.compile(
     r'bash "\$SCRIPT_DIR/(?P<path>(?:func_call|loop)_run_matrix_all_parallel_multifunc\.sh)"'
 )
+_RUNNER_DEFAULT_ENV_RE = re.compile(
+    r'^(?!\s*#)\s*(?:export\s+)?(?P<var>'
+    r'VALIDATION_AUTO_BEFORE_SNAPSHOT|'
+    r'VALIDATION_REQUIRE_BEFORE_DELTA|'
+    r'VALIDATION_REQUIRE_BASELINE_MATCH|'
+    r'VALIDATION_SKIP_COMPLETED|'
+    r'VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS|'
+    r'VALIDATION_RUNNER_DRY_RUN|'
+    r'PHASE3_REQUIRE_READY'
+    r')="\$\{(?P=var):-(?P<value>[^"}]+)\}"\s*$',
+    re.MULTILINE,
+)
+_RUNNER_REQUIRE_READY_ARG_RE = re.compile(
+    r'^(?!\s*#)\s*PHASE3_GATE_ARGS\+=\(--require-ready\)\s*$',
+    re.MULTILINE,
+)
+EXPECTED_RUNNER_SAFETY_DEFAULTS: Mapping[str, str] = {
+    "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
+    "VALIDATION_REQUIRE_BEFORE_DELTA": "0",
+    "VALIDATION_REQUIRE_BASELINE_MATCH": "0",
+    "VALIDATION_SKIP_COMPLETED": "0",
+    "VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS": "1",
+    "VALIDATION_RUNNER_DRY_RUN": "0",
+    "PHASE3_REQUIRE_READY": "1",
+}
 
 
 @dataclass(frozen=True)
@@ -70,6 +96,7 @@ class Phase3LaneSpec:
     required_recovery_actions: Optional[Sequence[str]] = None
     require_runner_manifest_ref: bool = False
     require_runner_target_filter: bool = False
+    require_runner_safety_defaults: bool = False
 
 
 DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
@@ -88,6 +115,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         required_recovery_actions=("return_coverage_proof_required",),
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=2,
@@ -103,6 +131,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         required_recovery_actions=("abi_relation", "high_bit_relation"),
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=3,
@@ -118,6 +147,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         required_recovery_actions=("readonly_operand_identity",),
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=4,
@@ -133,6 +163,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         required_recovery_actions=("method_b_covering_case", "method_b_guard_partition"),
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=5,
@@ -145,6 +176,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         validator=validate_phase3_sat_unsafety_lane5_manifest,
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=6,
@@ -157,6 +189,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         validator=validate_phase3_unresolved_expression_lane6_manifest,
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=7,
@@ -169,6 +202,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         validator=validate_phase3_solver_rewrite_lane7_manifest,
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=8,
@@ -181,6 +215,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         validator=validate_phase3_solver_rewrite_proof_lane8_manifest,
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
     Phase3LaneSpec(
         lane_number=9,
@@ -196,6 +231,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         required_recovery_actions=("solver_timeout_retry",),
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     ),
 )
 
@@ -259,6 +295,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "expected_proof_completion_gate": _expected_proof_completion_gate(spec),
         "require_runner_manifest_ref": spec.require_runner_manifest_ref,
         "require_runner_target_filter": spec.require_runner_target_filter,
+        "require_runner_safety_defaults": spec.require_runner_safety_defaults,
         "expected_runner_manifest_relpath": _expected_runner_manifest_relpath(spec),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
@@ -281,12 +318,17 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_pair_filter_var": MISSING_SENTINEL,
         "runner_base_path_relpath": MISSING_SENTINEL,
         "runner_matrix_script_relpath": MISSING_SENTINEL,
+        "runner_safety_defaults": {},
+        "runner_safety_duplicate_vars": [],
+        "runner_require_ready_arg_present": False,
+        "runner_gate_args_invoked": False,
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
         "expected_pair_filter_var": MISSING_SENTINEL,
         "expected_base_path_relpath": MISSING_SENTINEL,
         "expected_matrix_script_relpath": MISSING_SENTINEL,
+        "expected_runner_safety_defaults": dict(EXPECTED_RUNNER_SAFETY_DEFAULTS),
         "expected_target_functions": [],
         "expected_pair_filter": [],
     }
@@ -304,6 +346,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_pair_filter_var"] = runner_targets["pair_filter_var"]
             lane["runner_base_path_relpath"] = runner_targets["base_path_relpath"]
             lane["runner_matrix_script_relpath"] = runner_targets["matrix_script_relpath"]
+            runner_safety = _runner_safety_defaults(runner_path)
+            lane["runner_safety_defaults"] = runner_safety["defaults"]
+            lane["runner_safety_duplicate_vars"] = runner_safety["duplicate_vars"]
+            lane["runner_require_ready_arg_present"] = runner_safety["require_ready_arg_present"]
+            lane["runner_gate_args_invoked"] = runner_safety["gate_args_invoked"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -486,6 +533,44 @@ def _index_checks(
                     "phase3_lane_runner_matrix_script",
                     expected=lane.get("expected_matrix_script_relpath"),
                     actual=lane.get("runner_matrix_script_relpath"),
+                    **details,
+                )
+            )
+        if lane.get("require_runner_safety_defaults") is True:
+            checks.append(
+                _ok("phase3_lane_runner_safety_defaults_unique", **details)
+                if not lane.get("runner_safety_duplicate_vars")
+                else _failed(
+                    "phase3_lane_runner_safety_defaults_unique",
+                    duplicate_vars=lane.get("runner_safety_duplicate_vars"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_safety_defaults", **details)
+                if lane.get("runner_safety_defaults") == lane.get("expected_runner_safety_defaults")
+                else _failed(
+                    "phase3_lane_runner_safety_defaults",
+                    expected=lane.get("expected_runner_safety_defaults"),
+                    actual=lane.get("runner_safety_defaults"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_require_ready_arg", **details)
+                if lane.get("runner_require_ready_arg_present") is True
+                else _failed(
+                    "phase3_lane_runner_require_ready_arg",
+                    actual=lane.get("runner_require_ready_arg_present"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_gate_args_invoked", **details)
+                if lane.get("runner_gate_args_invoked") is True
+                else _failed(
+                    "phase3_lane_runner_gate_args_invoked",
+                    actual=lane.get("runner_gate_args_invoked"),
                     **details,
                 )
             )
@@ -690,6 +775,71 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
         "target_functions": _split_csv(target_match.group("value") if target_match else None),
         "pair_filter": _split_csv(pair_match.group("value") if pair_match else None),
     }
+
+
+def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
+    try:
+        content = runner_path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "defaults": {},
+            "duplicate_vars": [],
+            "require_ready_arg_present": False,
+            "gate_args_invoked": False,
+        }
+    defaults: Dict[str, str] = {}
+    duplicate_vars: list[str] = []
+    for match in _RUNNER_DEFAULT_ENV_RE.finditer(content):
+        var = match.group("var")
+        if var in defaults:
+            duplicate_vars.append(var)
+            continue
+        defaults[var] = match.group("value")
+    return {
+        "defaults": defaults,
+        "duplicate_vars": list(dict.fromkeys(duplicate_vars)),
+        "require_ready_arg_present": _RUNNER_REQUIRE_READY_ARG_RE.search(content) is not None,
+        "gate_args_invoked": _runner_gate_args_invoked(content),
+    }
+
+
+def _runner_gate_args_invoked(content: str) -> bool:
+    for command in _active_shell_commands(content):
+        if _is_gate_args_validator_command(command):
+            return True
+    return False
+
+
+def _is_gate_args_validator_command(command: str) -> bool:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if len(argv) < 4:
+        return False
+    return (
+        argv[0] == "$PYTHON_BIN"
+        and argv[1] == "-m"
+        and argv[2].startswith("scripts.function_tracer_pcode.validation.")
+        and "${PHASE3_GATE_ARGS[@]}" in argv[3:]
+    )
+
+
+def _active_shell_commands(content: str) -> list[str]:
+    commands: list[str] = []
+    pending = ""
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += stripped[:-1].rstrip() + " "
+            continue
+        commands.append((pending + stripped).strip())
+        pending = ""
+    if pending:
+        commands.append(pending.strip())
+    return commands
 
 
 def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
