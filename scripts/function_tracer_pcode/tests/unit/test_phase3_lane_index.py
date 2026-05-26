@@ -107,6 +107,8 @@ def _write_runner(
     manifest_relpath=None,
     target_category=None,
     pair_category=None,
+    base_category=None,
+    matrix_category=None,
     target_functions=None,
     pair_filter=None,
 ) -> None:
@@ -138,10 +140,24 @@ def _write_runner(
             [
                 f'export {target_var}="${{{target_var}:-{",".join(target_functions or ())}}}"',
                 f'export {pair_var}="${{{pair_var}:-{",".join(pair_filter or ())}}}"',
+                f'export BASE_PATH="${{BASE_PATH:-$SCRIPT_DIR/{_base_path_for_category(base_category or target_category)}}}"',
             ]
         )
+        lines.append(f'bash "$SCRIPT_DIR/{_matrix_script_for_category(matrix_category or target_category)}"')
     path.write_text("\n".join(lines) + "\n")
     path.chmod(0o755 if executable else 0o644)
+
+
+def _base_path_for_category(category: str) -> str:
+    if category == "function_call":
+        return "targets/cate1/function_call_test"
+    return "targets/cate1/loop_method_b_test"
+
+
+def _matrix_script_for_category(category: str) -> str:
+    if category == "function_call":
+        return "func_call_run_matrix_all_parallel_multifunc.sh"
+    return "loop_run_matrix_all_parallel_multifunc.sh"
 
 
 def _validator(manifest):
@@ -570,6 +586,8 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
     assert lane["expected_target_functions"] == ["sample_one", "sample_two"]
     assert lane["runner_target_var"] == "FUNCTION_CALL_TARGET_SET"
     assert lane["runner_pair_filter_var"] == "FUNCTION_CALL_PAIR_FILTER"
+    assert lane["runner_base_path_relpath"] == "targets/cate1/function_call_test"
+    assert lane["runner_matrix_script_relpath"] == "func_call_run_matrix_all_parallel_multifunc.sh"
     assert lane["runner_pair_filter"] == ["sample_one:B1_B2", "sample_two:B3_B4"]
 
 
@@ -690,6 +708,104 @@ def test_phase3_lane_index_rejects_runner_target_pair_env_var_mismatch(
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_runner_pair_filter_var" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_pair_filter" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("target_category", "base_category"),
+    (
+        ("function_call", "loop"),
+        ("loop", "function_call"),
+    ),
+)
+def test_phase3_lane_index_rejects_runner_base_path_category_mismatch(
+    tmp_path,
+    target_category,
+    base_category,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec, category=target_category)
+    _write_runner(
+        repo,
+        spec,
+        target_category=target_category,
+        base_category=base_category,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_base_path" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_pair_filter" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("target_category", "matrix_category"),
+    (
+        ("function_call", "loop"),
+        ("loop", "function_call"),
+    ),
+)
+def test_phase3_lane_index_rejects_runner_matrix_script_category_mismatch(
+    tmp_path,
+    target_category,
+    matrix_category,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec, category=target_category)
+    _write_runner(
+        repo,
+        spec,
+        target_category=target_category,
+        matrix_category=matrix_category,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_matrix_script" in manifest["summary"]["failed_kinds"]
     assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
     assert "phase3_lane_runner_pair_filter" not in manifest["summary"]["failed_kinds"]
 

@@ -46,6 +46,12 @@ _RUNNER_TARGET_SET_RE = re.compile(
 _RUNNER_PAIR_FILTER_RE = re.compile(
     r'export (?P<var>FUNCTION_CALL_PAIR_FILTER|LOOP_PAIR_FILTER)="\$\{(?P=var):-(?P<value>[^"}]*)\}"'
 )
+_RUNNER_BASE_PATH_RE = re.compile(
+    r'export BASE_PATH="\$\{BASE_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"'
+)
+_RUNNER_MATRIX_SCRIPT_RE = re.compile(
+    r'bash "\$SCRIPT_DIR/(?P<path>(?:func_call|loop)_run_matrix_all_parallel_multifunc\.sh)"'
+)
 
 
 @dataclass(frozen=True)
@@ -273,10 +279,14 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_target_category": MISSING_SENTINEL,
         "runner_target_var": MISSING_SENTINEL,
         "runner_pair_filter_var": MISSING_SENTINEL,
+        "runner_base_path_relpath": MISSING_SENTINEL,
+        "runner_matrix_script_relpath": MISSING_SENTINEL,
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
         "expected_pair_filter_var": MISSING_SENTINEL,
+        "expected_base_path_relpath": MISSING_SENTINEL,
+        "expected_matrix_script_relpath": MISSING_SENTINEL,
         "expected_target_functions": [],
         "expected_pair_filter": [],
     }
@@ -292,6 +302,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_target_category"] = runner_targets["category"]
             lane["runner_target_var"] = runner_targets["target_var"]
             lane["runner_pair_filter_var"] = runner_targets["pair_filter_var"]
+            lane["runner_base_path_relpath"] = runner_targets["base_path_relpath"]
+            lane["runner_matrix_script_relpath"] = runner_targets["matrix_script_relpath"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -311,6 +323,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     expected_targets = _manifest_target_filter(manifest)
     lane["expected_target_category"] = expected_targets["category"]
     lane["expected_pair_filter_var"] = expected_targets["pair_filter_var"]
+    lane["expected_base_path_relpath"] = expected_targets["base_path_relpath"]
+    lane["expected_matrix_script_relpath"] = expected_targets["matrix_script_relpath"]
     lane["expected_target_functions"] = expected_targets["target_functions"]
     lane["expected_pair_filter"] = expected_targets["pair_filter"]
     lane["representative_entries"] = _representative_entries(manifest.get("entries"))
@@ -452,6 +466,26 @@ def _index_checks(
                     "phase3_lane_runner_pair_filter",
                     expected=lane.get("expected_pair_filter"),
                     actual=lane.get("runner_pair_filter"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_base_path", **details)
+                if lane.get("runner_base_path_relpath") == lane.get("expected_base_path_relpath")
+                else _failed(
+                    "phase3_lane_runner_base_path",
+                    expected=lane.get("expected_base_path_relpath"),
+                    actual=lane.get("runner_base_path_relpath"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_matrix_script", **details)
+                if lane.get("runner_matrix_script_relpath") == lane.get("expected_matrix_script_relpath")
+                else _failed(
+                    "phase3_lane_runner_matrix_script",
+                    expected=lane.get("expected_matrix_script_relpath"),
+                    actual=lane.get("runner_matrix_script_relpath"),
                     **details,
                 )
             )
@@ -642,6 +676,8 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
         return _empty_target_filter()
     target_match = _RUNNER_TARGET_SET_RE.search(content)
     pair_match = _RUNNER_PAIR_FILTER_RE.search(content)
+    base_path_match = _RUNNER_BASE_PATH_RE.search(content)
+    matrix_match = _RUNNER_MATRIX_SCRIPT_RE.search(content)
     category = MISSING_SENTINEL
     if target_match:
         category = "function_call" if target_match.group("var") == "FUNCTION_CALL_TARGET_SET" else "loop"
@@ -649,6 +685,8 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
         "category": category,
         "target_var": target_match.group("var") if target_match else MISSING_SENTINEL,
         "pair_filter_var": pair_match.group("var") if pair_match else MISSING_SENTINEL,
+        "base_path_relpath": base_path_match.group("path") if base_path_match else MISSING_SENTINEL,
+        "matrix_script_relpath": matrix_match.group("path") if matrix_match else MISSING_SENTINEL,
         "target_functions": _split_csv(target_match.group("value") if target_match else None),
         "pair_filter": _split_csv(pair_match.group("value") if pair_match else None),
     }
@@ -677,6 +715,8 @@ def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "category": category,
         "pair_filter_var": _expected_pair_filter_var(category),
+        "base_path_relpath": _expected_base_path_relpath(category),
+        "matrix_script_relpath": _expected_matrix_script_relpath(category),
         "target_functions": functions,
         "pair_filter": pair_filter,
     }
@@ -687,6 +727,8 @@ def _empty_target_filter() -> Dict[str, Any]:
         "category": MISSING_SENTINEL,
         "target_var": MISSING_SENTINEL,
         "pair_filter_var": MISSING_SENTINEL,
+        "base_path_relpath": MISSING_SENTINEL,
+        "matrix_script_relpath": MISSING_SENTINEL,
         "target_functions": [],
         "pair_filter": [],
     }
@@ -697,6 +739,22 @@ def _expected_pair_filter_var(category: str) -> str:
         return "FUNCTION_CALL_PAIR_FILTER"
     if category == "loop":
         return "LOOP_PAIR_FILTER"
+    return MISSING_SENTINEL
+
+
+def _expected_base_path_relpath(category: str) -> str:
+    if category == "function_call":
+        return "targets/cate1/function_call_test"
+    if category == "loop":
+        return "targets/cate1/loop_method_b_test"
+    return MISSING_SENTINEL
+
+
+def _expected_matrix_script_relpath(category: str) -> str:
+    if category == "function_call":
+        return "func_call_run_matrix_all_parallel_multifunc.sh"
+    if category == "loop":
+        return "loop_run_matrix_all_parallel_multifunc.sh"
     return MISSING_SENTINEL
 
 
