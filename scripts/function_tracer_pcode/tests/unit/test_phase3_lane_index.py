@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
 import json
 import typing
 from pathlib import Path
@@ -91,10 +92,33 @@ def _write_manifest(
     )
 
 
-def _write_runner(repo: Path, spec: Phase3LaneSpec, *, executable=True) -> None:
+def _manifest_sha256(root: Path, spec: Phase3LaneSpec) -> str:
+    return hashlib.sha256((root / spec.manifest_relpath).read_bytes()).hexdigest()
+
+
+def _write_runner(
+    repo: Path,
+    spec: Phase3LaneSpec,
+    *,
+    executable=True,
+    manifest_sha256=None,
+    manifest_relpath=None,
+) -> None:
     path = repo / spec.runner_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
+    declared_manifest = manifest_relpath or f"artifacts/baselines/observed-v0@0a53352/{spec.manifest_relpath}"
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+    ]
+    if manifest_sha256 is not None:
+        lines.extend(
+            [
+                f'PHASE3_MANIFEST_PATH="${{PHASE3_MANIFEST_PATH:-$SCRIPT_DIR/{declared_manifest}}}"',
+                f'PHASE3_MANIFEST_SHA256="${{PHASE3_MANIFEST_SHA256:-{manifest_sha256}}}"',
+            ]
+        )
+    path.write_text("\n".join(lines) + "\n")
     path.chmod(0o755 if executable else 0o644)
 
 
@@ -375,6 +399,100 @@ def test_phase3_lane_index_rejects_incomplete_representative_entries(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_representative_entries_concrete" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_accepts_runner_manifest_ref(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_manifest_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_manifest_lane/manifest.json",
+        runner_relpath="run_runner_manifest_lane.sh",
+        manifest_kind="runner_manifest_lane_manifest",
+        ready_key="runner_manifest_lane_ready",
+        require_runner_manifest_ref=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, manifest_sha256=_manifest_sha256(baseline, spec))
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is True
+    lane = manifest["lanes"][0]
+    assert lane["runner_manifest_relpath"] == "artifacts/baselines/observed-v0@0a53352/audit/runner_manifest_lane/manifest.json"
+    assert lane["runner_manifest_sha256"] == lane["manifest_sha256"]
+
+
+def test_phase3_lane_index_rejects_runner_manifest_path_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_manifest_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_manifest_lane/manifest.json",
+        runner_relpath="run_runner_manifest_lane.sh",
+        manifest_kind="runner_manifest_lane_manifest",
+        ready_key="runner_manifest_lane_ready",
+        require_runner_manifest_ref=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        manifest_sha256=_manifest_sha256(baseline, spec),
+        manifest_relpath="artifacts/baselines/observed-v0@0a53352/audit/other_lane/manifest.json",
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_manifest_path" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_manifest_sha_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_manifest_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_manifest_lane/manifest.json",
+        runner_relpath="run_runner_manifest_lane.sh",
+        manifest_kind="runner_manifest_lane_manifest",
+        ready_key="runner_manifest_lane_ready",
+        require_runner_manifest_ref=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, manifest_sha256="0" * 64)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_manifest_sha256" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_accepts_expected_proof_completion_gate(tmp_path):

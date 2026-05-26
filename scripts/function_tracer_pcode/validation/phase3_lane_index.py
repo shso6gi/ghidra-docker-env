@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,12 @@ MANIFEST_VERSION = 1
 BASELINE_ID = "observed-v0@0a53352"
 MISSING_SENTINEL = "<missing>"
 LaneValidator = Callable[[Mapping[str, Any]], None]
+_RUNNER_MANIFEST_PATH_RE = re.compile(
+    r'PHASE3_MANIFEST_PATH="\$\{PHASE3_MANIFEST_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"'
+)
+_RUNNER_MANIFEST_SHA_RE = re.compile(
+    r'PHASE3_MANIFEST_SHA256="\$\{PHASE3_MANIFEST_SHA256:-(?P<sha>[0-9a-f]{64})\}"'
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,7 @@ class Phase3LaneSpec:
     pending_proof_keeps_final_result: Optional[str] = None
     completion_required_for_recovery: Optional[Sequence[str]] = None
     required_recovery_actions: Optional[Sequence[str]] = None
+    require_runner_manifest_ref: bool = False
 
 
 DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
@@ -65,6 +73,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("return_partition_extraction", "return_guard_coverage"),
         required_recovery_actions=("return_coverage_proof_required",),
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=2,
@@ -78,6 +87,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("abi_relation", "high_bit_relation"),
         required_recovery_actions=("abi_relation", "high_bit_relation"),
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=3,
@@ -91,6 +101,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("readonly_operand_identity",),
         required_recovery_actions=("readonly_operand_identity",),
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=4,
@@ -104,6 +115,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("method_b_covering_case", "method_b_guard_partition"),
         required_recovery_actions=("method_b_covering_case", "method_b_guard_partition"),
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=5,
@@ -114,6 +126,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_sat_unsafety_lane5_representatives",
         ready_key="phase3_lane5_ready",
         validator=validate_phase3_sat_unsafety_lane5_manifest,
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=6,
@@ -124,6 +137,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_unresolved_expression_lane6_representatives",
         ready_key="phase3_lane6_ready",
         validator=validate_phase3_unresolved_expression_lane6_manifest,
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=7,
@@ -134,6 +148,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_solver_rewrite_lane7_representatives",
         ready_key="phase3_lane7_ready",
         validator=validate_phase3_solver_rewrite_lane7_manifest,
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=8,
@@ -144,6 +159,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_solver_rewrite_proof_lane8_representatives",
         ready_key="phase3_lane8_ready",
         validator=validate_phase3_solver_rewrite_proof_lane8_manifest,
+        require_runner_manifest_ref=True,
     ),
     Phase3LaneSpec(
         lane_number=9,
@@ -157,6 +173,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="TIMEOUT",
         completion_required_for_recovery=("solver_timeout_retry",),
         required_recovery_actions=("solver_timeout_retry",),
+        require_runner_manifest_ref=True,
     ),
 )
 
@@ -218,6 +235,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "target_reason_ids": list(spec.target_reason_ids),
         "lane_reason_ids": list(_lane_reason_ids(spec)),
         "expected_proof_completion_gate": _expected_proof_completion_gate(spec),
+        "require_runner_manifest_ref": spec.require_runner_manifest_ref,
+        "expected_runner_manifest_relpath": _expected_runner_manifest_relpath(spec),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
         "runner_ref": _file_ref(runner_path),
@@ -232,12 +251,17 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_status": "missing",
         "runner_sha256": MISSING_SENTINEL,
         "runner_executable": False,
+        "runner_manifest_relpath": MISSING_SENTINEL,
+        "runner_manifest_sha256": MISSING_SENTINEL,
     }
     if runner_path.exists():
         lane["runner_status"] = "present" if runner_path.is_file() else "not_file"
         if runner_path.is_file():
             lane["runner_sha256"] = _sha256_file(runner_path)
             lane["runner_executable"] = os.access(runner_path, os.X_OK)
+            runner_refs = _runner_manifest_refs(runner_path)
+            lane["runner_manifest_relpath"] = runner_refs["manifest_relpath"]
+            lane["runner_manifest_sha256"] = runner_refs["manifest_sha256"]
     if not path.exists():
         return lane
     lane["status"] = "present"
@@ -331,6 +355,27 @@ def _index_checks(
                 **details,
             )
         )
+        if lane.get("require_runner_manifest_ref") is True:
+            checks.append(
+                _ok("phase3_lane_runner_manifest_path", **details)
+                if lane.get("runner_manifest_relpath") == lane.get("expected_runner_manifest_relpath")
+                else _failed(
+                    "phase3_lane_runner_manifest_path",
+                    expected=lane.get("expected_runner_manifest_relpath"),
+                    actual=lane.get("runner_manifest_relpath"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_manifest_sha256", **details)
+                if lane.get("runner_manifest_sha256") == lane.get("manifest_sha256")
+                else _failed(
+                    "phase3_lane_runner_manifest_sha256",
+                    expected=lane.get("manifest_sha256"),
+                    actual=lane.get("runner_manifest_sha256"),
+                    **details,
+                )
+            )
         checks.append(
             _ok("phase3_lane_manifest_kind", **details)
             if lane.get("observed_manifest_kind") == lane.get("expected_manifest_kind")
@@ -495,8 +540,28 @@ def _representative_entry_is_concrete(entry: Mapping[str, Any]) -> bool:
     return all(entry.get(key) not in {None, "", MISSING_SENTINEL} for key in ("id", "function", "binary_pair"))
 
 
+def _runner_manifest_refs(runner_path: Path) -> Dict[str, str]:
+    try:
+        content = runner_path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "manifest_relpath": MISSING_SENTINEL,
+            "manifest_sha256": MISSING_SENTINEL,
+        }
+    path_match = _RUNNER_MANIFEST_PATH_RE.search(content)
+    sha_match = _RUNNER_MANIFEST_SHA_RE.search(content)
+    return {
+        "manifest_relpath": path_match.group("path") if path_match else MISSING_SENTINEL,
+        "manifest_sha256": sha_match.group("sha") if sha_match else MISSING_SENTINEL,
+    }
+
+
 def _lane_reason_ids(spec: Phase3LaneSpec) -> tuple[str, ...]:
     return tuple(spec.lane_reason_ids or spec.target_reason_ids)
+
+
+def _expected_runner_manifest_relpath(spec: Phase3LaneSpec) -> str:
+    return f"artifacts/baselines/{BASELINE_ID}/{spec.manifest_relpath}"
 
 
 def _expected_proof_completion_gate(spec: Phase3LaneSpec) -> Optional[Dict[str, Any]]:
