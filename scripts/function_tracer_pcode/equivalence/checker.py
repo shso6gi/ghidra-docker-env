@@ -495,6 +495,16 @@ class EquivalenceChecker:
                                 if parallel_result.results
                                 else "no_solver_result",
                             ),
+                            evidence_kind="query_hash",
+                            object_target_key=self.monolithic_strategy._solver_timeout_object_target_key(
+                                analysis1=analysis1,
+                                analysis2=analysis2,
+                                stage="ABI_RETRY",
+                                query=smt_formula,
+                                timeout_seconds=getattr(self.solver_runner, "timeout", None),
+                                parallel_result=parallel_result,
+                            ),
+                            detail="ABI retry solver query timed out",
                         )
                     ]
                     if parallel_result.is_equivalent is None

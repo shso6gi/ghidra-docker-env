@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
+from unittest.mock import Mock
+
 from scripts.function_tracer_pcode.equivalence.attempts import record_attempt_from_result
 from scripts.function_tracer_pcode.equivalence.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.equivalence.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.equivalence.result import EquivalenceResult
 from scripts.function_tracer_pcode.equivalence.strategies.base import StrategyResult
+from scripts.function_tracer_pcode.equivalence.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownCountKind,
     UnknownRecoveryAction,
@@ -23,7 +27,10 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     unknown_recovery_plan_registry_snapshot,
 )
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import QueryResult
-from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import solve_query_twostage
+from scripts.function_tracer_pcode.equivalence.strategies.pairwise_query_executor import (
+    solve_query_internal,
+    solve_query_twostage,
+)
 from scripts.function_tracer_pcode.model import Expression
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from conftest import create_mock_analysis
@@ -39,6 +46,16 @@ def _unknown_solver_result() -> ParallelResult:
             )
         ]
     )
+
+
+def _nested_contains(value, needle) -> bool:
+    if value == needle:
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_nested_contains(item, needle) for item in value)
+    if isinstance(value, dict):
+        return any(_nested_contains(key, needle) or _nested_contains(item, needle) for key, item in value.items())
+    return False
 
 
 def test_unknown_reason_record_has_plan13_schema_fields():
@@ -168,6 +185,136 @@ def test_plan16_operational_backlog_reasons_have_registered_actions():
         assert all(action.proof_stage != "unspecified" for action in actions)
         assert all(action.required_evidence for action in actions)
         assert {action.target_regression for action in actions} == {reason_id.value}
+
+
+def test_solver_timeout_reason_carries_full_query_proof_target():
+    strategy = MonolithicStrategy(Mock(), Mock())
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+    left.binary_id = "B8"
+    right.binary_id = "B9"
+    query = "(check-sat)"
+
+    target = strategy._solver_timeout_object_target_key(
+        analysis1=left,
+        analysis2=right,
+        stage="S_MONOLITHIC_FALLBACK",
+        query=query,
+        timeout_seconds=10,
+        solver_name="Z3",
+    )
+    record = make_unknown_reason(
+        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+        stage="S_MONOLITHIC_FALLBACK",
+        evidence_kind="query_hash",
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([record])
+
+    assert target[0] == "solver_timeout"
+    assert ("pair", "B8_B9") in target
+    assert ("query_hash", hashlib.sha256(query.encode("utf-8")).hexdigest()) in target
+    assert ("timeout_budget_seconds", 10) in target
+    assert record.proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+        "solver_timeout_retry",
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+        "query_hash",
+        target,
+    )
+    assert actions[0].object_target_key == target
+    assert actions[0].proof_obligation_id == record.proof_obligation_id
+    assert actions[0].required_evidence == (
+        "query_hash",
+        "timeout_budget",
+        "solver_options",
+        "normalized_query",
+    )
+    assert not _nested_contains(target, getattr(left.function_ref, "program_id", None))
+
+
+def test_solver_timeout_target_uses_parallel_solver_metadata_over_fallback_name():
+    strategy = MonolithicStrategy(Mock(), Mock())
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+    left.binary_id = "B8"
+    right.binary_id = "B9"
+    parallel_result = ParallelResult(
+        results=[
+            SolverResult(
+                solver_name="CVC5",
+                status=SolverStatus.TIMEOUT,
+                elapsed_time=10.0,
+            )
+        ]
+    )
+
+    target = strategy._solver_timeout_object_target_key(
+        analysis1=left,
+        analysis2=right,
+        stage="S_MONOLITHIC_FALLBACK",
+        query="(check-sat)",
+        timeout_seconds=10,
+        solver_name="Z3",
+        parallel_result=parallel_result,
+    )
+
+    assert ("solver_options", ("solver", "CVC5"), ("timeout_seconds", 10)) in target
+    assert ("solver_options", ("solver", "Z3"), ("timeout_seconds", 10)) not in target
+
+
+def test_solver_timeout_target_records_multiple_solver_names_stably():
+    strategy = MonolithicStrategy(Mock(), Mock())
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+    parallel_result = ParallelResult(
+        results=[
+            SolverResult("Yices2", SolverStatus.UNKNOWN),
+            SolverResult("CVC5", SolverStatus.TIMEOUT),
+            SolverResult("Yices2", SolverStatus.TIMEOUT),
+        ]
+    )
+
+    target = strategy._solver_timeout_object_target_key(
+        analysis1=left,
+        analysis2=right,
+        stage="S_MONOLITHIC_FALLBACK",
+        query="(check-sat)",
+        timeout_seconds=10,
+        parallel_result=parallel_result,
+    )
+
+    assert ("solver_options", ("solvers", ("CVC5", "Yices2")), ("timeout_seconds", 10)) in target
+
+
+def test_solver_timeout_target_requires_actual_parallel_solver_metadata():
+    strategy = MonolithicStrategy(Mock(), Mock())
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+    parallel_result = ParallelResult(results=[], is_equivalent=None)
+
+    target = strategy._solver_timeout_object_target_key(
+        analysis1=left,
+        analysis2=right,
+        stage="S_MONOLITHIC_FALLBACK",
+        query="(check-sat)",
+        timeout_seconds=10,
+        solver_name="Z3",
+        parallel_result=parallel_result,
+    )
+    record = make_unknown_reason(
+        UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
+        stage="S_MONOLITHIC_FALLBACK",
+        evidence_kind="query_hash",
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([record])
+
+    assert target is None
+    assert record.object_target_key is None
+    assert record.proof_obligation_id is None
+    assert actions[0].object_target_key is None
+    assert actions[0].proof_obligation_id is None
 
 
 def test_legacy_recovery_action_inherits_known_reason_tuple_defaults():
@@ -543,6 +690,124 @@ def test_equivalence_result_serializes_completed_recovery_proof_evidence():
 class _FakeCase:
     value_expr = Expression.constant(1, size=4)
     conditions = []
+
+
+class _NonZ3TimeoutRunner:
+    def __init__(self):
+        self.received_timeouts = []
+
+    def run_sequential(self, _query, timeout=None):
+        self.received_timeouts.append(timeout)
+        return ParallelResult(
+            results=[
+                SolverResult(
+                    solver_name="CVC5",
+                    status=SolverStatus.TIMEOUT,
+                    elapsed_time=float(timeout or 0),
+                )
+            ],
+            first_definitive=None,
+            is_equivalent=None,
+        )
+
+
+class _NoSolverTimeoutRunner:
+    def run_sequential(self, _query, timeout=None):
+        return ParallelResult(results=[], is_equivalent=None)
+
+
+class _NonZ3PairwiseTimeoutStrategy(MonolithicStrategy):
+    per_query_timeout = 1
+    per_query_timeout_hard = 2
+    save_unknown_queries = False
+    enable_solver_proven_rewrite_fallback = False
+    enable_normalization_fallback = False
+
+    def __init__(self):
+        super().__init__(Mock(), _NonZ3TimeoutRunner())
+
+    def _build_condition_only_query(self, *_args, **_kwargs):
+        return "(check-sat)"
+
+    def _build_pair_query(self, *_args, **_kwargs):
+        return "(check-sat)"
+
+    def _solve_query_internal(self, query, pair_id, stage="full", use_hard_timeout=False):
+        return solve_query_internal(
+            self,
+            query,
+            pair_id,
+            stage=stage,
+            use_hard_timeout=use_hard_timeout,
+        )
+
+
+class _NoSolverPairwiseTimeoutStrategy(_NonZ3PairwiseTimeoutStrategy):
+    def __init__(self):
+        MonolithicStrategy.__init__(self, Mock(), _NoSolverTimeoutRunner())
+
+
+def test_pairwise_solver_timeout_target_uses_query_result_solver_metadata():
+    strategy = _NonZ3PairwiseTimeoutStrategy()
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+    left.binary_id = "B8"
+    right.binary_id = "B9"
+
+    result = solve_query_twostage(
+        strategy,
+        {
+            "analysis1": left,
+            "analysis2": right,
+            "return_size1": 32,
+            "return_size2": 32,
+        },
+        _FakeCase(),
+        _FakeCase(),
+        None,
+        None,
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.blocking_reason == UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
+    assert getattr(result.solver_results.results[0], "solver_name") == "CVC5"
+    assert ("solver_options", ("solver", "CVC5"), ("timeout_seconds", 2)) in result.object_target_key
+    assert ("solver_options", ("solver", "Z3"), ("timeout_seconds", 2)) not in result.object_target_key
+
+
+def test_pairwise_solver_timeout_keeps_no_solver_result_without_proof_target():
+    strategy = _NoSolverPairwiseTimeoutStrategy()
+    left = create_mock_analysis("fc_long_branch_dispatch")
+    right = create_mock_analysis("fc_long_branch_dispatch")
+
+    result = solve_query_twostage(
+        strategy,
+        {
+            "analysis1": left,
+            "analysis2": right,
+            "return_size1": 32,
+            "return_size2": 32,
+        },
+        _FakeCase(),
+        _FakeCase(),
+        None,
+        None,
+        "(0,0)",
+    )
+
+    assert result.is_equivalent is None
+    assert result.blocking_reason == UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
+    assert result.solver_results.results == []
+    assert result.object_target_key is None
+    reason = make_unknown_reason(
+        result.blocking_reason,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind=result.evidence_kind,
+        object_target_key=result.object_target_key,
+    )
+    assert reason.proof_obligation_id is None
 
 
 class _FallbackReasonStrategy:

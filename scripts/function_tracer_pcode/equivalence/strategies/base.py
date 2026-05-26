@@ -2,6 +2,7 @@
 """戦略基底クラス"""
 
 from abc import ABC, abstractmethod
+import hashlib
 from typing import Optional, Dict, Any, List, Mapping, Sequence, Tuple
 from dataclasses import dataclass, field
 
@@ -1020,6 +1021,125 @@ class CheckStrategy(ABC):
             self._return_storage_object_key(analysis) if analysis is not None else None,
             self._return_case_partition_member_object_key(case, return_info),
         )
+
+    def _solver_timeout_object_target_key(
+        self,
+        *,
+        analysis1: Optional[FunctionReturnAnalysis],
+        analysis2: Optional[FunctionReturnAnalysis],
+        stage: str,
+        query: Optional[str],
+        timeout_seconds: Any = None,
+        pair_id: Optional[str] = None,
+        solver_name: Optional[str] = None,
+        parallel_result: Optional[ParallelResult] = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        """Stable target for a timed-out solver query.
+
+        The query hash identifies the generated SMT artifact while both side
+        records keep the target anchored to Ghidra-derived function, return, and
+        guard objects.  Program ids are normalized through binary ids.
+        """
+
+        query_text = query or ""
+        query_hash = hashlib.sha256(query_text.encode("utf-8")).hexdigest() if query_text else None
+        resolved_pair_id = pair_id or self._binary_pair_id_from_analyses(analysis1, analysis2)
+        solver_options_key = self._solver_timeout_options_object_key(
+            parallel_result=parallel_result,
+            timeout_seconds=timeout_seconds,
+            fallback_solver_name=solver_name,
+        )
+        if solver_options_key is None:
+            return None
+        return (
+            "solver_timeout",
+            ("pair", resolved_pair_id),
+            ("stage", str(stage or "unknown")),
+            ("query_hash", query_hash),
+            ("timeout_budget_seconds", self._coerce_timeout_seconds(timeout_seconds)),
+            solver_options_key,
+            self._solver_timeout_side_object_key("left", analysis1),
+            self._solver_timeout_side_object_key("right", analysis2),
+        )
+
+    def _solver_timeout_options_object_key(
+        self,
+        *,
+        parallel_result: Optional[ParallelResult],
+        timeout_seconds: Any,
+        fallback_solver_name: Optional[str] = None,
+    ) -> Optional[Tuple[Any, ...]]:
+        timeout_key = ("timeout_seconds", self._coerce_timeout_seconds(timeout_seconds))
+        solver_names = self._solver_names_from_parallel_result(parallel_result)
+        if len(solver_names) == 1:
+            return ("solver_options", ("solver", solver_names[0]), timeout_key)
+        if solver_names:
+            return ("solver_options", ("solvers", solver_names), timeout_key)
+        if parallel_result is not None:
+            return None
+        fallback = str(fallback_solver_name).strip() if fallback_solver_name is not None else ""
+        if not fallback:
+            return None
+        return ("solver_options", ("solver", fallback), timeout_key)
+
+    @staticmethod
+    def _solver_names_from_parallel_result(parallel_result: Optional[ParallelResult]) -> Tuple[str, ...]:
+        results = getattr(parallel_result, "results", None)
+        if not results:
+            return ()
+        names = {
+            str(name).strip()
+            for result in results
+            for name in (getattr(result, "solver_name", None),)
+            if name is not None and str(name).strip()
+        }
+        return tuple(sorted(names))
+
+    @staticmethod
+    def _coerce_timeout_seconds(value: Any) -> Optional[int]:
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds >= 0 else None
+
+    def _solver_timeout_side_object_key(
+        self,
+        side_label: str,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> Tuple[Any, ...]:
+        target = (
+            "solver_timeout_side",
+            side_label,
+            self._analysis_entry_key(analysis) if analysis is not None else None,
+            self._return_storage_object_key(analysis) if analysis is not None else None,
+            self._return_partition_object_key(analysis) if analysis is not None else None,
+            self._return_guard_disjunction_object_key(analysis) if analysis is not None else None,
+        )
+        if analysis is not None:
+            return self._artifact_stable_key_for_analysis(target, analysis)
+        return target
+
+    @classmethod
+    def _binary_pair_id_from_analyses(
+        cls,
+        analysis1: Optional[FunctionReturnAnalysis],
+        analysis2: Optional[FunctionReturnAnalysis],
+    ) -> Optional[str]:
+        left = cls._analysis_binary_id(analysis1)
+        right = cls._analysis_binary_id(analysis2)
+        if not left or not right:
+            return None
+        return "_".join(sorted((left, right)))
+
+    @staticmethod
+    def _analysis_binary_id(analysis: Optional[FunctionReturnAnalysis]) -> Optional[str]:
+        if analysis is None:
+            return None
+        binary_id = getattr(analysis, "binary_id", None)
+        if isinstance(binary_id, str) and binary_id.strip():
+            return binary_id.strip()
+        return None
 
     def _return_case_partition_member_object_key(
         self,

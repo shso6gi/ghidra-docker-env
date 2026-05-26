@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Pairwise strategy helper models."""
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ...model import Condition, ReturnInfo
 from ...analysis.condition.simplifier import ConditionSimplifier
@@ -160,10 +160,12 @@ class QueryResult:
     def __init__(
         self,
         is_equivalent: Optional[bool],
-        counterexample_raw: Optional[Dict] = None
+        counterexample_raw: Optional[Dict] = None,
+        solver_results: Optional[Any] = None,
     ):
         self.is_equivalent = is_equivalent
         self.counterexample_raw = counterexample_raw
+        self.solver_results = solver_results
         self.last_query: Optional[str] = None
         self.normalization_rules: List = []
         self.pair_stage: Optional[str] = None

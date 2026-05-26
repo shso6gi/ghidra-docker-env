@@ -277,10 +277,23 @@ class MonolithicStrategy(CheckStrategy):
                 final_is_equivalent = None
                 counterexample_raw = None
             elif final_is_equivalent is None and not unknown_reasons:
+                timeout_budget = getattr(self.solver_runner, "timeout", None)
+                timeout_target = self._solver_timeout_object_target_key(
+                    analysis1=analysis1,
+                    analysis2=analysis2,
+                    stage="S_MONOLITHIC_FALLBACK",
+                    query=smt_formula,
+                    timeout_seconds=timeout_budget,
+                    parallel_result=parallel_result,
+                )
                 unknown_reasons.append(
                     make_unknown_reason(
                         UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
                         stage="S_MONOLITHIC_FALLBACK",
+                        evidence_refs=("monolithic_query_timeout",),
+                        evidence_kind="query_hash",
+                        object_target_key=timeout_target,
+                        detail="monolithic solver query timed out",
                     )
                 )
             

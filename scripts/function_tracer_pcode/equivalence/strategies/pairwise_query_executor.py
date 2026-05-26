@@ -138,6 +138,7 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
     return QueryResult(
         is_equivalent=parallel_result.is_equivalent,
         counterexample_raw=counterexample_raw,
+        solver_results=parallel_result,
     )
 
 
@@ -319,6 +320,22 @@ def solve_query_twostage(
             stage2_result.blocking_reason = norm_result.blocking_reason
             stage2_result.blocking_detail = norm_result.blocking_detail
             stage2_result.pair_stage = norm_result.pair_stage or stage2_result.pair_stage
+
+    if stage2_result.is_equivalent is None and not getattr(stage2_result, "blocking_reason", None):
+        stage2_result.blocking_reason = "solver_unknown_timeout"
+        stage2_result.blocking_detail = "pairwise solver query timed out or returned unknown"
+        stage2_result.evidence_kind = "query_hash"
+        target_builder = getattr(strategy, "_solver_timeout_object_target_key", None)
+        if callable(target_builder):
+            stage2_result.object_target_key = target_builder(
+                analysis1=base_ctx.get("analysis1"),
+                analysis2=base_ctx.get("analysis2"),
+                stage=stage2_result.pair_stage or "with-ineq",
+                query=stage2_result.last_query,
+                timeout_seconds=getattr(strategy, "per_query_timeout_hard", None),
+                pair_id=pair_id,
+                parallel_result=getattr(stage2_result, "solver_results", None),
+            )
 
     return stage2_result
 
