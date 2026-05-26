@@ -53,6 +53,20 @@ _RUNNER_BASE_PATH_RE = re.compile(
 _RUNNER_MATRIX_SCRIPT_RE = re.compile(
     r'bash "\$SCRIPT_DIR/(?P<path>(?:func_call|loop)_run_matrix_all_parallel_multifunc\.sh)"'
 )
+_RUNNER_CURRENT_LOG_ROOT_ARG_RE = re.compile(
+    r'^(?!\s*#)\s*--current-log-root\s+"(?P<value>[^"]*)"\s*$',
+    re.MULTILINE,
+)
+_RUNNER_BASELINE_LOG_ROOT_ARG_RE = re.compile(
+    r'^(?!\s*#)\s*--baseline-log-root\s+"(?P<value>[^"]*)"\s*$',
+    re.MULTILINE,
+)
+_RUNNER_CURRENT_LOG_ROOT_RE = re.compile(
+    r'^(?P<category>function_call|loop)=\$(?P<var>OUTPUT_BASE_DIR)$'
+)
+_RUNNER_BASELINE_LOG_ROOT_RE = re.compile(
+    r'^(?P<category>function_call|loop)=\$(?P<var>BASELINE_FUNCTION_CALL_LOG_ROOT|BASELINE_LOOP_LOG_ROOT)$'
+)
 _RUNNER_DEFAULT_ENV_RE = re.compile(
     r'^(?!\s*#)\s*(?:export\s+)?(?P<var>'
     r'VALIDATION_AUTO_BEFORE_SNAPSHOT|'
@@ -318,6 +332,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_pair_filter_var": MISSING_SENTINEL,
         "runner_base_path_relpath": MISSING_SENTINEL,
         "runner_matrix_script_relpath": MISSING_SENTINEL,
+        "runner_current_log_root_category": MISSING_SENTINEL,
+        "runner_current_log_root_var": MISSING_SENTINEL,
+        "runner_baseline_log_root_category": MISSING_SENTINEL,
+        "runner_baseline_log_root_var": MISSING_SENTINEL,
+        "runner_log_root_arg_counts": {},
         "runner_safety_defaults": {},
         "runner_safety_duplicate_vars": [],
         "runner_require_ready_arg_present": False,
@@ -328,6 +347,10 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "expected_pair_filter_var": MISSING_SENTINEL,
         "expected_base_path_relpath": MISSING_SENTINEL,
         "expected_matrix_script_relpath": MISSING_SENTINEL,
+        "expected_current_log_root_category": MISSING_SENTINEL,
+        "expected_current_log_root_var": MISSING_SENTINEL,
+        "expected_baseline_log_root_category": MISSING_SENTINEL,
+        "expected_baseline_log_root_var": MISSING_SENTINEL,
         "expected_runner_safety_defaults": dict(EXPECTED_RUNNER_SAFETY_DEFAULTS),
         "expected_target_functions": [],
         "expected_pair_filter": [],
@@ -346,6 +369,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_pair_filter_var"] = runner_targets["pair_filter_var"]
             lane["runner_base_path_relpath"] = runner_targets["base_path_relpath"]
             lane["runner_matrix_script_relpath"] = runner_targets["matrix_script_relpath"]
+            lane["runner_current_log_root_category"] = runner_targets["current_log_root_category"]
+            lane["runner_current_log_root_var"] = runner_targets["current_log_root_var"]
+            lane["runner_baseline_log_root_category"] = runner_targets["baseline_log_root_category"]
+            lane["runner_baseline_log_root_var"] = runner_targets["baseline_log_root_var"]
+            lane["runner_log_root_arg_counts"] = runner_targets["log_root_arg_counts"]
             runner_safety = _runner_safety_defaults(runner_path)
             lane["runner_safety_defaults"] = runner_safety["defaults"]
             lane["runner_safety_duplicate_vars"] = runner_safety["duplicate_vars"]
@@ -372,6 +400,10 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["expected_pair_filter_var"] = expected_targets["pair_filter_var"]
     lane["expected_base_path_relpath"] = expected_targets["base_path_relpath"]
     lane["expected_matrix_script_relpath"] = expected_targets["matrix_script_relpath"]
+    lane["expected_current_log_root_category"] = expected_targets["current_log_root_category"]
+    lane["expected_current_log_root_var"] = expected_targets["current_log_root_var"]
+    lane["expected_baseline_log_root_category"] = expected_targets["baseline_log_root_category"]
+    lane["expected_baseline_log_root_var"] = expected_targets["baseline_log_root_var"]
     lane["expected_target_functions"] = expected_targets["target_functions"]
     lane["expected_pair_filter"] = expected_targets["pair_filter"]
     lane["representative_entries"] = _representative_entries(manifest.get("entries"))
@@ -533,6 +565,54 @@ def _index_checks(
                     "phase3_lane_runner_matrix_script",
                     expected=lane.get("expected_matrix_script_relpath"),
                     actual=lane.get("runner_matrix_script_relpath"),
+                    **details,
+                )
+            )
+            log_root_counts = lane.get("runner_log_root_arg_counts")
+            checks.append(
+                _ok("phase3_lane_runner_log_root_args_unique", **details)
+                if isinstance(log_root_counts, Mapping)
+                and log_root_counts.get("current_log_root") == 1
+                and log_root_counts.get("baseline_log_root") == 1
+                else _failed(
+                    "phase3_lane_runner_log_root_args_unique",
+                    actual=log_root_counts or {},
+                    **details,
+                )
+            )
+            expected_current_log_root = {
+                "category": lane.get("expected_current_log_root_category"),
+                "var": lane.get("expected_current_log_root_var"),
+            }
+            actual_current_log_root = {
+                "category": lane.get("runner_current_log_root_category"),
+                "var": lane.get("runner_current_log_root_var"),
+            }
+            checks.append(
+                _ok("phase3_lane_runner_current_log_root", **details)
+                if actual_current_log_root == expected_current_log_root
+                else _failed(
+                    "phase3_lane_runner_current_log_root",
+                    expected=expected_current_log_root,
+                    actual=actual_current_log_root,
+                    **details,
+                )
+            )
+            expected_baseline_log_root = {
+                "category": lane.get("expected_baseline_log_root_category"),
+                "var": lane.get("expected_baseline_log_root_var"),
+            }
+            actual_baseline_log_root = {
+                "category": lane.get("runner_baseline_log_root_category"),
+                "var": lane.get("runner_baseline_log_root_var"),
+            }
+            checks.append(
+                _ok("phase3_lane_runner_baseline_log_root", **details)
+                if actual_baseline_log_root == expected_baseline_log_root
+                else _failed(
+                    "phase3_lane_runner_baseline_log_root",
+                    expected=expected_baseline_log_root,
+                    actual=actual_baseline_log_root,
                     **details,
                 )
             )
@@ -763,6 +843,18 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
     pair_match = _RUNNER_PAIR_FILTER_RE.search(content)
     base_path_match = _RUNNER_BASE_PATH_RE.search(content)
     matrix_match = _RUNNER_MATRIX_SCRIPT_RE.search(content)
+    current_log_root_args = list(_RUNNER_CURRENT_LOG_ROOT_ARG_RE.finditer(content))
+    baseline_log_root_args = list(_RUNNER_BASELINE_LOG_ROOT_ARG_RE.finditer(content))
+    current_log_root_match = (
+        _RUNNER_CURRENT_LOG_ROOT_RE.fullmatch(current_log_root_args[0].group("value"))
+        if len(current_log_root_args) == 1
+        else None
+    )
+    baseline_log_root_match = (
+        _RUNNER_BASELINE_LOG_ROOT_RE.fullmatch(baseline_log_root_args[0].group("value"))
+        if len(baseline_log_root_args) == 1
+        else None
+    )
     category = MISSING_SENTINEL
     if target_match:
         category = "function_call" if target_match.group("var") == "FUNCTION_CALL_TARGET_SET" else "loop"
@@ -772,6 +864,20 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
         "pair_filter_var": pair_match.group("var") if pair_match else MISSING_SENTINEL,
         "base_path_relpath": base_path_match.group("path") if base_path_match else MISSING_SENTINEL,
         "matrix_script_relpath": matrix_match.group("path") if matrix_match else MISSING_SENTINEL,
+        "current_log_root_category": (
+            current_log_root_match.group("category") if current_log_root_match else MISSING_SENTINEL
+        ),
+        "current_log_root_var": current_log_root_match.group("var") if current_log_root_match else MISSING_SENTINEL,
+        "baseline_log_root_category": (
+            baseline_log_root_match.group("category") if baseline_log_root_match else MISSING_SENTINEL
+        ),
+        "baseline_log_root_var": (
+            baseline_log_root_match.group("var") if baseline_log_root_match else MISSING_SENTINEL
+        ),
+        "log_root_arg_counts": {
+            "current_log_root": len(current_log_root_args),
+            "baseline_log_root": len(baseline_log_root_args),
+        },
         "target_functions": _split_csv(target_match.group("value") if target_match else None),
         "pair_filter": _split_csv(pair_match.group("value") if pair_match else None),
     }
@@ -867,6 +973,10 @@ def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
         "pair_filter_var": _expected_pair_filter_var(category),
         "base_path_relpath": _expected_base_path_relpath(category),
         "matrix_script_relpath": _expected_matrix_script_relpath(category),
+        "current_log_root_category": category,
+        "current_log_root_var": "OUTPUT_BASE_DIR" if category in {"function_call", "loop"} else MISSING_SENTINEL,
+        "baseline_log_root_category": category,
+        "baseline_log_root_var": _expected_baseline_log_root_var(category),
         "target_functions": functions,
         "pair_filter": pair_filter,
     }
@@ -879,6 +989,14 @@ def _empty_target_filter() -> Dict[str, Any]:
         "pair_filter_var": MISSING_SENTINEL,
         "base_path_relpath": MISSING_SENTINEL,
         "matrix_script_relpath": MISSING_SENTINEL,
+        "current_log_root_category": MISSING_SENTINEL,
+        "current_log_root_var": MISSING_SENTINEL,
+        "baseline_log_root_category": MISSING_SENTINEL,
+        "baseline_log_root_var": MISSING_SENTINEL,
+        "log_root_arg_counts": {
+            "current_log_root": 0,
+            "baseline_log_root": 0,
+        },
         "target_functions": [],
         "pair_filter": [],
     }
@@ -905,6 +1023,14 @@ def _expected_matrix_script_relpath(category: str) -> str:
         return "func_call_run_matrix_all_parallel_multifunc.sh"
     if category == "loop":
         return "loop_run_matrix_all_parallel_multifunc.sh"
+    return MISSING_SENTINEL
+
+
+def _expected_baseline_log_root_var(category: str) -> str:
+    if category == "function_call":
+        return "BASELINE_FUNCTION_CALL_LOG_ROOT"
+    if category == "loop":
+        return "BASELINE_LOOP_LOG_ROOT"
     return MISSING_SENTINEL
 
 
