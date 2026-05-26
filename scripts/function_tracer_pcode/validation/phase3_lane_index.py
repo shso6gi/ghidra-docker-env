@@ -45,6 +45,7 @@ class Phase3LaneSpec:
     manifest_kind: str
     ready_key: str
     validator: Optional[LaneValidator] = None
+    lane_reason_ids: Optional[Sequence[str]] = None
 
 
 DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
@@ -52,6 +53,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         lane_number=1,
         lane_id="phase3_return_coverage_lane1",
         target_reason_ids=("return_coverage_gap",),
+        lane_reason_ids=("return_coverage_gap", "return_coverage_inconclusive"),
         manifest_relpath="audit/phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json",
         runner_relpath="phase3_run_function_call_return_coverage_lane1_representatives.sh",
         manifest_kind="phase3_return_coverage_lane1_representatives",
@@ -196,6 +198,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "lane_number": spec.lane_number,
         "lane_id": spec.lane_id,
         "target_reason_ids": list(spec.target_reason_ids),
+        "lane_reason_ids": list(_lane_reason_ids(spec)),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
         "runner_ref": _file_ref(runner_path),
@@ -359,17 +362,14 @@ def _index_checks(
             if isinstance(implementation, Mapping)
             else ()
         )
-        missing_implementation_reasons = [
-            reason for reason in expected_reasons if reason not in implementation_reasons
-        ]
+        expected_lane_reasons = tuple(lane.get("lane_reason_ids") or expected_reasons)
         checks.append(
             _ok("phase3_lane_implementation_reason_ids", **details)
-            if not missing_implementation_reasons
+            if implementation_reasons == expected_lane_reasons
             else _failed(
                 "phase3_lane_implementation_reason_ids",
-                expected=list(expected_reasons),
+                expected=list(expected_lane_reasons),
                 actual=list(implementation_reasons),
-                missing=missing_implementation_reasons,
                 **details,
             )
         )
@@ -399,6 +399,10 @@ def _implementation_reason_ids(implementation: Mapping[str, Any]) -> tuple[str, 
         if value:
             reasons.append(str(value))
     return tuple(dict.fromkeys(reasons))
+
+
+def _lane_reason_ids(spec: Phase3LaneSpec) -> tuple[str, ...]:
+    return tuple(spec.lane_reason_ids or spec.target_reason_ids)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

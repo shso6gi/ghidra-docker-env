@@ -153,6 +153,12 @@ def test_phase3_lane_index_default_specs_cover_all_plan_lanes():
         "phase3_run_function_call_solver_rewrite_proof_lane8_representatives.sh",
         "phase3_run_function_call_solver_timeout_lane9_representatives.sh",
     ]
+    assert DEFAULT_PHASE3_LANE_SPECS[0].target_reason_ids == ("return_coverage_gap",)
+    assert DEFAULT_PHASE3_LANE_SPECS[0].lane_reason_ids == (
+        "return_coverage_gap",
+        "return_coverage_inconclusive",
+    )
+    assert all(spec.lane_reason_ids is None for spec in DEFAULT_PHASE3_LANE_SPECS[1:])
 
 
 def test_phase3_lane_index_type_hints_resolve():
@@ -219,6 +225,36 @@ def test_phase3_lane_index_rejects_implementation_reason_drift(tmp_path):
             spec,
             implementation_target_reason_id="wrong_reason" if spec.lane_id == "lane_two" else None,
             implementation_lane_reason_ids=("wrong_reason",) if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_implementation_reason_ids" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_target_reason_ids" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_implementation_reason_scope_expansion(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            implementation_lane_reason_ids=(
+                tuple(spec.target_reason_ids) + ("unexpected_reason",)
+                if spec.lane_id == "lane_two"
+                else None
+            ),
         )
         _write_runner(repo, spec)
 
