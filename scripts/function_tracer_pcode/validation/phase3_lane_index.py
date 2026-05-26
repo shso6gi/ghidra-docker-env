@@ -108,6 +108,7 @@ class Phase3LaneSpec:
     pending_proof_keeps_final_result: Optional[str] = None
     completion_required_for_recovery: Optional[Sequence[str]] = None
     required_recovery_actions: Optional[Sequence[str]] = None
+    gate_validator_module: Optional[str] = None
     require_runner_manifest_ref: bool = False
     require_runner_target_filter: bool = False
     require_runner_safety_defaults: bool = False
@@ -127,6 +128,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("return_partition_extraction", "return_guard_coverage"),
         required_recovery_actions=("return_coverage_proof_required",),
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -143,6 +145,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("abi_relation", "high_bit_relation"),
         required_recovery_actions=("abi_relation", "high_bit_relation"),
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -159,6 +162,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("readonly_operand_identity",),
         required_recovery_actions=("readonly_operand_identity",),
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_readonly_identity_lane3",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -175,6 +179,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="UNKNOWN",
         completion_required_for_recovery=("method_b_covering_case", "method_b_guard_partition"),
         required_recovery_actions=("method_b_covering_case", "method_b_guard_partition"),
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_method_b_closure_lane4",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -188,6 +193,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_sat_unsafety_lane5_representatives",
         ready_key="phase3_lane5_ready",
         validator=validate_phase3_sat_unsafety_lane5_manifest,
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -201,6 +207,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_unresolved_expression_lane6_representatives",
         ready_key="phase3_lane6_ready",
         validator=validate_phase3_unresolved_expression_lane6_manifest,
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -214,6 +221,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_solver_rewrite_lane7_representatives",
         ready_key="phase3_lane7_ready",
         validator=validate_phase3_solver_rewrite_lane7_manifest,
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_solver_rewrite_lane7",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -227,6 +235,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         manifest_kind="phase3_solver_rewrite_proof_lane8_representatives",
         ready_key="phase3_lane8_ready",
         validator=validate_phase3_solver_rewrite_proof_lane8_manifest,
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_solver_rewrite_proof_lane8",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -243,6 +252,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         pending_proof_keeps_final_result="TIMEOUT",
         completion_required_for_recovery=("solver_timeout_retry",),
         required_recovery_actions=("solver_timeout_retry",),
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_solver_timeout_lane9",
         require_runner_manifest_ref=True,
         require_runner_target_filter=True,
         require_runner_safety_defaults=True,
@@ -341,6 +351,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_safety_duplicate_vars": [],
         "runner_require_ready_arg_present": False,
         "runner_gate_args_invoked": False,
+        "runner_gate_validator_module": MISSING_SENTINEL,
+        "runner_gate_validator_invocation_count": 0,
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -351,6 +363,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "expected_current_log_root_var": MISSING_SENTINEL,
         "expected_baseline_log_root_category": MISSING_SENTINEL,
         "expected_baseline_log_root_var": MISSING_SENTINEL,
+        "expected_gate_validator_module": spec.gate_validator_module or MISSING_SENTINEL,
         "expected_runner_safety_defaults": dict(EXPECTED_RUNNER_SAFETY_DEFAULTS),
         "expected_target_functions": [],
         "expected_pair_filter": [],
@@ -379,6 +392,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_safety_duplicate_vars"] = runner_safety["duplicate_vars"]
             lane["runner_require_ready_arg_present"] = runner_safety["require_ready_arg_present"]
             lane["runner_gate_args_invoked"] = runner_safety["gate_args_invoked"]
+            lane["runner_gate_validator_module"] = runner_safety["gate_validator_module"]
+            lane["runner_gate_validator_invocation_count"] = runner_safety["gate_validator_invocation_count"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -651,9 +666,22 @@ def _index_checks(
                 else _failed(
                     "phase3_lane_runner_gate_args_invoked",
                     actual=lane.get("runner_gate_args_invoked"),
+                    invocation_count=lane.get("runner_gate_validator_invocation_count"),
                     **details,
                 )
             )
+            if lane.get("expected_gate_validator_module") != MISSING_SENTINEL:
+                checks.append(
+                    _ok("phase3_lane_runner_gate_validator_module", **details)
+                    if lane.get("runner_gate_validator_module") == lane.get("expected_gate_validator_module")
+                    else _failed(
+                        "phase3_lane_runner_gate_validator_module",
+                        expected=lane.get("expected_gate_validator_module"),
+                        actual=lane.get("runner_gate_validator_module"),
+                        invocation_count=lane.get("runner_gate_validator_invocation_count"),
+                        **details,
+                    )
+                )
         checks.append(
             _ok("phase3_lane_manifest_kind", **details)
             if lane.get("observed_manifest_kind") == lane.get("expected_manifest_kind")
@@ -892,6 +920,8 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "duplicate_vars": [],
             "require_ready_arg_present": False,
             "gate_args_invoked": False,
+            "gate_validator_module": MISSING_SENTINEL,
+            "gate_validator_invocation_count": 0,
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -901,34 +931,41 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             duplicate_vars.append(var)
             continue
         defaults[var] = match.group("value")
+    gate_validator_modules = _runner_gate_validator_modules(content)
     return {
         "defaults": defaults,
         "duplicate_vars": list(dict.fromkeys(duplicate_vars)),
         "require_ready_arg_present": _RUNNER_REQUIRE_READY_ARG_RE.search(content) is not None,
-        "gate_args_invoked": _runner_gate_args_invoked(content),
+        "gate_args_invoked": len(gate_validator_modules) == 1,
+        "gate_validator_module": gate_validator_modules[0] if len(gate_validator_modules) == 1 else MISSING_SENTINEL,
+        "gate_validator_invocation_count": len(gate_validator_modules),
     }
 
 
-def _runner_gate_args_invoked(content: str) -> bool:
+def _runner_gate_validator_modules(content: str) -> list[str]:
+    modules: list[str] = []
     for command in _active_shell_commands(content):
-        if _is_gate_args_validator_command(command):
-            return True
-    return False
+        module = _gate_args_validator_module(command)
+        if module:
+            modules.append(module)
+    return modules
 
 
-def _is_gate_args_validator_command(command: str) -> bool:
+def _gate_args_validator_module(command: str) -> Optional[str]:
     try:
         argv = shlex.split(command)
     except ValueError:
-        return False
+        return None
     if len(argv) < 4:
-        return False
-    return (
+        return None
+    if (
         argv[0] == "$PYTHON_BIN"
         and argv[1] == "-m"
         and argv[2].startswith("scripts.function_tracer_pcode.validation.")
         and "${PHASE3_GATE_ARGS[@]}" in argv[3:]
-    )
+    ):
+        return argv[2]
+    return None
 
 
 def _active_shell_commands(content: str) -> list[str]:

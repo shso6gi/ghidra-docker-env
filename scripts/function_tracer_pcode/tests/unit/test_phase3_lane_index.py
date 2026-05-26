@@ -115,6 +115,7 @@ def _write_runner(
     safety_defaults=None,
     require_ready_arg=False,
     invoke_gate_args=False,
+    gate_validator_module="scripts.function_tracer_pcode.validation.phase3_runner_safety_lane",
     target_functions=None,
     pair_filter=None,
 ) -> None:
@@ -182,7 +183,7 @@ def _write_runner(
     if invoke_gate_args:
         lines.extend(
             [
-                '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase3_runner_safety_lane \\',
+                f'"$PYTHON_BIN" -m {gate_validator_module} \\',
                 '    "${PHASE3_GATE_ARGS[@]}"',
             ]
         )
@@ -310,6 +311,17 @@ def test_phase3_lane_index_default_specs_cover_all_plan_lanes():
     assert DEFAULT_PHASE3_LANE_SPECS[8].pending_proof_keeps_final_result == "TIMEOUT"
     assert DEFAULT_PHASE3_LANE_SPECS[0].required_recovery_actions == ("return_coverage_proof_required",)
     assert DEFAULT_PHASE3_LANE_SPECS[8].required_recovery_actions == ("solver_timeout_retry",)
+    assert [spec.gate_validator_module for spec in DEFAULT_PHASE3_LANE_SPECS] == [
+        "scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1",
+        "scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2",
+        "scripts.function_tracer_pcode.validation.phase3_readonly_identity_lane3",
+        "scripts.function_tracer_pcode.validation.phase3_method_b_closure_lane4",
+        "scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5",
+        "scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6",
+        "scripts.function_tracer_pcode.validation.phase3_solver_rewrite_lane7",
+        "scripts.function_tracer_pcode.validation.phase3_solver_rewrite_proof_lane8",
+        "scripts.function_tracer_pcode.validation.phase3_solver_timeout_lane9",
+    ]
     assert all(spec.require_runner_manifest_ref for spec in DEFAULT_PHASE3_LANE_SPECS)
     assert all(spec.require_runner_target_filter for spec in DEFAULT_PHASE3_LANE_SPECS)
     assert all(spec.require_runner_safety_defaults for spec in DEFAULT_PHASE3_LANE_SPECS)
@@ -778,6 +790,131 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_safety_duplicate_vars"] == []
     assert lane["runner_require_ready_arg_present"] is True
     assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_validator_module"] == "scripts.function_tracer_pcode.validation.phase3_runner_safety_lane"
+    assert lane["runner_gate_validator_invocation_count"] == 1
+
+
+def test_phase3_lane_index_accepts_expected_runner_gate_validator_module(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    expected_module = "scripts.function_tracer_pcode.validation.phase3_expected_lane"
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        gate_validator_module=expected_module,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        gate_validator_module=expected_module,
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is True
+    assert manifest["lanes"][0]["runner_gate_validator_module"] == expected_module
+
+
+def test_phase3_lane_index_rejects_wrong_runner_gate_validator_module(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    expected_module = "scripts.function_tracer_pcode.validation.phase3_expected_lane"
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        gate_validator_module=expected_module,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        gate_validator_module="scripts.function_tracer_pcode.validation.phase3_wrong_lane",
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_validator_module"] == "scripts.function_tracer_pcode.validation.phase3_wrong_lane"
+    assert "phase3_lane_runner_gate_validator_module" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_duplicate_runner_gate_validator_invocations(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    expected_module = "scripts.function_tracer_pcode.validation.phase3_expected_lane"
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        gate_validator_module=expected_module,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        gate_validator_module=expected_module,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(f'"$PYTHON_BIN" -m {expected_module} "${{PHASE3_GATE_ARGS[@]}}"\n')
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is False
+    assert lane["runner_gate_validator_invocation_count"] == 2
+    assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_runner_safety_default_drift(tmp_path):
