@@ -34,6 +34,7 @@ def _write_manifest(
     root: Path,
     spec: Phase3LaneSpec,
     *,
+    category="function_call",
     ready=True,
     target_reason_ids=None,
     implementation_lane_id=None,
@@ -80,6 +81,7 @@ def _write_manifest(
                     else (
                         {
                             "id": f"{spec.lane_id}-representative",
+                            "category": category,
                             "function": f"{spec.lane_id}_function",
                             "binary_pair": "B1_B2",
                         },
@@ -103,6 +105,10 @@ def _write_runner(
     executable=True,
     manifest_sha256=None,
     manifest_relpath=None,
+    target_category=None,
+    pair_category=None,
+    target_functions=None,
+    pair_filter=None,
 ) -> None:
     path = repo / spec.runner_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +122,22 @@ def _write_runner(
             [
                 f'PHASE3_MANIFEST_PATH="${{PHASE3_MANIFEST_PATH:-$SCRIPT_DIR/{declared_manifest}}}"',
                 f'PHASE3_MANIFEST_SHA256="${{PHASE3_MANIFEST_SHA256:-{manifest_sha256}}}"',
+            ]
+        )
+    if target_category is not None:
+        if target_category == "function_call":
+            target_var = "FUNCTION_CALL_TARGET_SET"
+        else:
+            target_var = "LOOP_TARGET_SET"
+        resolved_pair_category = pair_category or target_category
+        if resolved_pair_category == "function_call":
+            pair_var = "FUNCTION_CALL_PAIR_FILTER"
+        else:
+            pair_var = "LOOP_PAIR_FILTER"
+        lines.extend(
+            [
+                f'export {target_var}="${{{target_var}:-{",".join(target_functions or ())}}}"',
+                f'export {pair_var}="${{{pair_var}:-{",".join(pair_filter or ())}}}"',
             ]
         )
     path.write_text("\n".join(lines) + "\n")
@@ -493,6 +515,183 @@ def test_phase3_lane_index_rejects_runner_manifest_sha_drift(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_runner_manifest_sha256" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(
+        baseline,
+        spec,
+        entries=[
+            {
+                "id": "entry-one",
+                "category": "function_call",
+                "function": "sample_one",
+                "binary_pair": "B1_B2",
+            },
+            {
+                "id": "entry-two",
+                "category": "function_call",
+                "function": "sample_two",
+                "binary_pair": "B3_B4",
+            },
+        ],
+    )
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        target_functions=("sample_one", "sample_two"),
+        pair_filter=("sample_one:B1_B2", "sample_two:B3_B4"),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is True
+    lane = manifest["lanes"][0]
+    assert lane["expected_target_functions"] == ["sample_one", "sample_two"]
+    assert lane["runner_target_var"] == "FUNCTION_CALL_TARGET_SET"
+    assert lane["runner_pair_filter_var"] == "FUNCTION_CALL_PAIR_FILTER"
+    assert lane["runner_pair_filter"] == ["sample_one:B1_B2", "sample_two:B3_B4"]
+
+
+def test_phase3_lane_index_rejects_runner_target_filter_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        target_functions=("wrong_function",),
+        pair_filter=("wrong_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_target_set" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_pair_filter" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_target_category_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec, category="loop")
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_target_category" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("target_category", "pair_category", "function_name"),
+    (
+        ("function_call", "loop", "runner_target_lane_function"),
+        ("loop", "function_call", "runner_target_lane_function"),
+    ),
+)
+def test_phase3_lane_index_rejects_runner_target_pair_env_var_mismatch(
+    tmp_path,
+    target_category,
+    pair_category,
+    function_name,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec, category=target_category)
+    _write_runner(
+        repo,
+        spec,
+        target_category=target_category,
+        pair_category=pair_category,
+        target_functions=(function_name,),
+        pair_filter=(f"{function_name}:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_runner_pair_filter_var" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_pair_filter" not in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_accepts_expected_proof_completion_gate(tmp_path):

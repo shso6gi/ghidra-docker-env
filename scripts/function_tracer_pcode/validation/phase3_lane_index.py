@@ -40,6 +40,12 @@ _RUNNER_MANIFEST_PATH_RE = re.compile(
 _RUNNER_MANIFEST_SHA_RE = re.compile(
     r'PHASE3_MANIFEST_SHA256="\$\{PHASE3_MANIFEST_SHA256:-(?P<sha>[0-9a-f]{64})\}"'
 )
+_RUNNER_TARGET_SET_RE = re.compile(
+    r'export (?P<var>FUNCTION_CALL_TARGET_SET|LOOP_TARGET_SET)="\$\{(?P=var):-(?P<value>[^"}]*)\}"'
+)
+_RUNNER_PAIR_FILTER_RE = re.compile(
+    r'export (?P<var>FUNCTION_CALL_PAIR_FILTER|LOOP_PAIR_FILTER)="\$\{(?P=var):-(?P<value>[^"}]*)\}"'
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,7 @@ class Phase3LaneSpec:
     completion_required_for_recovery: Optional[Sequence[str]] = None
     required_recovery_actions: Optional[Sequence[str]] = None
     require_runner_manifest_ref: bool = False
+    require_runner_target_filter: bool = False
 
 
 DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
@@ -74,6 +81,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         completion_required_for_recovery=("return_partition_extraction", "return_guard_coverage"),
         required_recovery_actions=("return_coverage_proof_required",),
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=2,
@@ -88,6 +96,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         completion_required_for_recovery=("abi_relation", "high_bit_relation"),
         required_recovery_actions=("abi_relation", "high_bit_relation"),
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=3,
@@ -102,6 +111,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         completion_required_for_recovery=("readonly_operand_identity",),
         required_recovery_actions=("readonly_operand_identity",),
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=4,
@@ -116,6 +126,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         completion_required_for_recovery=("method_b_covering_case", "method_b_guard_partition"),
         required_recovery_actions=("method_b_covering_case", "method_b_guard_partition"),
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=5,
@@ -127,6 +138,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         ready_key="phase3_lane5_ready",
         validator=validate_phase3_sat_unsafety_lane5_manifest,
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=6,
@@ -138,6 +150,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         ready_key="phase3_lane6_ready",
         validator=validate_phase3_unresolved_expression_lane6_manifest,
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=7,
@@ -149,6 +162,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         ready_key="phase3_lane7_ready",
         validator=validate_phase3_solver_rewrite_lane7_manifest,
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=8,
@@ -160,6 +174,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         ready_key="phase3_lane8_ready",
         validator=validate_phase3_solver_rewrite_proof_lane8_manifest,
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
     Phase3LaneSpec(
         lane_number=9,
@@ -174,6 +189,7 @@ DEFAULT_PHASE3_LANE_SPECS: Sequence[Phase3LaneSpec] = (
         completion_required_for_recovery=("solver_timeout_retry",),
         required_recovery_actions=("solver_timeout_retry",),
         require_runner_manifest_ref=True,
+        require_runner_target_filter=True,
     ),
 )
 
@@ -236,6 +252,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "lane_reason_ids": list(_lane_reason_ids(spec)),
         "expected_proof_completion_gate": _expected_proof_completion_gate(spec),
         "require_runner_manifest_ref": spec.require_runner_manifest_ref,
+        "require_runner_target_filter": spec.require_runner_target_filter,
         "expected_runner_manifest_relpath": _expected_runner_manifest_relpath(spec),
         "manifest_ref": _file_ref(path),
         "manifest_relpath": spec.manifest_relpath,
@@ -253,6 +270,15 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_executable": False,
         "runner_manifest_relpath": MISSING_SENTINEL,
         "runner_manifest_sha256": MISSING_SENTINEL,
+        "runner_target_category": MISSING_SENTINEL,
+        "runner_target_var": MISSING_SENTINEL,
+        "runner_pair_filter_var": MISSING_SENTINEL,
+        "runner_target_functions": [],
+        "runner_pair_filter": [],
+        "expected_target_category": MISSING_SENTINEL,
+        "expected_pair_filter_var": MISSING_SENTINEL,
+        "expected_target_functions": [],
+        "expected_pair_filter": [],
     }
     if runner_path.exists():
         lane["runner_status"] = "present" if runner_path.is_file() else "not_file"
@@ -262,6 +288,12 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             runner_refs = _runner_manifest_refs(runner_path)
             lane["runner_manifest_relpath"] = runner_refs["manifest_relpath"]
             lane["runner_manifest_sha256"] = runner_refs["manifest_sha256"]
+            runner_targets = _runner_target_filter(runner_path)
+            lane["runner_target_category"] = runner_targets["category"]
+            lane["runner_target_var"] = runner_targets["target_var"]
+            lane["runner_pair_filter_var"] = runner_targets["pair_filter_var"]
+            lane["runner_target_functions"] = runner_targets["target_functions"]
+            lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
         return lane
     lane["status"] = "present"
@@ -276,6 +308,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["observed_manifest_kind"] = manifest.get("manifest_kind") or MISSING_SENTINEL
     lane["ready_value"] = manifest.get(spec.ready_key, MISSING_SENTINEL)
     lane["observed_target_reason_ids"] = list(manifest.get("target_reason_ids") or ())
+    expected_targets = _manifest_target_filter(manifest)
+    lane["expected_target_category"] = expected_targets["category"]
+    lane["expected_pair_filter_var"] = expected_targets["pair_filter_var"]
+    lane["expected_target_functions"] = expected_targets["target_functions"]
+    lane["expected_pair_filter"] = expected_targets["pair_filter"]
     lane["representative_entries"] = _representative_entries(manifest.get("entries"))
     implementation = manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):
@@ -373,6 +410,48 @@ def _index_checks(
                     "phase3_lane_runner_manifest_sha256",
                     expected=lane.get("manifest_sha256"),
                     actual=lane.get("runner_manifest_sha256"),
+                    **details,
+                )
+            )
+        if lane.get("require_runner_target_filter") is True:
+            checks.append(
+                _ok("phase3_lane_runner_target_category", **details)
+                if lane.get("runner_target_category") == lane.get("expected_target_category")
+                else _failed(
+                    "phase3_lane_runner_target_category",
+                    expected=lane.get("expected_target_category"),
+                    actual=lane.get("runner_target_category"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_target_set", **details)
+                if lane.get("runner_target_functions") == lane.get("expected_target_functions")
+                else _failed(
+                    "phase3_lane_runner_target_set",
+                    expected=lane.get("expected_target_functions"),
+                    actual=lane.get("runner_target_functions"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_pair_filter_var", **details)
+                if lane.get("runner_pair_filter_var") == lane.get("expected_pair_filter_var")
+                else _failed(
+                    "phase3_lane_runner_pair_filter_var",
+                    expected=lane.get("expected_pair_filter_var"),
+                    actual=lane.get("runner_pair_filter_var"),
+                    target_var=lane.get("runner_target_var"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_pair_filter", **details)
+                if lane.get("runner_pair_filter") == lane.get("expected_pair_filter")
+                else _failed(
+                    "phase3_lane_runner_pair_filter",
+                    expected=lane.get("expected_pair_filter"),
+                    actual=lane.get("runner_pair_filter"),
                     **details,
                 )
             )
@@ -554,6 +633,77 @@ def _runner_manifest_refs(runner_path: Path) -> Dict[str, str]:
         "manifest_relpath": path_match.group("path") if path_match else MISSING_SENTINEL,
         "manifest_sha256": sha_match.group("sha") if sha_match else MISSING_SENTINEL,
     }
+
+
+def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
+    try:
+        content = runner_path.read_text(encoding="utf-8")
+    except OSError:
+        return _empty_target_filter()
+    target_match = _RUNNER_TARGET_SET_RE.search(content)
+    pair_match = _RUNNER_PAIR_FILTER_RE.search(content)
+    category = MISSING_SENTINEL
+    if target_match:
+        category = "function_call" if target_match.group("var") == "FUNCTION_CALL_TARGET_SET" else "loop"
+    return {
+        "category": category,
+        "target_var": target_match.group("var") if target_match else MISSING_SENTINEL,
+        "pair_filter_var": pair_match.group("var") if pair_match else MISSING_SENTINEL,
+        "target_functions": _split_csv(target_match.group("value") if target_match else None),
+        "pair_filter": _split_csv(pair_match.group("value") if pair_match else None),
+    }
+
+
+def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+    targets: list[tuple[str, str, str]] = []
+    for section in ("entries", "retired_transitions"):
+        raw_entries = manifest.get(section)
+        if not isinstance(raw_entries, (list, tuple)):
+            continue
+        for entry in raw_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            category = entry.get("category")
+            function = entry.get("function")
+            binary_pair = entry.get("binary_pair")
+            if category and function and binary_pair:
+                targets.append((str(category), str(function), str(binary_pair)))
+    if not targets:
+        return _empty_target_filter()
+    categories = tuple(dict.fromkeys(category for category, _, _ in targets))
+    category = categories[0] if len(categories) == 1 else MISSING_SENTINEL
+    functions = list(dict.fromkeys(function for _, function, _ in targets))
+    pair_filter = [f"{function}:{binary_pair}" for _, function, binary_pair in targets]
+    return {
+        "category": category,
+        "pair_filter_var": _expected_pair_filter_var(category),
+        "target_functions": functions,
+        "pair_filter": pair_filter,
+    }
+
+
+def _empty_target_filter() -> Dict[str, Any]:
+    return {
+        "category": MISSING_SENTINEL,
+        "target_var": MISSING_SENTINEL,
+        "pair_filter_var": MISSING_SENTINEL,
+        "target_functions": [],
+        "pair_filter": [],
+    }
+
+
+def _expected_pair_filter_var(category: str) -> str:
+    if category == "function_call":
+        return "FUNCTION_CALL_PAIR_FILTER"
+    if category == "loop":
+        return "LOOP_PAIR_FILTER"
+    return MISSING_SENTINEL
+
+
+def _split_csv(value: Any) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
 def _lane_reason_ids(spec: Phase3LaneSpec) -> tuple[str, ...]:
