@@ -338,7 +338,15 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "manifest_sha256": MISSING_SENTINEL,
         "observed_manifest_kind": MISSING_SENTINEL,
         "ready_value": MISSING_SENTINEL,
+        "manifest_readiness_ready": MISSING_SENTINEL,
+        "manifest_readiness_summary": {},
+        "manifest_readiness_failure_kinds": [],
+        "manifest_readiness_failure_counts": {},
+        "manifest_readiness_ready_entries": MISSING_SENTINEL,
+        "manifest_readiness_failed_entries": MISSING_SENTINEL,
         "validator_status": "not_run",
+        "validator_failure_kinds": [],
+        "validator_failure_counts": {},
         "runner_status": "missing",
         "runner_sha256": MISSING_SENTINEL,
         "runner_executable": False,
@@ -473,6 +481,13 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         return lane
     lane["observed_manifest_kind"] = manifest.get("manifest_kind") or MISSING_SENTINEL
     lane["ready_value"] = manifest.get(spec.ready_key, MISSING_SENTINEL)
+    manifest_readiness = _manifest_readiness(manifest)
+    lane["manifest_readiness_ready"] = manifest_readiness["ready"]
+    lane["manifest_readiness_summary"] = manifest_readiness["summary"]
+    lane["manifest_readiness_failure_kinds"] = manifest_readiness["failure_kinds"]
+    lane["manifest_readiness_failure_counts"] = manifest_readiness["failure_counts"]
+    lane["manifest_readiness_ready_entries"] = manifest_readiness["ready_entries"]
+    lane["manifest_readiness_failed_entries"] = manifest_readiness["failed_entries"]
     lane["observed_target_reason_ids"] = list(manifest.get("target_reason_ids") or ())
     expected_targets = _manifest_target_filter(manifest)
     lane["expected_target_category"] = expected_targets["category"]
@@ -506,6 +521,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         except ValueError as exc:
             lane["validator_status"] = "failed"
             lane["validator_error"] = str(exc)
+            lane["validator_failure_kinds"] = lane["manifest_readiness_failure_kinds"]
+            lane["validator_failure_counts"] = lane["manifest_readiness_failure_counts"]
         else:
             lane["validator_status"] = "passed"
     return lane
@@ -814,10 +831,29 @@ def _index_checks(
             if lane.get("ready_value") is True
             else _failed("phase3_lane_ready", ready_key=lane.get("ready_key"), actual=lane.get("ready_value"), **details)
         )
+        if lane.get("ready_value") is False:
+            checks.append(
+                _ok("phase3_lane_readiness_failure_details", **details)
+                if lane.get("manifest_readiness_failure_kinds")
+                else _failed(
+                    "phase3_lane_readiness_failure_details",
+                    readiness_ready=lane.get("manifest_readiness_ready"),
+                    readiness_summary=lane.get("manifest_readiness_summary"),
+                    failure_kinds=lane.get("manifest_readiness_failure_kinds"),
+                    failure_counts=lane.get("manifest_readiness_failure_counts"),
+                    **details,
+                )
+            )
         checks.append(
             _ok("phase3_lane_validator", **details)
             if lane.get("validator_status") in {"passed", "not_run"}
-            else _failed("phase3_lane_validator", error=lane.get("validator_error"), **details)
+            else _failed(
+                "phase3_lane_validator",
+                error=lane.get("validator_error"),
+                structured_failure_kinds=lane.get("validator_failure_kinds"),
+                structured_failure_counts=lane.get("validator_failure_counts"),
+                **details,
+            )
         )
         representative_entries = lane.get("representative_entries")
         checks.append(
@@ -988,6 +1024,54 @@ def _representative_entries(entries: Any) -> list[Dict[str, Any]]:
 
 def _representative_entry_is_concrete(entry: Mapping[str, Any]) -> bool:
     return all(entry.get(key) not in {None, "", MISSING_SENTINEL} for key in ("id", "function", "binary_pair"))
+
+
+def _manifest_readiness(manifest: Mapping[str, Any]) -> Dict[str, Any]:
+    readiness = manifest.get("readiness")
+    if not isinstance(readiness, Mapping):
+        return {
+            "ready": MISSING_SENTINEL,
+            "summary": {},
+            "failure_kinds": [],
+            "failure_counts": {},
+            "ready_entries": MISSING_SENTINEL,
+            "failed_entries": MISSING_SENTINEL,
+        }
+    failure_kinds = sorted(str(kind) for kind in readiness.get("failure_kinds") or ())
+    failure_counts = _manifest_readiness_failure_counts(readiness, fallback_kinds=failure_kinds)
+    return {
+        "ready": readiness.get("ready", MISSING_SENTINEL),
+        "summary": dict(readiness.get("summary") or {}) if isinstance(readiness.get("summary"), Mapping) else {},
+        "failure_kinds": failure_kinds,
+        "failure_counts": failure_counts,
+        "ready_entries": readiness.get("ready_entries", MISSING_SENTINEL),
+        "failed_entries": readiness.get("failed_entries", MISSING_SENTINEL),
+    }
+
+
+def _manifest_readiness_failure_counts(
+    readiness: Mapping[str, Any],
+    *,
+    fallback_kinds: Sequence[str],
+) -> Dict[str, int]:
+    raw_counts = readiness.get("failure_counts")
+    if isinstance(raw_counts, Mapping):
+        return {
+            str(kind): int(count)
+            for kind, count in sorted(raw_counts.items(), key=lambda item: str(item[0]))
+            if isinstance(count, int)
+        }
+    checks = readiness.get("checks")
+    if isinstance(checks, (list, tuple)):
+        counts: Dict[str, int] = {}
+        for check in checks:
+            if not isinstance(check, Mapping) or check.get("status") != "failed":
+                continue
+            kind = str(check.get("kind") or MISSING_SENTINEL)
+            counts[kind] = counts.get(kind, 0) + 1
+        if counts:
+            return dict(sorted(counts.items()))
+    return {kind: 1 for kind in fallback_kinds}
 
 
 def _runner_manifest_refs(runner_path: Path) -> Dict[str, str]:

@@ -41,6 +41,7 @@ def _write_manifest(
     implementation_target_reason_id=None,
     implementation_lane_reason_ids=None,
     proof_completion_gate=None,
+    readiness=None,
     entries=None,
 ) -> None:
     path = root / spec.manifest_relpath
@@ -69,29 +70,27 @@ def _write_manifest(
             "completion_required_for_recovery": list(spec.completion_required_for_recovery or ()),
             "required_recovery_actions": list(spec.required_recovery_actions or ()),
         }
-    path.write_text(
-        json.dumps(
-            {
-                "manifest_kind": spec.manifest_kind,
-                spec.ready_key: ready,
-                "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
-                "entries": list(
-                    entries
-                    if entries is not None
-                    else (
-                        {
-                            "id": f"{spec.lane_id}-representative",
-                            "category": category,
-                            "function": f"{spec.lane_id}_function",
-                            "binary_pair": "B1_B2",
-                        },
-                    )
-                ),
-                "implementation_manifest": implementation_manifest,
-            },
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "manifest_kind": spec.manifest_kind,
+        spec.ready_key: ready,
+        "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
+        "entries": list(
+            entries
+            if entries is not None
+            else (
+                {
+                    "id": f"{spec.lane_id}-representative",
+                    "category": category,
+                    "function": f"{spec.lane_id}_function",
+                    "binary_pair": "B1_B2",
+                },
+            )
+        ),
+        "implementation_manifest": implementation_manifest,
+    }
+    if readiness is not None:
+        payload["readiness"] = readiness
+    path.write_text(json.dumps(payload, sort_keys=True))
 
 
 def _manifest_sha256(root: Path, spec: Phase3LaneSpec) -> str:
@@ -423,6 +422,132 @@ def test_phase3_lane_index_rejects_target_reason_drift(tmp_path):
     assert manifest["summary"]["failed_kind_counts"]["phase3_lane_target_reason_ids"] == 1
     failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
     assert failed_lanes["lane_two"]["failed_kinds"] == ["phase3_lane_target_reason_ids"]
+
+
+def test_phase3_lane_index_records_manifest_readiness_failure_details(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(
+        baseline,
+        spec,
+        ready=False,
+        readiness={
+            "ready": False,
+            "ready_entries": 1,
+            "failed_entries": 2,
+            "summary": {
+                "total": 3,
+                "passed": 1,
+                "failed": 2,
+            },
+            "failure_kinds": ["missing_object_key", "missing_reason_tuple"],
+            "failure_counts": {
+                "missing_object_key": 1,
+                "missing_reason_tuple": 2,
+            },
+            "checks": [
+                {"kind": "missing_object_key", "status": "failed"},
+                {"kind": "missing_reason_tuple", "status": "failed"},
+                {"kind": "missing_reason_tuple", "status": "failed"},
+            ],
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["manifest_readiness_ready"] is False
+    assert lane["manifest_readiness_summary"] == {"failed": 2, "passed": 1, "total": 3}
+    assert lane["manifest_readiness_failure_kinds"] == [
+        "missing_object_key",
+        "missing_reason_tuple",
+    ]
+    assert lane["manifest_readiness_failure_counts"] == {
+        "missing_object_key": 1,
+        "missing_reason_tuple": 2,
+    }
+    assert lane["manifest_readiness_ready_entries"] == 1
+    assert lane["manifest_readiness_failed_entries"] == 2
+    assert "phase3_lane_ready" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_readiness_failure_details" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_ready_false_without_readiness_failure_details(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(baseline, spec, ready=False)
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["manifest_readiness_ready"] == "<missing>"
+    assert lane["manifest_readiness_failure_kinds"] == []
+    assert "phase3_lane_ready" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_readiness_failure_details" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_records_validator_structured_failure_details(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(
+        baseline,
+        spec,
+        ready=False,
+        readiness={
+            "ready": False,
+            "summary": {"total": 1, "passed": 0, "failed": 1},
+            "failure_kinds": ["validator_structured_failure"],
+            "checks": [
+                {"kind": "validator_structured_failure", "status": "failed"},
+            ],
+        },
+    )
+    path = baseline / spec.manifest_relpath
+    payload = json.loads(path.read_text())
+    payload["validator_should_fail"] = True
+    path.write_text(json.dumps(payload, sort_keys=True))
+    _write_runner(repo, spec)
+
+    index_path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(index_path.read_text())
+    lane = manifest["lanes"][0]
+    validator_check = next(
+        check for check in manifest["checks"] if check["kind"] == "phase3_lane_validator"
+    )
+
+    assert lane["validator_status"] == "failed"
+    assert lane["validator_failure_kinds"] == ["validator_structured_failure"]
+    assert lane["validator_failure_counts"] == {"validator_structured_failure": 1}
+    assert validator_check["structured_failure_kinds"] == ["validator_structured_failure"]
+    assert validator_check["structured_failure_counts"] == {"validator_structured_failure": 1}
+    assert "phase3_lane_validator" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_implementation_reason_drift(tmp_path):
