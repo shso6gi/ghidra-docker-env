@@ -223,6 +223,24 @@ def _safety_defaults(**overrides):
     return defaults
 
 
+def _expected_runner_safety_gate_smoke_argv():
+    return [
+        "-m",
+        "scripts.function_tracer_pcode.validation.phase3_runner_safety_lane",
+        "--gate-stage",
+        "post-fix",
+        "--baseline-raw-dir",
+        "$BASELINE_RAW_DIR",
+        "--output-dir",
+        "$PHASE3_GATE_OUTPUT_DIR",
+        "--phase3-manifest",
+        "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256",
+        "$PHASE3_MANIFEST_SHA256",
+        "--require-ready",
+    ]
+
+
 def _base_path_for_category(category: str) -> str:
     if category == "function_call":
         return "targets/cate1/function_call_test"
@@ -831,6 +849,8 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
     assert lane["runner_gate_smoke_argv_matches_expected"] is True
     assert lane["runner_gate_smoke_error"] == "<missing>"
+    assert lane["runner_gate_smoke_expected_argv"] == _expected_runner_safety_gate_smoke_argv()
+    assert lane["runner_gate_smoke_observed_argv"] == lane["runner_gate_smoke_expected_argv"]
 
 
 def test_phase3_lane_index_rejects_hardcoded_validator_args_without_gate_array(tmp_path):
@@ -1345,6 +1365,22 @@ def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
     assert lane["runner_gate_smoke_argv_matches_expected"] is False
     assert lane["runner_gate_smoke_error"] == "runner smoke validator argv differed from expected gate arguments"
+    assert lane["runner_gate_smoke_expected_argv"] == _expected_runner_safety_gate_smoke_argv()
+    assert lane["runner_gate_smoke_observed_argv"] == [
+        "-m",
+        "scripts.function_tracer_pcode.validation.phase3_runner_safety_lane",
+        "--gate-stage",
+        "post-fix",
+        "--baseline-raw-dir",
+        "$BASELINE_RAW_DIR",
+        "--output-dir",
+        "/tmp/phase3-wrong-gate-output",
+        "--phase3-manifest",
+        "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256",
+        "$PHASE3_MANIFEST_SHA256",
+        "--require-ready",
+    ]
     assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
 
 

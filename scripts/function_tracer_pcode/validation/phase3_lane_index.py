@@ -369,6 +369,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_smoke_validator_invocation_count": 0,
         "runner_gate_smoke_argv_matches_expected": False,
         "runner_gate_smoke_error": MISSING_SENTINEL,
+        "runner_gate_smoke_expected_argv": [],
+        "runner_gate_smoke_observed_argv": [],
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -424,6 +426,8 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
                 "gate_smoke_argv_matches_expected"
             ]
             lane["runner_gate_smoke_error"] = runner_safety["gate_smoke_error"]
+            lane["runner_gate_smoke_expected_argv"] = runner_safety["gate_smoke_expected_argv"]
+            lane["runner_gate_smoke_observed_argv"] = runner_safety["gate_smoke_observed_argv"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -749,6 +753,8 @@ def _index_checks(
                     invocation_count=lane.get("runner_gate_smoke_validator_invocation_count"),
                     argv_matches_expected=lane.get("runner_gate_smoke_argv_matches_expected"),
                     error=lane.get("runner_gate_smoke_error"),
+                    expected_argv=lane.get("runner_gate_smoke_expected_argv"),
+                    observed_argv=lane.get("runner_gate_smoke_observed_argv"),
                     **details,
                 )
             )
@@ -1001,6 +1007,8 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_smoke_validator_invocation_count": 0,
             "gate_smoke_argv_matches_expected": False,
             "gate_smoke_error": MISSING_SENTINEL,
+            "gate_smoke_expected_argv": [],
+            "gate_smoke_observed_argv": [],
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -1027,6 +1035,8 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": gate_probe["gate_smoke_validator_invocation_count"],
         "gate_smoke_argv_matches_expected": gate_probe["gate_smoke_argv_matches_expected"],
         "gate_smoke_error": gate_probe["gate_smoke_error"],
+        "gate_smoke_expected_argv": gate_probe["gate_smoke_expected_argv"],
+        "gate_smoke_observed_argv": gate_probe["gate_smoke_observed_argv"],
     }
 
 
@@ -1108,6 +1118,8 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": smoke_result["validator_invocation_count"],
         "gate_smoke_argv_matches_expected": smoke_result["argv_matches_expected"],
         "gate_smoke_error": smoke_result["error"] or MISSING_SENTINEL,
+        "gate_smoke_expected_argv": smoke_result["expected_argv"],
+        "gate_smoke_observed_argv": smoke_result["observed_argv"],
     }
 
 
@@ -1132,6 +1144,8 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": 0,
         "gate_smoke_argv_matches_expected": False,
         "gate_smoke_error": MISSING_SENTINEL,
+        "gate_smoke_expected_argv": [],
+        "gate_smoke_observed_argv": [],
     }
 
 
@@ -1423,6 +1437,11 @@ def _runner_gate_smoke_result(
         invocation_log = tmp / "validator-invocations.jsonl"
         _write_runner_smoke_python_stub(stub_python, invocation_log)
         env = _runner_smoke_environment(runner_path, tmp, stub_dir, stub_python)
+        expected_audit_argv = _expected_runner_smoke_audit_argv(
+            validator_module,
+            gate_args,
+            include_require_ready,
+        )
         expected_argv = _expected_runner_smoke_argv(
             validator_module,
             gate_args,
@@ -1441,12 +1460,19 @@ def _runner_gate_smoke_result(
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return _runner_gate_smoke_failed(f"runner smoke execution failed: {exc}")
+            return _runner_gate_smoke_failed(
+                f"runner smoke execution failed: {exc}",
+                expected_argv=expected_audit_argv,
+            )
         try:
             invocations = _read_runner_smoke_invocations(invocation_log)
         except ValueError as exc:
-            return _runner_gate_smoke_failed(f"runner smoke validator invocation log was invalid: {exc}")
+            return _runner_gate_smoke_failed(
+                f"runner smoke validator invocation log was invalid: {exc}",
+                expected_argv=expected_audit_argv,
+            )
         invocation_count = len(invocations)
+        observed_audit_argv = _normalize_runner_smoke_argv(invocations[0], env) if invocations else []
         argv_matches_expected = (
             invocation_count == 1
             and expected_argv is not None
@@ -1457,27 +1483,37 @@ def _runner_gate_smoke_result(
                 f"runner smoke execution failed: returncode={completed.returncode}",
                 invocation_count=invocation_count,
                 argv_matches_expected=argv_matches_expected,
+                expected_argv=expected_audit_argv,
+                observed_argv=observed_audit_argv,
             )
         if invocation_count != 1:
             return _runner_gate_smoke_failed(
                 f"runner smoke validator invocation count was {invocation_count}",
                 invocation_count=invocation_count,
+                expected_argv=expected_audit_argv,
+                observed_argv=observed_audit_argv,
             )
         if expected_argv is None:
             return _runner_gate_smoke_failed(
                 "runner smoke expected validator argv was unavailable",
                 invocation_count=invocation_count,
+                expected_argv=expected_audit_argv,
+                observed_argv=observed_audit_argv,
             )
         if invocations[0] != expected_argv:
             return _runner_gate_smoke_failed(
                 "runner smoke validator argv differed from expected gate arguments",
                 invocation_count=invocation_count,
+                expected_argv=expected_audit_argv,
+                observed_argv=observed_audit_argv,
             )
         return {
             "status": "passed",
             "validator_invocation_count": invocation_count,
             "argv_matches_expected": True,
             "error": None,
+            "expected_argv": expected_audit_argv,
+            "observed_argv": observed_audit_argv,
         }
 
 
@@ -1486,12 +1522,16 @@ def _runner_gate_smoke_failed(
     *,
     invocation_count: int = 0,
     argv_matches_expected: bool = False,
+    expected_argv: Optional[Sequence[str]] = None,
+    observed_argv: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     return {
         "status": "failed",
         "validator_invocation_count": invocation_count,
         "argv_matches_expected": argv_matches_expected,
         "error": error,
+        "expected_argv": list(expected_argv or ()),
+        "observed_argv": list(observed_argv or ()),
     }
 
 
@@ -1545,6 +1585,25 @@ def _expected_runner_smoke_argv(
     return argv
 
 
+def _expected_runner_smoke_audit_argv(
+    validator_module: str,
+    gate_args: Sequence[str],
+    include_require_ready: bool,
+) -> list[str]:
+    if validator_module == MISSING_SENTINEL:
+        return []
+    argv = ["-m", validator_module]
+    for raw in gate_args:
+        parsed = _split_static_gate_arg(raw)
+        if parsed is None:
+            return []
+        flag, value = parsed
+        argv.extend([flag, value])
+    if include_require_ready:
+        argv.append("--require-ready")
+    return argv
+
+
 def _resolve_runner_smoke_gate_value(value: str, env: Mapping[str, str]) -> str:
     resolved = value
     for name in sorted(_RUNNER_SMOKE_GATE_VALUE_ENV_KEYS, key=len, reverse=True):
@@ -1554,6 +1613,19 @@ def _resolve_runner_smoke_gate_value(value: str, env: Mapping[str, str]) -> str:
         resolved = resolved.replace("${" + name + "}", replacement)
         resolved = resolved.replace("$" + name, replacement)
     return resolved
+
+
+def _normalize_runner_smoke_argv(argv: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    normalized = [str(item) for item in argv]
+    replacements = [
+        (value, f"${name}")
+        for name in _RUNNER_SMOKE_GATE_VALUE_ENV_KEYS
+        for value in (env.get(name),)
+        if value
+    ]
+    for value, placeholder in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        normalized = [item.replace(value, placeholder) for item in normalized]
+    return normalized
 
 
 _RUNNER_SMOKE_GATE_VALUE_ENV_KEYS = (
