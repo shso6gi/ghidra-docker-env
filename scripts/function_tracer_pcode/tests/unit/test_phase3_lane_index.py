@@ -827,6 +827,10 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_args_assignment_count"] == 1
     assert lane["runner_gate_args_invalid_mutation_count"] == 0
     assert lane["runner_gate_args_invalid_mutations"] == []
+    assert lane["runner_gate_smoke_status"] == "passed"
+    assert lane["runner_gate_smoke_validator_invocation_count"] == 1
+    assert lane["runner_gate_smoke_argv_matches_expected"] is True
+    assert lane["runner_gate_smoke_error"] == "<missing>"
 
 
 def test_phase3_lane_index_rejects_hardcoded_validator_args_without_gate_array(tmp_path):
@@ -1280,6 +1284,68 @@ def test_phase3_lane_index_rejects_runner_failure_after_gate_validator(tmp_path)
     assert lane["runner_gate_args_invalid_mutation_count"] >= 1
     assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
     assert "runner smoke execution failed: returncode=1" in lane["runner_gate_args_invalid_mutations"]
+    assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
+    assert lane["runner_gate_smoke_status"] == "failed"
+    assert lane["runner_gate_smoke_validator_invocation_count"] == 1
+    assert lane["runner_gate_smoke_argv_matches_expected"] is True
+    assert lane["runner_gate_smoke_error"] == "runner smoke execution failed: returncode=1"
+
+
+def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            "PHASE3_GATE_ARGS=(",
+            'PHASE3_GATE_OUTPUT_DIR="/tmp/phase3-wrong-gate-output"\nPHASE3_GATE_ARGS=(',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_required_gate_args"] == {
+        "--gate-stage": "post-fix",
+        "--baseline-raw-dir": "$BASELINE_RAW_DIR",
+        "--output-dir": "$PHASE3_GATE_OUTPUT_DIR",
+        "--phase3-manifest": "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256": "$PHASE3_MANIFEST_SHA256",
+    }
+    assert lane["runner_gate_smoke_status"] == "failed"
+    assert lane["runner_gate_smoke_validator_invocation_count"] == 1
+    assert lane["runner_gate_smoke_argv_matches_expected"] is False
+    assert lane["runner_gate_smoke_error"] == "runner smoke validator argv differed from expected gate arguments"
+    assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
 
 
 @pytest.mark.parametrize("early_exit", ("exit 0", "exec true"))

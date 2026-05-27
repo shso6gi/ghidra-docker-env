@@ -365,6 +365,10 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_args_assignment_count": 0,
         "runner_gate_args_invalid_mutations": [],
         "runner_gate_args_invalid_mutation_count": 0,
+        "runner_gate_smoke_status": "not_run",
+        "runner_gate_smoke_validator_invocation_count": 0,
+        "runner_gate_smoke_argv_matches_expected": False,
+        "runner_gate_smoke_error": MISSING_SENTINEL,
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -412,6 +416,14 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_gate_args_assignment_count"] = runner_safety["gate_args_assignment_count"]
             lane["runner_gate_args_invalid_mutations"] = runner_safety["gate_args_invalid_mutations"]
             lane["runner_gate_args_invalid_mutation_count"] = runner_safety["gate_args_invalid_mutation_count"]
+            lane["runner_gate_smoke_status"] = runner_safety["gate_smoke_status"]
+            lane["runner_gate_smoke_validator_invocation_count"] = runner_safety[
+                "gate_smoke_validator_invocation_count"
+            ]
+            lane["runner_gate_smoke_argv_matches_expected"] = runner_safety[
+                "gate_smoke_argv_matches_expected"
+            ]
+            lane["runner_gate_smoke_error"] = runner_safety["gate_smoke_error"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -726,6 +738,20 @@ def _index_checks(
                     **details,
                 )
             )
+            checks.append(
+                _ok("phase3_lane_runner_gate_smoke", **details)
+                if lane.get("runner_gate_smoke_status") == "passed"
+                and lane.get("runner_gate_smoke_validator_invocation_count") == 1
+                and lane.get("runner_gate_smoke_argv_matches_expected") is True
+                else _failed(
+                    "phase3_lane_runner_gate_smoke",
+                    smoke_status=lane.get("runner_gate_smoke_status"),
+                    invocation_count=lane.get("runner_gate_smoke_validator_invocation_count"),
+                    argv_matches_expected=lane.get("runner_gate_smoke_argv_matches_expected"),
+                    error=lane.get("runner_gate_smoke_error"),
+                    **details,
+                )
+            )
         checks.append(
             _ok("phase3_lane_manifest_kind", **details)
             if lane.get("observed_manifest_kind") == lane.get("expected_manifest_kind")
@@ -971,6 +997,10 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_args_assignment_count": 0,
             "gate_args_invalid_mutations": [],
             "gate_args_invalid_mutation_count": 0,
+            "gate_smoke_status": "not_run",
+            "gate_smoke_validator_invocation_count": 0,
+            "gate_smoke_argv_matches_expected": False,
+            "gate_smoke_error": MISSING_SENTINEL,
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -993,6 +1023,10 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_args_assignment_count": gate_probe["gate_args_assignment_count"],
         "gate_args_invalid_mutations": gate_probe["gate_args_invalid_mutations"],
         "gate_args_invalid_mutation_count": gate_probe["gate_args_invalid_mutation_count"],
+        "gate_smoke_status": gate_probe["gate_smoke_status"],
+        "gate_smoke_validator_invocation_count": gate_probe["gate_smoke_validator_invocation_count"],
+        "gate_smoke_argv_matches_expected": gate_probe["gate_smoke_argv_matches_expected"],
+        "gate_smoke_error": gate_probe["gate_smoke_error"],
     }
 
 
@@ -1045,12 +1079,13 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
             + ", ".join(parsed_args["invalid_optional_args"])
         )
 
-    smoke_error = _runner_gate_smoke_error(
+    smoke_result = _runner_gate_smoke_result(
         runner_path,
         canonical_validator["module"] if canonical_validator else MISSING_SENTINEL,
         gate_block["args"],
         require_ready["present"],
     )
+    smoke_error = smoke_result["error"]
     if smoke_error:
         invalid_mutations.append(smoke_error)
 
@@ -1069,6 +1104,10 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_args_assignment_count": gate_block["assignment_count"],
         "gate_args_invalid_mutations": list(dict.fromkeys(invalid_mutations)),
         "gate_args_invalid_mutation_count": len(list(dict.fromkeys(invalid_mutations))),
+        "gate_smoke_status": smoke_result["status"],
+        "gate_smoke_validator_invocation_count": smoke_result["validator_invocation_count"],
+        "gate_smoke_argv_matches_expected": smoke_result["argv_matches_expected"],
+        "gate_smoke_error": smoke_result["error"] or MISSING_SENTINEL,
     }
 
 
@@ -1089,6 +1128,10 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
         "gate_args_assignment_count": 0,
         "gate_args_invalid_mutations": [],
         "gate_args_invalid_mutation_count": 0,
+        "gate_smoke_status": "not_run",
+        "gate_smoke_validator_invocation_count": 0,
+        "gate_smoke_argv_matches_expected": False,
+        "gate_smoke_error": MISSING_SENTINEL,
     }
 
 
@@ -1365,12 +1408,12 @@ def _runner_gate_args_forbidden_lines(
     return invalid
 
 
-def _runner_gate_smoke_error(
+def _runner_gate_smoke_result(
     runner_path: Path,
     validator_module: str,
     gate_args: Sequence[str],
     include_require_ready: bool,
-) -> Optional[str]:
+) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="phase3-lane-runner-smoke-") as tmp_name:
         tmp = Path(tmp_name)
         stub_dir = tmp / "bin"
@@ -1398,21 +1441,58 @@ def _runner_gate_smoke_error(
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"runner smoke execution failed: {exc}"
+            return _runner_gate_smoke_failed(f"runner smoke execution failed: {exc}")
         try:
             invocations = _read_runner_smoke_invocations(invocation_log)
         except ValueError as exc:
-            return f"runner smoke validator invocation log was invalid: {exc}"
+            return _runner_gate_smoke_failed(f"runner smoke validator invocation log was invalid: {exc}")
         invocation_count = len(invocations)
+        argv_matches_expected = (
+            invocation_count == 1
+            and expected_argv is not None
+            and invocations[0] == expected_argv
+        )
         if completed.returncode != 0:
-            return f"runner smoke execution failed: returncode={completed.returncode}"
+            return _runner_gate_smoke_failed(
+                f"runner smoke execution failed: returncode={completed.returncode}",
+                invocation_count=invocation_count,
+                argv_matches_expected=argv_matches_expected,
+            )
         if invocation_count != 1:
-            return f"runner smoke validator invocation count was {invocation_count}"
+            return _runner_gate_smoke_failed(
+                f"runner smoke validator invocation count was {invocation_count}",
+                invocation_count=invocation_count,
+            )
         if expected_argv is None:
-            return "runner smoke expected validator argv was unavailable"
+            return _runner_gate_smoke_failed(
+                "runner smoke expected validator argv was unavailable",
+                invocation_count=invocation_count,
+            )
         if invocations[0] != expected_argv:
-            return "runner smoke validator argv differed from expected gate arguments"
-        return None
+            return _runner_gate_smoke_failed(
+                "runner smoke validator argv differed from expected gate arguments",
+                invocation_count=invocation_count,
+            )
+        return {
+            "status": "passed",
+            "validator_invocation_count": invocation_count,
+            "argv_matches_expected": True,
+            "error": None,
+        }
+
+
+def _runner_gate_smoke_failed(
+    error: str,
+    *,
+    invocation_count: int = 0,
+    argv_matches_expected: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "status": "failed",
+        "validator_invocation_count": invocation_count,
+        "argv_matches_expected": argv_matches_expected,
+        "error": error,
+    }
 
 
 def _write_runner_smoke_stub(path: Path) -> None:
