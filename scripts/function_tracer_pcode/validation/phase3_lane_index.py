@@ -369,6 +369,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_smoke_validator_invocation_count": 0,
         "runner_gate_smoke_argv_matches_expected": False,
         "runner_gate_smoke_error": MISSING_SENTINEL,
+        "runner_gate_smoke_failure_kind": MISSING_SENTINEL,
         "runner_gate_smoke_returncode": MISSING_SENTINEL,
         "runner_gate_smoke_expected_argv": [],
         "runner_gate_smoke_observed_argv": [],
@@ -428,6 +429,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
                 "gate_smoke_argv_matches_expected"
             ]
             lane["runner_gate_smoke_error"] = runner_safety["gate_smoke_error"]
+            lane["runner_gate_smoke_failure_kind"] = runner_safety["gate_smoke_failure_kind"]
             lane["runner_gate_smoke_returncode"] = runner_safety["gate_smoke_returncode"]
             lane["runner_gate_smoke_expected_argv"] = runner_safety["gate_smoke_expected_argv"]
             lane["runner_gate_smoke_observed_argv"] = runner_safety["gate_smoke_observed_argv"]
@@ -759,6 +761,7 @@ def _index_checks(
                     invocation_count=lane.get("runner_gate_smoke_validator_invocation_count"),
                     argv_matches_expected=lane.get("runner_gate_smoke_argv_matches_expected"),
                     error=lane.get("runner_gate_smoke_error"),
+                    failure_kind=lane.get("runner_gate_smoke_failure_kind"),
                     returncode=lane.get("runner_gate_smoke_returncode"),
                     expected_argv=lane.get("runner_gate_smoke_expected_argv"),
                     observed_argv=lane.get("runner_gate_smoke_observed_argv"),
@@ -1015,6 +1018,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_smoke_validator_invocation_count": 0,
             "gate_smoke_argv_matches_expected": False,
             "gate_smoke_error": MISSING_SENTINEL,
+            "gate_smoke_failure_kind": MISSING_SENTINEL,
             "gate_smoke_returncode": MISSING_SENTINEL,
             "gate_smoke_expected_argv": [],
             "gate_smoke_observed_argv": [],
@@ -1045,6 +1049,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": gate_probe["gate_smoke_validator_invocation_count"],
         "gate_smoke_argv_matches_expected": gate_probe["gate_smoke_argv_matches_expected"],
         "gate_smoke_error": gate_probe["gate_smoke_error"],
+        "gate_smoke_failure_kind": gate_probe["gate_smoke_failure_kind"],
         "gate_smoke_returncode": gate_probe["gate_smoke_returncode"],
         "gate_smoke_expected_argv": gate_probe["gate_smoke_expected_argv"],
         "gate_smoke_observed_argv": gate_probe["gate_smoke_observed_argv"],
@@ -1130,6 +1135,7 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": smoke_result["validator_invocation_count"],
         "gate_smoke_argv_matches_expected": smoke_result["argv_matches_expected"],
         "gate_smoke_error": smoke_result["error"] or MISSING_SENTINEL,
+        "gate_smoke_failure_kind": smoke_result["failure_kind"],
         "gate_smoke_returncode": smoke_result["returncode"],
         "gate_smoke_expected_argv": smoke_result["expected_argv"],
         "gate_smoke_observed_argv": smoke_result["observed_argv"],
@@ -1158,6 +1164,7 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
         "gate_smoke_validator_invocation_count": 0,
         "gate_smoke_argv_matches_expected": False,
         "gate_smoke_error": MISSING_SENTINEL,
+        "gate_smoke_failure_kind": MISSING_SENTINEL,
         "gate_smoke_returncode": MISSING_SENTINEL,
         "gate_smoke_expected_argv": [],
         "gate_smoke_observed_argv": [],
@@ -1478,6 +1485,7 @@ def _runner_gate_smoke_result(
         except (OSError, subprocess.TimeoutExpired) as exc:
             return _runner_gate_smoke_failed(
                 f"runner smoke execution failed: {exc}",
+                failure_kind="execution_error",
                 expected_argv=expected_audit_argv,
             )
         try:
@@ -1485,6 +1493,7 @@ def _runner_gate_smoke_result(
         except ValueError as exc:
             return _runner_gate_smoke_failed(
                 f"runner smoke validator invocation log was invalid: {exc}",
+                failure_kind="invalid_invocation_log",
                 expected_argv=expected_audit_argv,
                 returncode=completed.returncode,
             )
@@ -1501,6 +1510,7 @@ def _runner_gate_smoke_result(
         if completed.returncode != 0:
             return _runner_gate_smoke_failed(
                 f"runner smoke execution failed: returncode={completed.returncode}",
+                failure_kind="nonzero_exit",
                 invocation_count=invocation_count,
                 argv_matches_expected=argv_matches_expected,
                 returncode=completed.returncode,
@@ -1511,6 +1521,7 @@ def _runner_gate_smoke_result(
         if invocation_count != 1:
             return _runner_gate_smoke_failed(
                 f"runner smoke validator invocation count was {invocation_count}",
+                failure_kind="validator_invocation_count",
                 invocation_count=invocation_count,
                 returncode=completed.returncode,
                 expected_argv=expected_audit_argv,
@@ -1520,6 +1531,7 @@ def _runner_gate_smoke_result(
         if expected_argv is None:
             return _runner_gate_smoke_failed(
                 "runner smoke expected validator argv was unavailable",
+                failure_kind="expected_argv_unavailable",
                 invocation_count=invocation_count,
                 returncode=completed.returncode,
                 expected_argv=expected_audit_argv,
@@ -1529,6 +1541,7 @@ def _runner_gate_smoke_result(
         if invocations[0] != expected_argv:
             return _runner_gate_smoke_failed(
                 "runner smoke validator argv differed from expected gate arguments",
+                failure_kind="argv_mismatch",
                 invocation_count=invocation_count,
                 returncode=completed.returncode,
                 expected_argv=expected_audit_argv,
@@ -1540,6 +1553,7 @@ def _runner_gate_smoke_result(
             "validator_invocation_count": invocation_count,
             "argv_matches_expected": True,
             "error": None,
+            "failure_kind": "none",
             "returncode": completed.returncode,
             "expected_argv": expected_audit_argv,
             "observed_argv": observed_audit_argv,
@@ -1550,6 +1564,7 @@ def _runner_gate_smoke_result(
 def _runner_gate_smoke_failed(
     error: str,
     *,
+    failure_kind: str,
     invocation_count: int = 0,
     argv_matches_expected: bool = False,
     returncode: Any = MISSING_SENTINEL,
@@ -1562,6 +1577,7 @@ def _runner_gate_smoke_failed(
         "validator_invocation_count": invocation_count,
         "argv_matches_expected": argv_matches_expected,
         "error": error,
+        "failure_kind": failure_kind,
         "returncode": returncode,
         "expected_argv": list(expected_argv or ()),
         "observed_argv": list(observed_argv or ()),
