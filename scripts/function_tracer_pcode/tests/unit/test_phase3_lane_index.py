@@ -851,6 +851,9 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_smoke_error"] == "<missing>"
     assert lane["runner_gate_smoke_expected_argv"] == _expected_runner_safety_gate_smoke_argv()
     assert lane["runner_gate_smoke_observed_argv"] == lane["runner_gate_smoke_expected_argv"]
+    assert lane["runner_gate_smoke_observed_invocations"] == [
+        lane["runner_gate_smoke_expected_argv"]
+    ]
 
 
 def test_phase3_lane_index_rejects_hardcoded_validator_args_without_gate_array(tmp_path):
@@ -1380,6 +1383,9 @@ def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
         "--phase3-manifest-sha256",
         "$PHASE3_MANIFEST_SHA256",
         "--require-ready",
+    ]
+    assert lane["runner_gate_smoke_observed_invocations"] == [
+        lane["runner_gate_smoke_observed_argv"]
     ]
     assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
 
@@ -3127,6 +3133,14 @@ def test_phase3_lane_index_rejects_duplicate_runner_gate_validator_invocations(t
     lane = manifest["lanes"][0]
     assert lane["runner_gate_args_invoked"] is False
     assert lane["runner_gate_validator_invocation_count"] == 2
+    expected_invocation = _expected_runner_safety_gate_smoke_argv()
+    expected_invocation[1] = expected_module
+    assert lane["runner_gate_smoke_expected_argv"] == []
+    assert lane["runner_gate_smoke_observed_argv"] == expected_invocation
+    assert lane["runner_gate_smoke_observed_invocations"] == [
+        expected_invocation,
+        expected_invocation,
+    ]
     assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
 
 

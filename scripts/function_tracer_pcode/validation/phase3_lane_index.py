@@ -371,6 +371,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_smoke_error": MISSING_SENTINEL,
         "runner_gate_smoke_expected_argv": [],
         "runner_gate_smoke_observed_argv": [],
+        "runner_gate_smoke_observed_invocations": [],
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -428,6 +429,9 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_gate_smoke_error"] = runner_safety["gate_smoke_error"]
             lane["runner_gate_smoke_expected_argv"] = runner_safety["gate_smoke_expected_argv"]
             lane["runner_gate_smoke_observed_argv"] = runner_safety["gate_smoke_observed_argv"]
+            lane["runner_gate_smoke_observed_invocations"] = runner_safety[
+                "gate_smoke_observed_invocations"
+            ]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -755,6 +759,7 @@ def _index_checks(
                     error=lane.get("runner_gate_smoke_error"),
                     expected_argv=lane.get("runner_gate_smoke_expected_argv"),
                     observed_argv=lane.get("runner_gate_smoke_observed_argv"),
+                    observed_invocations=lane.get("runner_gate_smoke_observed_invocations"),
                     **details,
                 )
             )
@@ -1009,6 +1014,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_smoke_error": MISSING_SENTINEL,
             "gate_smoke_expected_argv": [],
             "gate_smoke_observed_argv": [],
+            "gate_smoke_observed_invocations": [],
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -1037,6 +1043,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_error": gate_probe["gate_smoke_error"],
         "gate_smoke_expected_argv": gate_probe["gate_smoke_expected_argv"],
         "gate_smoke_observed_argv": gate_probe["gate_smoke_observed_argv"],
+        "gate_smoke_observed_invocations": gate_probe["gate_smoke_observed_invocations"],
     }
 
 
@@ -1120,6 +1127,7 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_error": smoke_result["error"] or MISSING_SENTINEL,
         "gate_smoke_expected_argv": smoke_result["expected_argv"],
         "gate_smoke_observed_argv": smoke_result["observed_argv"],
+        "gate_smoke_observed_invocations": smoke_result["observed_invocations"],
     }
 
 
@@ -1146,6 +1154,7 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
         "gate_smoke_error": MISSING_SENTINEL,
         "gate_smoke_expected_argv": [],
         "gate_smoke_observed_argv": [],
+        "gate_smoke_observed_invocations": [],
     }
 
 
@@ -1472,7 +1481,10 @@ def _runner_gate_smoke_result(
                 expected_argv=expected_audit_argv,
             )
         invocation_count = len(invocations)
-        observed_audit_argv = _normalize_runner_smoke_argv(invocations[0], env) if invocations else []
+        observed_audit_invocations = [
+            _normalize_runner_smoke_argv(invocation, env) for invocation in invocations
+        ]
+        observed_audit_argv = observed_audit_invocations[0] if observed_audit_invocations else []
         argv_matches_expected = (
             invocation_count == 1
             and expected_argv is not None
@@ -1485,6 +1497,7 @@ def _runner_gate_smoke_result(
                 argv_matches_expected=argv_matches_expected,
                 expected_argv=expected_audit_argv,
                 observed_argv=observed_audit_argv,
+                observed_invocations=observed_audit_invocations,
             )
         if invocation_count != 1:
             return _runner_gate_smoke_failed(
@@ -1492,6 +1505,7 @@ def _runner_gate_smoke_result(
                 invocation_count=invocation_count,
                 expected_argv=expected_audit_argv,
                 observed_argv=observed_audit_argv,
+                observed_invocations=observed_audit_invocations,
             )
         if expected_argv is None:
             return _runner_gate_smoke_failed(
@@ -1499,6 +1513,7 @@ def _runner_gate_smoke_result(
                 invocation_count=invocation_count,
                 expected_argv=expected_audit_argv,
                 observed_argv=observed_audit_argv,
+                observed_invocations=observed_audit_invocations,
             )
         if invocations[0] != expected_argv:
             return _runner_gate_smoke_failed(
@@ -1506,6 +1521,7 @@ def _runner_gate_smoke_result(
                 invocation_count=invocation_count,
                 expected_argv=expected_audit_argv,
                 observed_argv=observed_audit_argv,
+                observed_invocations=observed_audit_invocations,
             )
         return {
             "status": "passed",
@@ -1514,6 +1530,7 @@ def _runner_gate_smoke_result(
             "error": None,
             "expected_argv": expected_audit_argv,
             "observed_argv": observed_audit_argv,
+            "observed_invocations": observed_audit_invocations,
         }
 
 
@@ -1524,6 +1541,7 @@ def _runner_gate_smoke_failed(
     argv_matches_expected: bool = False,
     expected_argv: Optional[Sequence[str]] = None,
     observed_argv: Optional[Sequence[str]] = None,
+    observed_invocations: Optional[Sequence[Sequence[str]]] = None,
 ) -> Dict[str, Any]:
     return {
         "status": "failed",
@@ -1532,6 +1550,7 @@ def _runner_gate_smoke_failed(
         "error": error,
         "expected_argv": list(expected_argv or ()),
         "observed_argv": list(observed_argv or ()),
+        "observed_invocations": [list(argv) for argv in observed_invocations or ()],
     }
 
 
