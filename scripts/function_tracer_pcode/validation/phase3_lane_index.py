@@ -41,10 +41,12 @@ MISSING_SENTINEL = "<missing>"
 LaneValidator = Callable[[Mapping[str, Any]], None]
 RUNNER_GATE_SMOKE_TIMEOUT_SECONDS = 30
 _RUNNER_MANIFEST_PATH_RE = re.compile(
-    r'PHASE3_MANIFEST_PATH="\$\{PHASE3_MANIFEST_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"'
+    r'^(?!\s*#)\s*PHASE3_MANIFEST_PATH="\$\{PHASE3_MANIFEST_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"',
+    re.MULTILINE,
 )
 _RUNNER_MANIFEST_SHA_RE = re.compile(
-    r'PHASE3_MANIFEST_SHA256="\$\{PHASE3_MANIFEST_SHA256:-(?P<sha>[0-9a-f]{64})\}"'
+    r'^(?!\s*#)\s*PHASE3_MANIFEST_SHA256="\$\{PHASE3_MANIFEST_SHA256:-(?P<sha>[0-9a-f]{64})\}"',
+    re.MULTILINE,
 )
 _RUNNER_TARGET_SET_RE = re.compile(
     r'export (?P<var>FUNCTION_CALL_TARGET_SET|LOOP_TARGET_SET)="\$\{(?P=var):-(?P<value>[^"}]*)\}"'
@@ -305,15 +307,59 @@ def build_phase3_lane_index(
 
 
 def validate_phase3_lane_index(manifest: Mapping[str, Any]) -> None:
+    failures: list[str] = []
     if manifest.get("manifest_kind") != "phase3_proof_lane_index":
-        raise ValueError("Phase 3 lane index manifest kind mismatch")
-    if manifest.get("phase3_lanes_ready") is True:
-        return
+        failures.append("manifest_kind")
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        failures.append("manifest_version")
+    if manifest.get("artifact_role") != "derived_audit_lane_index":
+        failures.append("artifact_role")
+    if manifest.get("baseline_id") != BASELINE_ID:
+        failures.append("baseline_id")
+    if manifest.get("baseline_git_head") != BASELINE_GIT_HEAD:
+        failures.append("baseline_git_head")
+
     summary = manifest.get("summary")
     failed = summary.get("failed_kinds") if isinstance(summary, Mapping) else None
-    if not failed:
-        raise ValueError("Phase 3 lane index readiness is false without failed gate kinds")
-    raise ValueError(f"Phase 3 lane index failed: {', '.join(map(str, failed))}")
+    failed_kinds = list(failed or ()) if isinstance(failed, (list, tuple)) else []
+    summary_failed = summary.get("failed") if isinstance(summary, Mapping) else MISSING_SENTINEL
+    if not isinstance(summary, Mapping):
+        failures.append("summary")
+    elif not isinstance(summary_failed, int):
+        failures.append("summary_failed_count")
+
+    checks = manifest.get("checks")
+    failed_check_kinds: list[str] = []
+    if not isinstance(checks, (list, tuple)):
+        failures.append("checks")
+    else:
+        failed_check_kinds = [
+            str(check.get("kind") or MISSING_SENTINEL)
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        ]
+        if isinstance(summary_failed, int) and summary_failed != len(failed_check_kinds):
+            failures.append("summary_failed_count")
+        if failed_kinds != failed_check_kinds:
+            failures.append("summary_failed_kinds")
+
+    ready = manifest.get("phase3_lanes_ready")
+    if ready is True:
+        if summary_failed != 0 or failed_kinds:
+            failures.append("phase3_lanes_ready_summary_clean")
+        if failed_check_kinds:
+            failures.append("phase3_lanes_ready_checks_clean")
+    elif ready is False:
+        if not failed_kinds:
+            failures.append("phase3_lanes_ready_failure_kinds")
+        else:
+            failures.extend(str(kind) for kind in failed_kinds)
+    else:
+        failures.append("phase3_lanes_ready")
+
+    if not failures:
+        return
+    raise ValueError(f"Phase 3 lane index failed: {', '.join(dict.fromkeys(failures))}")
 
 
 def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str, Any]:
@@ -357,6 +403,9 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_status": "missing",
         "runner_sha256": MISSING_SENTINEL,
         "runner_executable": False,
+        "runner_shebang": MISSING_SENTINEL,
+        "runner_strict_mode_present": False,
+        "runner_strict_mode_before_first_command": False,
         "runner_manifest_relpath": MISSING_SENTINEL,
         "runner_manifest_sha256": MISSING_SENTINEL,
         "runner_target_category": MISSING_SENTINEL,
@@ -422,6 +471,12 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         if runner_path.is_file():
             lane["runner_sha256"] = _sha256_file(runner_path)
             lane["runner_executable"] = os.access(runner_path, os.X_OK)
+            runner_shell = _runner_shell_contract(runner_path)
+            lane["runner_shebang"] = runner_shell["shebang"]
+            lane["runner_strict_mode_present"] = runner_shell["strict_mode_present"]
+            lane["runner_strict_mode_before_first_command"] = runner_shell[
+                "strict_mode_before_first_command"
+            ]
             runner_refs = _runner_manifest_refs(runner_path)
             lane["runner_manifest_relpath"] = runner_refs["manifest_relpath"]
             lane["runner_manifest_sha256"] = runner_refs["manifest_sha256"]
@@ -629,6 +684,22 @@ def _index_checks(
                 )
             )
         if lane.get("require_runner_target_filter") is True:
+            expected_target_filter_complete = (
+                lane.get("expected_target_category") in {"function_call", "loop"}
+                and bool(lane.get("expected_target_functions"))
+                and bool(lane.get("expected_pair_filter"))
+            )
+            checks.append(
+                _ok("phase3_lane_manifest_target_filter_complete", **details)
+                if expected_target_filter_complete
+                else _failed(
+                    "phase3_lane_manifest_target_filter_complete",
+                    expected_category=lane.get("expected_target_category"),
+                    expected_functions=lane.get("expected_target_functions"),
+                    expected_pair_filter=lane.get("expected_pair_filter"),
+                    **details,
+                )
+            )
             checks.append(
                 _ok("phase3_lane_runner_target_category", **details)
                 if lane.get("runner_target_category") == lane.get("expected_target_category")
@@ -739,6 +810,19 @@ def _index_checks(
                 )
             )
         if lane.get("require_runner_safety_defaults") is True:
+            checks.append(
+                _ok("phase3_lane_runner_shell_contract", **details)
+                if lane.get("runner_shebang") == "#!/usr/bin/env bash"
+                and lane.get("runner_strict_mode_present") is True
+                and lane.get("runner_strict_mode_before_first_command") is True
+                else _failed(
+                    "phase3_lane_runner_shell_contract",
+                    shebang=lane.get("runner_shebang"),
+                    strict_mode_present=lane.get("runner_strict_mode_present"),
+                    strict_mode_before_first_command=lane.get("runner_strict_mode_before_first_command"),
+                    **details,
+                )
+            )
             checks.append(
                 _ok("phase3_lane_runner_safety_defaults_unique", **details)
                 if not lane.get("runner_safety_duplicate_vars")
@@ -905,6 +989,39 @@ def _index_checks(
             _ok("phase3_lane_ready", **details)
             if lane.get("ready_value") is True
             else _failed("phase3_lane_ready", ready_key=lane.get("ready_key"), actual=lane.get("ready_value"), **details)
+        )
+        readiness_failure_counts = lane.get("manifest_readiness_failure_counts")
+        readiness_failure_total = sum(
+            count
+            for count in (
+                readiness_failure_counts.values()
+                if isinstance(readiness_failure_counts, Mapping)
+                else ()
+            )
+            if isinstance(count, int)
+        )
+        readiness_matches_ready_key = (
+            lane.get("ready_value") is True
+            and lane.get("manifest_readiness_ready") is True
+            and not lane.get("manifest_readiness_failure_kinds")
+            and readiness_failure_total == 0
+        ) or (
+            lane.get("ready_value") is False
+            and lane.get("manifest_readiness_ready") is False
+            and bool(lane.get("manifest_readiness_failure_kinds"))
+        )
+        checks.append(
+            _ok("phase3_lane_readiness_consistent", **details)
+            if readiness_matches_ready_key
+            else _failed(
+                "phase3_lane_readiness_consistent",
+                ready_key=lane.get("ready_key"),
+                ready_value=lane.get("ready_value"),
+                readiness_ready=lane.get("manifest_readiness_ready"),
+                failure_kinds=lane.get("manifest_readiness_failure_kinds"),
+                failure_counts=lane.get("manifest_readiness_failure_counts"),
+                **details,
+            )
         )
         if lane.get("ready_value") is False:
             checks.append(
@@ -1149,16 +1266,71 @@ def _manifest_readiness_failure_counts(
     return {kind: 1 for kind in fallback_kinds}
 
 
+def _runner_shell_contract(runner_path: Path) -> Dict[str, Any]:
+    try:
+        lines = runner_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {
+            "shebang": MISSING_SENTINEL,
+            "strict_mode_present": False,
+            "strict_mode_before_first_command": False,
+        }
+    top_level = _runner_active_top_level_mask(lines)
+    first_command = next(
+        (
+            line.strip()
+            for index, line in enumerate(lines)
+            if index < len(top_level)
+            and top_level[index]
+            and line.strip()
+            and not line.strip().startswith("#")
+            and not line.strip().startswith("#!")
+        ),
+        MISSING_SENTINEL,
+    )
+    return {
+        "shebang": lines[0].strip() if lines else MISSING_SENTINEL,
+        "strict_mode_present": any(
+            index < len(top_level)
+            and top_level[index]
+            and line.strip() == "set -euo pipefail"
+            for index, line in enumerate(lines)
+        ),
+        "strict_mode_before_first_command": first_command == "set -euo pipefail",
+    }
+
+
 def _runner_manifest_refs(runner_path: Path) -> Dict[str, str]:
     try:
-        content = runner_path.read_text(encoding="utf-8")
+        lines = runner_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return {
             "manifest_relpath": MISSING_SENTINEL,
             "manifest_sha256": MISSING_SENTINEL,
         }
-    path_match = _RUNNER_MANIFEST_PATH_RE.search(content)
-    sha_match = _RUNNER_MANIFEST_SHA_RE.search(content)
+    top_level = _runner_active_top_level_mask(lines)
+    path_match = next(
+        (
+            match
+            for index, line in enumerate(lines)
+            if index < len(top_level)
+            and top_level[index]
+            for match in (_RUNNER_MANIFEST_PATH_RE.match(line),)
+            if match
+        ),
+        None,
+    )
+    sha_match = next(
+        (
+            match
+            for index, line in enumerate(lines)
+            if index < len(top_level)
+            and top_level[index]
+            for match in (_RUNNER_MANIFEST_SHA_RE.match(line),)
+            if match
+        ),
+        None,
+    )
     return {
         "manifest_relpath": path_match.group("path") if path_match else MISSING_SENTINEL,
         "manifest_sha256": sha_match.group("sha") if sha_match else MISSING_SENTINEL,
@@ -1167,15 +1339,43 @@ def _runner_manifest_refs(runner_path: Path) -> Dict[str, str]:
 
 def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
     try:
-        content = runner_path.read_text(encoding="utf-8")
+        lines = runner_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return _empty_target_filter()
-    target_match = _RUNNER_TARGET_SET_RE.search(content)
-    pair_match = _RUNNER_PAIR_FILTER_RE.search(content)
-    base_path_match = _RUNNER_BASE_PATH_RE.search(content)
-    matrix_match = _RUNNER_MATRIX_SCRIPT_RE.search(content)
-    current_log_root_args = list(_RUNNER_CURRENT_LOG_ROOT_ARG_RE.finditer(content))
-    baseline_log_root_args = list(_RUNNER_BASELINE_LOG_ROOT_ARG_RE.finditer(content))
+    top_level = _runner_active_top_level_mask(lines)
+    active_lines = [
+        line
+        for index, line in enumerate(lines)
+        if index < len(top_level) and top_level[index]
+    ]
+    target_match = next(
+        (match for line in active_lines for match in (_RUNNER_TARGET_SET_RE.match(line),) if match),
+        None,
+    )
+    pair_match = next(
+        (match for line in active_lines for match in (_RUNNER_PAIR_FILTER_RE.match(line),) if match),
+        None,
+    )
+    base_path_match = next(
+        (match for line in active_lines for match in (_RUNNER_BASE_PATH_RE.match(line),) if match),
+        None,
+    )
+    matrix_match = next(
+        (match for line in active_lines for match in (_RUNNER_MATRIX_SCRIPT_RE.match(line),) if match),
+        None,
+    )
+    current_log_root_args = [
+        match
+        for line in active_lines
+        for match in (_RUNNER_CURRENT_LOG_ROOT_ARG_RE.match(line),)
+        if match
+    ]
+    baseline_log_root_args = [
+        match
+        for line in active_lines
+        for match in (_RUNNER_BASELINE_LOG_ROOT_ARG_RE.match(line),)
+        if match
+    ]
     current_log_root_match = (
         _RUNNER_CURRENT_LOG_ROOT_RE.fullmatch(current_log_root_args[0].group("value"))
         if len(current_log_root_args) == 1
@@ -1216,7 +1416,7 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
 
 def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
     try:
-        content = runner_path.read_text(encoding="utf-8")
+        lines = runner_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return {
             "defaults": {},
@@ -1254,7 +1454,13 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
-    for match in _RUNNER_DEFAULT_ENV_RE.finditer(content):
+    top_level = _runner_active_top_level_mask(lines)
+    for index, line in enumerate(lines):
+        if index >= len(top_level) or not top_level[index]:
+            continue
+        match = _RUNNER_DEFAULT_ENV_RE.match(line)
+        if not match:
+            continue
         var = match.group("var")
         if var in defaults:
             duplicate_vars.append(var)
@@ -1445,6 +1651,55 @@ def _runner_static_top_level_mask(lines: Sequence[str]) -> list[bool]:
                 function_depth = max(0, function_depth - 1)
             continue
     return mask
+
+
+def _runner_active_top_level_mask(lines: Sequence[str]) -> list[bool]:
+    function_top_level = _runner_static_top_level_mask(lines)
+    mask: list[bool] = []
+    compound_depth = 0
+    subshell_depth = 0
+    guard_block_depth = 0
+    pending_guard_block = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        code = _runner_shell_structure_code(stripped)
+        opens_guard_block = (
+            re.search(r'(?:&&|\|\|)\s*\{\s*$', code) is not None
+            or (pending_guard_block and code == "{")
+        )
+        opens_subshell = code.startswith("(")
+        active = (
+            function_top_level[index]
+            and compound_depth == 0
+            and subshell_depth == 0
+            and guard_block_depth == 0
+            and not opens_guard_block
+            and not opens_subshell
+        )
+        mask.append(active)
+        if not function_top_level[index] or not code:
+            continue
+        pending_guard_block = False
+        if re.match(r'^(?:fi|done|esac)\b', code):
+            compound_depth = max(0, compound_depth - 1)
+        if code == ")":
+            subshell_depth = max(0, subshell_depth - 1)
+        if code == "}":
+            guard_block_depth = max(0, guard_block_depth - 1)
+        if re.match(r'^(?:if|for|while|until|case|select)\b', code):
+            compound_depth += 1
+        if opens_subshell:
+            subshell_depth += 1
+        if opens_guard_block:
+            guard_block_depth += 1
+        pending_guard_block = re.search(r'(?:&&|\|\|)\s*\\$', code) is not None
+    return mask
+
+
+def _runner_shell_structure_code(stripped: str) -> str:
+    if not stripped or stripped.startswith("#"):
+        return ""
+    return re.sub(r'\s+#.*$', '', stripped).strip()
 
 
 def _line_starts_shell_function(stripped: str) -> bool:
