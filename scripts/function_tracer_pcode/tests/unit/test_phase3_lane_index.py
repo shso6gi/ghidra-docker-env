@@ -360,7 +360,7 @@ def test_phase3_lane_index_builds_ready_index_for_custom_specs(tmp_path):
         assert lane["lane_baseline_id"] == "observed-v0@0a53352"
         assert lane["lane_baseline_git_head"] == "0a53352cf3c9528abfb654906ed7b963474bedc5"
         assert lane["lane_baseline_raw_artifact_ref"] == _baseline_raw_ref(baseline)
-    validate_phase3_lane_index(manifest)
+    validate_phase3_lane_index(manifest, lane_specs=_specs())
 
 
 def test_phase3_lane_index_validator_rejects_ready_true_with_failed_summary(tmp_path):
@@ -425,6 +425,148 @@ def test_phase3_lane_index_validator_rejects_ready_true_identity_drift(tmp_path)
 
     with pytest.raises(ValueError, match="baseline_git_head"):
         validate_phase3_lane_index(manifest)
+
+
+def test_phase3_lane_index_validator_rejects_tampered_lane_without_failed_check(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"][0]["lane_baseline_git_head"] = "wrong-head"
+
+    with pytest.raises(ValueError, match="derived_failed_kinds"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
+
+
+def test_phase3_lane_index_validator_rejects_missing_lane_entry(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"] = manifest["lanes"][:-1]
+
+    with pytest.raises(ValueError, match="lane_specs"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
+
+
+def test_phase3_lane_index_validator_rejects_forged_default_index_without_default_lanes():
+    manifest = {
+        "manifest_version": 1,
+        "manifest_kind": "phase3_proof_lane_index",
+        "artifact_role": "derived_audit_lane_index",
+        "baseline_id": "observed-v0@0a53352",
+        "baseline_git_head": DEFAULT_BASELINE_GIT_HEAD,
+        "phase3_lanes_ready": True,
+        "summary": {
+            "failed": 0,
+            "failed_kinds": [],
+        },
+        "checks": [],
+        "lanes": [],
+    }
+
+    with pytest.raises(ValueError, match="lane_specs"):
+        validate_phase3_lane_index(manifest)
+
+
+def test_phase3_lane_index_validator_recomputes_duplicate_representative_ids(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"][0]["representative_entries"] = [
+        {
+            "index": 0,
+            "id": "hidden-duplicate-representative-id",
+            "function": "function_one",
+            "binary_pair": "B1_B2",
+        },
+        {
+            "index": 1,
+            "id": "hidden-duplicate-representative-id",
+            "function": "function_two",
+            "binary_pair": "B3_B4",
+        },
+    ]
+    manifest["lanes"][0]["representative_entry_duplicate_ids"] = []
+
+    with pytest.raises(ValueError, match="derived_failed_kinds"):
+        validate_phase3_lane_index(manifest, lane_specs=(spec,))
+
+
+def test_phase3_lane_index_validator_recomputes_readiness_entry_counts_from_representatives(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"][0]["manifest_readiness_ready_entries"] = 999
+
+    with pytest.raises(ValueError, match="derived_failed_kinds"):
+        validate_phase3_lane_index(manifest, lane_specs=(spec,))
+
+
+def test_phase3_lane_index_validator_rejects_non_mapping_lane_entries(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"][0] = "not-a-mapping"
+
+    with pytest.raises(ValueError, match="lane_specs"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
 
 
 def test_phase3_lane_index_rejects_lane_manifest_version_drift(tmp_path):
@@ -663,6 +805,25 @@ def test_phase3_lane_index_type_hints_resolve():
     assert hints["return"] == tuple[str, ...]
 
 
+@pytest.mark.parametrize(
+    ("code", "expected_delta"),
+    (
+        ("{", 1),
+        ("}", -1),
+        ('echo "{"', 0),
+        ("echo '{'", 0),
+        ('echo "${VALUE:-{}}"', 0),
+        ('unused_contract() { echo "{"', 1),
+        ('echo "${VALUE:-{}}" }', -1),
+    ),
+)
+def test_phase3_lane_index_shell_brace_delta_ignores_quotes_and_parameter_expansions(
+    code,
+    expected_delta,
+):
+    assert phase3_lane_index._shell_brace_delta(code) == expected_delta
+
+
 def test_phase3_lane_index_rejects_missing_manifest(tmp_path):
     baseline = tmp_path / "baseline"
     repo = tmp_path / "repo"
@@ -772,6 +933,115 @@ def test_phase3_lane_index_records_manifest_readiness_failure_details(tmp_path):
     assert lane["manifest_readiness_failed_entries"] == 2
     assert "phase3_lane_ready" in manifest["summary"]["failed_kinds"]
     assert "phase3_lane_readiness_failure_details" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_ready_true_with_failed_readiness_entry_count(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(
+        baseline,
+        spec,
+        ready=True,
+        readiness={
+            "ready": True,
+            "ready_entries": 1,
+            "failed_entries": 1,
+            "failure_kinds": [],
+            "failure_counts": {},
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["manifest_readiness_ready"] is True
+    assert lane["manifest_readiness_failed_entries"] == 1
+    assert "phase3_lane_readiness_entry_counts" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_readiness_consistent" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_readiness_entry_count_mismatch_with_representatives(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(
+        baseline,
+        spec,
+        ready=True,
+        readiness={
+            "ready": True,
+            "ready_entries": 999,
+            "failed_entries": 0,
+            "failure_kinds": [],
+            "failure_counts": {},
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_readiness_entry_counts" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "readiness_summary",
+    (
+        {"total": 999, "passed": 1, "failed": 0},
+        {"total": 1, "passed": 999, "failed": 0},
+        {"total": 1, "passed": 1, "failed": 999},
+    ),
+)
+def test_phase3_lane_index_rejects_readiness_summary_entry_count_mismatch(
+    tmp_path,
+    readiness_summary,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = _specs()[0]
+    _write_manifest(
+        baseline,
+        spec,
+        ready=True,
+        readiness={
+            "ready": True,
+            "ready_entries": 1,
+            "failed_entries": 0,
+            "summary": readiness_summary,
+            "failure_kinds": [],
+            "failure_counts": {},
+        },
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_readiness_entry_counts" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_ready_false_without_readiness_failure_details(tmp_path):
@@ -1035,6 +1305,54 @@ def test_phase3_lane_index_rejects_incomplete_representative_entries(tmp_path):
     assert "phase3_lane_representative_entries_concrete" in manifest["summary"]["failed_kinds"]
 
 
+def test_phase3_lane_index_rejects_duplicate_representative_entry_ids(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="representative_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/representative_lane/manifest.json",
+        runner_relpath="run_representative_lane.sh",
+        manifest_kind="representative_lane_manifest",
+        ready_key="representative_lane_ready",
+    )
+    _write_manifest(
+        baseline,
+        spec,
+        entries=(
+            {
+                "id": "duplicate-representative-id",
+                "category": "function_call",
+                "function": "representative_lane_function",
+                "binary_pair": "B1_B2",
+            },
+            {
+                "id": "duplicate-representative-id",
+                "category": "function_call",
+                "function": "representative_lane_other_function",
+                "binary_pair": "B3_B4",
+            },
+        ),
+    )
+    _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["representative_entry_duplicate_ids"] == ["duplicate-representative-id"]
+    assert "phase3_lane_representative_entry_ids_unique" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_representative_entries_concrete" not in manifest["summary"]["failed_kinds"]
+
+
 def test_phase3_lane_index_accepts_runner_manifest_ref(tmp_path):
     baseline = tmp_path / "baseline"
     repo = tmp_path / "repo"
@@ -1268,6 +1586,13 @@ def test_phase3_lane_index_ignores_non_top_level_runner_manifest_ref(tmp_path, s
             "}",
             "}",
         ),
+        (
+            'unused_contract() {\n'
+            '[[ -n "${PHASE3_INNER_CONTRACT:-}" ]] && {\n'
+            ":\n"
+            "}",
+            "}",
+        ),
     ),
 )
 def test_phase3_lane_index_ignores_guarded_or_commented_subshell_runner_manifest_ref(
@@ -1339,6 +1664,7 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
         manifest_kind="runner_target_lane_manifest",
         ready_key="runner_target_lane_ready",
         require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
     )
     _write_manifest(
         baseline,
@@ -1364,6 +1690,9 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
         target_category="function_call",
         current_log_root_category="function_call",
         baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
         target_functions=("sample_one", "sample_two"),
         pair_filter=("sample_one:B1_B2", "sample_two:B3_B4"),
     )
@@ -1391,7 +1720,560 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
         "current_log_root": 1,
         "baseline_log_root": 1,
     }
+    assert lane["runner_target_filter_counts"] == {
+        "target_set": 1,
+        "pair_filter": 1,
+        "base_path": 1,
+        "matrix_script": 1,
+        "invalid_mutations": 0,
+    }
+    assert lane["runner_target_filter_invalid_mutation_count"] == 0
+    assert lane["runner_target_filter_invalid_mutations"] == []
     assert lane["runner_pair_filter"] == ["sample_one:B1_B2", "sample_two:B3_B4"]
+    expected_runtime_contract = {
+        "category": "function_call",
+        "matrix_script_relpath": "func_call_run_matrix_all_parallel_multifunc.sh",
+        "target_var": "FUNCTION_CALL_TARGET_SET",
+        "target_set": "sample_one,sample_two",
+        "pair_filter_var": "FUNCTION_CALL_PAIR_FILTER",
+        "pair_filter": "sample_one:B1_B2,sample_two:B3_B4",
+        "base_path_relpath": "targets/cate1/function_call_test",
+        "current_log_root": "function_call=$OUTPUT_BASE_DIR",
+        "baseline_log_root": "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT",
+    }
+    assert lane["runner_target_filter_runtime_status"] == "passed"
+    assert lane["runner_target_filter_runtime_invocation_count"] == 1
+    assert lane["runner_target_filter_runtime_contract_matches_expected"] is True
+    assert lane["runner_target_filter_runtime_failure_kind"] == "none"
+    assert lane["runner_target_filter_runtime_returncode"] == 0
+    assert lane["runner_target_filter_runtime_expected_contract"] == expected_runtime_contract
+    assert lane["runner_target_filter_runtime_observed_contract"] == expected_runtime_contract
+    assert lane["runner_target_filter_runtime_contract_diff"] == []
+    assert lane["runner_gate_smoke_status"] == "passed"
+    assert lane["runner_gate_smoke_validator_invocation_count"] == 1
+
+
+def test_phase3_lane_index_rejects_target_filter_only_spec_without_gate_policy(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_runtime_status"] == "passed"
+    assert lane["runner_target_filter_runtime_contract_matches_expected"] is True
+    assert "phase3_lane_runner_target_filter_gate_policy" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_filter_runtime_contract" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("override_line", "expected_var"),
+    (
+        ('export FUNCTION_CALL_TARGET_SET="evil_function"', "FUNCTION_CALL_TARGET_SET"),
+        ('export LOOP_TARGET_SET="evil_loop"', "LOOP_TARGET_SET"),
+        ('FUNCTION_CALL_TARGET_SET+="evil_function"', "FUNCTION_CALL_TARGET_SET"),
+        ('FUNCTION_CALL_PAIR_FILTER="evil_function:B1_B2"', "FUNCTION_CALL_PAIR_FILTER"),
+        ('FUNCTION_CALL_PAIR_FILTER+="evil_function:B1_B2"', "FUNCTION_CALL_PAIR_FILTER"),
+        ('LOOP_PAIR_FILTER="evil_loop:B1_B2"', "LOOP_PAIR_FILTER"),
+        ('unset FUNCTION_CALL_TARGET_SET', "FUNCTION_CALL_TARGET_SET"),
+        ('unset "FUNCTION_CALL_TARGET_SET"', "FUNCTION_CALL_TARGET_SET"),
+        ('unset -v LOOP_TARGET_SET', "LOOP_TARGET_SET"),
+        ('export -n FUNCTION_CALL_PAIR_FILTER', "FUNCTION_CALL_PAIR_FILTER"),
+        ('export -n "FUNCTION_CALL_PAIR_FILTER"', "FUNCTION_CALL_PAIR_FILTER"),
+        ('declare FUNCTION_CALL_TARGET_SET="evil_function"', "FUNCTION_CALL_TARGET_SET"),
+        ('typeset LOOP_PAIR_FILTER="evil_loop:B1_B2"', "LOOP_PAIR_FILTER"),
+        ('readonly BASE_PATH="/tmp/evil"', "BASE_PATH"),
+        ('export BASE_PATH="/tmp/evil"', "BASE_PATH"),
+        ('printf -v FUNCTION_CALL_TARGET_SET evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('printf -v "FUNCTION_CALL_TARGET_SET" evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('read -r FUNCTION_CALL_TARGET_SET <<< evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('read -p "prompt" FUNCTION_CALL_TARGET_SET <<< evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('IFS= read -r FUNCTION_CALL_PAIR_FILTER <<< evil_function:B1_B2', "FUNCTION_CALL_PAIR_FILTER"),
+        ('mapfile -t LOOP_TARGET_SET <<< evil_loop', "LOOP_TARGET_SET"),
+        ('readarray -t LOOP_PAIR_FILTER <<< evil_loop:B1_B2', "LOOP_PAIR_FILTER"),
+        ('eval "FUNCTION_CALL_TARGET_SET=evil_function"', "FUNCTION_CALL_TARGET_SET"),
+        ('eval FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2', "FUNCTION_CALL_PAIR_FILTER"),
+        ('builtin printf -v FUNCTION_CALL_TARGET_SET evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('command unset FUNCTION_CALL_TARGET_SET', "FUNCTION_CALL_TARGET_SET"),
+        ('builtin eval FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2', "FUNCTION_CALL_PAIR_FILTER"),
+        ('target=FUNCTION_CALL_TARGET_SET; printf -v "$target" evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('target=FUNCTION_CALL_TARGET_SET; printf -v ${target} evil_function', "FUNCTION_CALL_TARGET_SET"),
+        ('target=FUNCTION_CALL_TARGET_SET; unset "$target"', "FUNCTION_CALL_TARGET_SET"),
+        ('target=FUNCTION_CALL_PAIR_FILTER; builtin eval "$target=evil_function:B1_B2"', "FUNCTION_CALL_PAIR_FILTER"),
+        ('true && export LOOP_TARGET_SET="evil_loop"', "LOOP_TARGET_SET"),
+        ('false || LOOP_PAIR_FILTER="evil_loop:B1_B2"', "LOOP_PAIR_FILTER"),
+        ('unused_contract() { :; }; export FUNCTION_CALL_TARGET_SET="evil_function"', "FUNCTION_CALL_TARGET_SET"),
+    ),
+)
+def test_phase3_lane_index_rejects_noncanonical_runner_target_filter_assignment(
+    tmp_path,
+    override_line,
+    expected_var,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    lines.insert(matrix_index, override_line)
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_counts"]["invalid_mutations"] == 1
+    assert lane["runner_target_filter_invalid_mutation_count"] == 1
+    assert lane["runner_target_filter_invalid_mutations"][0]["vars"] == [expected_var]
+    assert "phase3_lane_runner_target_filter_immutable" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("override_line", "diff_key"),
+    (
+        (
+            'target=FUNCTION_CALL_; target+=TARGET_SET; printf -v "$target" evil_function',
+            "target_set",
+        ),
+        (
+            'target=FUNCTION_CALL_TARGET_SET; export "$target=evil_function"',
+            "target_set",
+        ),
+        (
+            'target=FUNCTION_CALL_TARGET_SET; declare "$target=evil_function"',
+            "target_set",
+        ),
+        (
+            'target=FUNCTION_CALL_TARGET_SET; typeset "$target=evil_function"',
+            "target_set",
+        ),
+        (
+            'target=FUNCTION_CALL_PAIR_FILTER; export "$target=evil_function:B1_B2"',
+            "pair_filter",
+        ),
+        (
+            'target=FUNCTION_CALL_PAIR_FILTER; declare "$target=evil_function:B1_B2"',
+            "pair_filter",
+        ),
+        (
+            'target=FUNCTION_CALL_PAIR_FILTER; typeset "$target=evil_function:B1_B2"',
+            "pair_filter",
+        ),
+    ),
+)
+def test_phase3_lane_index_runtime_contract_rejects_target_filter_bypass(
+    tmp_path,
+    override_line,
+    diff_key,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    lines.insert(matrix_index, override_line)
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_invalid_mutation_count"] == 0
+    assert lane["runner_target_filter_runtime_status"] == "failed"
+    assert lane["runner_target_filter_runtime_failure_kind"] == "contract_mismatch"
+    assert lane["runner_target_filter_runtime_invocation_count"] == 1
+    assert diff_key in {
+        diff["key"]
+        for diff in lane["runner_target_filter_runtime_contract_diff"]
+    }
+    assert "phase3_lane_runner_target_filter_runtime_contract" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_filter_immutable" not in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_runtime_contract_uses_non_dry_run_branch(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    lines[matrix_index:matrix_index] = [
+        'if [[ "${VALIDATION_RUNNER_DRY_RUN:-0}" == "0" ]]; then',
+        "    FUNCTION_CALL_TARGET_SET=evil_function",
+        "fi",
+    ]
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_invalid_mutation_count"] == 0
+    assert lane["runner_target_filter_runtime_status"] == "failed"
+    assert lane["runner_target_filter_runtime_failure_kind"] == "contract_mismatch"
+    assert lane["runner_target_filter_runtime_observed_contract"]["target_set"] == "evil_function"
+    assert lane["runner_gate_smoke_status"] == "passed"
+    assert "phase3_lane_runner_target_filter_runtime_contract" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_gate_smoke" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "override_line",
+    (
+        'eval "FUNCTION_CALL_TARGET_SET=evil_function"',
+        "builtin printf -v FUNCTION_CALL_TARGET_SET evil_function",
+        "command unset FUNCTION_CALL_TARGET_SET",
+        "builtin eval FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2",
+        'target=FUNCTION_CALL_TARGET_SET; printf -v "$target" evil_function',
+        "target=FUNCTION_CALL_TARGET_SET; printf -v ${target} evil_function",
+        'target=FUNCTION_CALL_TARGET_SET; unset "$target"',
+        'target=FUNCTION_CALL_PAIR_FILTER; builtin eval "$target=evil_function:B1_B2"',
+    ),
+)
+def test_phase3_lane_index_runtime_contract_rejects_previous_target_filter_bypasses(
+    tmp_path,
+    override_line,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    lines.insert(matrix_index, override_line)
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_runtime_status"] == "failed"
+    assert lane["runner_target_filter_runtime_failure_kind"] == "contract_mismatch"
+    assert lane["runner_target_filter_runtime_invocation_count"] == 1
+    assert "phase3_lane_runner_target_filter_runtime_contract" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_runtime_contract_accepts_target_filter_diagnostics(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    lines[matrix_index:matrix_index] = [
+        'echo "FUNCTION_CALL_TARGET_SET=evil_function"',
+        "printf '%s' FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2",
+        "command -v unset >/dev/null",
+    ]
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is True
+    assert lane["runner_target_filter_invalid_mutation_count"] == 0
+    assert lane["runner_target_filter_runtime_status"] == "passed"
+    assert lane["runner_target_filter_runtime_contract_matches_expected"] is True
+    assert lane["runner_gate_smoke_status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_vars"),
+    (
+        ('FUNCTION_CALL_TARGET_SET+="evil_function"', ["FUNCTION_CALL_TARGET_SET"]),
+        ('unset FUNCTION_CALL_TARGET_SET', ["FUNCTION_CALL_TARGET_SET"]),
+        ('unset "FUNCTION_CALL_TARGET_SET"', ["FUNCTION_CALL_TARGET_SET"]),
+        ('unset -v LOOP_TARGET_SET', ["LOOP_TARGET_SET"]),
+        ('export -n FUNCTION_CALL_PAIR_FILTER', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('export -n "FUNCTION_CALL_PAIR_FILTER"', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('declare -x FUNCTION_CALL_TARGET_SET="evil_function"', ["FUNCTION_CALL_TARGET_SET"]),
+        ('typeset LOOP_PAIR_FILTER="evil_loop:B1_B2"', ["LOOP_PAIR_FILTER"]),
+        ('readonly BASE_PATH="/tmp/evil"', ["BASE_PATH"]),
+        ('printf -v FUNCTION_CALL_TARGET_SET evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('printf -v "FUNCTION_CALL_TARGET_SET" evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('printf -vFUNCTION_CALL_TARGET_SET evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('read -r FUNCTION_CALL_TARGET_SET <<< evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('read -p "prompt" FUNCTION_CALL_TARGET_SET <<< evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('IFS= read -r FUNCTION_CALL_PAIR_FILTER <<< evil_function:B1_B2', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('read -a LOOP_TARGET_SET <<< evil_loop', ["LOOP_TARGET_SET"]),
+        ('mapfile -t LOOP_TARGET_SET <<< evil_loop', ["LOOP_TARGET_SET"]),
+        ('readarray -t LOOP_PAIR_FILTER <<< evil_loop:B1_B2', ["LOOP_PAIR_FILTER"]),
+        ('env FUNCTION_CALL_TARGET_SET=evil_function bash run.sh', ["FUNCTION_CALL_TARGET_SET"]),
+        ('eval "FUNCTION_CALL_TARGET_SET=evil_function"', ["FUNCTION_CALL_TARGET_SET"]),
+        ('eval FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('builtin printf -v FUNCTION_CALL_TARGET_SET evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('command unset FUNCTION_CALL_TARGET_SET', ["FUNCTION_CALL_TARGET_SET"]),
+        ('builtin eval FUNCTION_CALL_PAIR_FILTER=evil_function:B1_B2', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('command -v unset FUNCTION_CALL_TARGET_SET', []),
+        ('command -V printf FUNCTION_CALL_TARGET_SET', []),
+        ('target=FUNCTION_CALL_TARGET_SET; printf -v "$target" evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('target=FUNCTION_CALL_TARGET_SET; printf -v ${target} evil_function', ["FUNCTION_CALL_TARGET_SET"]),
+        ('target=FUNCTION_CALL_TARGET_SET; unset "$target"', ["FUNCTION_CALL_TARGET_SET"]),
+        ('target=FUNCTION_CALL_PAIR_FILTER; builtin eval "$target=evil_function:B1_B2"', ["FUNCTION_CALL_PAIR_FILTER"]),
+        ('target=foo; printf -v "$target" evil_function', []),
+        ('printf -v "$target" evil_function', [phase3_lane_index.DYNAMIC_TARGET_FILTER_DESTINATION]),
+        ('printf -v ${target} evil_function', [phase3_lane_index.DYNAMIC_TARGET_FILTER_DESTINATION]),
+        ('target=$maybe; read "$target" <<< evil_function', [phase3_lane_index.DYNAMIC_TARGET_FILTER_DESTINATION]),
+        ('target=${maybe}; read "$target" <<< evil_function', [phase3_lane_index.DYNAMIC_TARGET_FILTER_DESTINATION]),
+        ('echo "FUNCTION_CALL_TARGET_SET+=evil_function"', []),
+        ("echo 'unset FUNCTION_CALL_TARGET_SET'", []),
+        ('echo "${FUNCTION_CALL_TARGET_SET:-evil_function}"', []),
+        ('echo FUNCTION_CALL_TARGET_SET=runner_target_lane_function', []),
+        ('echo "FUNCTION_CALL_TARGET_SET"', []),
+        ("printf '%s' FUNCTION_CALL_TARGET_SET=runner_target_lane_function", []),
+        ("printf '%s' 'FUNCTION_CALL_TARGET_SET=runner_target_lane_function'", []),
+        ('printf "%s" FUNCTION_CALL_PAIR_FILTER=runner_target_lane_function:B1_B2', []),
+    ),
+)
+def test_phase3_lane_index_runner_target_filter_mutation_scanner(code, expected_vars):
+    assert phase3_lane_index._runner_target_filter_mutated_vars(code) == expected_vars
+
+
+def test_phase3_lane_index_rejects_top_level_target_override_after_quoted_function_brace(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                (
+                    "unused_contract() {",
+                    '    echo "{"',
+                    "}",
+                    'export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-evil_function}"',
+                    'echo "}"',
+                )
+            )
+            + "\n"
+        )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_counts"]["target_set"] == 2
+    assert "phase3_lane_runner_target_filter_unique" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_target_set" not in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_commented_runner_target_filter(tmp_path):
@@ -1603,6 +2485,13 @@ def test_phase3_lane_index_rejects_subshell_scoped_runner_target_filter(tmp_path
         ("(\n(\n:\n)", ")"),
         (
             '[[ -n "${PHASE3_STALE_CONTRACT:-}" ]] && {\n'
+            '[[ -n "${PHASE3_INNER_CONTRACT:-}" ]] && {\n'
+            ":\n"
+            "}",
+            "}",
+        ),
+        (
+            'unused_contract() {\n'
             '[[ -n "${PHASE3_INNER_CONTRACT:-}" ]] && {\n'
             ":\n"
             "}",
@@ -2002,6 +2891,13 @@ def test_phase3_lane_index_rejects_subshell_scoped_runner_safety_defaults(tmp_pa
         ("(\n(\n:\n)", ")"),
         (
             '[[ -n "${PHASE3_STALE_CONTRACT:-}" ]] && {\n'
+            '[[ -n "${PHASE3_INNER_CONTRACT:-}" ]] && {\n'
+            ":\n"
+            "}",
+            "}",
+        ),
+        (
+            'unused_contract() {\n'
             '[[ -n "${PHASE3_INNER_CONTRACT:-}" ]] && {\n'
             ":\n"
             "}",
@@ -5304,7 +6200,7 @@ def test_phase3_lane_index_accepts_expected_proof_completion_gate(tmp_path):
         "completion_required_for_recovery": ["stage_one"],
         "required_recovery_actions": ["action_one"],
     }
-    validate_phase3_lane_index(manifest)
+    validate_phase3_lane_index(manifest, lane_specs=(spec,))
 
 
 def test_phase3_lane_index_rejects_proof_completion_gate_drift(tmp_path):

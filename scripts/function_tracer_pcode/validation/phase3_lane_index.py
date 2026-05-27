@@ -38,8 +38,11 @@ MANIFEST_VERSION = 1
 BASELINE_ID = "observed-v0@0a53352"
 BASELINE_GIT_HEAD = "0a53352cf3c9528abfb654906ed7b963474bedc5"
 MISSING_SENTINEL = "<missing>"
+DYNAMIC_TARGET_FILTER_DESTINATION = "<dynamic_target_filter_destination>"
+NON_TARGET_FILTER_DESTINATION = "<non_target_filter_destination>"
 LaneValidator = Callable[[Mapping[str, Any]], None]
 RUNNER_GATE_SMOKE_TIMEOUT_SECONDS = 30
+_SHELL_QUOTED_SPACE = "\x1f"
 _RUNNER_MANIFEST_PATH_RE = re.compile(
     r'^(?!\s*#)\s*PHASE3_MANIFEST_PATH="\$\{PHASE3_MANIFEST_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"',
     re.MULTILINE,
@@ -59,6 +62,13 @@ _RUNNER_BASE_PATH_RE = re.compile(
 )
 _RUNNER_MATRIX_SCRIPT_RE = re.compile(
     r'bash "\$SCRIPT_DIR/(?P<path>(?:func_call|loop)_run_matrix_all_parallel_multifunc\.sh)"'
+)
+_RUNNER_TARGET_FILTER_ASSIGNMENT_VARS = (
+    "FUNCTION_CALL_TARGET_SET",
+    "LOOP_TARGET_SET",
+    "FUNCTION_CALL_PAIR_FILTER",
+    "LOOP_PAIR_FILTER",
+    "BASE_PATH",
 )
 _RUNNER_CURRENT_LOG_ROOT_ARG_RE = re.compile(
     r'^(?!\s*#)\s*--current-log-root\s+"(?P<value>[^"]*)"\s*$',
@@ -306,7 +316,11 @@ def build_phase3_lane_index(
     return path
 
 
-def validate_phase3_lane_index(manifest: Mapping[str, Any]) -> None:
+def validate_phase3_lane_index(
+    manifest: Mapping[str, Any],
+    *,
+    lane_specs: Optional[Sequence[Phase3LaneSpec]] = None,
+) -> None:
     failures: list[str] = []
     if manifest.get("manifest_kind") != "phase3_proof_lane_index":
         failures.append("manifest_kind")
@@ -333,15 +347,31 @@ def validate_phase3_lane_index(manifest: Mapping[str, Any]) -> None:
     if not isinstance(checks, (list, tuple)):
         failures.append("checks")
     else:
-        failed_check_kinds = [
-            str(check.get("kind") or MISSING_SENTINEL)
-            for check in checks
-            if isinstance(check, Mapping) and check.get("status") == "failed"
-        ]
+        failed_check_kinds = _failed_check_kinds(checks)
         if isinstance(summary_failed, int) and summary_failed != len(failed_check_kinds):
             failures.append("summary_failed_count")
         if failed_kinds != failed_check_kinds:
             failures.append("summary_failed_kinds")
+
+    lanes = manifest.get("lanes")
+    if not isinstance(lanes, (list, tuple)):
+        failures.append("lanes")
+    else:
+        specs = tuple(lane_specs or DEFAULT_PHASE3_LANE_SPECS)
+        actual_lane_rows = _lane_spec_rows_from_lanes(lanes)
+        expected_lane_rows = _lane_spec_rows_from_specs(specs)
+        if actual_lane_rows != expected_lane_rows:
+            failures.append("lane_specs")
+        derived_checks = _index_checks(
+            {
+                "baseline_id": manifest.get("baseline_id"),
+                "git_head": manifest.get("baseline_git_head"),
+            },
+            specs,
+            lanes,
+        )
+        if failed_check_kinds != _failed_check_kinds(derived_checks):
+            failures.append("derived_failed_kinds")
 
     ready = manifest.get("phase3_lanes_ready")
     if ready is True:
@@ -417,6 +447,19 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_current_log_root_var": MISSING_SENTINEL,
         "runner_baseline_log_root_category": MISSING_SENTINEL,
         "runner_baseline_log_root_var": MISSING_SENTINEL,
+        "runner_target_filter_counts": {},
+        "runner_target_filter_invalid_mutations": [],
+        "runner_target_filter_invalid_mutation_count": 0,
+        "runner_target_filter_runtime_status": "not_run",
+        "runner_target_filter_runtime_invocation_count": 0,
+        "runner_target_filter_runtime_contract_matches_expected": False,
+        "runner_target_filter_runtime_error": MISSING_SENTINEL,
+        "runner_target_filter_runtime_failure_kind": MISSING_SENTINEL,
+        "runner_target_filter_runtime_returncode": MISSING_SENTINEL,
+        "runner_target_filter_runtime_expected_contract": {},
+        "runner_target_filter_runtime_observed_contract": {},
+        "runner_target_filter_runtime_observed_invocations": [],
+        "runner_target_filter_runtime_contract_diff": [],
         "runner_log_root_arg_counts": {},
         "runner_safety_defaults": {},
         "runner_safety_duplicate_vars": [],
@@ -452,6 +495,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_smoke_argv_diff": [],
         "runner_target_functions": [],
         "runner_pair_filter": [],
+        "representative_entry_duplicate_ids": [],
         "expected_target_category": MISSING_SENTINEL,
         "expected_pair_filter_var": MISSING_SENTINEL,
         "expected_base_path_relpath": MISSING_SENTINEL,
@@ -490,6 +534,13 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_current_log_root_var"] = runner_targets["current_log_root_var"]
             lane["runner_baseline_log_root_category"] = runner_targets["baseline_log_root_category"]
             lane["runner_baseline_log_root_var"] = runner_targets["baseline_log_root_var"]
+            lane["runner_target_filter_counts"] = runner_targets["target_filter_counts"]
+            lane["runner_target_filter_invalid_mutations"] = runner_targets[
+                "target_filter_invalid_mutations"
+            ]
+            lane["runner_target_filter_invalid_mutation_count"] = runner_targets[
+                "target_filter_invalid_mutation_count"
+            ]
             lane["runner_log_root_arg_counts"] = runner_targets["log_root_arg_counts"]
             runner_safety = _runner_safety_defaults(runner_path)
             lane["runner_safety_defaults"] = runner_safety["defaults"]
@@ -562,6 +613,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["observed_target_reason_ids"] = list(manifest.get("target_reason_ids") or ())
     expected_targets = _manifest_target_filter(manifest)
     lane["expected_target_category"] = expected_targets["category"]
+    lane["expected_target_var"] = expected_targets["target_var"]
     lane["expected_pair_filter_var"] = expected_targets["pair_filter_var"]
     lane["expected_base_path_relpath"] = expected_targets["base_path_relpath"]
     lane["expected_matrix_script_relpath"] = expected_targets["matrix_script_relpath"]
@@ -571,6 +623,27 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
     lane["expected_baseline_log_root_var"] = expected_targets["baseline_log_root_var"]
     lane["expected_target_functions"] = expected_targets["target_functions"]
     lane["expected_pair_filter"] = expected_targets["pair_filter"]
+    if runner_path.is_file() and spec.require_runner_target_filter:
+        runtime_contract = _runner_target_filter_runtime_contract(
+            runner_path,
+            expected_targets,
+            manifest_path=path,
+            manifest_sha256=lane["manifest_sha256"],
+        )
+        lane["runner_target_filter_runtime_status"] = runtime_contract["status"]
+        lane["runner_target_filter_runtime_invocation_count"] = runtime_contract["invocation_count"]
+        lane["runner_target_filter_runtime_contract_matches_expected"] = runtime_contract[
+            "contract_matches_expected"
+        ]
+        lane["runner_target_filter_runtime_error"] = runtime_contract["error"] or MISSING_SENTINEL
+        lane["runner_target_filter_runtime_failure_kind"] = runtime_contract["failure_kind"]
+        lane["runner_target_filter_runtime_returncode"] = runtime_contract["returncode"]
+        lane["runner_target_filter_runtime_expected_contract"] = runtime_contract["expected_contract"]
+        lane["runner_target_filter_runtime_observed_contract"] = runtime_contract["observed_contract"]
+        lane["runner_target_filter_runtime_observed_invocations"] = runtime_contract[
+            "observed_invocations"
+        ]
+        lane["runner_target_filter_runtime_contract_diff"] = runtime_contract["contract_diff"]
     lane["representative_entries"] = _representative_entries(manifest.get("entries"))
     implementation = manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):
@@ -596,13 +669,16 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["validator_failure_counts"] = lane["manifest_readiness_failure_counts"]
         else:
             lane["validator_status"] = "passed"
+    lane["representative_entry_duplicate_ids"] = _duplicate_representative_ids(
+        lane["representative_entries"]
+    )
     return lane
 
 
 def _index_checks(
     baseline_manifest: Mapping[str, Any],
     specs: Sequence[Phase3LaneSpec],
-    lanes: Sequence[Mapping[str, Any]],
+    lanes: Sequence[Any],
 ) -> Sequence[Dict[str, Any]]:
     checks: list[Dict[str, Any]] = []
     checks.append(
@@ -627,8 +703,29 @@ def _index_checks(
         if lane_numbers == expected_lane_numbers
         else _failed("phase3_lane_order", expected=expected_lane_numbers, actual=lane_numbers)
     )
+    expected_lane_rows = _lane_spec_rows_from_specs(specs)
+    actual_lane_rows = _lane_spec_rows_from_lanes(lanes)
+    checks.append(
+        _ok("phase3_lane_count")
+        if len(actual_lane_rows) == len(expected_lane_rows)
+        else _failed("phase3_lane_count", expected=len(expected_lane_rows), actual=len(actual_lane_rows))
+    )
+    checks.append(
+        _ok("phase3_lane_spec_order")
+        if actual_lane_rows == expected_lane_rows
+        else _failed("phase3_lane_spec_order", expected=expected_lane_rows, actual=actual_lane_rows)
+    )
     seen = set()
-    for lane in lanes:
+    for lane_index, lane in enumerate(lanes):
+        if not isinstance(lane, Mapping):
+            checks.append(
+                _failed(
+                    "phase3_lane_entry_mapping",
+                    lane_index=lane_index,
+                    actual_type=type(lane).__name__,
+                )
+            )
+            continue
         details = {
             "lane_number": lane.get("lane_number"),
             "lane_id": lane.get("lane_id"),
@@ -690,6 +787,17 @@ def _index_checks(
                 and bool(lane.get("expected_pair_filter"))
             )
             checks.append(
+                _ok("phase3_lane_runner_target_filter_gate_policy", **details)
+                if lane.get("require_runner_safety_defaults") is True
+                else _failed(
+                    "phase3_lane_runner_target_filter_gate_policy",
+                    require_runner_target_filter=lane.get("require_runner_target_filter"),
+                    require_runner_safety_defaults=lane.get("require_runner_safety_defaults"),
+                    policy="target-filter lanes must also require runner safety defaults and gate smoke",
+                    **details,
+                )
+            )
+            checks.append(
                 _ok("phase3_lane_manifest_target_filter_complete", **details)
                 if expected_target_filter_complete
                 else _failed(
@@ -707,6 +815,31 @@ def _index_checks(
                     "phase3_lane_runner_target_category",
                     expected=lane.get("expected_target_category"),
                     actual=lane.get("runner_target_category"),
+                    **details,
+                )
+            )
+            target_filter_counts = lane.get("runner_target_filter_counts")
+            checks.append(
+                _ok("phase3_lane_runner_target_filter_unique", **details)
+                if isinstance(target_filter_counts, Mapping)
+                and target_filter_counts.get("target_set") == 1
+                and target_filter_counts.get("pair_filter") == 1
+                and target_filter_counts.get("base_path") == 1
+                and target_filter_counts.get("matrix_script") == 1
+                else _failed(
+                    "phase3_lane_runner_target_filter_unique",
+                    actual=target_filter_counts or {},
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_target_filter_immutable", **details)
+                if lane.get("runner_target_filter_invalid_mutation_count") == 0
+                else _failed(
+                    "phase3_lane_runner_target_filter_immutable",
+                    actual=target_filter_counts or {},
+                    invalid_mutation_count=lane.get("runner_target_filter_invalid_mutation_count"),
+                    invalid_mutations=lane.get("runner_target_filter_invalid_mutations"),
                     **details,
                 )
             )
@@ -806,6 +939,36 @@ def _index_checks(
                     "phase3_lane_runner_baseline_log_root",
                     expected=expected_baseline_log_root,
                     actual=actual_baseline_log_root,
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_target_filter_runtime_contract", **details)
+                if lane.get("runner_target_filter_runtime_status") == "passed"
+                and lane.get("runner_target_filter_runtime_invocation_count") == 1
+                and lane.get("runner_target_filter_runtime_contract_matches_expected") is True
+                and lane.get("runner_target_filter_runtime_failure_kind") == "none"
+                and lane.get("runner_target_filter_runtime_returncode") == 0
+                else _failed(
+                    "phase3_lane_runner_target_filter_runtime_contract",
+                    smoke_status=lane.get("runner_target_filter_runtime_status"),
+                    invocation_count=lane.get("runner_target_filter_runtime_invocation_count"),
+                    contract_matches_expected=lane.get(
+                        "runner_target_filter_runtime_contract_matches_expected"
+                    ),
+                    error=lane.get("runner_target_filter_runtime_error"),
+                    failure_kind=lane.get("runner_target_filter_runtime_failure_kind"),
+                    returncode=lane.get("runner_target_filter_runtime_returncode"),
+                    expected_contract=lane.get(
+                        "runner_target_filter_runtime_expected_contract"
+                    ),
+                    observed_contract=lane.get(
+                        "runner_target_filter_runtime_observed_contract"
+                    ),
+                    observed_invocations=lane.get(
+                        "runner_target_filter_runtime_observed_invocations"
+                    ),
+                    contract_diff=lane.get("runner_target_filter_runtime_contract_diff"),
                     **details,
                 )
             )
@@ -1023,6 +1186,26 @@ def _index_checks(
                 **details,
             )
         )
+        checks.append(
+            _ok("phase3_lane_readiness_entry_counts", **details)
+            if _readiness_entry_counts_consistent(lane)
+            else _failed(
+                "phase3_lane_readiness_entry_counts",
+                ready_key=lane.get("ready_key"),
+                ready_value=lane.get("ready_value"),
+                readiness_ready=lane.get("manifest_readiness_ready"),
+                readiness_summary=lane.get("manifest_readiness_summary"),
+                ready_entries=lane.get("manifest_readiness_ready_entries"),
+                failed_entries=lane.get("manifest_readiness_failed_entries"),
+                failure_kinds=lane.get("manifest_readiness_failure_kinds"),
+                representative_count=(
+                    len(lane.get("representative_entries"))
+                    if isinstance(lane.get("representative_entries"), list)
+                    else MISSING_SENTINEL
+                ),
+                **details,
+            )
+        )
         if lane.get("ready_value") is False:
             checks.append(
                 _ok("phase3_lane_readiness_failure_details", **details)
@@ -1072,6 +1255,27 @@ def _index_checks(
             else _failed(
                 "phase3_lane_representative_entries_concrete",
                 incomplete=incomplete_representatives,
+                **details,
+            )
+        )
+        duplicate_representative_ids = _duplicate_representative_ids(representative_entries)
+        stored_duplicate_representative_ids = lane.get("representative_entry_duplicate_ids")
+        checks.append(
+            _ok("phase3_lane_representative_entry_ids_unique", **details)
+            if duplicate_representative_ids == []
+            else _failed(
+                "phase3_lane_representative_entry_ids_unique",
+                duplicate_ids=duplicate_representative_ids,
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_representative_entry_duplicate_ids_consistent", **details)
+            if stored_duplicate_representative_ids == duplicate_representative_ids
+            else _failed(
+                "phase3_lane_representative_entry_duplicate_ids_consistent",
+                expected=duplicate_representative_ids,
+                actual=stored_duplicate_representative_ids,
                 **details,
             )
         )
@@ -1176,6 +1380,39 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _failed_check_kinds(checks: Sequence[Any]) -> list[str]:
+    return [
+        str(check.get("kind") or MISSING_SENTINEL)
+        for check in checks
+        if isinstance(check, Mapping) and check.get("status") == "failed"
+    ]
+
+
+def _lane_spec_rows_from_specs(specs: Sequence[Phase3LaneSpec]) -> list[Dict[str, Any]]:
+    return [
+        {
+            "lane_number": spec.lane_number,
+            "lane_id": spec.lane_id,
+            "manifest_relpath": spec.manifest_relpath,
+            "runner_relpath": spec.runner_relpath,
+        }
+        for spec in specs
+    ]
+
+
+def _lane_spec_rows_from_lanes(lanes: Sequence[Any]) -> list[Dict[str, Any]]:
+    return [
+        {
+            "lane_number": lane.get("lane_number", MISSING_SENTINEL),
+            "lane_id": lane.get("lane_id", MISSING_SENTINEL),
+            "manifest_relpath": lane.get("manifest_relpath", MISSING_SENTINEL),
+            "runner_relpath": lane.get("runner_relpath", MISSING_SENTINEL),
+        }
+        for lane in lanes
+        if isinstance(lane, Mapping)
+    ]
+
+
 def _implementation_reason_ids(implementation: Mapping[str, Any]) -> tuple[str, ...]:
     reasons: list[str] = []
     for key in ("target_reason_id", "active_target_reason_id"):
@@ -1216,6 +1453,23 @@ def _representative_entries(entries: Any) -> list[Dict[str, Any]]:
 
 def _representative_entry_is_concrete(entry: Mapping[str, Any]) -> bool:
     return all(entry.get(key) not in {None, "", MISSING_SENTINEL} for key in ("id", "function", "binary_pair"))
+
+
+def _duplicate_representative_ids(entries: Any) -> list[str]:
+    if not isinstance(entries, (list, tuple)):
+        return []
+    seen: set[str] = set()
+    duplicate_ids: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_id = str(entry.get("id") or MISSING_SENTINEL)
+        if entry_id == MISSING_SENTINEL:
+            continue
+        if entry_id in seen and entry_id not in duplicate_ids:
+            duplicate_ids.append(entry_id)
+        seen.add(entry_id)
+    return duplicate_ids
 
 
 def _manifest_readiness(manifest: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1264,6 +1518,40 @@ def _manifest_readiness_failure_counts(
         if counts:
             return dict(sorted(counts.items()))
     return {kind: 1 for kind in fallback_kinds}
+
+
+def _readiness_entry_counts_consistent(lane: Mapping[str, Any]) -> bool:
+    ready_entries = lane.get("manifest_readiness_ready_entries", MISSING_SENTINEL)
+    failed_entries = lane.get("manifest_readiness_failed_entries", MISSING_SENTINEL)
+    if ready_entries == MISSING_SENTINEL and failed_entries == MISSING_SENTINEL:
+        return True
+    if not isinstance(ready_entries, int) or not isinstance(failed_entries, int):
+        return False
+    if ready_entries < 0 or failed_entries < 0:
+        return False
+    representative_entries = lane.get("representative_entries")
+    if not isinstance(representative_entries, list):
+        return False
+    if ready_entries + failed_entries != len(representative_entries):
+        return False
+    readiness_summary = lane.get("manifest_readiness_summary")
+    if isinstance(readiness_summary, Mapping):
+        expected_summary = {
+            "total": ready_entries + failed_entries,
+            "passed": ready_entries,
+            "failed": failed_entries,
+        }
+        for key, expected_value in expected_summary.items():
+            if key not in readiness_summary:
+                continue
+            actual_value = readiness_summary.get(key)
+            if not isinstance(actual_value, int) or actual_value != expected_value:
+                return False
+    if lane.get("ready_value") is True:
+        return failed_entries == 0
+    if lane.get("ready_value") is False and lane.get("manifest_readiness_failure_kinds"):
+        return failed_entries > 0
+    return True
 
 
 def _runner_shell_contract(runner_path: Path) -> Dict[str, Any]:
@@ -1343,27 +1631,29 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
     except OSError:
         return _empty_target_filter()
     top_level = _runner_active_top_level_mask(lines)
-    active_lines = [
-        line
+    active_line_items = [
+        (index + 1, line)
         for index, line in enumerate(lines)
         if index < len(top_level) and top_level[index]
     ]
-    target_match = next(
-        (match for line in active_lines for match in (_RUNNER_TARGET_SET_RE.match(line),) if match),
-        None,
-    )
-    pair_match = next(
-        (match for line in active_lines for match in (_RUNNER_PAIR_FILTER_RE.match(line),) if match),
-        None,
-    )
-    base_path_match = next(
-        (match for line in active_lines for match in (_RUNNER_BASE_PATH_RE.match(line),) if match),
-        None,
-    )
-    matrix_match = next(
-        (match for line in active_lines for match in (_RUNNER_MATRIX_SCRIPT_RE.match(line),) if match),
-        None,
-    )
+    active_lines = [line for _, line in active_line_items]
+    invalid_mutations = _runner_target_filter_invalid_mutations(active_line_items)
+    target_matches = [
+        match for line in active_lines for match in (_RUNNER_TARGET_SET_RE.match(line),) if match
+    ]
+    pair_matches = [
+        match for line in active_lines for match in (_RUNNER_PAIR_FILTER_RE.match(line),) if match
+    ]
+    base_path_matches = [
+        match for line in active_lines for match in (_RUNNER_BASE_PATH_RE.match(line),) if match
+    ]
+    matrix_matches = [
+        match for line in active_lines for match in (_RUNNER_MATRIX_SCRIPT_RE.match(line),) if match
+    ]
+    target_match = target_matches[0] if target_matches else None
+    pair_match = pair_matches[0] if pair_matches else None
+    base_path_match = base_path_matches[0] if base_path_matches else None
+    matrix_match = matrix_matches[0] if matrix_matches else None
     current_log_root_args = [
         match
         for line in active_lines
@@ -1409,9 +1699,384 @@ def _runner_target_filter(runner_path: Path) -> Dict[str, Any]:
             "current_log_root": len(current_log_root_args),
             "baseline_log_root": len(baseline_log_root_args),
         },
+        "target_filter_counts": {
+            "target_set": len(target_matches),
+            "pair_filter": len(pair_matches),
+            "base_path": len(base_path_matches),
+            "matrix_script": len(matrix_matches),
+            "invalid_mutations": len(invalid_mutations),
+        },
+        "target_filter_invalid_mutations": invalid_mutations,
+        "target_filter_invalid_mutation_count": len(invalid_mutations),
         "target_functions": _split_csv(target_match.group("value") if target_match else None),
         "pair_filter": _split_csv(pair_match.group("value") if pair_match else None),
     }
+
+
+def _runner_target_filter_invalid_mutations(
+    lines: Sequence[tuple[int, str]],
+) -> list[Dict[str, Any]]:
+    invalid: list[Dict[str, Any]] = []
+    aliases: Dict[str, str] = {}
+    for line_number, line in lines:
+        code = _runner_shell_structure_code(line.strip())
+        if not code or _canonical_runner_target_filter_line(code):
+            continue
+        vars_on_line = _runner_target_filter_mutated_vars(code, aliases)
+        vars_on_line = list(dict.fromkeys(vars_on_line))
+        if not vars_on_line:
+            continue
+        invalid.append(
+            {
+                "line": line_number,
+                "vars": vars_on_line,
+                "code": code,
+            }
+        )
+    return invalid
+
+
+def _runner_target_filter_mutated_vars(
+    code: str,
+    aliases: Optional[Dict[str, str]] = None,
+) -> list[str]:
+    aliases = aliases if aliases is not None else {}
+    vars_on_line: list[str] = []
+    for words in _shell_command_words(_shell_assignment_scan_code(code)):
+        if not words:
+            continue
+        command_index = _shell_command_index(words)
+        leading_assignments = words[:command_index]
+        vars_on_line.extend(_target_filter_assignment_word_var(word) for word in leading_assignments)
+        if command_index >= len(words):
+            _record_target_filter_aliases(aliases, leading_assignments)
+            continue
+        effective = _effective_shell_command(words[command_index], words[command_index + 1:])
+        if effective is None:
+            continue
+        command, args = effective
+        if command == "unset":
+            vars_on_line.extend(_target_filter_named_or_assignment_var(arg, aliases) for arg in args)
+            continue
+        if command == "export" and _shell_words_have_option(args, "n"):
+            vars_on_line.extend(_target_filter_named_or_assignment_var(arg, aliases) for arg in args)
+            continue
+        if command == "export":
+            vars_on_line.extend(_target_filter_assignment_word_var(arg) for arg in args)
+            continue
+        if command in {"declare", "typeset"}:
+            vars_on_line.extend(_target_filter_assignment_word_var(arg) for arg in args)
+            continue
+        if command == "readonly":
+            vars_on_line.extend(_target_filter_named_or_assignment_var(arg, aliases) for arg in args)
+            continue
+        if command == "printf":
+            vars_on_line.extend(_printf_v_destination_vars(args, aliases))
+            continue
+        if command == "read":
+            vars_on_line.extend(_read_destination_vars(args, aliases))
+            continue
+        if command in {"mapfile", "readarray"}:
+            vars_on_line.extend(_mapfile_destination_vars(args, aliases))
+            continue
+        if command == "env":
+            vars_on_line.extend(_env_target_filter_vars(args))
+            continue
+        if command == "eval":
+            vars_on_line.extend(_eval_target_filter_vars(args, aliases))
+    return list(dict.fromkeys(var for var in vars_on_line if var is not None))
+
+
+def _shell_command_words(scan_code: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    words: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(scan_code):
+        char = scan_code[index]
+        next_char = scan_code[index + 1] if index + 1 < len(scan_code) else ""
+        if char.isspace():
+            if current:
+                words.append("".join(current).replace(_SHELL_QUOTED_SPACE, " "))
+                current = []
+            index += 1
+            continue
+        if char == ";" or (char == "&" and next_char == "&") or (char == "|" and next_char == "|"):
+            if current:
+                words.append("".join(current).replace(_SHELL_QUOTED_SPACE, " "))
+                current = []
+            if words:
+                commands.append(words)
+                words = []
+            index += 2 if char in {"&", "|"} else 1
+            continue
+        current.append(char)
+        index += 1
+    if current:
+        words.append("".join(current).replace(_SHELL_QUOTED_SPACE, " "))
+    if words:
+        commands.append(words)
+    return commands
+
+
+def _target_filter_assignment_word_var(word: str) -> Optional[str]:
+    name = _shell_assignment_word_name(word)
+    if name in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+        return name
+    return None
+
+
+def _target_filter_named_or_assignment_var(
+    word: str,
+    aliases: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    if word.startswith("-"):
+        return None
+    if word in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+        return word
+    direct = _target_filter_assignment_word_var(word)
+    if direct is not None:
+        return direct
+    return _target_filter_indirect_word_var(word, aliases or {})
+
+
+def _shell_assignment_word_name(word: str) -> Optional[str]:
+    if not word or not (word[0].isalpha() or word[0] == "_"):
+        return None
+    index = 1
+    while index < len(word) and (word[index].isalnum() or word[index] == "_"):
+        index += 1
+    suffix = word[index:]
+    if suffix.startswith("=") or suffix.startswith("+="):
+        return word[:index]
+    return None
+
+
+def _shell_assignment_word_parts(word: str) -> Optional[tuple[str, str]]:
+    name = _shell_assignment_word_name(word)
+    if name is None:
+        return None
+    suffix = word[len(name):]
+    if suffix.startswith("+="):
+        return name, suffix[2:]
+    if suffix.startswith("="):
+        return name, suffix[1:]
+    return None
+
+
+def _record_target_filter_aliases(aliases: Dict[str, str], words: Sequence[str]) -> None:
+    for word in words:
+        parts = _shell_assignment_word_parts(word)
+        if parts is None:
+            continue
+        name, value = parts
+        if name in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+            continue
+        if value in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+            aliases[name] = value
+        elif _word_has_shell_expansion(value):
+            aliases[name] = DYNAMIC_TARGET_FILTER_DESTINATION
+        else:
+            aliases[name] = NON_TARGET_FILTER_DESTINATION
+
+
+def _target_filter_indirect_word_var(word: str, aliases: Mapping[str, str]) -> Optional[str]:
+    referenced_names = _shell_expansion_names(word)
+    if not referenced_names:
+        return None
+    resolved: list[str] = []
+    for name in referenced_names:
+        target = aliases.get(name)
+        if target in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+            resolved.append(target)
+        elif target == DYNAMIC_TARGET_FILTER_DESTINATION or target is None:
+            resolved.append(DYNAMIC_TARGET_FILTER_DESTINATION)
+    if resolved:
+        return resolved[0]
+    return None
+
+
+def _word_has_shell_expansion(word: str) -> bool:
+    return bool(_shell_expansion_names(word) or "$(" in word or "`" in word)
+
+
+def _shell_expansion_names(word: str) -> list[str]:
+    names: list[str] = []
+    for match in re.finditer(r'\$(?P<braced>\{(?P<braced_name>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))', word):
+        names.append(match.group("braced_name") or match.group("plain"))
+    return names
+
+
+def _effective_shell_command(command: str, args: Sequence[str]) -> Optional[tuple[str, Sequence[str]]]:
+    if command == "builtin":
+        if not args:
+            return None
+        if args[0] == "--":
+            return (args[1], args[2:]) if len(args) > 1 else None
+        return args[0], args[1:]
+    if command == "command":
+        index = 0
+        while index < len(args) and args[index].startswith("-") and args[index] != "--":
+            if "v" in args[index][1:] or "V" in args[index][1:]:
+                return None
+            index += 1
+        if index < len(args) and args[index] == "--":
+            index += 1
+        if index >= len(args):
+            return None
+        return args[index], args[index + 1:]
+    return command, args
+
+
+def _shell_command_index(words: Sequence[str]) -> int:
+    index = 0
+    while index < len(words) and _shell_assignment_word_name(words[index]) is not None:
+        index += 1
+    return index
+
+
+def _shell_words_have_option(words: Sequence[str], option: str) -> bool:
+    return any(word.startswith("-") and not word.startswith("--") and option in word[1:] for word in words)
+
+
+def _printf_v_destination_vars(
+    args: Sequence[str],
+    aliases: Optional[Mapping[str, str]] = None,
+) -> list[str]:
+    for index, word in enumerate(args):
+        if word == "--":
+            return []
+        if word == "-v" and index + 1 < len(args):
+            return [_target_filter_named_or_assignment_var(args[index + 1], aliases)]
+        if word.startswith("-v") and len(word) > 2:
+            return [_target_filter_named_or_assignment_var(word[2:], aliases)]
+        if not word.startswith("-"):
+            return []
+    return []
+
+
+def _read_destination_vars(
+    args: Sequence[str],
+    aliases: Optional[Mapping[str, str]] = None,
+) -> list[str]:
+    destinations: list[Optional[str]] = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if _shell_redirection_word(word):
+            break
+        if word == "--":
+            index += 1
+            break
+        if word == "-a":
+            if index + 1 < len(args):
+                destinations.append(_target_filter_named_or_assignment_var(args[index + 1], aliases))
+            index += 2
+            continue
+        if word.startswith("-a") and len(word) > 2:
+            destinations.append(_target_filter_named_or_assignment_var(word[2:], aliases))
+            index += 1
+            continue
+        if word in {"-d", "-n", "-N", "-p", "-t", "-u"}:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        break
+    for word in args[index:]:
+        if _shell_redirection_word(word):
+            break
+        destinations.append(_target_filter_named_or_assignment_var(word, aliases))
+    return [var for var in destinations if var is not None]
+
+
+def _mapfile_destination_vars(
+    args: Sequence[str],
+    aliases: Optional[Mapping[str, str]] = None,
+) -> list[str]:
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if _shell_redirection_word(word):
+            return []
+        if word == "--":
+            index += 1
+            break
+        if word in {"-C", "-c", "-d", "-n", "-O", "-s", "-u"}:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(args) or _shell_redirection_word(args[index]):
+        return []
+    return [_target_filter_named_or_assignment_var(args[index], aliases)]
+
+
+def _env_target_filter_vars(args: Sequence[str]) -> list[Optional[str]]:
+    vars_on_line: list[Optional[str]] = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if word == "--":
+            index += 1
+            break
+        if word == "-u" and index + 1 < len(args):
+            vars_on_line.append(_target_filter_named_or_assignment_var(args[index + 1]))
+            index += 2
+            continue
+        if word.startswith("-u") and len(word) > 2:
+            vars_on_line.append(_target_filter_named_or_assignment_var(word[2:]))
+            index += 1
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        var = _target_filter_assignment_word_var(word)
+        if var is None:
+            break
+        vars_on_line.append(var)
+        index += 1
+    return vars_on_line
+
+
+def _eval_target_filter_vars(
+    args: Sequence[str],
+    aliases: Optional[Mapping[str, str]] = None,
+) -> list[str]:
+    vars_on_line: list[str] = []
+    for word in args:
+        vars_on_line.extend(_target_filter_vars_mentioned_in_word(word))
+        indirect = _target_filter_indirect_word_var(word, aliases or {})
+        if indirect is not None:
+            vars_on_line.append(indirect)
+    return list(dict.fromkeys(vars_on_line))
+
+
+def _target_filter_vars_mentioned_in_word(word: str) -> list[str]:
+    vars_on_line: list[str] = []
+    for var in _RUNNER_TARGET_FILTER_ASSIGNMENT_VARS:
+        if re.search(rf'(?<![A-Za-z0-9_]){re.escape(var)}(?![A-Za-z0-9_])', word):
+            vars_on_line.append(var)
+    return vars_on_line
+
+
+def _shell_redirection_word(word: str) -> bool:
+    return word.startswith("<") or word.startswith(">") or word in {"|", "|&"}
+
+
+def _canonical_runner_target_filter_line(code: str) -> bool:
+    return any(
+        pattern.fullmatch(code) is not None
+        for pattern in (
+            _RUNNER_TARGET_SET_RE,
+            _RUNNER_PAIR_FILTER_RE,
+            _RUNNER_BASE_PATH_RE,
+            _RUNNER_MATRIX_SCRIPT_RE,
+        )
+    )
 
 
 def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
@@ -1631,26 +2296,121 @@ def _runner_static_top_level_mask(lines: Sequence[str]) -> list[bool]:
     pending_function_body = False
     for line in lines:
         stripped = line.strip()
+        code = _runner_shell_structure_code(stripped)
         mask.append(function_depth == 0 and not pending_function_body)
-        if not stripped or stripped.startswith("#"):
+        if not code:
             continue
-        if pending_function_body and stripped == "{":
-            function_depth = 1
+        if pending_function_body and code.startswith("{"):
+            function_depth = max(1, _shell_brace_delta(code))
             pending_function_body = False
             continue
         if pending_function_body:
             pending_function_body = False
-        if _line_starts_shell_function(stripped):
-            if "{" in stripped and "}" not in stripped[stripped.find("{") + 1:]:
-                function_depth = 1
-            elif "{" not in stripped:
+        if function_depth > 0:
+            function_depth = max(0, function_depth + _shell_brace_delta(code))
+            continue
+        if _line_starts_shell_function(code):
+            if "{" in code:
+                function_depth = max(0, _shell_brace_delta(code[code.find("{"):]))
+            else:
                 pending_function_body = True
             continue
-        if function_depth > 0:
-            if stripped == "}":
-                function_depth = max(0, function_depth - 1)
-            continue
     return mask
+
+
+def _shell_brace_delta(code: str) -> int:
+    delta = 0
+    single_quote = False
+    double_quote = False
+    parameter_expansion_depth = 0
+    index = 0
+    while index < len(code):
+        char = code[index]
+        next_char = code[index + 1] if index + 1 < len(code) else ""
+        if char == "\\":
+            index += 2
+            continue
+        if single_quote:
+            if char == "'":
+                single_quote = False
+            index += 1
+            continue
+        if double_quote:
+            if char == '"':
+                double_quote = False
+            index += 1
+            continue
+        if parameter_expansion_depth > 0:
+            if char == "{":
+                parameter_expansion_depth += 1
+            elif char == "}":
+                parameter_expansion_depth -= 1
+            index += 1
+            continue
+        if char == "'":
+            single_quote = True
+        elif char == '"':
+            double_quote = True
+        elif char == "$" and next_char == "{":
+            parameter_expansion_depth = 1
+            index += 2
+            continue
+        elif char == "{":
+            delta += 1
+        elif char == "}":
+            delta -= 1
+        index += 1
+    return delta
+
+
+def _shell_assignment_scan_code(code: str) -> str:
+    out: list[str] = []
+    single_quote = False
+    double_quote = False
+    parameter_expansion_depth = 0
+    index = 0
+    while index < len(code):
+        char = code[index]
+        next_char = code[index + 1] if index + 1 < len(code) else ""
+        if char == "\\":
+            out.append(next_char if (single_quote or double_quote) and next_char else " ")
+            index += 2
+            continue
+        if single_quote:
+            if char == "'":
+                single_quote = False
+            else:
+                out.append(_SHELL_QUOTED_SPACE if char.isspace() else char)
+            index += 1
+            continue
+        if double_quote:
+            if char == '"':
+                double_quote = False
+            else:
+                out.append(_SHELL_QUOTED_SPACE if char.isspace() else char)
+            index += 1
+            continue
+        if parameter_expansion_depth > 0:
+            if char == "{":
+                parameter_expansion_depth += 1
+            elif char == "}":
+                parameter_expansion_depth -= 1
+            out.append(char)
+            index += 1
+            continue
+        if char == "'":
+            single_quote = True
+        elif char == '"':
+            double_quote = True
+        elif char == "$" and next_char == "{":
+            parameter_expansion_depth = 1
+            out.extend((char, next_char))
+            index += 2
+            continue
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def _runner_active_top_level_mask(lines: Sequence[str]) -> list[bool]:
@@ -2096,6 +2856,149 @@ def _runner_gate_smoke_result(
         }
 
 
+def _runner_target_filter_runtime_contract(
+    runner_path: Path,
+    expected_targets: Mapping[str, Any],
+    *,
+    manifest_path: Path,
+    manifest_sha256: str,
+) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="phase3-lane-target-smoke-") as tmp_name:
+        tmp = Path(tmp_name)
+        stub_dir = tmp / "bin"
+        stub_dir.mkdir()
+        invocation_log = tmp / "matrix-invocations.jsonl"
+        _write_runner_matrix_smoke_bash_stub(stub_dir / "bash", invocation_log)
+        stub_python = tmp / "validator_python"
+        _write_runner_smoke_python_stub(stub_python, tmp / "validator-invocations.jsonl")
+        env = _runner_smoke_environment(
+            runner_path,
+            tmp,
+            stub_dir,
+            stub_python,
+            manifest_path=manifest_path,
+            manifest_sha256=manifest_sha256,
+        )
+        expected_contract = _expected_runner_target_runtime_contract(expected_targets, env)
+        try:
+            completed = subprocess.run(
+                [_bash_executable(), str(runner_path)],
+                cwd=str(runner_path.parent),
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=RUNNER_GATE_SMOKE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return _runner_target_runtime_failed(
+                f"runner target runtime smoke execution failed: {exc}",
+                failure_kind="execution_error",
+                expected_contract=expected_contract,
+            )
+        try:
+            invocations = _read_runner_matrix_smoke_invocations(invocation_log)
+        except ValueError as exc:
+            return _runner_target_runtime_failed(
+                f"runner target runtime smoke invocation log was invalid: {exc}",
+                failure_kind="invalid_invocation_log",
+                expected_contract=expected_contract,
+                returncode=completed.returncode,
+            )
+        invocation_count = len(invocations)
+        observed_contracts = [
+            _observed_runner_target_runtime_contract(invocation, env, runner_path)
+            for invocation in invocations
+        ]
+        observed_contract = observed_contracts[0] if observed_contracts else {}
+        contract_matches_expected = (
+            invocation_count == 1
+            and expected_contract is not None
+            and observed_contract == expected_contract
+        )
+        if completed.returncode != 0:
+            return _runner_target_runtime_failed(
+                f"runner target runtime smoke execution failed: returncode={completed.returncode}",
+                failure_kind="nonzero_exit",
+                invocation_count=invocation_count,
+                contract_matches_expected=contract_matches_expected,
+                returncode=completed.returncode,
+                expected_contract=expected_contract,
+                observed_contract=observed_contract,
+                observed_invocations=observed_contracts,
+            )
+        if invocation_count != 1:
+            return _runner_target_runtime_failed(
+                f"runner target runtime smoke matrix invocation count was {invocation_count}",
+                failure_kind="matrix_invocation_count",
+                invocation_count=invocation_count,
+                returncode=completed.returncode,
+                expected_contract=expected_contract,
+                observed_contract=observed_contract,
+                observed_invocations=observed_contracts,
+            )
+        if expected_contract is None:
+            return _runner_target_runtime_failed(
+                "runner target runtime expected contract was unavailable",
+                failure_kind="expected_contract_unavailable",
+                invocation_count=invocation_count,
+                returncode=completed.returncode,
+                expected_contract=None,
+                observed_contract=observed_contract,
+                observed_invocations=observed_contracts,
+            )
+        if observed_contract != expected_contract:
+            return _runner_target_runtime_failed(
+                "runner target runtime contract differed from expected target filter",
+                failure_kind="contract_mismatch",
+                invocation_count=invocation_count,
+                returncode=completed.returncode,
+                expected_contract=expected_contract,
+                observed_contract=observed_contract,
+                observed_invocations=observed_contracts,
+            )
+        return {
+            "status": "passed",
+            "invocation_count": invocation_count,
+            "contract_matches_expected": True,
+            "error": None,
+            "failure_kind": "none",
+            "returncode": completed.returncode,
+            "expected_contract": expected_contract,
+            "observed_contract": observed_contract,
+            "observed_invocations": observed_contracts,
+            "contract_diff": [],
+        }
+
+
+def _runner_target_runtime_failed(
+    error: str,
+    *,
+    failure_kind: str,
+    invocation_count: int = 0,
+    contract_matches_expected: bool = False,
+    returncode: Any = MISSING_SENTINEL,
+    expected_contract: Optional[Mapping[str, Any]] = None,
+    observed_contract: Optional[Mapping[str, Any]] = None,
+    observed_invocations: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    expected = dict(expected_contract or {})
+    observed = dict(observed_contract or {})
+    return {
+        "status": "failed",
+        "invocation_count": invocation_count,
+        "contract_matches_expected": contract_matches_expected,
+        "error": error,
+        "failure_kind": failure_kind,
+        "returncode": returncode,
+        "expected_contract": expected,
+        "observed_contract": observed,
+        "observed_invocations": [dict(item) for item in observed_invocations or ()],
+        "contract_diff": _mapping_diff(expected, observed),
+    }
+
+
 def _runner_gate_smoke_failed(
     error: str,
     *,
@@ -2140,8 +3043,71 @@ def _argv_diff(expected: Sequence[str], observed: Sequence[str]) -> list[Dict[st
     return diff
 
 
+def _mapping_diff(expected: Mapping[str, Any], observed: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    diff: list[Dict[str, Any]] = []
+    keys = sorted(set(expected) | set(observed))
+    for key in keys:
+        expected_value = expected.get(key, MISSING_SENTINEL)
+        observed_value = observed.get(key, MISSING_SENTINEL)
+        if expected_value == observed_value:
+            continue
+        diff.append(
+            {
+                "key": key,
+                "expected": expected_value,
+                "observed": observed_value,
+            }
+        )
+    return diff
+
+
 def _write_runner_smoke_stub(path: Path) -> None:
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_runner_matrix_smoke_bash_stub(path: Path, invocation_log: Path) -> None:
+    matrix_scripts = (
+        "func_call_run_matrix_all_parallel_multifunc.sh",
+        "loop_run_matrix_all_parallel_multifunc.sh",
+    )
+    env_keys = (
+        "FUNCTION_CALL_TARGET_SET",
+        "LOOP_TARGET_SET",
+        "FUNCTION_CALL_PAIR_FILTER",
+        "LOOP_PAIR_FILTER",
+        "BASE_PATH",
+        "OUTPUT_BASE_DIR",
+        "BASELINE_FUNCTION_CALL_LOG_ROOT",
+        "BASELINE_LOOP_LOG_ROOT",
+    )
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"matrix_scripts = {matrix_scripts!r}\n"
+        f"env_keys = {env_keys!r}\n"
+        f"invocation_log = {str(invocation_log)!r}\n"
+        "argv = sys.argv[1:]\n"
+        "script = next((arg for arg in argv if Path(arg).name in matrix_scripts), None)\n"
+        "if script is not None:\n"
+        "    payload = {\n"
+        "        'argv': argv,\n"
+        "        'script': script,\n"
+        "        'env': {key: os.environ.get(key) for key in env_keys},\n"
+        "    }\n"
+        "    with open(invocation_log, 'a', encoding='utf-8') as handle:\n"
+        "        json.dump(payload, handle, sort_keys=True)\n"
+        "        handle.write('\\n')\n"
+        "    sys.exit(0)\n"
+        "real_bash = os.environ.get('PHASE3_REAL_BASH')\n"
+        "if not real_bash:\n"
+        "    sys.exit(127)\n"
+        "os.execv(real_bash, [real_bash, *argv])\n",
+        encoding="utf-8",
+    )
     path.chmod(0o755)
 
 
@@ -2156,6 +3122,35 @@ def _write_runner_smoke_python_stub(path: Path, invocation_log: Path) -> None:
         encoding="utf-8",
     )
     path.chmod(0o755)
+
+
+def _read_runner_matrix_smoke_invocations(invocation_log: Path) -> list[Dict[str, Any]]:
+    if not invocation_log.exists():
+        return []
+    invocations: list[Dict[str, Any]] = []
+    for raw in invocation_log.read_text(encoding="utf-8").splitlines():
+        loaded = json.loads(raw)
+        if not isinstance(loaded, Mapping):
+            raise ValueError("non-object matrix invocation record")
+        argv = loaded.get("argv")
+        env = loaded.get("env")
+        script = loaded.get("script")
+        if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+            raise ValueError("non-string matrix argv record")
+        if not isinstance(script, str):
+            raise ValueError("missing matrix script record")
+        if not isinstance(env, Mapping):
+            raise ValueError("missing matrix env record")
+        if not all(value is None or isinstance(value, str) for value in env.values()):
+            raise ValueError("non-string matrix env record")
+        invocations.append(
+            {
+                "argv": argv,
+                "script": script,
+                "env": dict(env),
+            }
+        )
+    return invocations
 
 
 def _read_runner_smoke_invocations(invocation_log: Path) -> list[list[str]]:
@@ -2188,6 +3183,117 @@ def _expected_runner_smoke_argv(
     if include_require_ready:
         argv.append("--require-ready")
     return argv
+
+
+def _expected_runner_target_runtime_contract(
+    expected_targets: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> Optional[Dict[str, Any]]:
+    category = expected_targets.get("category")
+    if category not in {"function_call", "loop"}:
+        return None
+    target_var = _expected_target_var(str(category))
+    pair_filter_var = expected_targets.get("pair_filter_var")
+    baseline_var = expected_targets.get("baseline_log_root_var")
+    if (
+        target_var == MISSING_SENTINEL
+        or pair_filter_var == MISSING_SENTINEL
+        or baseline_var == MISSING_SENTINEL
+    ):
+        return None
+    return {
+        "category": str(category),
+        "matrix_script_relpath": str(expected_targets.get("matrix_script_relpath") or MISSING_SENTINEL),
+        "target_var": target_var,
+        "target_set": ",".join(str(item) for item in expected_targets.get("target_functions") or ()),
+        "pair_filter_var": str(pair_filter_var),
+        "pair_filter": ",".join(str(item) for item in expected_targets.get("pair_filter") or ()),
+        "base_path_relpath": str(expected_targets.get("base_path_relpath") or MISSING_SENTINEL),
+        "current_log_root": f"{category}=$OUTPUT_BASE_DIR",
+        "baseline_log_root": f"{category}=${baseline_var}",
+    }
+
+
+def _observed_runner_target_runtime_contract(
+    invocation: Mapping[str, Any],
+    smoke_env: Mapping[str, str],
+    runner_path: Path,
+) -> Dict[str, Any]:
+    env = invocation.get("env") if isinstance(invocation.get("env"), Mapping) else {}
+    script = str(invocation.get("script") or "")
+    script_relpath = _normalize_runner_path_relpath(script, runner_path.parent)
+    category = _category_for_matrix_script(script_relpath)
+    target_var = _expected_target_var(category)
+    pair_filter_var = _expected_pair_filter_var(category)
+    baseline_var = _expected_baseline_log_root_var(category)
+    target_set = _runtime_env_value(env, target_var)
+    pair_filter = _runtime_env_value(env, pair_filter_var)
+    base_path = _runtime_env_value(env, "BASE_PATH")
+    current_log_root_value = _normalize_runtime_env_value(
+        _runtime_env_value(env, "OUTPUT_BASE_DIR"),
+        smoke_env,
+    )
+    baseline_log_root_value = _normalize_runtime_env_value(
+        _runtime_env_value(env, baseline_var),
+        smoke_env,
+    )
+    return {
+        "category": category,
+        "matrix_script_relpath": script_relpath,
+        "target_var": target_var,
+        "target_set": target_set,
+        "pair_filter_var": pair_filter_var,
+        "pair_filter": pair_filter,
+        "base_path_relpath": _normalize_runner_path_relpath(base_path, runner_path.parent),
+        "current_log_root": (
+            f"{category}={current_log_root_value}"
+            if category != MISSING_SENTINEL and current_log_root_value != MISSING_SENTINEL
+            else MISSING_SENTINEL
+        ),
+        "baseline_log_root": (
+            f"{category}={baseline_log_root_value}"
+            if category != MISSING_SENTINEL and baseline_log_root_value != MISSING_SENTINEL
+            else MISSING_SENTINEL
+        ),
+    }
+
+
+def _runtime_env_value(env: Mapping[str, Any], key: str) -> str:
+    if key == MISSING_SENTINEL:
+        return MISSING_SENTINEL
+    value = env.get(key)
+    return str(value) if value is not None else MISSING_SENTINEL
+
+
+def _normalize_runner_path_relpath(value: str, repo: Path) -> str:
+    if not value or value == MISSING_SENTINEL:
+        return MISSING_SENTINEL
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            return path.relative_to(repo).as_posix()
+        except ValueError:
+            return str(path)
+    return value
+
+
+def _normalize_runtime_env_value(value: str, smoke_env: Mapping[str, str]) -> str:
+    if not value or value == MISSING_SENTINEL:
+        return MISSING_SENTINEL
+    for name, replacement in sorted(smoke_env.items(), key=lambda item: len(item[1]), reverse=True):
+        if not replacement:
+            continue
+        if value == replacement:
+            return f"${name}"
+    return value
+
+
+def _category_for_matrix_script(script_relpath: str) -> str:
+    if Path(script_relpath).name == "func_call_run_matrix_all_parallel_multifunc.sh":
+        return "function_call"
+    if Path(script_relpath).name == "loop_run_matrix_all_parallel_multifunc.sh":
+        return "loop"
+    return MISSING_SENTINEL
 
 
 def _expected_runner_smoke_audit_argv(
@@ -2250,11 +3356,17 @@ def _runner_smoke_environment(
     tmp: Path,
     stub_dir: Path,
     stub_python: Path,
+    *,
+    manifest_path: Optional[Path] = None,
+    manifest_sha256: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Dict[str, str]:
     env = dict(os.environ)
     for key in (
         *EXPECTED_RUNNER_SAFETY_DEFAULTS,
+        *_RUNNER_TARGET_FILTER_ASSIGNMENT_VARS,
         "PYTHON_BIN",
+        "SCRIPT_DIR",
         "OUTPUT_BASE_DIR",
         "PHASE3_GATE_OUTPUT_DIR",
         "RUNNER_TMP_ROOT",
@@ -2264,10 +3376,13 @@ def _runner_smoke_environment(
         "PHASE1_DIR",
         "PHASE3_MANIFEST_PATH",
         "PHASE3_MANIFEST_SHA256",
+        "PARALLEL_JOBS",
     ):
         env.pop(key, None)
     env["PATH"] = f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    env["PHASE3_REAL_BASH"] = _bash_executable()
     env["PYTHON_BIN"] = str(stub_python)
+    env["SCRIPT_DIR"] = str(runner_path.parent)
     env["OUTPUT_BASE_DIR"] = str(tmp / "output")
     env["PHASE3_GATE_OUTPUT_DIR"] = str(tmp / "gate")
     env["RUNNER_TMP_ROOT"] = str(tmp / "runner_tmp")
@@ -2275,15 +3390,24 @@ def _runner_smoke_environment(
     env["BASELINE_FUNCTION_CALL_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "function_call")
     env["BASELINE_LOOP_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "loop")
     env["PHASE1_DIR"] = str(runner_path.parent / "artifacts" / "baselines" / BASELINE_ID / "phase1")
-    refs = _runner_manifest_refs(runner_path)
-    if refs["manifest_relpath"] != MISSING_SENTINEL:
-        env["PHASE3_MANIFEST_PATH"] = str(runner_path.parent / refs["manifest_relpath"])
+    if manifest_path is not None:
+        env["PHASE3_MANIFEST_PATH"] = str(manifest_path)
     else:
-        env["PHASE3_MANIFEST_PATH"] = str(tmp / "phase3_manifest.json")
-    if refs["manifest_sha256"] != MISSING_SENTINEL:
-        env["PHASE3_MANIFEST_SHA256"] = str(refs["manifest_sha256"])
+        refs = _runner_manifest_refs(runner_path)
+        if refs["manifest_relpath"] != MISSING_SENTINEL:
+            env["PHASE3_MANIFEST_PATH"] = str(runner_path.parent / refs["manifest_relpath"])
+        else:
+            env["PHASE3_MANIFEST_PATH"] = str(tmp / "phase3_manifest.json")
+    if manifest_sha256 is not None:
+        env["PHASE3_MANIFEST_SHA256"] = str(manifest_sha256)
     else:
-        env["PHASE3_MANIFEST_SHA256"] = "0" * 64
+        refs = _runner_manifest_refs(runner_path)
+        if refs["manifest_sha256"] != MISSING_SENTINEL:
+            env["PHASE3_MANIFEST_SHA256"] = str(refs["manifest_sha256"])
+        else:
+            env["PHASE3_MANIFEST_SHA256"] = "0" * 64
+    if dry_run:
+        env["VALIDATION_RUNNER_DRY_RUN"] = "1"
     return env
 
 
@@ -2316,6 +3440,7 @@ def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     pair_filter = [f"{function}:{binary_pair}" for _, function, binary_pair in targets]
     return {
         "category": category,
+        "target_var": _expected_target_var(category),
         "pair_filter_var": _expected_pair_filter_var(category),
         "base_path_relpath": _expected_base_path_relpath(category),
         "matrix_script_relpath": _expected_matrix_script_relpath(category),
@@ -2339,6 +3464,15 @@ def _empty_target_filter() -> Dict[str, Any]:
         "current_log_root_var": MISSING_SENTINEL,
         "baseline_log_root_category": MISSING_SENTINEL,
         "baseline_log_root_var": MISSING_SENTINEL,
+        "target_filter_counts": {
+            "target_set": 0,
+            "pair_filter": 0,
+            "base_path": 0,
+            "matrix_script": 0,
+            "invalid_mutations": 0,
+        },
+        "target_filter_invalid_mutations": [],
+        "target_filter_invalid_mutation_count": 0,
         "log_root_arg_counts": {
             "current_log_root": 0,
             "baseline_log_root": 0,
@@ -2346,6 +3480,14 @@ def _empty_target_filter() -> Dict[str, Any]:
         "target_functions": [],
         "pair_filter": [],
     }
+
+
+def _expected_target_var(category: str) -> str:
+    if category == "function_call":
+        return "FUNCTION_CALL_TARGET_SET"
+    if category == "loop":
+        return "LOOP_TARGET_SET"
+    return MISSING_SENTINEL
 
 
 def _expected_pair_filter_var(category: str) -> str:
