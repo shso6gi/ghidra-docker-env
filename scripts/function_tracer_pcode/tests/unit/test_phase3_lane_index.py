@@ -849,6 +849,7 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
     assert lane["runner_gate_smoke_argv_matches_expected"] is True
     assert lane["runner_gate_smoke_error"] == "<missing>"
+    assert lane["runner_gate_smoke_returncode"] == 0
     assert lane["runner_gate_smoke_expected_argv"] == _expected_runner_safety_gate_smoke_argv()
     assert lane["runner_gate_smoke_observed_argv"] == lane["runner_gate_smoke_expected_argv"]
     assert lane["runner_gate_smoke_observed_invocations"] == [
@@ -1312,6 +1313,7 @@ def test_phase3_lane_index_rejects_runner_failure_after_gate_validator(tmp_path)
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
     assert lane["runner_gate_smoke_argv_matches_expected"] is True
     assert lane["runner_gate_smoke_error"] == "runner smoke execution failed: returncode=1"
+    assert lane["runner_gate_smoke_returncode"] == 1
 
 
 def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
@@ -1368,6 +1370,7 @@ def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
     assert lane["runner_gate_smoke_argv_matches_expected"] is False
     assert lane["runner_gate_smoke_error"] == "runner smoke validator argv differed from expected gate arguments"
+    assert lane["runner_gate_smoke_returncode"] == 0
     assert lane["runner_gate_smoke_expected_argv"] == _expected_runner_safety_gate_smoke_argv()
     assert lane["runner_gate_smoke_observed_argv"] == [
         "-m",
