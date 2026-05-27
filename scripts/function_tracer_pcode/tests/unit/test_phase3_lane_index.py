@@ -307,6 +307,9 @@ def test_phase3_lane_index_builds_ready_index_for_custom_specs(tmp_path):
     manifest = json.loads(path.read_text())
     assert manifest["manifest_kind"] == "phase3_proof_lane_index"
     assert manifest["phase3_lanes_ready"] is True
+    assert manifest["summary"]["failed_kind_counts"] == {}
+    assert manifest["summary"]["failed_lanes"] == []
+    assert manifest["summary"]["failed_index_kinds"] == []
     assert [lane["lane_id"] for lane in manifest["lanes"]] == ["lane_one", "lane_two"]
     assert all(lane["manifest_sha256"] != "<missing>" for lane in manifest["lanes"])
     assert all(lane["runner_sha256"] != "<missing>" for lane in manifest["lanes"])
@@ -388,6 +391,9 @@ def test_phase3_lane_index_rejects_missing_manifest(tmp_path):
 
     assert manifest["phase3_lanes_ready"] is False
     assert "phase3_lane_manifest_present" in manifest["summary"]["failed_kinds"]
+    assert manifest["summary"]["failed_kind_counts"]["phase3_lane_manifest_present"] == 1
+    failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
+    assert failed_lanes["lane_two"]["failed_kind_counts"]["phase3_lane_manifest_present"] == 1
     with pytest.raises(ValueError, match="phase3_lane_manifest_present"):
         validate_phase3_lane_index(manifest)
 
@@ -414,6 +420,9 @@ def test_phase3_lane_index_rejects_target_reason_drift(tmp_path):
     manifest = json.loads(path.read_text())
 
     assert "phase3_lane_target_reason_ids" in manifest["summary"]["failed_kinds"]
+    assert manifest["summary"]["failed_kind_counts"]["phase3_lane_target_reason_ids"] == 1
+    failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
+    assert failed_lanes["lane_two"]["failed_kinds"] == ["phase3_lane_target_reason_ids"]
 
 
 def test_phase3_lane_index_rejects_implementation_reason_drift(tmp_path):
@@ -842,6 +851,11 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
         "--phase3-manifest": 1,
         "--phase3-manifest-sha256": 1,
     }
+    assert lane["runner_required_gate_args_missing"] == []
+    assert lane["runner_required_gate_args_duplicate"] == []
+    assert lane["runner_required_gate_args_value_mismatch"] == []
+    assert lane["runner_gate_args_unknown_args"] == []
+    assert lane["runner_gate_args_invalid_optional_args"] == []
     assert lane["runner_gate_args_assignment_count"] == 1
     assert lane["runner_gate_args_invalid_mutation_count"] == 0
     assert lane["runner_gate_args_invalid_mutations"] == []
@@ -856,6 +870,75 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_smoke_observed_invocations"] == [
         lane["runner_gate_smoke_expected_argv"]
     ]
+    assert lane["runner_gate_smoke_argv_diff"] == []
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "returncode"),
+    (
+        ("argv_mismatch", 0),
+        ("none", 1),
+    ),
+)
+def test_phase3_lane_index_rejects_inconsistent_successful_runner_gate_smoke(
+    tmp_path,
+    monkeypatch,
+    failure_kind,
+    returncode,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+
+    def fake_smoke_result(*_args, **_kwargs):
+        argv = _expected_runner_safety_gate_smoke_argv()
+        return {
+            "status": "passed",
+            "validator_invocation_count": 1,
+            "argv_matches_expected": True,
+            "error": None,
+            "failure_kind": failure_kind,
+            "returncode": returncode,
+            "expected_argv": argv,
+            "observed_argv": argv,
+            "observed_invocations": [argv],
+            "argv_diff": [],
+        }
+
+    monkeypatch.setattr(phase3_lane_index, "_runner_gate_smoke_result", fake_smoke_result)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_smoke_status"] == "passed"
+    assert lane["runner_gate_smoke_failure_kind"] == failure_kind
+    assert lane["runner_gate_smoke_returncode"] == returncode
+    assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_hardcoded_validator_args_without_gate_array(tmp_path):
@@ -1393,6 +1476,13 @@ def test_phase3_lane_index_rejects_runner_gate_smoke_argv_mismatch(tmp_path):
     assert lane["runner_gate_smoke_observed_invocations"] == [
         lane["runner_gate_smoke_observed_argv"]
     ]
+    assert lane["runner_gate_smoke_argv_diff"] == [
+        {
+            "index": 7,
+            "expected": "$PHASE3_GATE_OUTPUT_DIR",
+            "observed": "/tmp/phase3-wrong-gate-output",
+        }
+    ]
     assert "phase3_lane_runner_gate_smoke" in manifest["summary"]["failed_kinds"]
 
 
@@ -1697,6 +1787,9 @@ def test_phase3_lane_index_rejects_missing_required_runner_gate_arg(tmp_path):
     assert manifest["phase3_lanes_ready"] is False
     lane = manifest["lanes"][0]
     assert lane["runner_required_gate_arg_counts"]["--phase3-manifest-sha256"] == 0
+    assert lane["runner_required_gate_args_missing"] == ["--phase3-manifest-sha256"]
+    assert lane["runner_required_gate_args_duplicate"] == []
+    assert lane["runner_required_gate_args_value_mismatch"] == []
     assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
 
 
@@ -1742,6 +1835,9 @@ def test_phase3_lane_index_rejects_duplicate_required_runner_gate_arg(tmp_path):
     assert manifest["phase3_lanes_ready"] is False
     lane = manifest["lanes"][0]
     assert lane["runner_required_gate_arg_counts"]["--phase3-manifest-sha256"] == 2
+    assert lane["runner_required_gate_args_missing"] == []
+    assert lane["runner_required_gate_args_duplicate"] == ["--phase3-manifest-sha256"]
+    assert lane["runner_required_gate_args_value_mismatch"] == []
     assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
 
 
@@ -1780,6 +1876,15 @@ def test_phase3_lane_index_rejects_wrong_required_runner_gate_arg_value(tmp_path
     assert manifest["phase3_lanes_ready"] is False
     lane = manifest["lanes"][0]
     assert lane["runner_required_gate_args"]["--gate-stage"] == "pre-fix"
+    assert lane["runner_required_gate_args_missing"] == []
+    assert lane["runner_required_gate_args_duplicate"] == []
+    assert lane["runner_required_gate_args_value_mismatch"] == [
+        {
+            "flag": "--gate-stage",
+            "expected": "post-fix",
+            "actual": "pre-fix",
+        }
+    ]
     assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
 
 
@@ -4006,6 +4111,8 @@ def test_phase3_lane_index_rejects_wrong_baseline_id(tmp_path):
     manifest = json.loads(path.read_text())
 
     assert "baseline_id" in manifest["summary"]["failed_kinds"]
+    assert manifest["summary"]["failed_kind_counts"]["baseline_id"] == 1
+    assert manifest["summary"]["failed_index_kinds"] == ["baseline_id"]
 
 
 def test_phase3_lane_index_rejects_missing_runner(tmp_path):

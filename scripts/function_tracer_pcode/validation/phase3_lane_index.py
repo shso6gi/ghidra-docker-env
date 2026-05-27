@@ -360,8 +360,19 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_args_invoked": False,
         "runner_gate_validator_module": MISSING_SENTINEL,
         "runner_gate_validator_invocation_count": 0,
-        "runner_required_gate_args": {},
-        "runner_required_gate_arg_counts": {},
+        "runner_required_gate_args": {
+            flag: MISSING_SENTINEL
+            for flag in EXPECTED_RUNNER_GATE_ARGS
+        },
+        "runner_required_gate_arg_counts": {
+            flag: 0
+            for flag in EXPECTED_RUNNER_GATE_ARGS
+        },
+        "runner_required_gate_args_missing": list(EXPECTED_RUNNER_GATE_ARGS),
+        "runner_required_gate_args_duplicate": [],
+        "runner_required_gate_args_value_mismatch": [],
+        "runner_gate_args_unknown_args": [],
+        "runner_gate_args_invalid_optional_args": [],
         "runner_gate_args_assignment_count": 0,
         "runner_gate_args_invalid_mutations": [],
         "runner_gate_args_invalid_mutation_count": 0,
@@ -374,6 +385,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_smoke_expected_argv": [],
         "runner_gate_smoke_observed_argv": [],
         "runner_gate_smoke_observed_invocations": [],
+        "runner_gate_smoke_argv_diff": [],
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -418,6 +430,15 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_gate_validator_invocation_count"] = runner_safety["gate_validator_invocation_count"]
             lane["runner_required_gate_args"] = runner_safety["required_gate_args"]
             lane["runner_required_gate_arg_counts"] = runner_safety["required_gate_arg_counts"]
+            lane["runner_required_gate_args_missing"] = runner_safety["required_gate_args_missing"]
+            lane["runner_required_gate_args_duplicate"] = runner_safety["required_gate_args_duplicate"]
+            lane["runner_required_gate_args_value_mismatch"] = runner_safety[
+                "required_gate_args_value_mismatch"
+            ]
+            lane["runner_gate_args_unknown_args"] = runner_safety["gate_args_unknown_args"]
+            lane["runner_gate_args_invalid_optional_args"] = runner_safety[
+                "gate_args_invalid_optional_args"
+            ]
             lane["runner_gate_args_assignment_count"] = runner_safety["gate_args_assignment_count"]
             lane["runner_gate_args_invalid_mutations"] = runner_safety["gate_args_invalid_mutations"]
             lane["runner_gate_args_invalid_mutation_count"] = runner_safety["gate_args_invalid_mutation_count"]
@@ -436,6 +457,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_gate_smoke_observed_invocations"] = runner_safety[
                 "gate_smoke_observed_invocations"
             ]
+            lane["runner_gate_smoke_argv_diff"] = runner_safety["gate_smoke_argv_diff"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -736,6 +758,11 @@ def _index_checks(
                     expected=lane.get("expected_runner_gate_args"),
                     actual=lane.get("runner_required_gate_args"),
                     counts=required_gate_arg_counts or {},
+                    missing=lane.get("runner_required_gate_args_missing"),
+                    duplicate=lane.get("runner_required_gate_args_duplicate"),
+                    value_mismatch=lane.get("runner_required_gate_args_value_mismatch"),
+                    unknown_args=lane.get("runner_gate_args_unknown_args"),
+                    invalid_optional_args=lane.get("runner_gate_args_invalid_optional_args"),
                     assignment_count=lane.get("runner_gate_args_assignment_count"),
                     **details,
                 )
@@ -755,6 +782,8 @@ def _index_checks(
                 if lane.get("runner_gate_smoke_status") == "passed"
                 and lane.get("runner_gate_smoke_validator_invocation_count") == 1
                 and lane.get("runner_gate_smoke_argv_matches_expected") is True
+                and lane.get("runner_gate_smoke_failure_kind") == "none"
+                and lane.get("runner_gate_smoke_returncode") == 0
                 else _failed(
                     "phase3_lane_runner_gate_smoke",
                     smoke_status=lane.get("runner_gate_smoke_status"),
@@ -766,6 +795,7 @@ def _index_checks(
                     expected_argv=lane.get("runner_gate_smoke_expected_argv"),
                     observed_argv=lane.get("runner_gate_smoke_observed_argv"),
                     observed_invocations=lane.get("runner_gate_smoke_observed_invocations"),
+                    argv_diff=lane.get("runner_gate_smoke_argv_diff"),
                     **details,
                 )
             )
@@ -884,10 +914,37 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         for check in checks
         if isinstance(check, Mapping) and check.get("status") == "failed"
     ]
+    failed_kind_counts: Dict[str, int] = {}
+    failed_lanes: Dict[str, Dict[str, Any]] = {}
+    failed_index_kinds: list[str] = []
+    for check in failed:
+        kind = str(check.get("kind") or MISSING_SENTINEL)
+        failed_kind_counts[kind] = failed_kind_counts.get(kind, 0) + 1
+        lane_id = check.get("lane_id")
+        if not lane_id:
+            failed_index_kinds.append(kind)
+            continue
+        lane_key = str(lane_id)
+        lane_summary = failed_lanes.setdefault(
+            lane_key,
+            {
+                "lane_number": check.get("lane_number", MISSING_SENTINEL),
+                "lane_id": lane_key,
+                "failed": 0,
+                "failed_kinds": [],
+                "failed_kind_counts": {},
+            },
+        )
+        lane_summary["failed"] += 1
+        lane_summary["failed_kinds"].append(kind)
+        lane_summary["failed_kind_counts"][kind] = lane_summary["failed_kind_counts"].get(kind, 0) + 1
     return {
         "total": len(checks),
         "failed": len(failed),
         "failed_kinds": [check.get("kind") for check in failed],
+        "failed_kind_counts": failed_kind_counts,
+        "failed_lanes": list(failed_lanes.values()),
+        "failed_index_kinds": failed_index_kinds,
     }
 
 
@@ -1009,8 +1066,19 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_args_invoked": False,
             "gate_validator_module": MISSING_SENTINEL,
             "gate_validator_invocation_count": 0,
-            "required_gate_args": {},
-            "required_gate_arg_counts": {},
+            "required_gate_args": {
+                flag: MISSING_SENTINEL
+                for flag in EXPECTED_RUNNER_GATE_ARGS
+            },
+            "required_gate_arg_counts": {
+                flag: 0
+                for flag in EXPECTED_RUNNER_GATE_ARGS
+            },
+            "required_gate_args_missing": list(EXPECTED_RUNNER_GATE_ARGS),
+            "required_gate_args_duplicate": [],
+            "required_gate_args_value_mismatch": [],
+            "gate_args_unknown_args": [],
+            "gate_args_invalid_optional_args": [],
             "gate_args_assignment_count": 0,
             "gate_args_invalid_mutations": [],
             "gate_args_invalid_mutation_count": 0,
@@ -1023,6 +1091,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_smoke_expected_argv": [],
             "gate_smoke_observed_argv": [],
             "gate_smoke_observed_invocations": [],
+            "gate_smoke_argv_diff": [],
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -1042,6 +1111,11 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_validator_invocation_count": gate_probe["gate_validator_invocation_count"],
         "required_gate_args": gate_probe["required_gate_args"],
         "required_gate_arg_counts": gate_probe["required_gate_arg_counts"],
+        "required_gate_args_missing": gate_probe["required_gate_args_missing"],
+        "required_gate_args_duplicate": gate_probe["required_gate_args_duplicate"],
+        "required_gate_args_value_mismatch": gate_probe["required_gate_args_value_mismatch"],
+        "gate_args_unknown_args": gate_probe["gate_args_unknown_args"],
+        "gate_args_invalid_optional_args": gate_probe["gate_args_invalid_optional_args"],
         "gate_args_assignment_count": gate_probe["gate_args_assignment_count"],
         "gate_args_invalid_mutations": gate_probe["gate_args_invalid_mutations"],
         "gate_args_invalid_mutation_count": gate_probe["gate_args_invalid_mutation_count"],
@@ -1054,6 +1128,7 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_expected_argv": gate_probe["gate_smoke_expected_argv"],
         "gate_smoke_observed_argv": gate_probe["gate_smoke_observed_argv"],
         "gate_smoke_observed_invocations": gate_probe["gate_smoke_observed_invocations"],
+        "gate_smoke_argv_diff": gate_probe["gate_smoke_argv_diff"],
     }
 
 
@@ -1073,6 +1148,7 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
     )
     gate_block = _runner_gate_args_block(lines, top_level, validator_limit)
     parsed_args = _static_gate_args(gate_block["args"])
+    gate_arg_diagnostics = _gate_arg_diagnostics(parsed_args)
     require_ready = _runner_require_ready_block(lines, validator_limit)
     invalid_mutations = list(gate_block["invalid_mutations"])
     invalid_mutations.extend(require_ready["invalid_mutations"])
@@ -1128,6 +1204,11 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_validator_invocation_count": len(validator_starts),
         "required_gate_args": parsed_args["values"],
         "required_gate_arg_counts": parsed_args["counts"],
+        "required_gate_args_missing": gate_arg_diagnostics["missing"],
+        "required_gate_args_duplicate": gate_arg_diagnostics["duplicate"],
+        "required_gate_args_value_mismatch": gate_arg_diagnostics["value_mismatch"],
+        "gate_args_unknown_args": gate_arg_diagnostics["unknown_args"],
+        "gate_args_invalid_optional_args": gate_arg_diagnostics["invalid_optional_args"],
         "gate_args_assignment_count": gate_block["assignment_count"],
         "gate_args_invalid_mutations": list(dict.fromkeys(invalid_mutations)),
         "gate_args_invalid_mutation_count": len(list(dict.fromkeys(invalid_mutations))),
@@ -1140,6 +1221,7 @@ def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
         "gate_smoke_expected_argv": smoke_result["expected_argv"],
         "gate_smoke_observed_argv": smoke_result["observed_argv"],
         "gate_smoke_observed_invocations": smoke_result["observed_invocations"],
+        "gate_smoke_argv_diff": smoke_result["argv_diff"],
     }
 
 
@@ -1157,6 +1239,11 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
             flag: 0
             for flag in EXPECTED_RUNNER_GATE_ARGS
         },
+        "required_gate_args_missing": list(EXPECTED_RUNNER_GATE_ARGS),
+        "required_gate_args_duplicate": [],
+        "required_gate_args_value_mismatch": [],
+        "gate_args_unknown_args": [],
+        "gate_args_invalid_optional_args": [],
         "gate_args_assignment_count": 0,
         "gate_args_invalid_mutations": [],
         "gate_args_invalid_mutation_count": 0,
@@ -1169,6 +1256,7 @@ def _empty_runner_gate_contract() -> Dict[str, Any]:
         "gate_smoke_expected_argv": [],
         "gate_smoke_observed_argv": [],
         "gate_smoke_observed_invocations": [],
+        "gate_smoke_argv_diff": [],
     }
 
 
@@ -1392,6 +1480,38 @@ def _static_gate_args_valid(parsed: Mapping[str, Any], *, require_ready: bool) -
     )
 
 
+def _gate_arg_diagnostics(parsed: Mapping[str, Any]) -> Dict[str, Any]:
+    counts = parsed.get("counts") if isinstance(parsed.get("counts"), Mapping) else {}
+    values = parsed.get("values") if isinstance(parsed.get("values"), Mapping) else {}
+    missing: list[str] = []
+    duplicate: list[str] = []
+    value_mismatch: list[Dict[str, Any]] = []
+    for flag, expected in EXPECTED_RUNNER_GATE_ARGS.items():
+        count = counts.get(flag, 0)
+        if count == 0:
+            missing.append(flag)
+            continue
+        if count > 1:
+            duplicate.append(flag)
+            continue
+        actual = values.get(flag, MISSING_SENTINEL)
+        if actual != expected:
+            value_mismatch.append(
+                {
+                    "flag": flag,
+                    "expected": expected,
+                    "actual": actual,
+                }
+            )
+    return {
+        "missing": missing,
+        "duplicate": duplicate,
+        "value_mismatch": value_mismatch,
+        "unknown_args": list(parsed.get("unknown_args") or ()),
+        "invalid_optional_args": list(parsed.get("invalid_optional_args") or ()),
+    }
+
+
 def _invalid_optional_gate_args(optional_values: Mapping[str, Sequence[str]]) -> list[str]:
     allowed = {
         "--current-log-root": {
@@ -1558,6 +1678,7 @@ def _runner_gate_smoke_result(
             "expected_argv": expected_audit_argv,
             "observed_argv": observed_audit_argv,
             "observed_invocations": observed_audit_invocations,
+            "argv_diff": [],
         }
 
 
@@ -1582,7 +1703,27 @@ def _runner_gate_smoke_failed(
         "expected_argv": list(expected_argv or ()),
         "observed_argv": list(observed_argv or ()),
         "observed_invocations": [list(argv) for argv in observed_invocations or ()],
+        "argv_diff": _argv_diff(expected_argv or (), observed_argv or ()),
     }
+
+
+def _argv_diff(expected: Sequence[str], observed: Sequence[str]) -> list[Dict[str, Any]]:
+    expected_values = [str(item) for item in expected]
+    observed_values = [str(item) for item in observed]
+    diff: list[Dict[str, Any]] = []
+    for index in range(max(len(expected_values), len(observed_values))):
+        expected_value = expected_values[index] if index < len(expected_values) else MISSING_SENTINEL
+        observed_value = observed_values[index] if index < len(observed_values) else MISSING_SENTINEL
+        if expected_value == observed_value:
+            continue
+        diff.append(
+            {
+                "index": index,
+                "expected": expected_value,
+                "observed": observed_value,
+            }
+        )
+    return diff
 
 
 def _write_runner_smoke_stub(path: Path) -> None:
