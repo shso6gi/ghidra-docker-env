@@ -116,6 +116,8 @@ def _write_runner(
     require_ready_arg=False,
     invoke_gate_args=False,
     gate_validator_module="scripts.function_tracer_pcode.validation.phase3_runner_safety_lane",
+    include_required_gate_args=None,
+    required_gate_arg_overrides=None,
     target_functions=None,
     pair_filter=None,
 ) -> None:
@@ -155,23 +157,39 @@ def _write_runner(
             ]
         )
         lines.append(f'bash "$SCRIPT_DIR/{_matrix_script_for_category(matrix_category or target_category)}"')
-    if current_log_root_category is not None or baseline_log_root_category is not None:
+    include_required_gate_args = (
+        safety_defaults is not None
+        if include_required_gate_args is None
+        else include_required_gate_args
+    )
+    if include_required_gate_args or current_log_root_category is not None or baseline_log_root_category is not None:
         resolved_current_log_root_category = current_log_root_category or target_category or "function_call"
         resolved_baseline_log_root_category = baseline_log_root_category or resolved_current_log_root_category
         resolved_baseline_log_root_var_category = (
             baseline_log_root_var_category or resolved_baseline_log_root_category
         )
-        lines.extend(
-            [
-                "PHASE3_GATE_ARGS=(",
-                f'    --current-log-root "{resolved_current_log_root_category}=$OUTPUT_BASE_DIR"',
-                (
-                    f'    --baseline-log-root "{resolved_baseline_log_root_category}'
-                    f'=${_baseline_log_root_var_for_category(resolved_baseline_log_root_var_category)}"'
-                ),
-                ")",
-            ]
-        )
+        gate_args = []
+        if include_required_gate_args:
+            required_gate_args = {
+                "--gate-stage": "post-fix",
+                "--baseline-raw-dir": '"$BASELINE_RAW_DIR"',
+                "--output-dir": '"$PHASE3_GATE_OUTPUT_DIR"',
+                "--phase3-manifest": '"$PHASE3_MANIFEST_PATH"',
+                "--phase3-manifest-sha256": '"$PHASE3_MANIFEST_SHA256"',
+            }
+            required_gate_args.update(required_gate_arg_overrides or {})
+            gate_args.extend(f"    {flag} {value}" for flag, value in required_gate_args.items())
+        if current_log_root_category is not None or baseline_log_root_category is not None:
+            gate_args.extend(
+                [
+                    f'    --current-log-root "{resolved_current_log_root_category}=$OUTPUT_BASE_DIR"',
+                    (
+                        f'    --baseline-log-root "{resolved_baseline_log_root_category}'
+                        f'=${_baseline_log_root_var_for_category(resolved_baseline_log_root_var_category)}"'
+                    ),
+                ]
+            )
+        lines.extend(["PHASE3_GATE_ARGS=(", *gate_args, ")"])
     if require_ready_arg:
         lines.extend(
             [
@@ -792,6 +810,659 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_args_invoked"] is True
     assert lane["runner_gate_validator_module"] == "scripts.function_tracer_pcode.validation.phase3_runner_safety_lane"
     assert lane["runner_gate_validator_invocation_count"] == 1
+    assert lane["runner_required_gate_args"] == {
+        "--gate-stage": "post-fix",
+        "--baseline-raw-dir": "$BASELINE_RAW_DIR",
+        "--output-dir": "$PHASE3_GATE_OUTPUT_DIR",
+        "--phase3-manifest": "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256": "$PHASE3_MANIFEST_SHA256",
+    }
+    assert lane["runner_required_gate_arg_counts"] == {
+        "--gate-stage": 1,
+        "--baseline-raw-dir": 1,
+        "--output-dir": 1,
+        "--phase3-manifest": 1,
+        "--phase3-manifest-sha256": 1,
+    }
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] == 0
+    assert lane["runner_gate_args_invalid_mutations"] == []
+
+
+def test_phase3_lane_index_rejects_hardcoded_validator_args_without_gate_array(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    runner_path = repo / spec.runner_relpath
+    runner_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+    ]
+    for name, value in _safety_defaults().items():
+        prefix = "export " if name != "PHASE3_REQUIRE_READY" else ""
+        lines.append(f'{prefix}{name}="${{{name}:-{value}}}"')
+    lines.append(
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase3_runner_safety_lane '
+        '--gate-stage post-fix '
+        '--baseline-raw-dir "$BASELINE_RAW_DIR" '
+        '--output-dir "$PHASE3_GATE_OUTPUT_DIR" '
+        '--phase3-manifest "$PHASE3_MANIFEST_PATH" '
+        '--phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256" '
+        "--require-ready"
+    )
+    runner_path.write_text("\n".join(lines) + "\n")
+    runner_path.chmod(0o755)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 0
+    assert all(value == "<missing>" for value in lane["runner_required_gate_args"].values())
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("forged_arg", "expected_invoked"),
+    (
+        ('"__phase3_gate_args_array_probe__"', True),
+        ('"$PHASE3_GATE_ARRAY_SENTINEL"', True),
+    ),
+)
+def test_phase3_lane_index_rejects_forged_public_gate_array_sentinel(
+    tmp_path,
+    forged_arg,
+    expected_invoked,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '    "${PHASE3_GATE_ARGS[@]}"',
+            f"    {forged_arg} \\\n"
+            "    --gate-stage post-fix \\\n"
+            '    --baseline-raw-dir "$BASELINE_RAW_DIR" \\\n'
+            '    --output-dir "$PHASE3_GATE_OUTPUT_DIR" \\\n'
+            '    --phase3-manifest "$PHASE3_MANIFEST_PATH" \\\n'
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256" \\\n'
+            "    --require-ready",
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is expected_invoked
+    if expected_invoked:
+        assert lane["runner_gate_args_assignment_count"] == 1
+        assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+        assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+        assert "validator did not consume PHASE3_GATE_ARGS array" in lane["runner_gate_args_invalid_mutations"]
+    else:
+        assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_single_gate_array_element_with_hardcoded_args(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '    "${PHASE3_GATE_ARGS[@]}"',
+            '    "${PHASE3_GATE_ARGS[0]}" \\\n'
+            "    --gate-stage post-fix \\\n"
+            '    --baseline-raw-dir "$BASELINE_RAW_DIR" \\\n'
+            '    --output-dir "$PHASE3_GATE_OUTPUT_DIR" \\\n'
+            '    --phase3-manifest "$PHASE3_MANIFEST_PATH" \\\n'
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256" \\\n'
+            "    --require-ready",
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "validator did not consume PHASE3_GATE_ARGS array" in lane["runner_gate_args_invalid_mutations"]
+
+
+def test_phase3_lane_index_rejects_marker_prefix_forged_from_gate_array_element(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '    "${PHASE3_GATE_ARGS[@]}"',
+            '    "${PHASE3_GATE_ARGS[0]%start}start" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:0" --gate-stage \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:1" post-fix \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:2" --baseline-raw-dir \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:3" "$BASELINE_RAW_DIR" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:4" --output-dir \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:5" "$PHASE3_GATE_OUTPUT_DIR" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:6" --phase3-manifest \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:7" "$PHASE3_MANIFEST_PATH" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:8" --phase3-manifest-sha256 \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:9" "$PHASE3_MANIFEST_SHA256" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:10" --require-ready \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}end:11"',
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "validator did not consume PHASE3_GATE_ARGS array" in lane["runner_gate_args_invalid_mutations"]
+
+
+def test_phase3_lane_index_rejects_full_array_decoy_literal_with_forged_markers(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '    "${PHASE3_GATE_ARGS[@]}"',
+            '    "${PHASE3_GATE_ARGS[0]%start}start" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:0" --gate-stage \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:1" post-fix \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:2" --baseline-raw-dir \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:3" "$BASELINE_RAW_DIR" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:4" --output-dir \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:5" "$PHASE3_GATE_OUTPUT_DIR" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:6" --phase3-manifest \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:7" "$PHASE3_MANIFEST_PATH" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:8" --phase3-manifest-sha256 \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:9" "$PHASE3_MANIFEST_SHA256" \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}arg:10" --require-ready \\\n'
+            '    "${PHASE3_GATE_ARGS[0]%start}end:11" \\\n'
+            "    <<< '\"${PHASE3_GATE_ARGS[@]}\"'",
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "validator did not consume PHASE3_GATE_ARGS array" in lane["runner_gate_args_invalid_mutations"]
+
+
+@pytest.mark.parametrize(
+    "helper_mutation",
+    (
+        "__phase3_gate_probe_command_uses_full_gate_array() { return 0; }",
+        "unset -f __phase3_gate_probe_command_uses_full_gate_array",
+    ),
+)
+def test_phase3_lane_index_rejects_probe_helper_mutation_before_forged_markers(
+    tmp_path,
+    helper_mutation,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_text = runner_path.read_text().replace(
+        '"$PYTHON_BIN" -m',
+        helper_mutation + '\n"$PYTHON_BIN" -m',
+        1,
+    )
+    runner_text = runner_text.replace(
+        '    "${PHASE3_GATE_ARGS[@]}"',
+        '    "${PHASE3_GATE_ARGS[0]%start}start" \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:0" --gate-stage \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:1" post-fix \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:2" --baseline-raw-dir \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:3" "$BASELINE_RAW_DIR" \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:4" --output-dir \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:5" "$PHASE3_GATE_OUTPUT_DIR" \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:6" --phase3-manifest \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:7" "$PHASE3_MANIFEST_PATH" \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:8" --phase3-manifest-sha256 \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:9" "$PHASE3_MANIFEST_SHA256" \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}arg:10" --require-ready \\\n'
+        '    "${PHASE3_GATE_ARGS[0]%start}end:11"',
+    )
+    runner_path.write_text(runner_text)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "validator did not consume PHASE3_GATE_ARGS array" in lane["runner_gate_args_invalid_mutations"]
+
+
+def test_phase3_lane_index_rejects_gate_args_mutation_history_even_if_restored(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            "PHASE3_GATE_ARGS=(",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)\nPHASE3_GATE_ARGS=(",
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_runner_failure_after_gate_validator(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write("false\n")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "runner smoke execution failed: returncode=1" in lane["runner_gate_args_invalid_mutations"]
+
+
+@pytest.mark.parametrize("early_exit", ("exit 0", "exec true"))
+def test_phase3_lane_index_rejects_unreached_gate_validator(tmp_path, early_exit):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            early_exit + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+    assert "runner smoke validator invocation count was 0" in lane["runner_gate_args_invalid_mutations"]
+
+
+@pytest.mark.parametrize(
+    "tamper_lines",
+    (
+        (
+            "__PHASE3_GATE_PROBE_IN_TRAP=1",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "PHASE3_GATE_ARGS=(",
+            "    --gate-stage post-fix",
+            '    --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '    --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '    --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            ")",
+            "PHASE3_GATE_ARGS+=(--require-ready)",
+            "unset __PHASE3_GATE_PROBE_IN_TRAP",
+        ),
+        (
+            "PHASE3_RUNNER_PROBE_PYTHON=/bin/true",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "PHASE3_GATE_ARGS=(",
+            "    --gate-stage post-fix",
+            '    --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '    --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '    --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            ")",
+            "PHASE3_GATE_ARGS+=(--require-ready)",
+            "unset PHASE3_RUNNER_PROBE_PYTHON",
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_runtime_probe_variable_tampering(
+    tmp_path,
+    tamper_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(tamper_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "extra_line",
+    (
+        "PHASE3_GATE_ARGS+=(--unexpected-option value)",
+        'PHASE3_GATE_ARGS+=(--current-log-root "function_call=/tmp/wrong")',
+        "PHASE3_GATE_ARGS+=(--require-ready)",
+    ),
+)
+def test_phase3_lane_index_rejects_extra_runtime_gate_args(tmp_path, extra_line):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            extra_line + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_accepts_expected_runner_gate_validator_module(tmp_path):
@@ -871,6 +1542,1446 @@ def test_phase3_lane_index_rejects_wrong_runner_gate_validator_module(tmp_path):
     assert lane["runner_gate_args_invoked"] is True
     assert lane["runner_gate_validator_module"] == "scripts.function_tracer_pcode.validation.phase3_wrong_lane"
     assert "phase3_lane_runner_gate_validator_module" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_missing_required_runner_gate_arg(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        required_gate_arg_overrides={"--phase3-manifest-sha256": "<missing>"},
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace("    --phase3-manifest-sha256 <missing>\n", "")
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_required_gate_arg_counts"]["--phase3-manifest-sha256"] == 0
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_duplicate_required_runner_gate_arg(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            ")\nif [[",
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"\n)\nif [[',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_required_gate_arg_counts"]["--phase3-manifest-sha256"] == 2
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_wrong_required_runner_gate_arg_value(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        required_gate_arg_overrides={"--gate-stage": "pre-fix"},
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_required_gate_args"]["--gate-stage"] == "pre-fix"
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_phase3_gate_args_reassignment_before_validator(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            'PHASE3_GATE_ARGS=()\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert lane["runner_gate_args_invoked"] is True
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        ("unset PHASE3_GATE_ARGS",),
+        ("unset PHASE3_GATE_ARGS[0]",),
+        ("unset 'PHASE3_GATE_ARGS[0]'",),
+        ("unset -v PHASE3_GATE_ARGS[0]",),
+        ("unset 'PHASE3_GATE_ARGS[@]'",),
+        ("builtin unset PHASE3_GATE_ARGS[0]",),
+        ("command unset PHASE3_GATE_ARGS[0]",),
+        ("builtin unset 'PHASE3_GATE_ARGS[0]",),
+        ("command unset 'PHASE3_GATE_ARGS[0]",),
+        ('PHASE3_GATE_ARGS=("${OTHER_ARGS[@]}")',),
+        ("PHASE3_GATE_ARGS+=(--gate-stage pre-fix)",),
+        ("PHASE3_GATE_ARGS[1]=pre-fix",),
+        ("declare -a PHASE3_GATE_ARGS=(bad)",),
+        ("typeset -a PHASE3_GATE_ARGS=(bad)",),
+        ("readonly -a PHASE3_GATE_ARGS=(bad)",),
+        ("declare -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("typeset -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("builtin declare -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("command declare -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("builtin typeset -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("command typeset -n GATE_ALIAS=PHASE3_GATE_ARGS", "GATE_ALIAS=(--gate-stage pre-fix)"),
+        ("eval 'PHASE3_GATE_ARGS=(--gate-stage pre-fix)'",),
+        ("eval 'unset PHASE3_GATE_ARGS'",),
+        ('builtin eval "PHASE3_GATE_ARGS=(--gate-stage pre-fix)"',),
+        ("builtin printf -v PHASE3_GATE_ARGS %s pre-fix",),
+        ('command eval "PHASE3_GATE_ARGS=(--gate-stage pre-fix)"',),
+        ("command printf -v PHASE3_GATE_ARGS %s pre-fix",),
+        ('read -a PHASE3_GATE_ARGS <<< "--gate-stage pre-fix"',),
+        ('readarray -t PHASE3_GATE_ARGS <<< "--gate-stage pre-fix"',),
+        ('mapfile -t PHASE3_GATE_ARGS <<< "--gate-stage pre-fix"',),
+        ("printf -v PHASE3_GATE_ARGS %s pre-fix",),
+    ),
+)
+def test_phase3_lane_index_rejects_phase3_gate_args_mutation_before_validator(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert (
+        lane["runner_gate_args_invalid_mutation_count"] >= 1
+        or lane["runner_gate_args_invoked"] is False
+    )
+    assert (
+        "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+        or "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        (
+            "GATE_ALIAS=PHASE3_GATE_ARGS",
+            "declare -n GATE_ALIAS",
+            "GATE_ALIAS=(--gate-stage pre-fix)",
+        ),
+        (
+            "PHASE3_REF=PHASE3_GATE_ARGS",
+            "typeset -n PHASE3_REF",
+            "PHASE3_REF=(--gate-stage pre-fix)",
+        ),
+        (
+            "declare -n GATE_ALIAS",
+            "GATE_ALIAS=PHASE3_GATE_ARGS",
+            "GATE_ALIAS=(--gate-stage pre-fix)",
+        ),
+        (
+            "declare -n GATE_ALIAS; "
+            "GATE_ALIAS=PHASE3_GATE_ARGS; "
+            "GATE_ALIAS=(--gate-stage pre-fix)",
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_two_step_nameref_gate_args_mutation(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        (
+            "target=PHASE3_GATE_ARGS",
+            'unset "$target"',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'printf -v "$target" %s pre-fix',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'read "$target" <<< pre-fix',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'eval "$target=(--gate-stage pre-fix)"',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'declare "$target=pre-fix"',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'unset "${target}"',
+        ),
+        (
+            "export target=PHASE3_GATE_ARGS",
+            'unset "$target"',
+        ),
+        (
+            "declare target=PHASE3_GATE_ARGS",
+            'printf -v "$target" %s pre-fix',
+        ),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'export "$target=pre-fix"',
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_variable_alias_builtin_gate_args_mutation(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'unset "$target2"'),
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'printf -v "$target2" %s pre-fix'),
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'read "$target2" <<< pre-fix'),
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'eval "$target2=(--gate-stage pre-fix)"'),
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'declare "$target2=pre-fix"'),
+        ("target=PHASE3_GATE_ARGS", 'target2="$target"', 'export "$target2=pre-fix"'),
+    ),
+)
+def test_phase3_lane_index_rejects_transitive_alias_gate_args_mutation(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        ("target=PHASE3_", "target+=GATE_ARGS", 'printf -v "$target" %s pre-fix'),
+        ("target=PHASE3_", "target+=GATE_ARGS", 'eval "$target=(--gate-stage pre-fix)"'),
+        ("target=PHASE3_", "target+=GATE_ARGS", 'unset "$target"'),
+        ("target=PHASE3_", "target+=GATE_ARGS", 'read "$target" <<< pre-fix'),
+    ),
+)
+def test_phase3_lane_index_rejects_split_name_alias_gate_args_mutation(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize("disable_debug_trap", ("trap - DEBUG", "builtin trap - DEBUG"))
+def test_phase3_lane_index_rejects_gate_args_restore_after_debug_trap_disabled(
+    tmp_path,
+    disable_debug_trap,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    restore_lines = "\n".join(
+        (
+            disable_debug_trap,
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "PHASE3_GATE_ARGS=(",
+            "    --gate-stage post-fix",
+            '    --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '    --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '    --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            ")",
+            "PHASE3_GATE_ARGS+=(--require-ready)",
+            "trap '__phase3_gate_probe_debug_trap' DEBUG",
+        )
+    )
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            restore_lines + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "function_definition",
+    (
+        "mutate_gate_args() { PHASE3_GATE_ARGS=(--gate-stage pre-fix); }",
+        'mutate_gate_args() { target=PHASE3_GATE_ARGS; unset "$target"; }',
+        'mutate_gate_args() { target=PHASE3_GATE_ARGS; printf -v "$target" %s pre-fix; }',
+        'mutate_gate_args() { local target=PHASE3_GATE_ARGS; unset "$target"; }',
+        "\n".join(
+            (
+                "mutate_gate_args()",
+                "{",
+                "    PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+                "}",
+            )
+        ),
+        "\n".join(
+            (
+                "function mutate_gate_args",
+                "{",
+                "    unset PHASE3_GATE_ARGS[0]",
+                "}",
+            )
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_called_function_that_mutates_gate_args(
+    tmp_path,
+    function_definition,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_text = runner_path.read_text()
+    runner_text = runner_text.replace(
+        "PHASE3_GATE_ARGS=(",
+        function_definition + "\nPHASE3_GATE_ARGS=(",
+        1,
+    )
+    runner_text = runner_text.replace(
+        '"$PYTHON_BIN" -m',
+        'mutate_gate_args\n"$PYTHON_BIN" -m',
+        1,
+    )
+    runner_path.write_text(runner_text)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "call_line",
+    (
+        "if mutate_gate_args; then :; fi",
+        "! mutate_gate_args",
+        "time mutate_gate_args",
+    ),
+)
+def test_phase3_lane_index_rejects_control_prefix_mutating_function_call(
+    tmp_path,
+    call_line,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_text = runner_path.read_text()
+    runner_text = runner_text.replace(
+        "PHASE3_GATE_ARGS=(",
+        "mutate_gate_args() { PHASE3_GATE_ARGS=(--gate-stage pre-fix); }\nPHASE3_GATE_ARGS=(",
+        1,
+    )
+    runner_text = runner_text.replace(
+        '"$PYTHON_BIN" -m',
+        call_line + '\n"$PYTHON_BIN" -m',
+        1,
+    )
+    runner_path.write_text(runner_text)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_rejects_function_internal_mutation_even_if_restored(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    restore_function = "\n".join(
+        (
+            "mutate_gate_args()",
+            "{",
+            "    PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "    PHASE3_GATE_ARGS+=(--require-ready)",
+            "}",
+        )
+    )
+    runner_text = runner_path.read_text()
+    runner_text = runner_text.replace(
+        "PHASE3_GATE_ARGS=(",
+        restore_function + "\nPHASE3_GATE_ARGS=(",
+        1,
+    )
+    runner_text = runner_text.replace(
+        '"$PYTHON_BIN" -m',
+        'mutate_gate_args\n"$PYTHON_BIN" -m',
+        1,
+    )
+    runner_path.write_text(runner_text)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_required_gate_args"] == {
+        "--gate-stage": "post-fix",
+        "--baseline-raw-dir": "$BASELINE_RAW_DIR",
+        "--output-dir": "$PHASE3_GATE_OUTPUT_DIR",
+        "--phase3-manifest": "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256": "$PHASE3_MANIFEST_SHA256",
+    }
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize("disable_functrace", ("set +o functrace", "set +T"))
+def test_phase3_lane_index_rejects_function_internal_restore_after_functrace_disabled(
+    tmp_path,
+    disable_functrace,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    restore_function = "\n".join(
+        (
+            "mutate_gate_args()",
+            "{",
+            "    PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "    PHASE3_GATE_ARGS+=(--require-ready)",
+            "}",
+        )
+    )
+    runner_text = runner_path.read_text()
+    runner_text = runner_text.replace(
+        "PHASE3_GATE_ARGS=(",
+        restore_function + "\nPHASE3_GATE_ARGS=(",
+        1,
+    )
+    runner_text = runner_text.replace(
+        '"$PYTHON_BIN" -m',
+        disable_functrace + '\nmutate_gate_args\n"$PYTHON_BIN" -m',
+        1,
+    )
+    runner_path.write_text(runner_text)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_required_gate_args"] == {
+        "--gate-stage": "post-fix",
+        "--baseline-raw-dir": "$BASELINE_RAW_DIR",
+        "--output-dir": "$PHASE3_GATE_OUTPUT_DIR",
+        "--phase3-manifest": "$PHASE3_MANIFEST_PATH",
+        "--phase3-manifest-sha256": "$PHASE3_MANIFEST_SHA256",
+    }
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "function_definition",
+    (
+        "mutate_gate_args() { PHASE3_GATE_ARGS=(--gate-stage pre-fix); }",
+        "\n".join(
+            (
+                "mutate_gate_args()",
+                "{",
+                "    PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+                "}",
+            )
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_uncalled_mutating_function_definition_before_validator(
+    tmp_path,
+    function_definition,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            function_definition + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "mutation_lines",
+    (
+        ("target=PHASE3_GATE_ARGS", "declare target=OTHER", 'unset "$target"'),
+        ("target=PHASE3_GATE_ARGS", "typeset target=OTHER", 'unset "$target"'),
+        ("target=PHASE3_GATE_ARGS", "readonly target=OTHER", 'unset "$target"'),
+        ("target=PHASE3_GATE_ARGS", "export target=OTHER", 'unset "$target"'),
+        (
+            "target=PHASE3_GATE_ARGS",
+            'reset_alias() { local target=OTHER; unset "$target"; }',
+            "reset_alias",
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_alias_reassignment_before_indirect_unset(
+    tmp_path,
+    mutation_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            "\n".join(mutation_lines) + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("mutation_line", "expected_fragment"),
+    (
+        (
+            'if [[ "$PHASE3_REQUIRE_READY" != "0" ]]; then '
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix); fi",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+        ),
+        (
+            "true && PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+        ),
+        (
+            "foo; PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+        ),
+        (
+            'case "$PHASE3_REQUIRE_READY" in 1) PHASE3_GATE_ARGS=(--gate-stage pre-fix);; esac',
+            "PHASE3_GATE_ARGS=(--gate-stage pre-fix)",
+        ),
+        (
+            'case "$PHASE3_REQUIRE_READY" in 1) unset PHASE3_GATE_ARGS;; esac',
+            "unset PHASE3_GATE_ARGS",
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_inline_phase3_gate_args_mutation_before_validator(
+    tmp_path,
+    mutation_line,
+    expected_fragment,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            mutation_line + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert (
+        lane["runner_gate_args_invalid_mutation_count"] >= 1
+        or lane["runner_gate_args_invoked"] is False
+    )
+    assert (
+        "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+        or "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+    )
+
+
+def test_phase3_lane_index_rejects_required_gate_args_defined_after_validator_invocation(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        include_required_gate_args=False,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                [
+                    "PHASE3_GATE_ARGS=(",
+                    "    --gate-stage post-fix",
+                    '    --baseline-raw-dir "$BASELINE_RAW_DIR"',
+                    '    --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+                    '    --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+                    '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+                    ")",
+                ]
+            )
+            + "\n"
+        )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 0
+    assert all(count == 0 for count in lane["runner_required_gate_arg_counts"].values())
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_ignores_required_gate_args_in_other_arrays(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        include_required_gate_args=False,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                [
+                    "OTHER_ARGS=(",
+                    "    --gate-stage post-fix",
+                    '    --baseline-raw-dir "$BASELINE_RAW_DIR"',
+                    '    --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+                    '    --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+                    '    --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+                    ")",
+                ]
+            )
+            + "\n"
+        )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert all(count == 0 for count in lane["runner_required_gate_arg_counts"].values())
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+def test_phase3_lane_index_ignores_required_gate_args_inside_uncalled_function(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        include_required_gate_args=False,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                [
+                    "unused_gate_args() {",
+                    "    PHASE3_GATE_ARGS=(",
+                    "        --gate-stage post-fix",
+                    '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+                    '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+                    '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+                    '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+                    "    )",
+                    "}",
+                ]
+            )
+            + "\n"
+        )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert all(count == 0 for count in lane["runner_required_gate_arg_counts"].values())
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "wrapper_lines",
+    (
+        (
+            "function unused_gate_args {",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+        (
+            "function unused_gate_args { # comment",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+        (
+            "unused_gate_args()",
+            "{",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+        (
+            "unused_gate_args() { # comment",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+        (
+            "function unused_gate_args",
+            "{",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+        (
+            "if false; then",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "fi",
+        ),
+        (
+            "if false; then # comment",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "fi",
+        ),
+        (
+            "if false",
+            "then",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "fi",
+        ),
+        (
+            "(",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            ")",
+        ),
+        (
+            "{",
+            "    PHASE3_GATE_ARGS=(",
+            "        --gate-stage post-fix",
+            '        --baseline-raw-dir "$BASELINE_RAW_DIR"',
+            '        --output-dir "$PHASE3_GATE_OUTPUT_DIR"',
+            '        --phase3-manifest "$PHASE3_MANIFEST_PATH"',
+            '        --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"',
+            "    )",
+            "}",
+        ),
+    ),
+)
+def test_phase3_lane_index_ignores_required_gate_args_inside_uncalled_shell_scopes(
+    tmp_path,
+    wrapper_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        include_required_gate_args=False,
+    )
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(wrapper_lines) + "\n")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert all(count == 0 for count in lane["runner_required_gate_arg_counts"].values())
+    assert "phase3_lane_runner_required_gate_args" in manifest["summary"]["failed_kinds"]
 
 
 def test_phase3_lane_index_rejects_duplicate_runner_gate_validator_invocations(tmp_path):
@@ -1136,6 +3247,170 @@ def test_phase3_lane_index_rejects_non_executed_gate_args_strings(tmp_path, fake
 
     assert manifest["phase3_lanes_ready"] is False
     assert manifest["lanes"][0]["runner_gate_args_invoked"] is False
+    assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "fake_command",
+    (
+        'echo \'"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"\'',
+        'GATE_CALL=\'"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"\'',
+    ),
+)
+def test_phase3_lane_index_rejects_non_executed_gate_arg_strings_before_valid_validator(
+    tmp_path,
+    fake_command,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=True, invoke_gate_args=True)
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            fake_command + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_assignment_count"] == 1
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "side_effect_line",
+    (
+        'echo "$((PHASE3_GATE_ARGS[1]=0))"',
+        'GATE_CALL="$((PHASE3_GATE_ARGS[1]=0))"',
+    ),
+)
+def test_phase3_lane_index_rejects_side_effect_gate_arg_expansions_before_validator(
+    tmp_path,
+    side_effect_line,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=True, invoke_gate_args=True)
+    runner_path = repo / spec.runner_relpath
+    runner_path.write_text(
+        runner_path.read_text().replace(
+            '"$PYTHON_BIN" -m',
+            side_effect_line + '\n"$PYTHON_BIN" -m',
+            1,
+        )
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is True
+    assert lane["runner_gate_args_invalid_mutation_count"] >= 1
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    "wrapper_lines",
+    (
+        (
+            'unused_gate() { "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake '
+            '"${PHASE3_GATE_ARGS[@]}"; }',
+        ),
+        (
+            'if false; then "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake '
+            '"${PHASE3_GATE_ARGS[@]}"; fi',
+        ),
+        (
+            "unused_gate()",
+            "{",
+            '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"',
+            "}",
+        ),
+        (
+            "function unused_gate",
+            "{",
+            '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.fake "${PHASE3_GATE_ARGS[@]}"',
+            "}",
+        ),
+    ),
+)
+def test_phase3_lane_index_rejects_gate_invocation_inside_uncalled_shell_scopes(
+    tmp_path,
+    wrapper_lines,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_safety_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_safety_lane/manifest.json",
+        runner_relpath="run_runner_safety_lane.sh",
+        manifest_kind="runner_safety_lane_manifest",
+        ready_key="runner_safety_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(repo, spec, safety_defaults=_safety_defaults(), require_ready_arg=True, invoke_gate_args=False)
+    runner_path = repo / spec.runner_relpath
+    with runner_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(wrapper_lines) + "\n")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    lane = manifest["lanes"][0]
+    assert lane["runner_gate_args_invoked"] is False
+    assert lane["runner_gate_validator_invocation_count"] == 0
     assert "phase3_lane_runner_gate_args_invoked" in manifest["summary"]["failed_kinds"]
 
 

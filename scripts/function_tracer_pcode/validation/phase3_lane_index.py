@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
-import shlex
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,7 @@ MANIFEST_VERSION = 1
 BASELINE_ID = "observed-v0@0a53352"
 MISSING_SENTINEL = "<missing>"
 LaneValidator = Callable[[Mapping[str, Any]], None]
+RUNNER_GATE_SMOKE_TIMEOUT_SECONDS = 30
 _RUNNER_MANIFEST_PATH_RE = re.compile(
     r'PHASE3_MANIFEST_PATH="\$\{PHASE3_MANIFEST_PATH:-\$SCRIPT_DIR/(?P<path>[^"}]+)\}"'
 )
@@ -79,10 +83,6 @@ _RUNNER_DEFAULT_ENV_RE = re.compile(
     r')="\$\{(?P=var):-(?P<value>[^"}]+)\}"\s*$',
     re.MULTILINE,
 )
-_RUNNER_REQUIRE_READY_ARG_RE = re.compile(
-    r'^(?!\s*#)\s*PHASE3_GATE_ARGS\+=\(--require-ready\)\s*$',
-    re.MULTILINE,
-)
 EXPECTED_RUNNER_SAFETY_DEFAULTS: Mapping[str, str] = {
     "VALIDATION_AUTO_BEFORE_SNAPSHOT": "0",
     "VALIDATION_REQUIRE_BEFORE_DELTA": "0",
@@ -91,6 +91,13 @@ EXPECTED_RUNNER_SAFETY_DEFAULTS: Mapping[str, str] = {
     "VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS": "1",
     "VALIDATION_RUNNER_DRY_RUN": "0",
     "PHASE3_REQUIRE_READY": "1",
+}
+EXPECTED_RUNNER_GATE_ARGS: Mapping[str, str] = {
+    "--gate-stage": "post-fix",
+    "--baseline-raw-dir": "$BASELINE_RAW_DIR",
+    "--output-dir": "$PHASE3_GATE_OUTPUT_DIR",
+    "--phase3-manifest": "$PHASE3_MANIFEST_PATH",
+    "--phase3-manifest-sha256": "$PHASE3_MANIFEST_SHA256",
 }
 
 
@@ -353,6 +360,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "runner_gate_args_invoked": False,
         "runner_gate_validator_module": MISSING_SENTINEL,
         "runner_gate_validator_invocation_count": 0,
+        "runner_required_gate_args": {},
+        "runner_required_gate_arg_counts": {},
+        "runner_gate_args_assignment_count": 0,
+        "runner_gate_args_invalid_mutations": [],
+        "runner_gate_args_invalid_mutation_count": 0,
         "runner_target_functions": [],
         "runner_pair_filter": [],
         "expected_target_category": MISSING_SENTINEL,
@@ -365,6 +377,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "expected_baseline_log_root_var": MISSING_SENTINEL,
         "expected_gate_validator_module": spec.gate_validator_module or MISSING_SENTINEL,
         "expected_runner_safety_defaults": dict(EXPECTED_RUNNER_SAFETY_DEFAULTS),
+        "expected_runner_gate_args": dict(EXPECTED_RUNNER_GATE_ARGS),
         "expected_target_functions": [],
         "expected_pair_filter": [],
     }
@@ -394,6 +407,11 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             lane["runner_gate_args_invoked"] = runner_safety["gate_args_invoked"]
             lane["runner_gate_validator_module"] = runner_safety["gate_validator_module"]
             lane["runner_gate_validator_invocation_count"] = runner_safety["gate_validator_invocation_count"]
+            lane["runner_required_gate_args"] = runner_safety["required_gate_args"]
+            lane["runner_required_gate_arg_counts"] = runner_safety["required_gate_arg_counts"]
+            lane["runner_gate_args_assignment_count"] = runner_safety["gate_args_assignment_count"]
+            lane["runner_gate_args_invalid_mutations"] = runner_safety["gate_args_invalid_mutations"]
+            lane["runner_gate_args_invalid_mutation_count"] = runner_safety["gate_args_invalid_mutation_count"]
             lane["runner_target_functions"] = runner_targets["target_functions"]
             lane["runner_pair_filter"] = runner_targets["pair_filter"]
     if not path.exists():
@@ -682,6 +700,32 @@ def _index_checks(
                         **details,
                     )
                 )
+            required_gate_arg_counts = lane.get("runner_required_gate_arg_counts")
+            checks.append(
+                _ok("phase3_lane_runner_required_gate_args", **details)
+                if lane.get("runner_required_gate_args") == lane.get("expected_runner_gate_args")
+                and isinstance(required_gate_arg_counts, Mapping)
+                and all(required_gate_arg_counts.get(flag) == 1 for flag in EXPECTED_RUNNER_GATE_ARGS)
+                and lane.get("runner_gate_args_assignment_count") == 1
+                else _failed(
+                    "phase3_lane_runner_required_gate_args",
+                    expected=lane.get("expected_runner_gate_args"),
+                    actual=lane.get("runner_required_gate_args"),
+                    counts=required_gate_arg_counts or {},
+                    assignment_count=lane.get("runner_gate_args_assignment_count"),
+                    **details,
+                )
+            )
+            checks.append(
+                _ok("phase3_lane_runner_gate_args_immutable", **details)
+                if lane.get("runner_gate_args_invalid_mutation_count") == 0
+                else _failed(
+                    "phase3_lane_runner_gate_args_immutable",
+                    invalid_mutations=lane.get("runner_gate_args_invalid_mutations"),
+                    invalid_mutation_count=lane.get("runner_gate_args_invalid_mutation_count"),
+                    **details,
+                )
+            )
         checks.append(
             _ok("phase3_lane_manifest_kind", **details)
             if lane.get("observed_manifest_kind") == lane.get("expected_manifest_kind")
@@ -922,6 +966,11 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             "gate_args_invoked": False,
             "gate_validator_module": MISSING_SENTINEL,
             "gate_validator_invocation_count": 0,
+            "required_gate_args": {},
+            "required_gate_arg_counts": {},
+            "gate_args_assignment_count": 0,
+            "gate_args_invalid_mutations": [],
+            "gate_args_invalid_mutation_count": 0,
         }
     defaults: Dict[str, str] = {}
     duplicate_vars: list[str] = []
@@ -931,58 +980,561 @@ def _runner_safety_defaults(runner_path: Path) -> Dict[str, Any]:
             duplicate_vars.append(var)
             continue
         defaults[var] = match.group("value")
-    gate_validator_modules = _runner_gate_validator_modules(content)
+    gate_probe = _runner_gate_contract(runner_path)
     return {
         "defaults": defaults,
         "duplicate_vars": list(dict.fromkeys(duplicate_vars)),
-        "require_ready_arg_present": _RUNNER_REQUIRE_READY_ARG_RE.search(content) is not None,
-        "gate_args_invoked": len(gate_validator_modules) == 1,
-        "gate_validator_module": gate_validator_modules[0] if len(gate_validator_modules) == 1 else MISSING_SENTINEL,
-        "gate_validator_invocation_count": len(gate_validator_modules),
+        "require_ready_arg_present": gate_probe["require_ready_arg_present"],
+        "gate_args_invoked": gate_probe["gate_args_invoked"],
+        "gate_validator_module": gate_probe["gate_validator_module"],
+        "gate_validator_invocation_count": gate_probe["gate_validator_invocation_count"],
+        "required_gate_args": gate_probe["required_gate_args"],
+        "required_gate_arg_counts": gate_probe["required_gate_arg_counts"],
+        "gate_args_assignment_count": gate_probe["gate_args_assignment_count"],
+        "gate_args_invalid_mutations": gate_probe["gate_args_invalid_mutations"],
+        "gate_args_invalid_mutation_count": gate_probe["gate_args_invalid_mutation_count"],
     }
 
 
-def _runner_gate_validator_modules(content: str) -> list[str]:
-    modules: list[str] = []
-    for command in _active_shell_commands(content):
-        module = _gate_args_validator_module(command)
-        if module:
-            modules.append(module)
-    return modules
-
-
-def _gate_args_validator_module(command: str) -> Optional[str]:
+def _runner_gate_contract(runner_path: Path) -> Dict[str, Any]:
+    empty = _empty_runner_gate_contract()
     try:
-        argv = shlex.split(command)
-    except ValueError:
-        return None
-    if len(argv) < 4:
-        return None
-    if (
-        argv[0] == "$PYTHON_BIN"
-        and argv[1] == "-m"
-        and argv[2].startswith("scripts.function_tracer_pcode.validation.")
-        and "${PHASE3_GATE_ARGS[@]}" in argv[3:]
+        content = runner_path.read_text(encoding="utf-8")
+    except OSError:
+        return empty
+
+    lines = content.splitlines()
+    top_level = _runner_static_top_level_mask(lines)
+    validator_starts = _runner_gate_validator_starts(lines, top_level)
+    canonical_validator = _canonical_runner_gate_validator_invocation(lines, validator_starts)
+    validator_limit = canonical_validator["start"] if canonical_validator else (
+        validator_starts[0]["index"] if validator_starts else len(lines)
+    )
+    gate_block = _runner_gate_args_block(lines, top_level, validator_limit)
+    parsed_args = _static_gate_args(gate_block["args"])
+    require_ready = _runner_require_ready_block(lines, validator_limit)
+    invalid_mutations = list(gate_block["invalid_mutations"])
+    invalid_mutations.extend(require_ready["invalid_mutations"])
+    invalid_mutations.extend(
+        _runner_gate_args_forbidden_lines(
+            lines,
+            validator_limit,
+            gate_block["ranges"],
+            require_ready["ranges"],
+        )
+    )
+
+    if len(validator_starts) != 1:
+        if validator_starts:
+            invalid_mutations.append(f"runner invoked gate validator {len(validator_starts)} times")
+    elif canonical_validator is None:
+        invalid_mutations.append("validator did not consume PHASE3_GATE_ARGS array")
+
+    if parsed_args["values"] != dict(EXPECTED_RUNNER_GATE_ARGS) or any(
+        parsed_args["counts"].get(flag) != 1 for flag in EXPECTED_RUNNER_GATE_ARGS
     ):
-        return argv[2]
-    return None
+        invalid_mutations.append("static PHASE3_GATE_ARGS differed from expected gate arguments")
+    if parsed_args["unknown_args"]:
+        invalid_mutations.append(
+            "static PHASE3_GATE_ARGS contained unexpected arguments: "
+            + ", ".join(parsed_args["unknown_args"])
+        )
+    if parsed_args["invalid_optional_args"]:
+        invalid_mutations.append(
+            "static PHASE3_GATE_ARGS contained invalid optional arguments: "
+            + ", ".join(parsed_args["invalid_optional_args"])
+        )
+
+    smoke_error = _runner_gate_smoke_error(
+        runner_path,
+        canonical_validator["module"] if canonical_validator else MISSING_SENTINEL,
+        gate_block["args"],
+        require_ready["present"],
+    )
+    if smoke_error:
+        invalid_mutations.append(smoke_error)
+
+    module = (
+        validator_starts[0]["module"]
+        if validator_starts
+        else MISSING_SENTINEL
+    )
+    return {
+        "require_ready_arg_present": require_ready["present"],
+        "gate_args_invoked": len(validator_starts) == 1,
+        "gate_validator_module": module,
+        "gate_validator_invocation_count": len(validator_starts),
+        "required_gate_args": parsed_args["values"],
+        "required_gate_arg_counts": parsed_args["counts"],
+        "gate_args_assignment_count": gate_block["assignment_count"],
+        "gate_args_invalid_mutations": list(dict.fromkeys(invalid_mutations)),
+        "gate_args_invalid_mutation_count": len(list(dict.fromkeys(invalid_mutations))),
+    }
 
 
-def _active_shell_commands(content: str) -> list[str]:
-    commands: list[str] = []
-    pending = ""
-    for raw_line in content.splitlines():
-        stripped = raw_line.strip()
+def _empty_runner_gate_contract() -> Dict[str, Any]:
+    return {
+        "require_ready_arg_present": False,
+        "gate_args_invoked": False,
+        "gate_validator_module": MISSING_SENTINEL,
+        "gate_validator_invocation_count": 0,
+        "required_gate_args": {
+            flag: MISSING_SENTINEL
+            for flag in EXPECTED_RUNNER_GATE_ARGS
+        },
+        "required_gate_arg_counts": {
+            flag: 0
+            for flag in EXPECTED_RUNNER_GATE_ARGS
+        },
+        "gate_args_assignment_count": 0,
+        "gate_args_invalid_mutations": [],
+        "gate_args_invalid_mutation_count": 0,
+    }
+
+
+def _runner_static_top_level_mask(lines: Sequence[str]) -> list[bool]:
+    mask: list[bool] = []
+    function_depth = 0
+    pending_function_body = False
+    for line in lines:
+        stripped = line.strip()
+        mask.append(function_depth == 0 and not pending_function_body)
         if not stripped or stripped.startswith("#"):
             continue
-        if stripped.endswith("\\"):
-            pending += stripped[:-1].rstrip() + " "
+        if pending_function_body and stripped == "{":
+            function_depth = 1
+            pending_function_body = False
             continue
-        commands.append((pending + stripped).strip())
-        pending = ""
-    if pending:
-        commands.append(pending.strip())
-    return commands
+        if pending_function_body:
+            pending_function_body = False
+        if _line_starts_shell_function(stripped):
+            if "{" in stripped and "}" not in stripped[stripped.find("{") + 1:]:
+                function_depth = 1
+            elif "{" not in stripped:
+                pending_function_body = True
+            continue
+        if function_depth > 0:
+            if stripped == "}":
+                function_depth = max(0, function_depth - 1)
+            continue
+    return mask
+
+
+def _line_starts_shell_function(stripped: str) -> bool:
+    return bool(
+        re.match(r'^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*(?:\{.*)?$', stripped)
+        or re.match(r'^function\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:\{.*)?$', stripped)
+    )
+
+
+def _runner_gate_validator_starts(lines: Sequence[str], top_level: Sequence[bool]) -> list[Dict[str, Any]]:
+    starts: list[Dict[str, Any]] = []
+    pattern = re.compile(
+        r'^\s*"\$PYTHON_BIN"\s+-m\s+'
+        r'(?P<module>scripts\.function_tracer_pcode\.validation\.[A-Za-z0-9_\.]+)'
+        r'(?P<suffix>.*)$'
+    )
+    for index, line in enumerate(lines):
+        if index >= len(top_level) or not top_level[index]:
+            continue
+        match = pattern.match(line)
+        if not match:
+            continue
+        starts.append(
+            {
+                "index": index,
+                "module": match.group("module"),
+                "suffix": match.group("suffix").strip(),
+            }
+        )
+    return starts
+
+
+def _canonical_runner_gate_validator_invocation(
+    lines: Sequence[str],
+    validator_starts: Sequence[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if len(validator_starts) != 1:
+        return None
+    start = validator_starts[0]
+    index = int(start["index"])
+    if start.get("suffix") != "\\":
+        return None
+    if index + 1 >= len(lines):
+        return None
+    if lines[index + 1].strip() != '"${PHASE3_GATE_ARGS[@]}"':
+        return None
+    return {
+        "start": index,
+        "end": index + 1,
+        "module": start["module"],
+    }
+
+
+def _runner_gate_args_block(
+    lines: Sequence[str],
+    top_level: Sequence[bool],
+    validator_limit: int,
+) -> Dict[str, Any]:
+    starts = [
+        index
+        for index, line in enumerate(lines[:validator_limit])
+        if index < len(top_level) and top_level[index] and line.strip() == "PHASE3_GATE_ARGS=("
+    ]
+    invalid_mutations: list[str] = []
+    if len(starts) != 1:
+        if not starts:
+            invalid_mutations.append("PHASE3_GATE_ARGS block missing")
+        else:
+            invalid_mutations.append(f"runner defined PHASE3_GATE_ARGS {len(starts)} times")
+        return {
+            "args": [],
+            "ranges": [],
+            "assignment_count": 0,
+            "invalid_mutations": invalid_mutations,
+        }
+    start = starts[0]
+    args: list[str] = []
+    end: Optional[int] = None
+    for index in range(start + 1, validator_limit):
+        stripped = lines[index].strip()
+        if stripped == ")":
+            end = index
+            break
+        if stripped and not stripped.startswith("#"):
+            args.append(stripped)
+    if end is None:
+        invalid_mutations.append("PHASE3_GATE_ARGS block is unterminated")
+        end = start
+    parsed = _static_gate_args(args)
+    assignment_count = 1 if _static_gate_args_valid(parsed, require_ready=False) else 0
+    return {
+        "args": args,
+        "ranges": [(start, end)],
+        "assignment_count": assignment_count,
+        "invalid_mutations": invalid_mutations,
+    }
+
+
+def _runner_require_ready_block(lines: Sequence[str], validator_limit: int) -> Dict[str, Any]:
+    ranges: list[tuple[int, int]] = []
+    invalid_mutations: list[str] = []
+    ready_line_indexes = [
+        index
+        for index, line in enumerate(lines[:validator_limit])
+        if line.strip() == "PHASE3_GATE_ARGS+=(--require-ready)"
+    ]
+    for index in ready_line_indexes:
+        if (
+            index - 1 >= 0
+            and index + 1 < validator_limit
+            and lines[index - 1].strip() == 'if [[ "$PHASE3_REQUIRE_READY" != "0" ]]; then'
+            and lines[index + 1].strip() == "fi"
+        ):
+            ranges.append((index - 1, index + 1))
+        else:
+            invalid_mutations.append("PHASE3_GATE_ARGS --require-ready append is not in the canonical guard")
+    if len(ranges) > 1:
+        invalid_mutations.append(f"runner appended --require-ready {len(ranges)} times")
+    return {
+        "present": len(ranges) == 1,
+        "ranges": ranges,
+        "invalid_mutations": invalid_mutations,
+    }
+
+
+def _static_gate_args(args: Sequence[str]) -> Dict[str, Any]:
+    values: Dict[str, list[str]] = {flag: [] for flag in EXPECTED_RUNNER_GATE_ARGS}
+    optional_values: Dict[str, list[str]] = {
+        "--current-log-root": [],
+        "--baseline-log-root": [],
+        "--phase1-dir": [],
+        "--phase1-current-log-root": [],
+    }
+    unknown_args: list[str] = []
+    for raw in args:
+        parsed = _split_static_gate_arg(raw)
+        if parsed is None:
+            unknown_args.append(raw)
+            continue
+        flag, value = parsed
+        if flag in values:
+            values[flag].append(_normalize_static_gate_value(value))
+        elif flag in optional_values:
+            optional_values[flag].append(_normalize_static_gate_value(value))
+        else:
+            unknown_args.append(raw)
+    invalid_optional_args = _invalid_optional_gate_args(optional_values)
+    return {
+        "values": {
+            flag: observed[0] if len(observed) == 1 else MISSING_SENTINEL
+            for flag, observed in values.items()
+        },
+        "counts": {
+            flag: len(observed)
+            for flag, observed in values.items()
+        },
+        "optional_values": optional_values,
+        "optional_counts": {
+            flag: len(observed)
+            for flag, observed in optional_values.items()
+        },
+        "unknown_args": unknown_args,
+        "invalid_optional_args": invalid_optional_args,
+    }
+
+
+def _split_static_gate_arg(raw: str) -> Optional[tuple[str, str]]:
+    stripped = raw.strip()
+    if not stripped.startswith("--"):
+        return None
+    parts = stripped.split(None, 1)
+    if len(parts) != 2:
+        return None
+    flag, value = parts
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    return flag, value
+
+
+def _normalize_static_gate_value(value: str) -> str:
+    return value
+
+
+def _static_gate_args_valid(parsed: Mapping[str, Any], *, require_ready: bool) -> bool:
+    return (
+        parsed["values"] == dict(EXPECTED_RUNNER_GATE_ARGS)
+        and all(parsed["counts"].get(flag) == 1 for flag in EXPECTED_RUNNER_GATE_ARGS)
+        and not parsed["unknown_args"]
+        and not parsed["invalid_optional_args"]
+        and not require_ready
+    )
+
+
+def _invalid_optional_gate_args(optional_values: Mapping[str, Sequence[str]]) -> list[str]:
+    allowed = {
+        "--current-log-root": {
+            "function_call=$OUTPUT_BASE_DIR",
+            "loop=$OUTPUT_BASE_DIR",
+        },
+        "--baseline-log-root": {
+            "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT",
+            "loop=$BASELINE_LOOP_LOG_ROOT",
+        },
+        "--phase1-dir": {
+            "$PHASE1_DIR",
+        },
+        "--phase1-current-log-root": {
+            "function_call=$OUTPUT_BASE_DIR",
+            "loop=$OUTPUT_BASE_DIR",
+        },
+    }
+    invalid: list[str] = []
+    for flag, observed in optional_values.items():
+        if len(observed) > 1:
+            invalid.append(f"{flag}=<duplicate>")
+            continue
+        if len(observed) == 1 and observed[0] not in allowed[flag]:
+            invalid.append(f"{flag}={observed[0]}")
+    return invalid
+
+
+def _runner_gate_args_forbidden_lines(
+    lines: Sequence[str],
+    validator_limit: int,
+    gate_ranges: Sequence[tuple[int, int]],
+    require_ready_ranges: Sequence[tuple[int, int]],
+) -> list[str]:
+    invalid: list[str] = []
+    allowed = set()
+    for start, end in (*gate_ranges, *require_ready_ranges):
+        allowed.update(range(start, end + 1))
+    post_gate_start = max((end + 1 for _, end in gate_ranges), default=None)
+    for index, line in enumerate(lines[:validator_limit]):
+        if index in allowed:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "PHASE3_GATE_ARGS" in stripped:
+            invalid.append(f"unexpected PHASE3_GATE_ARGS line before validator: {stripped}")
+            continue
+        if post_gate_start is not None and index >= post_gate_start:
+            invalid.append(f"unexpected command between PHASE3_GATE_ARGS block and validator: {stripped}")
+    return invalid
+
+
+def _runner_gate_smoke_error(
+    runner_path: Path,
+    validator_module: str,
+    gate_args: Sequence[str],
+    include_require_ready: bool,
+) -> Optional[str]:
+    with tempfile.TemporaryDirectory(prefix="phase3-lane-runner-smoke-") as tmp_name:
+        tmp = Path(tmp_name)
+        stub_dir = tmp / "bin"
+        stub_dir.mkdir()
+        _write_runner_smoke_stub(stub_dir / "bash")
+        stub_python = tmp / "validator_python"
+        invocation_log = tmp / "validator-invocations.jsonl"
+        _write_runner_smoke_python_stub(stub_python, invocation_log)
+        env = _runner_smoke_environment(runner_path, tmp, stub_dir, stub_python)
+        expected_argv = _expected_runner_smoke_argv(
+            validator_module,
+            gate_args,
+            include_require_ready,
+            env,
+        )
+        try:
+            completed = subprocess.run(
+                [_bash_executable(), str(runner_path)],
+                cwd=str(runner_path.parent),
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=RUNNER_GATE_SMOKE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"runner smoke execution failed: {exc}"
+        try:
+            invocations = _read_runner_smoke_invocations(invocation_log)
+        except ValueError as exc:
+            return f"runner smoke validator invocation log was invalid: {exc}"
+        invocation_count = len(invocations)
+        if completed.returncode != 0:
+            return f"runner smoke execution failed: returncode={completed.returncode}"
+        if invocation_count != 1:
+            return f"runner smoke validator invocation count was {invocation_count}"
+        if expected_argv is None:
+            return "runner smoke expected validator argv was unavailable"
+        if invocations[0] != expected_argv:
+            return "runner smoke validator argv differed from expected gate arguments"
+        return None
+
+
+def _write_runner_smoke_stub(path: Path) -> None:
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_runner_smoke_python_stub(path: Path, invocation_log: Path) -> None:
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "import sys\n"
+        f"with open({str(invocation_log)!r}, 'a', encoding='utf-8') as handle:\n"
+        "    json.dump(sys.argv[1:], handle)\n"
+        "    handle.write('\\n')\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _read_runner_smoke_invocations(invocation_log: Path) -> list[list[str]]:
+    if not invocation_log.exists():
+        return []
+    invocations: list[list[str]] = []
+    for raw in invocation_log.read_text(encoding="utf-8").splitlines():
+        loaded = json.loads(raw)
+        if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
+            raise ValueError("non-string argv record")
+        invocations.append(loaded)
+    return invocations
+
+
+def _expected_runner_smoke_argv(
+    validator_module: str,
+    gate_args: Sequence[str],
+    include_require_ready: bool,
+    env: Mapping[str, str],
+) -> Optional[list[str]]:
+    if validator_module == MISSING_SENTINEL:
+        return None
+    argv = ["-m", validator_module]
+    for raw in gate_args:
+        parsed = _split_static_gate_arg(raw)
+        if parsed is None:
+            return None
+        flag, value = parsed
+        argv.extend([flag, _resolve_runner_smoke_gate_value(value, env)])
+    if include_require_ready:
+        argv.append("--require-ready")
+    return argv
+
+
+def _resolve_runner_smoke_gate_value(value: str, env: Mapping[str, str]) -> str:
+    resolved = value
+    for name in sorted(_RUNNER_SMOKE_GATE_VALUE_ENV_KEYS, key=len, reverse=True):
+        replacement = env.get(name)
+        if replacement is None:
+            continue
+        resolved = resolved.replace("${" + name + "}", replacement)
+        resolved = resolved.replace("$" + name, replacement)
+    return resolved
+
+
+_RUNNER_SMOKE_GATE_VALUE_ENV_KEYS = (
+    "BASELINE_FUNCTION_CALL_LOG_ROOT",
+    "BASELINE_LOOP_LOG_ROOT",
+    "PHASE3_MANIFEST_SHA256",
+    "PHASE3_GATE_OUTPUT_DIR",
+    "PHASE3_MANIFEST_PATH",
+    "BASELINE_RAW_DIR",
+    "OUTPUT_BASE_DIR",
+    "PHASE1_DIR",
+)
+
+
+def _runner_smoke_environment(
+    runner_path: Path,
+    tmp: Path,
+    stub_dir: Path,
+    stub_python: Path,
+) -> Dict[str, str]:
+    env = dict(os.environ)
+    for key in (
+        *EXPECTED_RUNNER_SAFETY_DEFAULTS,
+        "PYTHON_BIN",
+        "OUTPUT_BASE_DIR",
+        "PHASE3_GATE_OUTPUT_DIR",
+        "RUNNER_TMP_ROOT",
+        "BASELINE_RAW_DIR",
+        "BASELINE_FUNCTION_CALL_LOG_ROOT",
+        "BASELINE_LOOP_LOG_ROOT",
+        "PHASE1_DIR",
+        "PHASE3_MANIFEST_PATH",
+        "PHASE3_MANIFEST_SHA256",
+    ):
+        env.pop(key, None)
+    env["PATH"] = f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    env["PYTHON_BIN"] = str(stub_python)
+    env["OUTPUT_BASE_DIR"] = str(tmp / "output")
+    env["PHASE3_GATE_OUTPUT_DIR"] = str(tmp / "gate")
+    env["RUNNER_TMP_ROOT"] = str(tmp / "runner_tmp")
+    env["BASELINE_RAW_DIR"] = str(runner_path.parent / "artifacts" / "baselines" / BASELINE_ID / "raw")
+    env["BASELINE_FUNCTION_CALL_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "function_call")
+    env["BASELINE_LOOP_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "loop")
+    env["PHASE1_DIR"] = str(runner_path.parent / "artifacts" / "baselines" / BASELINE_ID / "phase1")
+    refs = _runner_manifest_refs(runner_path)
+    if refs["manifest_relpath"] != MISSING_SENTINEL:
+        env["PHASE3_MANIFEST_PATH"] = str(runner_path.parent / refs["manifest_relpath"])
+    else:
+        env["PHASE3_MANIFEST_PATH"] = str(tmp / "phase3_manifest.json")
+    if refs["manifest_sha256"] != MISSING_SENTINEL:
+        env["PHASE3_MANIFEST_SHA256"] = str(refs["manifest_sha256"])
+    else:
+        env["PHASE3_MANIFEST_SHA256"] = "0" * 64
+    return env
+
+
+def _bash_executable() -> str:
+    for candidate in ("/bin/bash", "/usr/bin/bash"):
+        if Path(candidate).exists():
+            return candidate
+    return "bash"
 
 
 def _manifest_target_filter(manifest: Mapping[str, Any]) -> Dict[str, Any]:
