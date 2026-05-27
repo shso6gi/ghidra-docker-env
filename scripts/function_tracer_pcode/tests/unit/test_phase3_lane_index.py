@@ -16,18 +16,29 @@ from scripts.function_tracer_pcode.validation.phase3_lane_index import (
 )
 
 
-def _write_baseline(root: Path, *, baseline_id: str = "observed-v0@0a53352") -> None:
+DEFAULT_BASELINE_GIT_HEAD = phase3_lane_index.BASELINE_GIT_HEAD
+
+
+def _write_baseline(
+    root: Path,
+    *,
+    baseline_id: str = "observed-v0@0a53352",
+    git_head: str | None = DEFAULT_BASELINE_GIT_HEAD,
+) -> None:
     raw = root / "raw"
     raw.mkdir(parents=True)
-    (raw / "artifact_manifest.json").write_text(
-        json.dumps(
-            {
-                "baseline_id": baseline_id,
-                "git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
-            },
-            sort_keys=True,
-        )
-    )
+    payload = {"baseline_id": baseline_id}
+    if git_head is not None:
+        payload["git_head"] = git_head
+    (raw / "artifact_manifest.json").write_text(json.dumps(payload, sort_keys=True))
+
+
+def _baseline_raw_ref(root: Path) -> dict[str, str]:
+    raw_manifest_path = root / "raw" / "artifact_manifest.json"
+    return {
+        "path": str(raw_manifest_path),
+        "sha256": hashlib.sha256(raw_manifest_path.read_bytes()).hexdigest(),
+    }
 
 
 def _write_manifest(
@@ -41,11 +52,19 @@ def _write_manifest(
     implementation_target_reason_id=None,
     implementation_lane_reason_ids=None,
     proof_completion_gate=None,
+    manifest_version=1,
+    artifact_role="unit_test_phase3_lane_manifest",
+    baseline_id=None,
+    baseline_git_head=None,
+    include_baseline_git_head=True,
+    baseline_raw_artifact_ref=None,
     readiness=None,
     entries=None,
 ) -> None:
     path = root / spec.manifest_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
+    raw_manifest_path = root / "raw" / "artifact_manifest.json"
+    baseline_manifest = json.loads(raw_manifest_path.read_text())
     impl_target = (
         implementation_target_reason_id
         if implementation_target_reason_id is not None
@@ -71,8 +90,13 @@ def _write_manifest(
             "required_recovery_actions": list(spec.required_recovery_actions or ()),
         }
     payload = {
-        "manifest_kind": spec.manifest_kind,
         spec.ready_key: ready,
+        "baseline_id": baseline_id if baseline_id is not None else baseline_manifest["baseline_id"],
+        "baseline_raw_artifact_ref": (
+            baseline_raw_artifact_ref
+            if baseline_raw_artifact_ref is not None
+            else _baseline_raw_ref(root)
+        ),
         "target_reason_ids": list(target_reason_ids if target_reason_ids is not None else spec.target_reason_ids),
         "entries": list(
             entries
@@ -88,6 +112,15 @@ def _write_manifest(
         ),
         "implementation_manifest": implementation_manifest,
     }
+    if include_baseline_git_head:
+        payload["baseline_git_head"] = (
+            baseline_git_head if baseline_git_head is not None else baseline_manifest["git_head"]
+        )
+    if manifest_version is not None:
+        payload["manifest_version"] = manifest_version
+    if artifact_role is not None:
+        payload["artifact_role"] = artifact_role
+    payload["manifest_kind"] = spec.manifest_kind
     if readiness is not None:
         payload["readiness"] = readiness
     path.write_text(json.dumps(payload, sort_keys=True))
@@ -312,7 +345,193 @@ def test_phase3_lane_index_builds_ready_index_for_custom_specs(tmp_path):
     assert [lane["lane_id"] for lane in manifest["lanes"]] == ["lane_one", "lane_two"]
     assert all(lane["manifest_sha256"] != "<missing>" for lane in manifest["lanes"])
     assert all(lane["runner_sha256"] != "<missing>" for lane in manifest["lanes"])
+    for lane in manifest["lanes"]:
+        assert lane["observed_manifest_version"] == 1
+        assert lane["observed_artifact_role"] == "unit_test_phase3_lane_manifest"
+        assert lane["lane_baseline_id"] == "observed-v0@0a53352"
+        assert lane["lane_baseline_git_head"] == "0a53352cf3c9528abfb654906ed7b963474bedc5"
+        assert lane["lane_baseline_raw_artifact_ref"] == _baseline_raw_ref(baseline)
     validate_phase3_lane_index(manifest)
+
+
+def test_phase3_lane_index_rejects_lane_manifest_version_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            manifest_version=2 if spec.lane_id == "lane_two" else 1,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_manifest_version" in manifest["summary"]["failed_kinds"]
+    failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
+    assert failed_lanes["lane_two"]["failed_kinds"] == ["phase3_lane_manifest_version"]
+
+
+def test_phase3_lane_index_rejects_lane_manifest_missing_artifact_role(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            artifact_role=None if spec.lane_id == "lane_two" else "unit_test_phase3_lane_manifest",
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_artifact_role_present" in manifest["summary"]["failed_kinds"]
+    failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
+    assert failed_lanes["lane_two"]["failed_kinds"] == ["phase3_lane_artifact_role_present"]
+
+
+def test_phase3_lane_index_rejects_lane_manifest_baseline_identity_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            baseline_id="wrong-baseline" if spec.lane_id == "lane_two" else None,
+            baseline_git_head="wrong-head" if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_baseline_id" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_baseline_git_head" in manifest["summary"]["failed_kinds"]
+    failed_lanes = {entry["lane_id"]: entry for entry in manifest["summary"]["failed_lanes"]}
+    assert failed_lanes["lane_two"]["failed_kind_counts"]["phase3_lane_baseline_id"] == 1
+    assert failed_lanes["lane_two"]["failed_kind_counts"]["phase3_lane_baseline_git_head"] == 1
+
+
+def test_phase3_lane_index_rejects_missing_raw_and_lane_baseline_git_head(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline, git_head=None)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec, include_baseline_git_head=False)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert manifest["baseline_git_head"] == "<missing>"
+    assert "baseline_git_head" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_baseline_git_head" in manifest["summary"]["failed_kinds"]
+    assert manifest["summary"]["failed_kind_counts"]["baseline_git_head"] == 1
+    assert manifest["summary"]["failed_kind_counts"]["phase3_lane_baseline_git_head"] == len(specs)
+    assert manifest["summary"]["failed_index_kinds"] == ["baseline_git_head"]
+    assert all(lane["lane_baseline_git_head"] == "<missing>" for lane in manifest["lanes"])
+    assert all(
+        lane["failed_kind_counts"]["phase3_lane_baseline_git_head"] == 1
+        for lane in manifest["summary"]["failed_lanes"]
+    )
+
+
+def test_phase3_lane_index_rejects_wrong_raw_and_lane_baseline_git_head(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline, git_head="wrong-head")
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert manifest["baseline_git_head"] == "wrong-head"
+    assert "baseline_git_head" in manifest["summary"]["failed_kinds"]
+    assert "phase3_lane_baseline_git_head" in manifest["summary"]["failed_kinds"]
+    assert manifest["summary"]["failed_kind_counts"]["baseline_git_head"] == 1
+    assert manifest["summary"]["failed_kind_counts"]["phase3_lane_baseline_git_head"] == len(specs)
+    assert manifest["summary"]["failed_index_kinds"] == ["baseline_git_head"]
+    assert all(lane["lane_baseline_git_head"] == "wrong-head" for lane in manifest["lanes"])
+    assert all(
+        lane["failed_kind_counts"]["phase3_lane_baseline_git_head"] == 1
+        for lane in manifest["summary"]["failed_lanes"]
+    )
+
+
+def test_phase3_lane_index_rejects_lane_manifest_baseline_raw_artifact_ref_drift(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(
+            baseline,
+            spec,
+            baseline_raw_artifact_ref={
+                "path": "wrong/raw/artifact_manifest.json",
+                "sha256": "0" * 64,
+            } if spec.lane_id == "lane_two" else None,
+        )
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert "phase3_lane_baseline_raw_artifact_ref" in manifest["summary"]["failed_kinds"]
+    lane = next(lane for lane in manifest["lanes"] if lane["lane_id"] == "lane_two")
+    assert lane["expected_lane_baseline_raw_artifact_ref"] == _baseline_raw_ref(baseline)
+    assert lane["lane_baseline_raw_artifact_ref"] == {
+        "path": "wrong/raw/artifact_manifest.json",
+        "sha256": "0" * 64,
+    }
 
 
 def test_phase3_lane_index_default_specs_cover_all_plan_lanes():

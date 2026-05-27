@@ -36,6 +36,7 @@ from .phase3_return_width_bridge_lane2 import (
 
 MANIFEST_VERSION = 1
 BASELINE_ID = "observed-v0@0a53352"
+BASELINE_GIT_HEAD = "0a53352cf3c9528abfb654906ed7b963474bedc5"
 MISSING_SENTINEL = "<missing>"
 LaneValidator = Callable[[Mapping[str, Any]], None]
 RUNNER_GATE_SMOKE_TIMEOUT_SECONDS = 30
@@ -335,6 +336,12 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         "expected_manifest_kind": spec.manifest_kind,
         "ready_key": spec.ready_key,
         "status": "missing",
+        "observed_manifest_version": MISSING_SENTINEL,
+        "observed_artifact_role": MISSING_SENTINEL,
+        "lane_baseline_id": MISSING_SENTINEL,
+        "lane_baseline_git_head": MISSING_SENTINEL,
+        "lane_baseline_raw_artifact_ref": {},
+        "expected_lane_baseline_raw_artifact_ref": _file_ref(root / "raw" / "artifact_manifest.json"),
         "manifest_sha256": MISSING_SENTINEL,
         "observed_manifest_kind": MISSING_SENTINEL,
         "ready_value": MISSING_SENTINEL,
@@ -479,7 +486,16 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
         lane["validator_status"] = "failed"
         lane["validator_error"] = str(exc)
         return lane
+    lane["observed_manifest_version"] = manifest.get("manifest_version", MISSING_SENTINEL)
     lane["observed_manifest_kind"] = manifest.get("manifest_kind") or MISSING_SENTINEL
+    lane["observed_artifact_role"] = manifest.get("artifact_role") or MISSING_SENTINEL
+    lane["lane_baseline_id"] = manifest.get("baseline_id") or MISSING_SENTINEL
+    lane["lane_baseline_git_head"] = manifest.get("baseline_git_head") or MISSING_SENTINEL
+    lane["lane_baseline_raw_artifact_ref"] = (
+        dict(manifest.get("baseline_raw_artifact_ref"))
+        if isinstance(manifest.get("baseline_raw_artifact_ref"), Mapping)
+        else {}
+    )
     lane["ready_value"] = manifest.get(spec.ready_key, MISSING_SENTINEL)
     manifest_readiness = _manifest_readiness(manifest)
     lane["manifest_readiness_ready"] = manifest_readiness["ready"]
@@ -538,6 +554,16 @@ def _index_checks(
         _ok("baseline_id")
         if baseline_manifest.get("baseline_id") == BASELINE_ID
         else _failed("baseline_id", expected=BASELINE_ID, actual=baseline_manifest.get("baseline_id"))
+    )
+    baseline_git_head = baseline_manifest.get("git_head") or MISSING_SENTINEL
+    checks.append(
+        _ok("baseline_git_head")
+        if baseline_git_head == BASELINE_GIT_HEAD
+        else _failed(
+            "baseline_git_head",
+            expected=BASELINE_GIT_HEAD,
+            actual=baseline_git_head,
+        )
     )
     lane_numbers = [spec.lane_number for spec in specs]
     expected_lane_numbers = list(range(1, len(specs) + 1))
@@ -823,6 +849,55 @@ def _index_checks(
                 "phase3_lane_manifest_kind",
                 expected=lane.get("expected_manifest_kind"),
                 actual=lane.get("observed_manifest_kind"),
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_manifest_version", **details)
+            if lane.get("observed_manifest_version") == MANIFEST_VERSION
+            else _failed(
+                "phase3_lane_manifest_version",
+                expected=MANIFEST_VERSION,
+                actual=lane.get("observed_manifest_version"),
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_artifact_role_present", **details)
+            if lane.get("observed_artifact_role") not in {None, "", MISSING_SENTINEL}
+            else _failed(
+                "phase3_lane_artifact_role_present",
+                actual=lane.get("observed_artifact_role"),
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_baseline_id", **details)
+            if lane.get("lane_baseline_id") == BASELINE_ID
+            else _failed(
+                "phase3_lane_baseline_id",
+                expected=BASELINE_ID,
+                actual=lane.get("lane_baseline_id"),
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_baseline_git_head", **details)
+            if lane.get("lane_baseline_git_head") == BASELINE_GIT_HEAD
+            else _failed(
+                "phase3_lane_baseline_git_head",
+                expected=BASELINE_GIT_HEAD,
+                actual=lane.get("lane_baseline_git_head"),
+                **details,
+            )
+        )
+        checks.append(
+            _ok("phase3_lane_baseline_raw_artifact_ref", **details)
+            if lane.get("lane_baseline_raw_artifact_ref") == lane.get("expected_lane_baseline_raw_artifact_ref")
+            else _failed(
+                "phase3_lane_baseline_raw_artifact_ref",
+                expected=lane.get("expected_lane_baseline_raw_artifact_ref"),
+                actual=lane.get("lane_baseline_raw_artifact_ref"),
                 **details,
             )
         )
