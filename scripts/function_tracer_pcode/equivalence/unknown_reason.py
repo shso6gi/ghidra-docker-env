@@ -449,6 +449,7 @@ def _register_defaults() -> None:
             UnknownDecisionEffect.BLOCKS_DECISION,
             UnknownReasonScope.EXPRESSION,
             UnknownAggregationUnit.PAIR,
+            target_regression="unresolved_expression",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.UNRESOLVED_VALUE_EXPRESSION,
@@ -717,6 +718,41 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="solver_unknown_timeout",
             description="Recover solver timeouts by retrying a normalized query with explicit solver settings.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.UNRESOLVED_EXPRESSION,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "typed_expression_lowering",
+                    required_evidence=(
+                        "object_target_key",
+                        "typed_expression_key",
+                        "lowering_rule",
+                    ),
+                    description=(
+                        "Lower the object-derived unresolved expression into a typed SMT term "
+                        "without erasing provenance."
+                    ),
+                ),
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                    "type_normalization",
+                    required_evidence=(
+                        "operand_widths",
+                        "signedness_policy",
+                        "normalized_expression",
+                    ),
+                    description=(
+                        "Normalize operand widths and signedness before retrying the affected query."
+                    ),
+                ),
+            ),
+            target_regression="unresolved_expression",
+            description=(
+                "Recover unresolved expressions by typed lowering and type normalization before "
+                "any solver retry can affect equivalence decisions."
+            ),
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.NORMALIZATION_NO_CHANGE,

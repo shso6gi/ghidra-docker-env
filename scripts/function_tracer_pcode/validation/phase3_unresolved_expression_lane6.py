@@ -23,6 +23,7 @@ from .phase3_return_width_bridge_lane2 import (
     _identity_set_check,
     _jsonable,
     _nested_contains_missing,
+    _nested_contains_missing_sentinel,
     _nested_has_specific_leaf,
     _nonnegative_int_like,
     _normalize_nested_tuple,
@@ -39,13 +40,19 @@ from .phase3_readonly_identity_lane3 import (
     _analysis_entry_key_is_specific,
     _nested_contains_diagnostic_reason,
 )
-from ..equivalence.unknown_reason import UNKNOWN_TUPLE_MISSING, UnknownCountKind
+from ..equivalence.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
+    UnknownCountKind,
+    build_unknown_recovery_actions,
+)
 
 
 MANIFEST_VERSION = 1
 TARGET_REASON_IDS = ("unresolved_expression",)
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
 UNRESOLVED_EVIDENCE_KIND = "unresolved_expression_safety"
+UNRESOLVED_PROOF_KIND = "solver_retry_or_normalization"
+UNRESOLVED_PROOF_STAGES = ("typed_expression_lowering", "type_normalization")
 UNRESOLVED_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
     "unresolved_expression",
@@ -267,6 +274,12 @@ def _materialize_post_fix_entry(
     status, failures = _post_fix_status(entry)
     entry["post_fix_status"] = status
     entry["post_fix_failures"] = failures
+    entry["required_completion_actions"] = (
+        _required_completion_actions(entry) if status == "pending_proof" else []
+    )
+    entry["pending_proof_obligations"] = (
+        _pending_proof_obligations(entry) if status == "pending_proof" else []
+    )
     return entry
 
 
@@ -284,6 +297,7 @@ def _observation(
         }
     payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
     reasons = _extract_final_unknown_reasons(payload)
+    reason_records = [_reason_to_dict(reason) for reason in reasons]
     return {
         "log_status": "present",
         "log_path": record.get("relative_log_path") or MISSING_SENTINEL,
@@ -300,7 +314,11 @@ def _observation(
             list(_global_reason_tuple_from_record(reason, UnknownCountKind.REASON_RECORD.value))
             for reason in reasons
         ],
-        "reason_records": [_reason_to_dict(reason) for reason in reasons],
+        "reason_records": reason_records,
+        "proof_actions": [
+            action.to_dict()
+            for action in build_unknown_recovery_actions(reasons)
+        ],
     }
 
 
@@ -419,6 +437,8 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
         )
     if failures:
         return "failed", failures
+    if _unresolved_expression_proof_actions_complete(entry, current_targets):
+        return "pending_proof", ()
     return "pending_object_evidence", ()
 
 
@@ -490,7 +510,7 @@ def _post_fix_checks(
     for entry in entries:
         for failure in entry.get("post_fix_failures") or ():
             checks.append(failure)
-        if entry.get("post_fix_status") == "pending_object_evidence":
+        if entry.get("post_fix_status") in {"pending_object_evidence", "pending_proof"}:
             checks.append(
                 _ok(
                     "unresolved_expression_post_fix_expected_movement",
@@ -529,6 +549,115 @@ def _implementation_manifest(entries: Sequence[Mapping[str, Any]]) -> Dict[str, 
             ]
         ),
     }
+
+
+def _unresolved_expression_proof_actions_complete(
+    entry: Mapping[str, Any],
+    current_targets: Sequence[Any],
+) -> bool:
+    target_keys = {_canonical_json(target) for target in current_targets}
+    if not target_keys:
+        return False
+    stages_by_target: Dict[str, set[str]] = {target_key: set() for target_key in target_keys}
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    for action in current.get("proof_actions") or ():
+        if not isinstance(action, Mapping):
+            continue
+        if action.get("reason_id") != "unresolved_expression":
+            continue
+        if action.get("proof_kind") != UNRESOLVED_PROOF_KIND:
+            continue
+        stage = action.get("proof_stage")
+        if stage not in UNRESOLVED_PROOF_STAGES:
+            continue
+        if action.get("status") not in {"planned", "pending_proof"}:
+            continue
+        if not action.get("required_evidence"):
+            continue
+        proof_obligation_id = action.get("proof_obligation_id")
+        if proof_obligation_id is None or _nested_contains_missing_sentinel(proof_obligation_id):
+            continue
+        target = action.get("object_target_key")
+        if not _object_target_key_is_specific_unresolved_expression(target):
+            continue
+        target_key = _canonical_json(target)
+        if target_key not in stages_by_target:
+            continue
+        stages_by_target[target_key].add(str(stage))
+    required = set(UNRESOLVED_PROOF_STAGES)
+    return all(stages == required for stages in stages_by_target.values())
+
+
+def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    target_keys = {_canonical_json(target) for target in _canonical_targets(entry.get("target_object_keys"))}
+    obligations = []
+    for action in _current_unresolved_expression_actions(entry):
+        target_key = _canonical_json(action.get("object_target_key"))
+        if target_key not in target_keys:
+            continue
+        obligations.append(
+            {
+                "reason_id": action.get("reason_id") or MISSING_SENTINEL,
+                "proof_kind": action.get("proof_kind") or MISSING_SENTINEL,
+                "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+                "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+                "required_evidence": list(action.get("required_evidence") or ()),
+                "proof_obligation_id": _jsonable(action.get("proof_obligation_id")),
+                "completed_evidence_present": False,
+                "status": "pending_evidence",
+            }
+        )
+    return tuple(sorted(obligations, key=_canonical_json))
+
+
+def _required_completion_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    actions = []
+    for action in _current_unresolved_expression_actions(entry):
+        actions.append(
+            {
+                "count_kind": action.get("count_kind") or UnknownCountKind.PROOF_ACTION.value,
+                "reason_id": action.get("reason_id") or MISSING_SENTINEL,
+                "decision_effect": action.get("decision_effect") or MISSING_SENTINEL,
+                "reason_scope": action.get("reason_scope") or MISSING_SENTINEL,
+                "aggregation_unit": action.get("aggregation_unit") or MISSING_SENTINEL,
+                "stage": action.get("stage") or MISSING_SENTINEL,
+                "pair_or_case": action.get("pair_or_case") or MISSING_SENTINEL,
+                "proof_kind": action.get("proof_kind") or MISSING_SENTINEL,
+                "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+                "status": action.get("status") or MISSING_SENTINEL,
+                "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+                "required_evidence": list(action.get("required_evidence") or ()),
+                "object_target_key": _jsonable(action.get("object_target_key")),
+                "proof_obligation_id": _jsonable(action.get("proof_obligation_id")),
+            }
+        )
+    return tuple(sorted(actions, key=_canonical_json))
+
+
+def _current_unresolved_expression_actions(entry: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    actions = []
+    for action in current.get("proof_actions") or ():
+        if not isinstance(action, Mapping):
+            continue
+        if action.get("reason_id") != "unresolved_expression":
+            continue
+        if action.get("proof_kind") != UNRESOLVED_PROOF_KIND:
+            continue
+        if action.get("proof_stage") not in UNRESOLVED_PROOF_STAGES:
+            continue
+        if action.get("status") not in {"planned", "pending_proof"}:
+            continue
+        if not action.get("required_evidence"):
+            continue
+        proof_obligation_id = action.get("proof_obligation_id")
+        if proof_obligation_id is None or _nested_contains_missing_sentinel(proof_obligation_id):
+            continue
+        target = action.get("object_target_key")
+        if not _object_target_key_is_specific_unresolved_expression(target):
+            continue
+        actions.append(action)
+    return tuple(actions)
 
 
 def _current_targets(entry: Any) -> Sequence[Any]:

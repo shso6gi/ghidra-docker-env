@@ -317,6 +317,18 @@ def test_phase3_method_b_closure_lane4_manifest_and_post_fix_gate_ready(tmp_path
     gate = json.loads(post_fix_path.read_text())
     assert gate["phase3_lane4_post_fix_ready"] is True
     assert gate["entries"][0]["post_fix_status"] == "pending_proof"
+    obligations = gate["entries"][0]["pending_proof_obligations"]
+    assert {obligation["proof_stage"] for obligation in obligations} == {
+        "method_b_covering_case",
+        "method_b_guard_partition",
+    }
+    assert all(
+        obligation["reason_id"] == "method_b_closure_blocked"
+        and obligation["completed_evidence_present"] is False
+        and obligation["status"] == "pending_evidence"
+        and obligation["proof_obligation_id"]
+        for obligation in obligations
+    )
     validate_phase3_method_b_closure_lane4_post_fix_gate(gate)
 
 

@@ -304,6 +304,23 @@ def test_phase3_readonly_identity_lane3_manifest_and_post_fix_gate_ready(tmp_pat
     gate = json.loads(post_fix_path.read_text())
     assert gate["phase3_lane3_post_fix_ready"] is True
     assert gate["entries"][0]["post_fix_status"] == "pending_proof"
+    assert gate["entries"][0]["pending_proof_obligations"] == [
+        {
+            "reason_id": "readonly_identity_missing",
+            "proof_kind": "storage_backed_identity_propagation",
+            "proof_stage": "readonly_operand_identity",
+            "evidence_kind": "object_storage_identity",
+            "required_evidence": [
+                "object_storage_identity",
+                "count_identity",
+                "guard_implication",
+                "finite_witness",
+            ],
+            "proof_obligation_id": entry["required_completion_actions"][0]["proof_obligation_id"],
+            "completed_evidence_present": False,
+            "status": "pending_evidence",
+        }
+    ]
     validate_phase3_readonly_identity_lane3_post_fix_gate(gate)
 
 

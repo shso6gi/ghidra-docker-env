@@ -245,6 +245,23 @@ def test_phase3_solver_timeout_lane9_manifest_and_post_fix_gate_ready(tmp_path):
     gate = json.loads(post_fix_path.read_text())
     assert gate["phase3_lane9_post_fix_ready"] is True
     assert gate["entries"][0]["post_fix_status"] == "pending_retry"
+    assert gate["entries"][0]["pending_retry_obligations"] == [
+        {
+            "reason_id": "solver_unknown_timeout",
+            "proof_kind": "solver_retry_or_normalization",
+            "proof_stage": "solver_timeout_retry",
+            "evidence_kind": "query_hash",
+            "required_evidence": [
+                "query_hash",
+                "timeout_budget",
+                "solver_options",
+                "normalized_query",
+            ],
+            "proof_obligation_id": entry["required_completion_actions"][0]["proof_obligation_id"],
+            "completed_evidence_present": False,
+            "status": "pending_retry",
+        }
+    ]
     validate_phase3_solver_timeout_lane9_post_fix_gate(gate)
 
 

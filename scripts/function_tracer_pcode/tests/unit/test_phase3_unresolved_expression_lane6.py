@@ -4,6 +4,11 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownReasonId,
+    build_unknown_recovery_actions,
+    make_unknown_reason,
+)
 from scripts.function_tracer_pcode.model import (
     Condition,
     Expression,
@@ -14,8 +19,13 @@ from scripts.function_tracer_pcode.model import (
 )
 from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6 import (
     UNRESOLVED_EVIDENCE_KIND,
+    UNRESOLVED_PROOF_KIND,
+    UNRESOLVED_PROOF_STAGES,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
+    _pending_proof_obligations,
+    _post_fix_status,
+    _required_completion_actions,
 )
 
 
@@ -267,3 +277,77 @@ def test_unresolved_expression_reason_tuple_stays_count_compatible():
         "<missing>",
     )
     assert UNRESOLVED_EVIDENCE_KIND == "unresolved_expression_safety"
+
+
+def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actions_exist():
+    target = _unresolved_target()
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([reason])
+    entry = {
+        "id": "representative-unresolved-expression-is-even-mips64",
+        "function": "fc_is_even",
+        "binary_pair": "B10_B15",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action.to_dict() for action in actions],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+    assert [action.proof_stage for action in actions] == list(UNRESOLVED_PROOF_STAGES)
+    assert all(action.proof_obligation_id for action in actions)
+    obligations = _pending_proof_obligations(entry)
+    assert {obligation["proof_stage"] for obligation in obligations} == set(UNRESOLVED_PROOF_STAGES)
+    assert all(obligation["reason_id"] == "unresolved_expression" for obligation in obligations)
+    assert all(obligation["proof_kind"] == UNRESOLVED_PROOF_KIND for obligation in obligations)
+    assert all(obligation["proof_obligation_id"] for obligation in obligations)
+    assert all(obligation["completed_evidence_present"] is False for obligation in obligations)
+    assert all(obligation["status"] == "pending_evidence" for obligation in obligations)
+    required_actions = _required_completion_actions(entry)
+    assert {action["proof_stage"] for action in required_actions} == set(UNRESOLVED_PROOF_STAGES)
+    assert {
+        repr(action["proof_obligation_id"])
+        for action in required_actions
+    } == {
+        repr(obligation["proof_obligation_id"])
+        for obligation in obligations
+    }
+    assert all(action["required_evidence"] for action in required_actions)
+
+
+def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_without_actions():
+    target = _unresolved_target()
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    entry = {
+        "id": "representative-unresolved-expression-is-even-mips64",
+        "function": "fc_is_even",
+        "binary_pair": "B10_B15",
+        "target_object_keys": [target],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_object_evidence"
+    assert failures == ()

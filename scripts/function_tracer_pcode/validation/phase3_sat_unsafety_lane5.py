@@ -48,6 +48,7 @@ from ..equivalence.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
     build_proof_obligation_id,
+    build_unknown_recovery_actions,
     coerce_unknown_recovery_actions,
 )
 
@@ -325,6 +326,9 @@ def _materialize_post_fix_entry(
     status, failures = _post_fix_status(entry)
     entry["post_fix_status"] = status
     entry["post_fix_failures"] = failures
+    entry["pending_proof_obligations"] = (
+        _pending_proof_obligations(entry) if status == "pending_proof" else []
+    )
     return entry
 
 
@@ -349,7 +353,7 @@ def _observation(
     raw_actions = payload.get("unknown_recovery_actions")
     if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
         raw_actions = ()
-    actions = coerce_unknown_recovery_actions(raw_actions)
+    actions_with_raw = _merged_recovery_actions(reasons, raw_actions)
     return {
         "log_status": "present",
         "log_path": record.get("relative_log_path") or MISSING_SENTINEL,
@@ -370,14 +374,44 @@ def _observation(
         ],
         "proof_action_tuples": [
             list(_global_reason_tuple_from_action(action))
-            for action in actions
+            for action, _raw_action in actions_with_raw
         ],
         "reason_records": [_reason_to_dict(reason) for reason in reasons],
         "proof_actions": [
-            _action_to_dict(action, raw_actions[index] if index < len(raw_actions) else None)
-            for index, action in enumerate(actions)
+            _action_to_dict(action, raw_action)
+            for action, raw_action in actions_with_raw
         ],
     }
+
+
+def _merged_recovery_actions(
+    reasons: Sequence[Any],
+    raw_actions: Sequence[Any],
+) -> Tuple[Tuple[Any, Any], ...]:
+    merged: list[Tuple[Any, Any]] = []
+    seen: set[Tuple[str, str, str, str, str, str]] = set()
+    for raw_action, action in zip(raw_actions, coerce_unknown_recovery_actions(raw_actions)):
+        key = _recovery_action_key(action)
+        seen.add(key)
+        merged.append((action, raw_action))
+    for action in build_unknown_recovery_actions(reasons):
+        key = _recovery_action_key(action)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((action, None))
+    return tuple(merged)
+
+
+def _recovery_action_key(action: Any) -> Tuple[str, str, str, str, str, str]:
+    return (
+        str(getattr(action, "reason_id", MISSING_SENTINEL)),
+        str(getattr(action, "proof_kind", MISSING_SENTINEL)),
+        str(getattr(action, "proof_stage", MISSING_SENTINEL)),
+        str(getattr(action, "evidence_kind", MISSING_SENTINEL)),
+        _canonical_json(_jsonable(getattr(action, "object_target_key", None))),
+        _canonical_json(_jsonable(getattr(action, "proof_obligation_id", None))),
+    )
 
 
 def _reason_to_dict(reason: Any) -> Dict[str, Any]:
@@ -848,6 +882,30 @@ def _completed_evidence_matches_action(
         and object_target_key == _normalize_nested_tuple(action.get("object_target_key"))
         and expected_id == _normalize_nested_tuple(action.get("proof_obligation_id"))
     )
+
+
+def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    obligations = []
+    for action in _canonical_actions(entry.get("required_completion_actions")):
+        has_completed_evidence = any(
+            _completed_evidence_matches_action(evidence, action)
+            for evidence in completed
+        )
+        obligations.append(
+            {
+                "reason_id": action.get("reason_id") or MISSING_SENTINEL,
+                "proof_kind": action.get("proof_kind") or MISSING_SENTINEL,
+                "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+                "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+                "required_evidence": list(action.get("required_evidence") or ()),
+                "proof_obligation_id": _jsonable(action.get("proof_obligation_id")),
+                "completed_evidence_present": has_completed_evidence,
+                "status": "completed_evidence_present" if has_completed_evidence else "pending_evidence",
+            }
+        )
+    return obligations
 
 
 def _completed_evidence_has_required_proof_content(

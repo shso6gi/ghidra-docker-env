@@ -5,8 +5,10 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
+    UnknownReasonId,
     UnknownRecoveryProofKind,
     build_unknown_recovery_actions,
+    make_unknown_reason,
 )
 from scripts.function_tracer_pcode.model import (
     CallTargetRef,
@@ -27,7 +29,9 @@ from scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5 import (
     SAT_PROOF_KIND,
     SAT_PROOF_STAGE,
     SAT_REQUIRED_EVIDENCE,
+    _observation,
     _object_target_key_is_specific_sat_unsafety,
+    _pending_proof_obligations,
     _proof_action_has_expected_id,
     _proof_action_matches_lane_definition,
 )
@@ -265,3 +269,75 @@ def test_sat_unsafety_action_rejects_weak_proof_id_target():
     action["object_target_key"] = ("sat_unsafety", ("pair", "(0,1)"))
 
     assert not _proof_action_has_expected_id(action)
+
+
+def test_sat_unsafety_pending_proof_obligations_materialize_required_evidence():
+    action = build_unknown_recovery_actions([_sat_reason()])[0].to_dict()
+    entry = {
+        "required_completion_actions": [action],
+        "current_observation": {
+            "completed_recovery_proof_evidence": [],
+        },
+    }
+
+    obligations = _pending_proof_obligations(entry)
+    assert len(obligations) == 1
+    assert obligations[0]["reason_id"] == "sat_unsafety"
+    assert obligations[0]["proof_kind"] == SAT_PROOF_KIND
+    assert obligations[0]["proof_stage"] == SAT_PROOF_STAGE
+    assert obligations[0]["evidence_kind"] == SAT_EVIDENCE_KIND
+    assert obligations[0]["required_evidence"] == list(SAT_REQUIRED_EVIDENCE)
+    assert obligations[0]["proof_obligation_id"]
+    assert obligations[0]["completed_evidence_present"] is False
+    assert obligations[0]["status"] == "pending_evidence"
+
+
+def test_sat_unsafety_observation_supplements_registered_unresolved_actions():
+    sat_reason = _sat_reason()
+    sat_action = build_unknown_recovery_actions([sat_reason])[0]
+    unresolved_reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind="unresolved_expression_safety",
+        object_target_key=(
+            "unresolved_expression",
+            ("pair", "B9_B10"),
+            ("expression", ("parameter", "x", ("int", 0), 4)),
+        ),
+    )
+    record = {
+        "payload": {
+            "is_equivalent": None,
+            "is_timeout": False,
+            "function1_name": "fc_is_even",
+            "function2_name": "fc_is_even",
+            "binary1_name": "function_call_test-mips64-clang-O0",
+            "binary2_name": "function_call_test-mips64-clang-O1",
+            "unknown_reasons": [sat_reason.to_dict(), unresolved_reason.to_dict()],
+            "unknown_recovery_actions": [sat_action.to_dict()],
+        },
+        "relative_log_path": "fc_is_even/fc_is_even_B9_B10.log",
+        "log_sha256": "0" * 64,
+    }
+
+    observation = _observation({}, record)
+    actions = observation["proof_actions"]
+
+    assert [action["reason_id"] for action in actions].count("sat_unsafety") == 1
+    assert [action["reason_id"] for action in actions].count("unresolved_expression") == 2
+    assert {
+        action["proof_stage"]
+        for action in actions
+        if action["reason_id"] == "unresolved_expression"
+    } == {"typed_expression_lowering", "type_normalization"}
+    assert all(
+        action["proof_obligation_id"]
+        for action in actions
+        if action["reason_id"] == "unresolved_expression"
+    )
+    assert all(
+        action["raw_object_target_key_present"] is False
+        for action in actions
+        if action["reason_id"] == "unresolved_expression"
+    )

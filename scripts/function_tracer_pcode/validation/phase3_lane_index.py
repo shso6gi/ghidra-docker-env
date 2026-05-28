@@ -2723,15 +2723,38 @@ def _invalid_optional_gate_args(optional_values: Mapping[str, Sequence[str]]) ->
         "--phase1-current-log-root": {
             "function_call=$OUTPUT_BASE_DIR",
             "loop=$OUTPUT_BASE_DIR",
+            "function_call=$PHASE1_FUNCTION_CALL_LOG_ROOT",
+            "loop=$PHASE1_LOOP_LOG_ROOT",
         },
     }
     invalid: list[str] = []
     for flag, observed in optional_values.items():
+        if flag == "--phase1-current-log-root":
+            invalid.extend(_invalid_phase1_current_log_roots(observed, allowed[flag]))
+            continue
         if len(observed) > 1:
             invalid.append(f"{flag}=<duplicate>")
             continue
         if len(observed) == 1 and observed[0] not in allowed[flag]:
             invalid.append(f"{flag}={observed[0]}")
+    return invalid
+
+
+def _invalid_phase1_current_log_roots(
+    observed: Sequence[str],
+    allowed: set[str],
+) -> list[str]:
+    invalid: list[str] = []
+    seen_categories: set[str] = set()
+    for value in observed:
+        if value not in allowed:
+            invalid.append(f"--phase1-current-log-root={value}")
+            continue
+        category = value.split("=", 1)[0]
+        if category in seen_categories:
+            invalid.append(f"--phase1-current-log-root={category}=<duplicate>")
+            continue
+        seen_categories.add(category)
     return invalid
 
 
@@ -3431,6 +3454,8 @@ def _normalize_runner_smoke_argv(argv: Sequence[str], env: Mapping[str, str]) ->
 _RUNNER_SMOKE_GATE_VALUE_ENV_KEYS = (
     "BASELINE_FUNCTION_CALL_LOG_ROOT",
     "BASELINE_LOOP_LOG_ROOT",
+    "PHASE1_FUNCTION_CALL_LOG_ROOT",
+    "PHASE1_LOOP_LOG_ROOT",
     "PHASE3_MANIFEST_SHA256",
     "PHASE3_GATE_OUTPUT_DIR",
     "PHASE3_MANIFEST_PATH",
@@ -3448,7 +3473,6 @@ def _runner_smoke_environment(
     *,
     manifest_path: Optional[Path] = None,
     manifest_sha256: Optional[str] = None,
-    dry_run: bool = False,
 ) -> Dict[str, str]:
     env = dict(os.environ)
     for key in (
@@ -3462,6 +3486,8 @@ def _runner_smoke_environment(
         "BASELINE_RAW_DIR",
         "BASELINE_FUNCTION_CALL_LOG_ROOT",
         "BASELINE_LOOP_LOG_ROOT",
+        "PHASE1_FUNCTION_CALL_LOG_ROOT",
+        "PHASE1_LOOP_LOG_ROOT",
         "PHASE1_DIR",
         "PHASE3_MANIFEST_PATH",
         "PHASE3_MANIFEST_SHA256",
@@ -3479,6 +3505,8 @@ def _runner_smoke_environment(
     env["BASELINE_FUNCTION_CALL_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "function_call")
     env["BASELINE_LOOP_LOG_ROOT"] = str(Path(env["BASELINE_RAW_DIR"]) / "logs" / "loop")
     env["PHASE1_DIR"] = str(runner_path.parent / "artifacts" / "baselines" / BASELINE_ID / "phase1")
+    env["PHASE1_FUNCTION_CALL_LOG_ROOT"] = str(runner_path.parent / "logs" / "equivalence_all" / "function_call_test")
+    env["PHASE1_LOOP_LOG_ROOT"] = str(runner_path.parent / "logs" / "equivalence_all" / "loop_method_b_test")
     if manifest_path is not None:
         env["PHASE3_MANIFEST_PATH"] = str(manifest_path)
     else:
@@ -3495,8 +3523,6 @@ def _runner_smoke_environment(
             env["PHASE3_MANIFEST_SHA256"] = str(refs["manifest_sha256"])
         else:
             env["PHASE3_MANIFEST_SHA256"] = "0" * 64
-    if dry_run:
-        env["VALIDATION_RUNNER_DRY_RUN"] = "1"
     return env
 
 

@@ -29,6 +29,8 @@ export RUNNER_TMP_ROOT="${RUNNER_TMP_ROOT:-${TMPDIR:-/tmp}/ghidra-equivalence-fu
 BASELINE_RAW_DIR="${BASELINE_RAW_DIR:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw}"
 BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"
 PHASE1_DIR="${PHASE1_DIR:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/phase1}"
+PHASE1_FUNCTION_CALL_LOG_ROOT="${PHASE1_FUNCTION_CALL_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/function_call_test}"
+PHASE1_LOOP_LOG_ROOT="${PHASE1_LOOP_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/loop_method_b_test}"
 PHASE3_MANIFEST_PATH="${PHASE3_MANIFEST_PATH:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/audit/phase3_return_coverage_lane1_reclassification/return_coverage_lane1_representatives.json}"
 PHASE3_MANIFEST_SHA256="${PHASE3_MANIFEST_SHA256:-eec876a6473ac4ac344d846bdffb93d7bbcf23d55559d0c6d58ee890304e6f5a}"
 PHASE3_GATE_OUTPUT_DIR="${PHASE3_GATE_OUTPUT_DIR:-$OUTPUT_BASE_DIR/phase3_return_coverage_lane1_gate}"
@@ -68,6 +70,8 @@ phase3_manifest_sha256=$PHASE3_MANIFEST_SHA256
 phase3_gate_output_dir=$PHASE3_GATE_OUTPUT_DIR
 phase3_require_ready=$PHASE3_REQUIRE_READY
 baseline_function_call_log_root=$BASELINE_FUNCTION_CALL_LOG_ROOT
+phase1_function_call_log_root=$PHASE1_FUNCTION_CALL_LOG_ROOT
+phase1_loop_log_root=$PHASE1_LOOP_LOG_ROOT
 runner_tmp_root=$RUNNER_TMP_ROOT
 EOF
 
@@ -86,7 +90,8 @@ PHASE3_GATE_ARGS=(
     --current-log-root "function_call=$OUTPUT_BASE_DIR"
     --baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"
     --phase1-dir "$PHASE1_DIR"
-    --phase1-current-log-root "function_call=$OUTPUT_BASE_DIR"
+    --phase1-current-log-root "function_call=$PHASE1_FUNCTION_CALL_LOG_ROOT"
+    --phase1-current-log-root "loop=$PHASE1_LOOP_LOG_ROOT"
     --phase3-manifest "$PHASE3_MANIFEST_PATH"
     --phase3-manifest-sha256 "$PHASE3_MANIFEST_SHA256"
 )

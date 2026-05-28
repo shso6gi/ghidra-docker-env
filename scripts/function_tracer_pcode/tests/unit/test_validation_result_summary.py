@@ -749,6 +749,24 @@ def test_phase3_lane3_readonly_representative_wrapper_pins_pair_and_manifest_has
     assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
 
 
+def test_phase3_lane4_method_b_closure_representative_wrapper_pins_pair_and_manifest_hash():
+    script = Path("phase3_run_loop_method_b_closure_lane4_representatives.sh").read_text()
+
+    assert 'LOOP_TARGET_SET="${LOOP_TARGET_SET:-lmb_sum_even_index_step2}"' in script
+    assert 'LOOP_PAIR_FILTER="${LOOP_PAIR_FILTER:-lmb_sum_even_index_step2:B10_B13}"' in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_method_b_closure_lane4/method_b_closure_lane4_representatives.json" in script
+    assert "925d7614fa46b74c4cf2378182cf701a47fe771fc8a9b445b90509fdb92ae9e1" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 4 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_LOOP_LOG_ROOT="${BASELINE_LOOP_LOG_ROOT:-$BASELINE_RAW_DIR/logs/loop}"' in script
+    assert '--baseline-log-root "loop=$BASELINE_LOOP_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
 def test_phase3_lane5_sat_unsafety_representative_wrapper_pins_pair_and_manifest_hash():
     script = Path("phase3_run_function_call_sat_unsafety_lane5_representatives.sh").read_text()
 
@@ -801,3 +819,61 @@ def test_phase3_lane7_solver_rewrite_representative_wrapper_pins_pair_and_manife
     assert "--phase3-manifest-sha256" in script
     assert "--gate-stage post-fix" in script
     assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
+def test_phase3_lane8_solver_rewrite_proof_representative_wrapper_pins_pair_and_manifest_hash():
+    script = Path("phase3_run_function_call_solver_rewrite_proof_lane8_representatives.sh").read_text()
+
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum}"' in script
+    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_recursive_sum:B8_B10}"' in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_solver_rewrite_proof_lane8/solver_rewrite_proof_lane8_representatives.json" in script
+    assert "36af8ab79a23375db0a2bad49679b90e035a2fb7d99a994f0396eaaeb4742c43" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 8 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
+def test_phase3_lane9_solver_timeout_representative_wrapper_pins_pair_and_manifest_hash():
+    script = Path("phase3_run_function_call_solver_timeout_lane9_representatives.sh").read_text()
+
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_long_branch_dispatch}"' in script
+    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_long_branch_dispatch:B8_B9}"' in script
+    assert ".venv-pyghidra/bin/python" in script
+    assert "phase3_solver_timeout_lane9/solver_timeout_lane9_representatives.json" in script
+    assert "ceb30318fa56f5255d115f0ac53320ad349b7133c69dc2e1c05ee8c1afdb3f06" in script
+    assert 'VALIDATION_RUNNER_DRY_RUN="${VALIDATION_RUNNER_DRY_RUN:-0}"' in script
+    assert "Phase 3 lane 9 dry run finished before post-fix gate." in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert 'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
+    assert "--phase3-manifest-sha256" in script
+    assert "--gate-stage post-fix" in script
+    assert "PHASE3_GATE_ARGS+=(--require-ready)" in script
+
+
+def test_phase3_post_fix_gate_index_wrapper_validates_all_gates():
+    script_path = Path("phase3_validate_all_post_fix_gates.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase3_post_fix_gate_index}"'
+    ) in script
+    assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
+    assert '--repo-root "$SCRIPT_DIR"' in script
+    assert '--output-dir "$OUTPUT_DIR"' in script
+    assert 'ARGS+=(--require-ready)' in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase3_post_fix_gate_index "${ARGS[@]}"'
+    ) in script

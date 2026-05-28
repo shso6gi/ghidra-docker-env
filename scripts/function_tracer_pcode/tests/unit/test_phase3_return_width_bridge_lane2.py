@@ -417,6 +417,18 @@ def test_phase3_return_width_bridge_lane2_manifest_and_post_fix_gate_ready(tmp_p
     gate = json.loads(post_fix_path.read_text())
     assert gate["phase3_lane2_post_fix_ready"] is True
     assert gate["entries"][0]["post_fix_status"] == "pending_proof"
+    obligations = gate["entries"][0]["pending_proof_obligations"]
+    assert {obligation["proof_stage"] for obligation in obligations} == {
+        "abi_relation",
+        "high_bit_relation",
+    }
+    assert all(
+        obligation["reason_id"] == "return_width_bridge_missing"
+        and obligation["completed_evidence_present"] is False
+        and obligation["status"] == "pending_evidence"
+        and obligation["proof_obligation_id"]
+        for obligation in obligations
+    )
     validate_phase3_return_width_bridge_lane2_post_fix_gate(gate)
 
 

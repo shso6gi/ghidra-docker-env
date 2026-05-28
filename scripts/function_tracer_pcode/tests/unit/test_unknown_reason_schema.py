@@ -170,6 +170,7 @@ def test_plan16_operational_backlog_reasons_have_registered_actions():
         UnknownReasonId.RETURN_COVERAGE_GAP,
         UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
         UnknownReasonId.SAT_UNSAFETY,
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
         UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,
         UnknownReasonId.NORMALIZATION_NO_CHANGE,
         UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE,
@@ -185,6 +186,43 @@ def test_plan16_operational_backlog_reasons_have_registered_actions():
         assert all(action.proof_stage != "unspecified" for action in actions)
         assert all(action.required_evidence for action in actions)
         assert {action.target_regression for action in actions} == {reason_id.value}
+
+
+def test_unresolved_expression_recovery_plan_tracks_typed_lowering_work():
+    target = ("unresolved_expression", ("pair", "(0,0)"), ("object", "expr"))
+    record = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,0)",
+        evidence_kind="unresolved_expression_safety",
+        object_target_key=target,
+    )
+    actions = build_unknown_recovery_actions([record])
+    plan = get_unknown_recovery_plan(UnknownReasonId.UNRESOLVED_EXPRESSION)
+
+    assert [obligation.proof_stage for obligation in plan.proof_obligations] == [
+        "typed_expression_lowering",
+        "type_normalization",
+    ]
+    assert [action.proof_stage for action in actions] == [
+        "typed_expression_lowering",
+        "type_normalization",
+    ]
+    assert {action.proof_kind for action in actions} == {
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION.value,
+    }
+    assert {action.status for action in actions} == {
+        UnknownRecoveryActionStatus.PLANNED.value,
+    }
+    assert all(action.object_target_key == target for action in actions)
+    assert all(action.proof_obligation_id for action in actions)
+    assert actions[0].proof_obligation_id == build_proof_obligation_id(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        "typed_expression_lowering",
+        UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+        "unresolved_expression_safety",
+        target,
+    )
 
 
 def test_solver_timeout_reason_carries_full_query_proof_target():

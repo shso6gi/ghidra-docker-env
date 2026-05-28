@@ -696,6 +696,45 @@ def test_phase3_return_coverage_post_fix_gate_accepts_completed_eq_with_frozen_p
         "fc_recursive_sum": "completed_recovery",
         "fc_is_even": "pending_proof",
     }
+    pending = next(entry for entry in manifest["entries"] if entry["function"] == "fc_is_even")
+    required_actions = pending["required_completion_actions"]
+    assert len(required_actions) == 4
+    assert {
+        json.dumps(action["proof_obligation_id"], sort_keys=True)
+        for action in required_actions
+    } == {
+        json.dumps(obligation["proof_obligation_id"], sort_keys=True)
+        for obligation in pending["pending_proof_obligations"]
+    }
+    pending_obligations = pending["pending_proof_obligations"]
+    assert len(pending_obligations) == 4
+    assert {obligation["proof_stage"] for obligation in pending_obligations} == {
+        "return_partition_extraction",
+        "return_guard_coverage",
+    }
+    required_by_stage = {
+        obligation["proof_stage"]: obligation["required_evidence"]
+        for obligation in pending_obligations
+    }
+    assert required_by_stage == {
+        "return_partition_extraction": [
+            "missing_return_guard",
+            "tail_or_default_return_value",
+            "return_storage",
+        ],
+        "return_guard_coverage": [
+            "case_guard_disjunction",
+            "path_feasibility",
+            "function_precondition",
+        ],
+    }
+    assert all(
+        obligation["reason_id"] == "return_coverage_gap"
+        and obligation["completed_evidence_present"] is False
+        and obligation["status"] == "pending_evidence"
+        and obligation["proof_obligation_id"]
+        for obligation in pending_obligations
+    )
     recursive = next(entry for entry in manifest["entries"] if entry["function"] == "fc_recursive_sum")
     completed = recursive["current_observation"]["completed_recovery_proof_evidence"]
     assert {item["proof_stage"] for item in completed} == {

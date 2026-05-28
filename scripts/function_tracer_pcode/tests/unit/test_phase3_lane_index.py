@@ -2894,6 +2894,103 @@ def test_phase3_lane_index_accepts_runner_safety_defaults(tmp_path):
     assert lane["runner_gate_smoke_argv_diff"] == []
 
 
+def test_phase3_lane_index_accepts_phase1_regression_log_roots(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_phase1_gate_lane",
+        target_reason_ids=("return_coverage_gap",),
+        manifest_relpath="audit/runner_phase1_gate_lane/manifest.json",
+        runner_relpath="run_runner_phase1_gate_lane.sh",
+        manifest_kind="runner_phase1_gate_lane_manifest",
+        ready_key="runner_phase1_gate_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    gate_end = next(index for index, line in enumerate(lines) if line == ")")
+    lines[gate_end:gate_end] = [
+        '    --phase1-dir "$PHASE1_DIR"',
+        '    --phase1-current-log-root "function_call=$PHASE1_FUNCTION_CALL_LOG_ROOT"',
+        '    --phase1-current-log-root "loop=$PHASE1_LOOP_LOG_ROOT"',
+    ]
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is True
+    assert lane["runner_gate_args_invalid_optional_args"] == []
+    assert lane["runner_gate_smoke_status"] == "passed"
+    assert "--phase1-current-log-root" in lane["runner_gate_smoke_observed_argv"]
+    assert "function_call=$PHASE1_FUNCTION_CALL_LOG_ROOT" in lane["runner_gate_smoke_observed_argv"]
+    assert "loop=$PHASE1_LOOP_LOG_ROOT" in lane["runner_gate_smoke_observed_argv"]
+    validate_phase3_lane_index(manifest, lane_specs=(spec,))
+
+
+def test_phase3_lane_index_rejects_duplicate_phase1_regression_category(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_phase1_gate_lane",
+        target_reason_ids=("return_coverage_gap",),
+        manifest_relpath="audit/runner_phase1_gate_lane/manifest.json",
+        runner_relpath="run_runner_phase1_gate_lane.sh",
+        manifest_kind="runner_phase1_gate_lane_manifest",
+        ready_key="runner_phase1_gate_lane_ready",
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    gate_end = next(index for index, line in enumerate(lines) if line == ")")
+    lines[gate_end:gate_end] = [
+        '    --phase1-current-log-root "function_call=$OUTPUT_BASE_DIR"',
+        '    --phase1-current-log-root "function_call=$PHASE1_FUNCTION_CALL_LOG_ROOT"',
+    ]
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_gate_args_invalid_optional_args"] == [
+        "--phase1-current-log-root=function_call=<duplicate>"
+    ]
+    assert "phase3_lane_runner_gate_args_immutable" in manifest["summary"]["failed_kinds"]
+
+
 def test_phase3_lane_index_rejects_function_scoped_runner_safety_defaults(tmp_path):
     baseline = tmp_path / "baseline"
     repo = tmp_path / "repo"

@@ -707,6 +707,9 @@ def _materialize_post_fix_entry(
     status, failures = _post_fix_status(entry)
     entry["post_fix_status"] = status
     entry["post_fix_failures"] = failures
+    entry["pending_proof_obligations"] = (
+        _pending_proof_obligations(entry) if status == "pending_proof" else []
+    )
     return entry
 
 
@@ -986,6 +989,30 @@ def _completed_recovery_failures(
                 )
             )
     return failures
+
+
+def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    current = entry.get("current_observation") if isinstance(entry.get("current_observation"), Mapping) else {}
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    obligations = []
+    for action in _canonical_actions(entry.get("required_completion_actions")):
+        has_completed_evidence = any(
+            _completed_evidence_matches_action(evidence, action)
+            for evidence in completed
+        )
+        obligations.append(
+            {
+                "reason_id": action.get("reason_id") or MISSING_SENTINEL,
+                "proof_kind": action.get("proof_kind") or MISSING_SENTINEL,
+                "proof_stage": action.get("proof_stage") or MISSING_SENTINEL,
+                "evidence_kind": action.get("evidence_kind") or MISSING_SENTINEL,
+                "required_evidence": list(action.get("required_evidence") or ()),
+                "proof_obligation_id": _jsonable(action.get("proof_obligation_id")),
+                "completed_evidence_present": has_completed_evidence,
+                "status": "completed_evidence_present" if has_completed_evidence else "pending_evidence",
+            }
+        )
+    return obligations
 
 
 def _completed_evidence_matches_action(

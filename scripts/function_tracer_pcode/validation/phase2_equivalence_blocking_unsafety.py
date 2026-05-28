@@ -74,6 +74,24 @@ UNRESOLVED_EXPRESSION_REASON_TUPLE = (
     MISSING_SENTINEL,
     MISSING_SENTINEL,
 )
+UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES = {
+    (
+        "unresolved_expression",
+        "blocks_decision",
+        "expression",
+        "solver_retry_or_normalization",
+        "typed_expression_lowering",
+        "planned",
+    ),
+    (
+        "unresolved_expression",
+        "blocks_decision",
+        "expression",
+        "solver_retry_or_normalization",
+        "type_normalization",
+        "planned",
+    ),
+}
 RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE = (
     "return_coverage_inconclusive",
     "blocks_decision",
@@ -812,6 +830,8 @@ def _allowed_phase2_tuple_delta(
         if reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0:
             return True
         if allow_reason_reclassification:
+            if reason_tuple in UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES:
+                return value < 0
             if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE:
                 return value < 0
             if reason_tuple in SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES:
