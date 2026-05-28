@@ -1740,6 +1740,7 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
         "base_path_relpath": "targets/cate1/function_call_test",
         "current_log_root": "function_call=$OUTPUT_BASE_DIR",
         "baseline_log_root": "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT",
+        "validation_runner_dry_run": "0",
     }
     assert lane["runner_target_filter_runtime_status"] == "passed"
     assert lane["runner_target_filter_runtime_invocation_count"] == 1
@@ -1749,8 +1750,55 @@ def test_phase3_lane_index_accepts_runner_target_filter(tmp_path):
     assert lane["runner_target_filter_runtime_expected_contract"] == expected_runtime_contract
     assert lane["runner_target_filter_runtime_observed_contract"] == expected_runtime_contract
     assert lane["runner_target_filter_runtime_contract_diff"] == []
+    assert lane["runner_target_filter_runtime_contract_consistent"] is True
     assert lane["runner_gate_smoke_status"] == "passed"
     assert lane["runner_gate_smoke_validator_invocation_count"] == 1
+
+
+def test_phase3_lane_index_rejects_tampered_runtime_contract_consistency(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+    lane["runner_target_filter_runtime_observed_contract"]["target_set"] = "evil_function"
+    lane["runner_target_filter_runtime_contract_matches_expected"] = True
+    lane["runner_target_filter_runtime_contract_diff"] = []
+    lane["runner_target_filter_runtime_contract_consistent"] = True
+
+    with pytest.raises(ValueError, match="derived_failed_kinds"):
+        validate_phase3_lane_index(manifest, lane_specs=(spec,))
 
 
 def test_phase3_lane_index_rejects_target_filter_only_spec_without_gate_policy(tmp_path):
@@ -1790,6 +1838,9 @@ def test_phase3_lane_index_rejects_target_filter_only_spec_without_gate_policy(t
     assert manifest["phase3_lanes_ready"] is False
     assert lane["runner_target_filter_runtime_status"] == "passed"
     assert lane["runner_target_filter_runtime_contract_matches_expected"] is True
+    assert lane["runner_target_filter_runtime_observed_contract"]["validation_runner_dry_run"] == (
+        phase3_lane_index.MISSING_SENTINEL
+    )
     assert "phase3_lane_runner_target_filter_gate_policy" in manifest["summary"]["failed_kinds"]
     assert "phase3_lane_runner_target_filter_runtime_contract" not in manifest["summary"]["failed_kinds"]
 
@@ -2041,9 +2092,82 @@ def test_phase3_lane_index_runtime_contract_uses_non_dry_run_branch(tmp_path):
     assert lane["runner_target_filter_runtime_status"] == "failed"
     assert lane["runner_target_filter_runtime_failure_kind"] == "contract_mismatch"
     assert lane["runner_target_filter_runtime_observed_contract"]["target_set"] == "evil_function"
+    assert lane["runner_target_filter_runtime_observed_contract"]["validation_runner_dry_run"] == "0"
     assert lane["runner_gate_smoke_status"] == "passed"
     assert "phase3_lane_runner_target_filter_runtime_contract" in manifest["summary"]["failed_kinds"]
     assert "phase3_lane_runner_gate_smoke" not in manifest["summary"]["failed_kinds"]
+
+
+@pytest.mark.parametrize(
+    ("matrix_mutation", "expected_invocation_count"),
+    (
+        ("remove", 0),
+        ("duplicate", 2),
+    ),
+)
+def test_phase3_lane_index_runtime_contract_requires_one_matrix_invocation(
+    tmp_path,
+    matrix_mutation,
+    expected_invocation_count,
+):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    spec = Phase3LaneSpec(
+        lane_number=1,
+        lane_id="runner_target_lane",
+        target_reason_ids=("reason_one",),
+        manifest_relpath="audit/runner_target_lane/manifest.json",
+        runner_relpath="run_runner_target_lane.sh",
+        manifest_kind="runner_target_lane_manifest",
+        ready_key="runner_target_lane_ready",
+        require_runner_target_filter=True,
+        require_runner_safety_defaults=True,
+    )
+    _write_manifest(baseline, spec)
+    _write_runner(
+        repo,
+        spec,
+        target_category="function_call",
+        current_log_root_category="function_call",
+        baseline_log_root_category="function_call",
+        safety_defaults=_safety_defaults(),
+        require_ready_arg=True,
+        invoke_gate_args=True,
+        target_functions=("runner_target_lane_function",),
+        pair_filter=("runner_target_lane_function:B1_B2",),
+    )
+    runner_path = repo / spec.runner_relpath
+    lines = runner_path.read_text(encoding="utf-8").splitlines()
+    matrix_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith('bash "$SCRIPT_DIR/')
+    )
+    matrix_line = lines[matrix_index]
+    if matrix_mutation == "remove":
+        del lines[matrix_index]
+    else:
+        lines.insert(matrix_index + 1, matrix_line)
+    runner_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+    lane = manifest["lanes"][0]
+
+    assert manifest["phase3_lanes_ready"] is False
+    assert lane["runner_target_filter_runtime_status"] == "failed"
+    assert lane["runner_target_filter_runtime_failure_kind"] == "matrix_invocation_count"
+    assert lane["runner_target_filter_runtime_invocation_count"] == expected_invocation_count
+    assert len(lane["runner_target_filter_runtime_observed_invocations"]) == (
+        expected_invocation_count
+    )
+    assert "phase3_lane_runner_target_filter_runtime_contract" in manifest["summary"]["failed_kinds"]
 
 
 @pytest.mark.parametrize(

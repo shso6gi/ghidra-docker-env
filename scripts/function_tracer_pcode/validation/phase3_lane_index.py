@@ -629,6 +629,7 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             expected_targets,
             manifest_path=path,
             manifest_sha256=lane["manifest_sha256"],
+            require_safety_defaults=spec.require_runner_safety_defaults,
         )
         lane["runner_target_filter_runtime_status"] = runtime_contract["status"]
         lane["runner_target_filter_runtime_invocation_count"] = runtime_contract["invocation_count"]
@@ -644,6 +645,9 @@ def _materialize_lane(root: Path, repo: Path, spec: Phase3LaneSpec) -> Dict[str,
             "observed_invocations"
         ]
         lane["runner_target_filter_runtime_contract_diff"] = runtime_contract["contract_diff"]
+        lane["runner_target_filter_runtime_contract_consistent"] = (
+            _runner_target_runtime_contract_consistency(lane)["ok"]
+        )
     lane["representative_entries"] = _representative_entries(manifest.get("entries"))
     implementation = manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):
@@ -943,12 +947,28 @@ def _index_checks(
                 )
             )
             checks.append(
+                _ok("phase3_lane_runner_target_filter_runtime_contract_consistent", **details)
+                if lane.get("runner_target_filter_runtime_contract_consistent") is True
+                and _runner_target_runtime_contract_consistency(lane)["ok"] is True
+                else _failed(
+                    "phase3_lane_runner_target_filter_runtime_contract_consistent",
+                    stored_consistent=lane.get(
+                        "runner_target_filter_runtime_contract_consistent"
+                    ),
+                    consistency=_runner_target_runtime_contract_consistency(lane),
+                    **details,
+                )
+            )
+            runtime_contract_consistency = _runner_target_runtime_contract_consistency(lane)
+            checks.append(
                 _ok("phase3_lane_runner_target_filter_runtime_contract", **details)
                 if lane.get("runner_target_filter_runtime_status") == "passed"
                 and lane.get("runner_target_filter_runtime_invocation_count") == 1
                 and lane.get("runner_target_filter_runtime_contract_matches_expected") is True
                 and lane.get("runner_target_filter_runtime_failure_kind") == "none"
                 and lane.get("runner_target_filter_runtime_returncode") == 0
+                and runtime_contract_consistency["ok"] is True
+                and runtime_contract_consistency["expected_equals_observed"] is True
                 else _failed(
                     "phase3_lane_runner_target_filter_runtime_contract",
                     smoke_status=lane.get("runner_target_filter_runtime_status"),
@@ -969,6 +989,7 @@ def _index_checks(
                         "runner_target_filter_runtime_observed_invocations"
                     ),
                     contract_diff=lane.get("runner_target_filter_runtime_contract_diff"),
+                    consistency=runtime_contract_consistency,
                     **details,
                 )
             )
@@ -2862,6 +2883,7 @@ def _runner_target_filter_runtime_contract(
     *,
     manifest_path: Path,
     manifest_sha256: str,
+    require_safety_defaults: bool,
 ) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="phase3-lane-target-smoke-") as tmp_name:
         tmp = Path(tmp_name)
@@ -2879,7 +2901,10 @@ def _runner_target_filter_runtime_contract(
             manifest_path=manifest_path,
             manifest_sha256=manifest_sha256,
         )
-        expected_contract = _expected_runner_target_runtime_contract(expected_targets, env)
+        expected_contract = _expected_runner_target_runtime_contract(
+            expected_targets,
+            require_safety_defaults=require_safety_defaults,
+        )
         try:
             completed = subprocess.run(
                 [_bash_executable(), str(runner_path)],
@@ -2999,6 +3024,62 @@ def _runner_target_runtime_failed(
     }
 
 
+def _runner_target_runtime_contract_consistency(lane: Mapping[str, Any]) -> Dict[str, Any]:
+    expected = lane.get("runner_target_filter_runtime_expected_contract")
+    observed = lane.get("runner_target_filter_runtime_observed_contract")
+    stored_diff = lane.get("runner_target_filter_runtime_contract_diff")
+    observed_invocations = lane.get("runner_target_filter_runtime_observed_invocations")
+    invocation_count = lane.get("runner_target_filter_runtime_invocation_count")
+
+    expected_is_mapping = isinstance(expected, Mapping)
+    observed_is_mapping = isinstance(observed, Mapping)
+    stored_diff_is_list = isinstance(stored_diff, list)
+    observed_invocations_is_list = isinstance(observed_invocations, list)
+
+    computed_diff = (
+        _mapping_diff(expected, observed)
+        if expected_is_mapping and observed_is_mapping
+        else []
+    )
+    observed_invocation_count = (
+        len(observed_invocations) if observed_invocations_is_list else MISSING_SENTINEL
+    )
+    if observed_invocations_is_list and observed_invocations:
+        first_observed_invocation = observed_invocations[0]
+    else:
+        first_observed_invocation = {}
+    first_observed_invocation_matches = (
+        observed_is_mapping
+        and isinstance(first_observed_invocation, Mapping)
+        and first_observed_invocation == observed
+    )
+    expected_equals_observed = (
+        expected == observed if expected_is_mapping and observed_is_mapping else False
+    )
+    ok = (
+        expected_is_mapping
+        and observed_is_mapping
+        and stored_diff_is_list
+        and observed_invocations_is_list
+        and stored_diff == computed_diff
+        and observed_invocation_count == invocation_count
+        and first_observed_invocation_matches
+    )
+    return {
+        "ok": ok,
+        "expected_is_mapping": expected_is_mapping,
+        "observed_is_mapping": observed_is_mapping,
+        "stored_diff_is_list": stored_diff_is_list,
+        "observed_invocations_is_list": observed_invocations_is_list,
+        "stored_diff": stored_diff if stored_diff_is_list else MISSING_SENTINEL,
+        "computed_diff": computed_diff,
+        "observed_invocation_count": observed_invocation_count,
+        "reported_invocation_count": invocation_count,
+        "first_observed_invocation_matches": first_observed_invocation_matches,
+        "expected_equals_observed": expected_equals_observed,
+    }
+
+
 def _runner_gate_smoke_failed(
     error: str,
     *,
@@ -3080,6 +3161,7 @@ def _write_runner_matrix_smoke_bash_stub(path: Path, invocation_log: Path) -> No
         "OUTPUT_BASE_DIR",
         "BASELINE_FUNCTION_CALL_LOG_ROOT",
         "BASELINE_LOOP_LOG_ROOT",
+        "VALIDATION_RUNNER_DRY_RUN",
     )
     path.write_text(
         f"#!{sys.executable}\n"
@@ -3187,7 +3269,8 @@ def _expected_runner_smoke_argv(
 
 def _expected_runner_target_runtime_contract(
     expected_targets: Mapping[str, Any],
-    env: Mapping[str, str],
+    *,
+    require_safety_defaults: bool,
 ) -> Optional[Dict[str, Any]]:
     category = expected_targets.get("category")
     if category not in {"function_call", "loop"}:
@@ -3211,6 +3294,11 @@ def _expected_runner_target_runtime_contract(
         "base_path_relpath": str(expected_targets.get("base_path_relpath") or MISSING_SENTINEL),
         "current_log_root": f"{category}=$OUTPUT_BASE_DIR",
         "baseline_log_root": f"{category}=${baseline_var}",
+        "validation_runner_dry_run": (
+            EXPECTED_RUNNER_SAFETY_DEFAULTS["VALIDATION_RUNNER_DRY_RUN"]
+            if require_safety_defaults
+            else MISSING_SENTINEL
+        ),
     }
 
 
@@ -3255,6 +3343,7 @@ def _observed_runner_target_runtime_contract(
             if category != MISSING_SENTINEL and baseline_log_root_value != MISSING_SENTINEL
             else MISSING_SENTINEL
         ),
+        "validation_runner_dry_run": _runtime_env_value(env, "VALIDATION_RUNNER_DRY_RUN"),
     }
 
 
