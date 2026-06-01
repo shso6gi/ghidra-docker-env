@@ -18,7 +18,6 @@ from ..equivalence.unknown_reason import (
 )
 from .unknown_reason_summary import (
     compare_validation_unknowns,
-    extract_result_payloads_from_logs,
     extract_result_payloads_from_text,
     format_validation_unknown_diff,
     format_validation_unknown_diff_unavailable,
@@ -41,6 +40,8 @@ STATUS_ORDER = (
     STATUS_TIMEOUT,
     STATUS_INCOMPLETE,
 )
+BASELINE_MATCH_SCOPE_ALL = "all"
+BASELINE_MATCH_SCOPE_AFTER_PAIRS = "after-pairs"
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,22 @@ def compare_validation_baseline_records(
     )
 
 
+def scope_baseline_records_for_after_pairs(
+    before_records: Iterable[ValidationLogRecord],
+    after_records: Iterable[ValidationLogRecord],
+) -> Tuple[ValidationLogRecord, ...]:
+    after_record_tuple = tuple(after_records)
+    before_record_tuple = tuple(before_records)
+    if not after_record_tuple:
+        return before_record_tuple
+    after_pair_identities = _pair_identity_set(after_record_tuple)
+    return tuple(
+        record
+        for record in before_record_tuple
+        if _canonical_pair_result_tuple(record)[:2] in after_pair_identities
+    )
+
+
 def format_function_results_summary(
     function_name: str,
     aggregate: ValidationResultAggregate,
@@ -278,6 +295,7 @@ def format_function_results_summary(
     elapsed_seconds: Optional[float] = None,
     include_unknown_reason_summary: bool = True,
     before_log_paths: Sequence[Any] = (),
+    baseline_match_scope: str = BASELINE_MATCH_SCOPE_ALL,
 ) -> str:
     lines = [f"--- Results for {function_name} ---"]
     lines.append(f"  Total pairs     : {aggregate.total_pairs}")
@@ -298,7 +316,13 @@ def format_function_results_summary(
         lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
         lines.append("")
         if before_log_paths:
-            before_payloads = extract_result_payloads_from_logs(before_log_paths)
+            before_records = aggregate_validation_logs(before_log_paths).records
+            before_records = _apply_baseline_match_scope(
+                before_records,
+                aggregate.records,
+                baseline_match_scope,
+            )
+            before_payloads = _payloads_from_records(before_records)
             lines.append(
                 format_validation_unknown_diff(
                     compare_validation_unknowns(before_payloads, payloads),
@@ -309,7 +333,7 @@ def format_function_results_summary(
             lines.append(
                 format_validation_baseline_comparison(
                     compare_validation_baseline_records(
-                        aggregate_validation_logs(before_log_paths).records,
+                        before_records,
                         aggregate.records,
                     ),
                     indent="  ",
@@ -326,6 +350,7 @@ def format_overall_results_summary(
     *,
     function_wall_times: Optional[Mapping[str, float]] = None,
     before_log_paths: Sequence[Any] = (),
+    baseline_match_scope: str = BASELINE_MATCH_SCOPE_ALL,
 ) -> str:
     function_wall_times = function_wall_times or {}
     lines = [
@@ -367,7 +392,13 @@ def format_overall_results_summary(
     lines.append(format_validation_unknown_summary(unknown_summary, indent="  "))
     lines.append("")
     if before_log_paths:
-        before_payloads = extract_result_payloads_from_logs(before_log_paths)
+        before_records = aggregate_validation_logs(before_log_paths).records
+        before_records = _apply_baseline_match_scope(
+            before_records,
+            summary.overall.records,
+            baseline_match_scope,
+        )
+        before_payloads = _payloads_from_records(before_records)
         lines.append(
             format_validation_unknown_diff(
                 compare_validation_unknowns(before_payloads, payloads),
@@ -378,7 +409,7 @@ def format_overall_results_summary(
         lines.append(
             format_validation_baseline_comparison(
                 compare_validation_baseline_records(
-                    aggregate_validation_logs(before_log_paths).records,
+                    before_records,
                     summary.overall.records,
                 ),
                 indent="  ",
@@ -491,6 +522,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="fail when canonical before/after baseline comparison has any delta",
     )
     parser.add_argument(
+        "--baseline-match-scope",
+        choices=(BASELINE_MATCH_SCOPE_ALL, BASELINE_MATCH_SCOPE_AFTER_PAIRS),
+        default=BASELINE_MATCH_SCOPE_ALL,
+        help=(
+            "baseline comparison scope; use after-pairs for filtered representative "
+            "reruns where only executed pairs should be compared"
+        ),
+    )
+    parser.add_argument(
         "--function-wall-time",
         action="append",
         default=None,
@@ -509,12 +549,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             aggregate,
             elapsed_seconds=args.elapsed_seconds,
             before_log_paths=before_logs,
+            baseline_match_scope=args.baseline_match_scope,
         )
         print(output)
         _require_baseline_match(
             before_logs,
             aggregate.records,
             args.require_baseline_match,
+            args.baseline_match_scope,
         )
         return 0
 
@@ -526,12 +568,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overall,
         function_wall_times=_parse_function_wall_times(args.function_wall_time or ()),
         before_log_paths=before_logs,
+        baseline_match_scope=args.baseline_match_scope,
     )
     print(output)
     _require_baseline_match(
         before_logs,
         overall.overall.records,
         args.require_baseline_match,
+        args.baseline_match_scope,
     )
     return 0
 
@@ -547,13 +591,30 @@ def _require_baseline_match(
     before_logs: Sequence[Any],
     after_records: Sequence[ValidationLogRecord],
     require_baseline_match: bool,
+    baseline_match_scope: str,
 ) -> None:
     if not require_baseline_match:
         return
     before_records = aggregate_validation_logs(before_logs).records if before_logs else ()
+    before_records = _apply_baseline_match_scope(
+        before_records,
+        after_records,
+        baseline_match_scope,
+    )
     comparison = compare_validation_baseline_records(before_records, after_records)
     if comparison.has_differences():
         raise SystemExit("baseline comparison mismatch")
+
+
+def _apply_baseline_match_scope(
+    before_records: Iterable[ValidationLogRecord],
+    after_records: Iterable[ValidationLogRecord],
+    baseline_match_scope: str,
+) -> Tuple[ValidationLogRecord, ...]:
+    before_record_tuple = tuple(before_records)
+    if baseline_match_scope == BASELINE_MATCH_SCOPE_AFTER_PAIRS:
+        return scope_baseline_records_for_after_pairs(before_record_tuple, after_records)
+    return before_record_tuple
 
 
 def _format_count_lines(indent: str, aggregate: ValidationResultAggregate) -> Tuple[str, ...]:

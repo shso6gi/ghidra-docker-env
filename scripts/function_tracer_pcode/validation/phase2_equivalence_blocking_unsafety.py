@@ -39,11 +39,24 @@ from .unknown_reason_summary import (
 
 
 MANIFEST_VERSION = 1
+MANIFEST_KIND = "phase2_equivalence_blocking_unsafety_expected_movement"
+BASELINE_ID = "observed-v0@0a53352"
+BASELINE_GIT_HEAD = "0a53352cf3c9528abfb654906ed7b963474bedc5"
 TARGET_REASON_ID = "equivalence_blocking_unsafety"
 EXPECTED_RECOVERY_ACTION = "call_effect_summary_proof_required"
 EXPECTED_PROOF_KIND = UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
 EXPECTED_PROOF_STAGE = "object_evidence_collected"
 EXPECTED_ACTION_STATUS = UnknownRecoveryActionStatus.PENDING_PROOF.value
+REQUIRED_PRODUCER_EQUIV_ARGS = (
+    "--no-completed-recovery-proofs",
+)
+REQUIRED_PRODUCER_RUN_MANIFEST_VALUES = {
+    "run_kind": "phase2_function_call_full_matrix_pre_producer",
+    "expected_final_result_movement": "none",
+    "expected_reason_movement": "call_effect_summary_proof/object_evidence_collected/pending_proof",
+    "validation_skip_completed": "0",
+    "phase2_run_expected_movement_gate": "1",
+}
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
 TARGET_REPRESENTATIVE_IDS = (
     "representative-equivalence-blocking-unsafety-apply",
@@ -255,23 +268,26 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     output.mkdir(parents=True, exist_ok=True)
     representative = _read_json(phase1 / "representative_manifest.json")
     phase1_index = _read_optional_json(phase1 / "phase1_manifest_index.json")
+    phase1_index_gate = _phase1_manifest_index_gate(phase1_index)
     current_records = _records_by_key(current_log_roots)
     entries = []
     for entry in _target_representatives(representative):
         entries.append(_validate_representative_expected_movement(entry, current_records))
+    producer_gate = _validate_phase2_producer_config(current_log_roots)
     baseline_gate = _validate_overall_baseline_comparison(
         baseline_log_roots or {},
         current_log_roots,
     )
-    summary = _movement_summary(entries, baseline_gate)
+    summary = _movement_summary(entries, baseline_gate, producer_gate)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
-        "manifest_kind": "phase2_equivalence_blocking_unsafety_expected_movement",
+        "manifest_kind": MANIFEST_KIND,
         "baseline_id": phase1_index.get("baseline_id") or MISSING_SENTINEL,
         "baseline_git_head": phase1_index.get("baseline_git_head") or MISSING_SENTINEL,
         "target_reason_id": TARGET_REASON_ID,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "phase1_manifest_index_ref": _file_ref(phase1 / "phase1_manifest_index.json"),
+        "phase1_manifest_index_gate": phase1_index_gate,
         "phase1_representative_manifest_ref": {
             "path": "representative_manifest.json",
             "sha256": _sha256_file(phase1 / "representative_manifest.json"),
@@ -285,8 +301,14 @@ def build_phase2_equivalence_blocking_unsafety_movement(
             for category, path in sorted((baseline_log_roots or {}).items())
         },
         "movement_summary": summary,
+        "phase2_producer_config_gate": producer_gate,
         "overall_baseline_comparison_gate": baseline_gate,
-        "phase2_ready": summary["failed"] == 0 and baseline_gate.get("passed") is True,
+        "phase2_ready": (
+            summary["failed"] == 0
+            and producer_gate.get("passed") is True
+            and baseline_gate.get("passed") is True
+            and phase1_index_gate.get("passed") is True
+        ),
         "entries": entries,
     }
     path = output / "equivalence_blocking_unsafety_expected_movement.json"
@@ -295,15 +317,240 @@ def build_phase2_equivalence_blocking_unsafety_movement(
 
 
 def validate_phase2_equivalence_blocking_unsafety_movement(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase2_ready") is True:
-        return
-    summary = manifest.get("movement_summary")
-    if not isinstance(summary, Mapping):
-        raise ValueError("Phase 2 movement is false and movement summary is missing")
-    failed = summary.get("failed_kinds") or ()
+    failed = _phase2_movement_failure_kinds(manifest)
     if not failed:
-        raise ValueError("Phase 2 movement is false without failed movement kinds")
+        return
     raise ValueError(f"Phase 2 expected movement failed: {', '.join(map(str, failed))}")
+
+
+def _phase2_movement_failure_kinds(manifest: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    if not isinstance(manifest, Mapping):
+        return ("manifest_not_mapping",)
+
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        failures.append("manifest_version_mismatch")
+    if manifest.get("manifest_kind") != MANIFEST_KIND:
+        failures.append("manifest_kind_mismatch")
+    if manifest.get("baseline_id") != BASELINE_ID:
+        failures.append("baseline_id_mismatch")
+    if manifest.get("baseline_git_head") != BASELINE_GIT_HEAD:
+        failures.append("baseline_git_head_mismatch")
+    if manifest.get("target_reason_id") != TARGET_REASON_ID:
+        failures.append("target_reason_id_mismatch")
+
+    summary = manifest.get("movement_summary")
+    entries_value = manifest.get("entries")
+    baseline_gate = manifest.get("overall_baseline_comparison_gate")
+    producer_gate = manifest.get("phase2_producer_config_gate")
+    phase1_index_gate = manifest.get("phase1_manifest_index_gate")
+    entries = _phase2_entries(entries_value, failures)
+    summary_is_mapping = isinstance(summary, Mapping)
+    baseline_gate_is_mapping = isinstance(baseline_gate, Mapping)
+    producer_gate_is_mapping = isinstance(producer_gate, Mapping)
+    phase1_index_gate_is_mapping = isinstance(phase1_index_gate, Mapping)
+
+    if not summary_is_mapping:
+        failures.append("movement_summary_missing")
+    if not baseline_gate_is_mapping:
+        failures.append("overall_baseline_comparison_gate_missing")
+    if not producer_gate_is_mapping:
+        failures.append("phase2_producer_config_gate_missing")
+    if not phase1_index_gate_is_mapping:
+        failures.append("phase1_manifest_index_gate_missing")
+
+    if entries is not None:
+        failures.extend(_phase2_entry_failures(entries))
+    if baseline_gate_is_mapping:
+        failures.extend(_phase2_baseline_gate_failures(baseline_gate))
+    if producer_gate_is_mapping:
+        failures.extend(_phase2_producer_gate_failures(producer_gate))
+    if phase1_index_gate_is_mapping:
+        failures.extend(_phase1_index_gate_failures(phase1_index_gate))
+
+    if (
+        entries is not None
+        and summary_is_mapping
+        and baseline_gate_is_mapping
+        and producer_gate_is_mapping
+        and phase1_index_gate_is_mapping
+    ):
+        expected_summary = _movement_summary(entries, baseline_gate, producer_gate)
+        failures.extend(_phase2_movement_summary_failures(summary, expected_summary))
+        expected_ready = (
+            expected_summary.get("failed") == 0
+            and producer_gate.get("passed") is True
+            and baseline_gate.get("passed") is True
+            and phase1_index_gate.get("passed") is True
+        )
+        if manifest.get("phase2_ready") is not expected_ready:
+            failures.append("phase2_ready_consistency")
+        if not expected_ready:
+            expected_failed_kinds = expected_summary.get("failed_kinds") or ()
+            if expected_failed_kinds:
+                failures.extend(str(kind) for kind in expected_failed_kinds)
+            else:
+                failures.append("movement_summary_failed_kinds_missing")
+    elif manifest.get("phase2_ready") is True:
+        failures.append("phase2_ready_without_valid_inputs")
+
+    return tuple(sorted(set(str(failure) for failure in failures)))
+
+
+def _phase1_manifest_index_gate(phase1_index: Mapping[str, Any]) -> Mapping[str, Any]:
+    failures = []
+    if not isinstance(phase1_index, Mapping):
+        return {
+            "passed": False,
+            "status": "failed",
+            "failed_kinds": ["phase1_manifest_index_missing"],
+        }
+    if phase1_index.get("baseline_id") != BASELINE_ID:
+        failures.append("baseline_id_mismatch")
+    if phase1_index.get("baseline_git_head") != BASELINE_GIT_HEAD:
+        failures.append("baseline_git_head_mismatch")
+    if failures:
+        return {
+            "passed": False,
+            "status": "failed",
+            "failed_kinds": failures,
+        }
+    return {"passed": True, "status": "passed", "failed_kinds": []}
+
+
+def _phase2_entries(value: Any, failures: list) -> Optional[Sequence[Mapping[str, Any]]]:
+    if not _is_non_string_sequence(value):
+        failures.append("entries_missing")
+        return None
+    entries = []
+    for entry in value:
+        if not isinstance(entry, Mapping):
+            failures.append("entry_not_mapping")
+            return None
+        entries.append(entry)
+    return tuple(entries)
+
+
+def _phase2_entry_failures(entries: Sequence[Mapping[str, Any]]) -> Sequence[str]:
+    failures = []
+    entry_ids = [str(entry.get("entry_id") or MISSING_SENTINEL) for entry in entries]
+    duplicate_ids = sorted(
+        entry_id
+        for entry_id, count in Counter(entry_ids).items()
+        if count > 1
+    )
+    missing_ids = sorted(set(TARGET_REPRESENTATIVE_IDS) - set(entry_ids))
+    unexpected_ids = sorted(set(entry_ids) - set(TARGET_REPRESENTATIVE_IDS))
+    if duplicate_ids:
+        failures.append("representative_entry_duplicate_id")
+    if missing_ids:
+        failures.append("missing_target_representative")
+    if unexpected_ids:
+        failures.append("unexpected_target_representative")
+    for entry in entries:
+        if entry.get("target_reason_id") != TARGET_REASON_ID:
+            failures.append("entry_target_reason_id_mismatch")
+        status = entry.get("movement_status")
+        failed_kinds = entry.get("failed_kinds") or ()
+        if status == "expected_movement" and failed_kinds:
+            failures.append("entry_failed_kinds_on_expected_movement")
+        if status != "expected_movement" and not failed_kinds:
+            failures.append("entry_failure_without_failed_kinds")
+    return failures
+
+
+def _phase2_baseline_gate_failures(baseline_gate: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    passed = baseline_gate.get("passed")
+    status = baseline_gate.get("status")
+    failed_kinds = baseline_gate.get("failed_kinds")
+    if passed is not True and passed is not False:
+        failures.append("overall_baseline_comparison_gate_passed_not_bool")
+    if not _is_non_string_sequence(failed_kinds):
+        failures.append("overall_baseline_comparison_gate_failed_kinds_invalid")
+        failed_kinds = ()
+    if passed is True:
+        if status != "passed":
+            failures.append("overall_baseline_comparison_gate_status_mismatch")
+        if failed_kinds:
+            failures.append("overall_baseline_comparison_gate_passed_with_failures")
+    elif passed is False:
+        if status != "failed":
+            failures.append("overall_baseline_comparison_gate_status_mismatch")
+        if not failed_kinds:
+            failures.append("overall_baseline_comparison_gate_failed_without_kinds")
+    return failures
+
+
+def _phase2_producer_gate_failures(producer_gate: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    passed = producer_gate.get("passed")
+    status = producer_gate.get("status")
+    failed_kinds = producer_gate.get("failed_kinds")
+    if passed is not True and passed is not False:
+        failures.append("phase2_producer_config_gate_passed_not_bool")
+    if not _is_non_string_sequence(failed_kinds):
+        failures.append("phase2_producer_config_gate_failed_kinds_invalid")
+        failed_kinds = ()
+    if passed is True:
+        if status != "passed":
+            failures.append("phase2_producer_config_gate_status_mismatch")
+        if failed_kinds:
+            failures.append("phase2_producer_config_gate_passed_with_failures")
+    elif passed is False:
+        if status != "failed":
+            failures.append("phase2_producer_config_gate_status_mismatch")
+        if not failed_kinds:
+            failures.append("phase2_producer_config_gate_failed_without_kinds")
+    return failures
+
+
+def _phase1_index_gate_failures(phase1_index_gate: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    passed = phase1_index_gate.get("passed")
+    status = phase1_index_gate.get("status")
+    failed_kinds = phase1_index_gate.get("failed_kinds")
+    if passed is not True and passed is not False:
+        failures.append("phase1_manifest_index_gate_passed_not_bool")
+    if not _is_non_string_sequence(failed_kinds):
+        failures.append("phase1_manifest_index_gate_failed_kinds_invalid")
+        failed_kinds = ()
+    if passed is True:
+        if status != "passed":
+            failures.append("phase1_manifest_index_gate_status_mismatch")
+        if failed_kinds:
+            failures.append("phase1_manifest_index_gate_passed_with_failures")
+    elif passed is False:
+        if status != "failed":
+            failures.append("phase1_manifest_index_gate_status_mismatch")
+        if not failed_kinds:
+            failures.append("phase1_manifest_index_gate_failed_without_kinds")
+    return failures
+
+
+def _phase2_movement_summary_failures(
+    summary: Mapping[str, Any],
+    expected_summary: Mapping[str, Any],
+) -> Sequence[str]:
+    failures = []
+    for key in (
+        "target_reason_id",
+        "total",
+        "passed",
+        "failed",
+        "failed_kinds",
+        "expected_representative_ids",
+        "missing_representative_ids",
+        "unexpected_representative_ids",
+        "allowed_movement",
+    ):
+        if summary.get(key) != expected_summary.get(key):
+            failures.append(f"movement_summary_{key}_mismatch")
+    return failures
+
+
+def _is_non_string_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -593,6 +840,7 @@ def _target_representatives(manifest: Mapping[str, Any]) -> Sequence[Mapping[str
 def _movement_summary(
     entries: Sequence[Mapping[str, Any]],
     baseline_gate: Mapping[str, Any],
+    producer_gate: Mapping[str, Any],
 ) -> Dict[str, Any]:
     entry_ids = {str(entry.get("entry_id") or MISSING_SENTINEL) for entry in entries}
     missing_representatives = sorted(set(TARGET_REPRESENTATIVE_IDS) - entry_ids)
@@ -606,14 +854,22 @@ def _movement_summary(
         | ({"missing_target_representative"} if missing_representatives else set())
         | ({"unexpected_target_representative"} if unexpected_representatives else set())
         | set(str(kind) for kind in (baseline_gate.get("failed_kinds") or ()))
+        | set(str(kind) for kind in (producer_gate.get("failed_kinds") or ()))
     )
     failed_entries = sum(1 for entry in entries if entry.get("movement_status") != "expected_movement")
     baseline_failures = 0 if baseline_gate.get("passed") is True else 1
+    producer_failures = 0 if producer_gate.get("passed") is True else 1
     return {
         "target_reason_id": TARGET_REASON_ID,
         "total": len(entries),
         "passed": sum(1 for entry in entries if entry.get("movement_status") == "expected_movement"),
-        "failed": failed_entries + len(missing_representatives) + len(unexpected_representatives) + baseline_failures,
+        "failed": (
+            failed_entries
+            + len(missing_representatives)
+            + len(unexpected_representatives)
+            + baseline_failures
+            + producer_failures
+        ),
         "failed_kinds": failed_kinds,
         "expected_representative_ids": list(TARGET_REPRESENTATIVE_IDS),
         "missing_representative_ids": missing_representatives,
@@ -626,6 +882,91 @@ def _movement_summary(
             "recovery_action": EXPECTED_RECOVERY_ACTION,
         },
     }
+
+
+def _validate_phase2_producer_config(
+    current_log_roots: Mapping[str, Path],
+) -> Dict[str, Any]:
+    failed_kinds = []
+    roots: Dict[str, Any] = {}
+    if not current_log_roots:
+        failed_kinds.append("phase2_producer_current_log_root_missing")
+
+    for category, root_value in sorted(current_log_roots.items()):
+        root = Path(root_value)
+        manifest_path = root / "run_manifest.txt"
+        root_result: Dict[str, Any] = {
+            "root": str(root),
+            "run_manifest": str(manifest_path),
+            "run_manifest_present": manifest_path.is_file(),
+            "required_equivalence_args": list(REQUIRED_PRODUCER_EQUIV_ARGS),
+            "required_run_manifest_values": dict(REQUIRED_PRODUCER_RUN_MANIFEST_VALUES),
+            "function_call_extra_equiv_args": MISSING_SENTINEL,
+            "missing_required_equivalence_args": list(REQUIRED_PRODUCER_EQUIV_ARGS),
+            "run_manifest_values": {},
+            "mismatched_required_run_manifest_values": dict(REQUIRED_PRODUCER_RUN_MANIFEST_VALUES),
+        }
+        if not manifest_path.is_file():
+            failed_kinds.append("phase2_producer_run_manifest_missing")
+            roots[str(category)] = root_result
+            continue
+
+        manifest_values = _read_run_manifest_values(manifest_path)
+        extra_args = str(manifest_values.get("function_call_extra_equiv_args") or "")
+        present_args = set(extra_args.split())
+        missing_args = [
+            arg
+            for arg in REQUIRED_PRODUCER_EQUIV_ARGS
+            if arg not in present_args
+        ]
+        root_result["function_call_extra_equiv_args"] = extra_args
+        root_result["missing_required_equivalence_args"] = missing_args
+        if missing_args:
+            failed_kinds.append("phase2_producer_recovery_flags_missing")
+        observed_required_values = {
+            key: str(manifest_values.get(key) or "")
+            for key in REQUIRED_PRODUCER_RUN_MANIFEST_VALUES
+        }
+        mismatched_values = {
+            key: {
+                "expected": expected,
+                "actual": observed_required_values.get(key) or MISSING_SENTINEL,
+            }
+            for key, expected in REQUIRED_PRODUCER_RUN_MANIFEST_VALUES.items()
+            if observed_required_values.get(key) != expected
+        }
+        root_result["run_manifest_values"] = observed_required_values
+        root_result["mismatched_required_run_manifest_values"] = mismatched_values
+        if mismatched_values:
+            failed_kinds.append("phase2_producer_run_manifest_values_mismatch")
+        roots[str(category)] = root_result
+
+    failed_kinds = sorted(set(failed_kinds))
+    return {
+        "passed": not failed_kinds,
+        "status": "passed" if not failed_kinds else "failed",
+        "failed_kinds": failed_kinds,
+        "required_equivalence_args": list(REQUIRED_PRODUCER_EQUIV_ARGS),
+        "required_run_manifest_values": dict(REQUIRED_PRODUCER_RUN_MANIFEST_VALUES),
+        "roots": roots,
+    }
+
+
+def _read_run_manifest_values(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        key = key.strip()
+        if not key:
+            continue
+        values[key] = value.strip()
+    return values
 
 
 def _validate_overall_baseline_comparison(

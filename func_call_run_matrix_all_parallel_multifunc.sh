@@ -115,10 +115,12 @@ VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
+VALIDATION_BASELINE_MATCH_SCOPE=${VALIDATION_BASELINE_MATCH_SCOPE:-all}  # Use after-pairs for filtered representative preflight runs.
 VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
 VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS=${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}  # Set to 1 for Phase 2 producer reruns.
 VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
 FUNCTION_CALL_PAIR_FILTER=${FUNCTION_CALL_PAIR_FILTER:-}  # Comma-separated function:B1_B2 entries for representative reruns.
+FUNCTION_CALL_EXTRA_EQUIV_ARGS=${FUNCTION_CALL_EXTRA_EQUIV_ARGS:-}  # Extra CLI args appended to each equivalence run.
 RUNNER_TMP_ROOT=${RUNNER_TMP_ROOT:-"${TMPDIR:-/tmp}/ghidra-equivalence-function-call.$$"}
 
 # bash バージョンチェック（wait -n は 4.3+ 必須）
@@ -221,12 +223,14 @@ echo "Skip completed logs: $VALIDATION_SKIP_COMPLETED"
 echo "Require Phase 2 object keys on skipped logs: $VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS"
 echo "Runner dry run: $VALIDATION_RUNNER_DRY_RUN"
 echo "Function/pair filter: ${FUNCTION_CALL_PAIR_FILTER:-<none>}"
+echo "Extra equivalence args: ${FUNCTION_CALL_EXTRA_EQUIV_ARGS:-<none>}"
 echo "Validation before dir: $VALIDATION_BEFORE_LABEL [$VALIDATION_BEFORE_SOURCE]"
 if [[ -n "${VALIDATION_MOVED_OUTPUT_DIR:-}" ]]; then
     echo "Moved old output dir: $VALIDATION_MOVED_OUTPUT_DIR"
 fi
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
+echo "Baseline match scope: $VALIDATION_BASELINE_MATCH_SCOPE"
 echo "============================================================"
 echo ""
 
@@ -286,10 +290,15 @@ run_pair() {
     local PAIR_TMPDIR="${RUNNER_TMP_ROOT}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}"
     mkdir -p "$PAIR_TMPDIR"
 
+    local -a EXTRA_EQUIV_ARGS=()
+    if [[ -n "$FUNCTION_CALL_EXTRA_EQUIV_ARGS" ]]; then
+        read -r -a EXTRA_EQUIV_ARGS <<< "$FUNCTION_CALL_EXTRA_EQUIV_ARGS"
+    fi
+
     TMPDIR="$PAIR_TMPDIR" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main \
         --equiv "$BASE_PATH/$BIN1" "$BASE_PATH/$BIN2" \
         --binary-ids "$ROW_ID" "$COL_ID" \
-        -f "$TARGET_FUNC" -d --emit-result-json \
+        -f "$TARGET_FUNC" -d --emit-result-json "${EXTRA_EQUIV_ARGS[@]}" \
         > "$LOG_FILE" 2>&1
     local ec=$?
 
@@ -314,7 +323,7 @@ run_pair() {
 }
 
 export -f run_pair
-export BASE_PATH PYTHON_BIN RUNNER_TMP_ROOT VALIDATION_SKIP_COMPLETED
+export BASE_PATH PYTHON_BIN RUNNER_TMP_ROOT VALIDATION_SKIP_COMPLETED FUNCTION_CALL_EXTRA_EQUIV_ARGS
 
 write_summary_file() {
     local output_file="$1"
@@ -869,6 +878,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     if [[ "$VALIDATION_REQUIRE_BASELINE_MATCH" != "0" ]]; then
         FUNCTION_SUMMARY_ARGS+=(--require-baseline-match)
     fi
+    FUNCTION_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")
     if ! write_summary_file "$RESULT_FILE" \
         python3 -m scripts.function_tracer_pcode.validation.result_summary \
             "${FUNCTION_SUMMARY_ARGS[@]}" \
@@ -894,6 +904,7 @@ fi
 if [[ "$VALIDATION_REQUIRE_BASELINE_MATCH" != "0" ]]; then
     OVERALL_SUMMARY_ARGS+=(--require-baseline-match)
 fi
+OVERALL_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")
 for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")
 done

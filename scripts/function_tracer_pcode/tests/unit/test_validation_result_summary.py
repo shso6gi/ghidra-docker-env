@@ -404,6 +404,111 @@ def test_result_summary_require_baseline_match_rejects_canonical_mismatch(tmp_pa
     assert before_log.is_file()
 
 
+def test_result_summary_baseline_match_after_pairs_scope_ignores_unrun_pairs(tmp_path):
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    before_dir.mkdir()
+    after_dir.mkdir()
+    _write_log(
+        before_dir,
+        "fc_apply_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload(
+            "fc_apply_indirect",
+            True,
+            binary1_name="function_call_test-arm64-clang-O0",
+            binary2_name="function_call_test-arm64-clang-O1",
+        ),
+    )
+    _write_log(
+        before_dir,
+        "fc_apply_indirect_B1_B3.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_apply_indirect",
+            None,
+            binary1_name="function_call_test-arm64-clang-O0",
+            binary2_name="function_call_test-arm64-clang-O2",
+        ),
+    )
+    after_log = _write_log(
+        after_dir,
+        "fc_apply_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload(
+            "fc_apply_indirect",
+            True,
+            binary1_name="function_call_test-arm64-clang-O0",
+            binary2_name="function_call_test-arm64-clang-O1",
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--function-summary",
+            "--function-name",
+            "fc_apply_indirect",
+            "--before-dir",
+            str(before_dir),
+            "--require-before-dir",
+            "--require-baseline-match",
+            "--baseline-match-scope",
+            "after-pairs",
+            str(after_log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "Total results delta      : 0" in result.stdout
+    assert "Missing pair identities:" in result.stdout
+    assert "ok" in result.stdout
+
+
+def test_result_summary_after_pairs_scope_still_rejects_empty_after_set(tmp_path):
+    before_dir = tmp_path / "before"
+    before_dir.mkdir()
+    _write_log(
+        before_dir,
+        "fc_apply_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload(
+            "fc_apply_indirect",
+            True,
+            binary1_name="B1",
+            binary2_name="B2",
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--function-summary",
+            "--function-name",
+            "fc_apply_indirect",
+            "--before-dir",
+            str(before_dir),
+            "--require-before-dir",
+            "--require-baseline-match",
+            "--baseline-match-scope",
+            "after-pairs",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "baseline comparison mismatch" in result.stderr
+
+
 def test_matrix_runners_update_summary_outputs_only_after_success():
     script_paths = (
         "loop_run_matrix_all_parallel_multifunc.sh",
@@ -425,6 +530,11 @@ def test_matrix_runners_update_summary_outputs_only_after_success():
         assert "OVERALL_SUMMARY_ARGS+=(--require-baseline-match)" in script
         assert '} | tee "$RESULT_FILE"' not in script
         assert '} | tee "$SUMMARY_FILE"' not in script
+
+    function_call_script = Path("func_call_run_matrix_all_parallel_multifunc.sh").read_text()
+    assert "VALIDATION_BASELINE_MATCH_SCOPE=${VALIDATION_BASELINE_MATCH_SCOPE:-all}" in function_call_script
+    assert 'FUNCTION_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")' in function_call_script
+    assert 'OVERALL_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")' in function_call_script
 
 
 def test_function_call_runner_supports_full_phase2_parallel_mode():
@@ -674,13 +784,18 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-full20}"' in script
     assert 'cd "$SCRIPT_DIR"' in script
     assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
-    assert "function_call_test_phase2_full_pre_producer" in script
+    assert "function_call_test_phase2_full_current" in script
     assert "artifacts/baselines/observed-v0@0a53352/raw/logs/function_call" in script
     assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-1}"' in script
     assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-0}"' in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"' in script
     assert 'VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"' in script
     assert 'VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}"' in script
+    assert 'VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}"' in script
+    assert 'FUNCTION_CALL_EXTRA_EQUIV_ARGS="${FUNCTION_CALL_EXTRA_EQUIV_ARGS:-}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert "--no-completed-recovery-proofs" not in script
+    assert "Phase 2 full matrix dry run finished before expected-movement gate." in script
     assert "PHASE2_GATE_BASELINE_DIR=" in script
     assert "validation_before_dir=${VALIDATION_BEFORE_DIR:-}" in script
     assert "validation_moved_output_dir=${VALIDATION_MOVED_OUTPUT_DIR:-}" in script
@@ -689,6 +804,39 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert "phase2_equivalence_blocking_unsafety" in script
     assert "--baseline-log-root" in script
     assert "files_to_copy_for_codex.txt" in script
+
+
+def test_phase2_pre_producer_wrapper_pins_producer_only_flags():
+    script = Path("phase2_run_function_call_full_matrix_pre_producer_32jobs.sh").read_text()
+
+    assert "function_call_test_phase2_full_pre_producer" in script
+    assert 'VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-0}"' in script
+    assert 'VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-1}"' in script
+    assert (
+        'FUNCTION_CALL_EXTRA_EQUIV_ARGS="${FUNCTION_CALL_EXTRA_EQUIV_ARGS:---no-completed-recovery-proofs}"'
+    ) in script
+    default_line = next(
+        line for line in script.splitlines() if line.startswith("export FUNCTION_CALL_EXTRA_EQUIV_ARGS=")
+    )
+    assert "--no-retry-phases" not in default_line
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-1}"' in script
+    assert "phase2_function_call_full_matrix_pre_producer" in script
+    assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_32jobs.sh"' in script
+
+
+def test_phase2_pre_producer_preflight_pins_target_pairs_and_filtered_baseline_scope():
+    script = Path("phase2_run_function_call_pre_producer_preflight.sh").read_text()
+
+    assert "function_call_test_phase2_pre_producer_preflight" in script
+    assert "fc_select_simple:B1_B10" in script
+    assert "fc_widen_then_bias:B1_B14" in script
+    assert "fc_long_branch_dispatch:B1_B10" in script
+    assert "fc_guarded_call:B5_B13" in script
+    assert "fc_recursive_sum:B3_B7" not in script
+    assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 
 
 def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():

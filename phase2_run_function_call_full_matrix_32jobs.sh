@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Run the full function_call Phase 2 pre-producer matrix on a high-spec host.
+# Run the full function_call matrix with the normal current equivalence behavior.
 #
-# This wrapper keeps semantic recovery disabled at the producer layer. It captures
-# the expected Phase 2 movement for equivalence_blocking_unsafety:
-# final results should not move, while the reason tuple may move to
-# call_effect_summary_proof / object_evidence_collected / pending_proof.
+# Producer validation uses phase2_run_function_call_full_matrix_pre_producer_32jobs.sh,
+# which deliberately disables completed recovery proofs while keeping retry
+# phases enabled.
 
 set -euo pipefail
 
@@ -19,7 +18,7 @@ fi
 
 export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-full20}"
 export PARALLEL_JOBS="${PARALLEL_JOBS:-32}"
-export OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_pre_producer}"
+export OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_current}"
 export BASE_PATH="${BASE_PATH:-$SCRIPT_DIR/targets/cate1/function_call_test}"
 export PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 DEFAULT_VALIDATION_BEFORE_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/logs/function_call"
@@ -41,8 +40,14 @@ else
     export VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-0}"
 fi
 export VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"
+export VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-all}"
 export VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"
-export VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-1}"
+export VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}"
+export FUNCTION_CALL_EXTRA_EQUIV_ARGS="${FUNCTION_CALL_EXTRA_EQUIV_ARGS:-}"
+export PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"
+export PHASE2_RUN_KIND="${PHASE2_RUN_KIND:-phase2_function_call_full_matrix_current}"
+export PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT="${PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT:-normal-current-baseline-comparison}"
+export PHASE2_EXPECTED_REASON_MOVEMENT="${PHASE2_EXPECTED_REASON_MOVEMENT:-none-required-by-this-wrapper}"
 export RUNNER_TMP_ROOT="${RUNNER_TMP_ROOT:-${TMPDIR:-/tmp}/ghidra-equivalence-function-call-full.$$}"
 
 validation_prepare_before_after_logs
@@ -56,10 +61,10 @@ if [[ -z "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
 fi
 
 cat > "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
-run_kind=phase2_function_call_full_matrix_pre_producer
+run_kind=$PHASE2_RUN_KIND
 target_reason=equivalence_blocking_unsafety
-expected_final_result_movement=none
-expected_reason_movement=call_effect_summary_proof/object_evidence_collected/pending_proof
+expected_final_result_movement=$PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT
+expected_reason_movement=$PHASE2_EXPECTED_REASON_MOVEMENT
 function_call_target_set=$FUNCTION_CALL_TARGET_SET
 parallel_jobs=$PARALLEL_JOBS
 output_base_dir=$OUTPUT_BASE_DIR
@@ -69,8 +74,11 @@ validation_before_dir=${VALIDATION_BEFORE_DIR:-}
 validation_auto_before_snapshot=$VALIDATION_AUTO_BEFORE_SNAPSHOT
 validation_require_before_delta=$VALIDATION_REQUIRE_BEFORE_DELTA
 validation_require_baseline_match=$VALIDATION_REQUIRE_BASELINE_MATCH
+validation_baseline_match_scope=$VALIDATION_BASELINE_MATCH_SCOPE
 validation_skip_completed=$VALIDATION_SKIP_COMPLETED
 validation_require_phase2_object_keys=$VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS
+function_call_extra_equiv_args=$FUNCTION_CALL_EXTRA_EQUIV_ARGS
+phase2_run_expected_movement_gate=$PHASE2_RUN_EXPECTED_MOVEMENT_GATE
 validation_before_source=$VALIDATION_BEFORE_SOURCE
 validation_moved_output_dir=${VALIDATION_MOVED_OUTPUT_DIR:-}
 phase2_gate_baseline_dir=${PHASE2_GATE_BASELINE_DIR:-}
@@ -100,35 +108,45 @@ EOF
 
 bash "$SCRIPT_DIR/func_call_run_matrix_all_parallel_multifunc.sh"
 
-PHASE2_GATE_OUTPUT_DIR="${PHASE2_GATE_OUTPUT_DIR:-$OUTPUT_BASE_DIR/phase2_gate}"
-mkdir -p "$PHASE2_GATE_OUTPUT_DIR"
+if [[ "${VALIDATION_RUNNER_DRY_RUN:-0}" != "0" ]]; then
+    echo "Phase 2 full matrix dry run finished before expected-movement gate."
+    exit 0
+fi
 
-PHASE1_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/phase1"
-if [[ -f "$PHASE1_DIR/representative_manifest.json" ]]; then
-    PHASE2_GATE_ARGS=(
-        --phase1-dir "$PHASE1_DIR"
-        --output-dir "$PHASE2_GATE_OUTPUT_DIR"
-        --current-log-root "function_call=$OUTPUT_BASE_DIR"
-    )
-    if [[ -n "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
-        PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$PHASE2_GATE_BASELINE_DIR")
-        PHASE2_REQUIRE_READY=1
+PHASE2_GATE_OUTPUT_DIR="${PHASE2_GATE_OUTPUT_DIR:-$OUTPUT_BASE_DIR/phase2_gate}"
+if [[ "$PHASE2_RUN_EXPECTED_MOVEMENT_GATE" == "1" ]]; then
+    mkdir -p "$PHASE2_GATE_OUTPUT_DIR"
+
+    PHASE1_DIR="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/phase1"
+    if [[ -f "$PHASE1_DIR/representative_manifest.json" ]]; then
+        PHASE2_GATE_ARGS=(
+            --phase1-dir "$PHASE1_DIR"
+            --output-dir "$PHASE2_GATE_OUTPUT_DIR"
+            --current-log-root "function_call=$OUTPUT_BASE_DIR"
+        )
+        if [[ -n "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
+            PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$PHASE2_GATE_BASELINE_DIR")
+            PHASE2_REQUIRE_READY=1
+        else
+            PHASE2_REQUIRE_READY=0
+        fi
+        if [[ "$PHASE2_REQUIRE_READY" == "1" ]]; then
+            "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
+                "${PHASE2_GATE_ARGS[@]}" \
+                --require-ready
+        else
+            echo "Running Phase 2 gate without --require-ready because observed-v0 baseline logs are unavailable." >&2
+            echo "Copy raw logs to a review machine with artifacts/baselines/observed-v0@0a53352/raw/logs/function_call and rerun the gate there." >&2
+            "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
+                "${PHASE2_GATE_ARGS[@]}"
+        fi
     else
-        PHASE2_REQUIRE_READY=0
-    fi
-    if [[ "$PHASE2_REQUIRE_READY" == "1" ]]; then
-        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
-            "${PHASE2_GATE_ARGS[@]}" \
-            --require-ready
-    else
-        echo "Running Phase 2 gate without --require-ready because observed-v0 baseline logs are unavailable." >&2
-        echo "Copy raw logs to a review machine with artifacts/baselines/observed-v0@0a53352/raw/logs/function_call and rerun the gate there." >&2
-        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety \
-            "${PHASE2_GATE_ARGS[@]}"
+        echo "Skipping Phase 2 gate: $PHASE1_DIR/representative_manifest.json is missing." >&2
+        echo "Copy logs to a review machine with artifacts/baselines/observed-v0@0a53352/phase1 and rerun the gate there." >&2
     fi
 else
-    echo "Skipping Phase 2 gate: $PHASE1_DIR/representative_manifest.json is missing." >&2
-    echo "Copy logs to a review machine with artifacts/baselines/observed-v0@0a53352/phase1 and rerun the gate there." >&2
+    echo "Skipping Phase 2 expected-movement gate for normal full matrix run."
+    echo "Use phase2_run_function_call_full_matrix_pre_producer_32jobs.sh for producer validation."
 fi
 
 echo ""

@@ -70,6 +70,32 @@ def _write_log(root: Path, function: str, left: str, right: str, payload):
     return path
 
 
+def _write_phase2_run_manifest(
+    root: Path,
+    *,
+    extra_args: str = "--no-completed-recovery-proofs",
+    run_kind: str = "phase2_function_call_full_matrix_pre_producer",
+    expected_final_result_movement: str = "none",
+    expected_reason_movement: str = "call_effect_summary_proof/object_evidence_collected/pending_proof",
+    validation_skip_completed: str = "0",
+    phase2_run_expected_movement_gate: str = "1",
+):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run_manifest.txt").write_text(
+        "\n".join(
+            [
+                "run_kind=" + run_kind,
+                "target_reason=equivalence_blocking_unsafety",
+                "expected_final_result_movement=" + expected_final_result_movement,
+                "expected_reason_movement=" + expected_reason_movement,
+                "validation_skip_completed=" + validation_skip_completed,
+                "function_call_extra_equiv_args=" + extra_args,
+                "phase2_run_expected_movement_gate=" + phase2_run_expected_movement_gate,
+            ]
+        )
+    )
+
+
 def _representative_manifest(phase1_dir: Path):
     phase1_dir.mkdir(parents=True)
     (phase1_dir / "phase1_manifest_index.json").write_text(
@@ -253,6 +279,7 @@ def _old_blocking_reason():
 
 def _write_all_representative_logs(root: Path, payload_by_function=None):
     payload_by_function = payload_by_function or {}
+    _write_phase2_run_manifest(root)
     for _entry_id, function, _binary_pair, left, right in REPRESENTATIVES:
         payload = payload_by_function.get(function) or _payload(function, left, right, None, [_pending_reason()])
         _write_log(root, function, left, right, payload)
@@ -263,6 +290,23 @@ def _write_all_baseline_representative_logs(root: Path, payload_by_function=None
     for _entry_id, function, _binary_pair, left, right in REPRESENTATIVES:
         payload = payload_by_function.get(function) or _payload(function, left, right, None, [_old_blocking_reason()])
         _write_log(root, function, left, right, payload)
+
+
+def _ready_phase2_manifest(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    return json.loads(path.read_text())
 
 
 def test_phase2_accepts_expected_pending_proof_movement_for_representative(tmp_path):
@@ -288,9 +332,253 @@ def test_phase2_accepts_expected_pending_proof_movement_for_representative(tmp_p
     assert manifest["phase2_ready"] is True
     assert manifest["movement_summary"]["failed"] == 0
     assert manifest["movement_summary"]["passed"] == 3
+    assert manifest["phase2_producer_config_gate"]["passed"] is True
     assert manifest["overall_baseline_comparison_gate"]["passed"] is True
     assert {entry["movement_status"] for entry in manifest["entries"]} == {"expected_movement"}
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_ready_true_with_failed_entry(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["movement_status"] = "failed"
+    manifest["entries"][0]["failed_kinds"] = ["target_reason_missing"]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="target_reason_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_ready_true_with_tampered_summary_count(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["movement_summary"]["passed"] = 999
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="movement_summary_passed_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_ready_true_without_baseline_gate(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest.pop("overall_baseline_comparison_gate")
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="overall_baseline_comparison_gate_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_ready_true_without_producer_gate(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest.pop("phase2_producer_config_gate")
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="phase2_producer_config_gate_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_missing_phase2_producer_manifest(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    (current_root / "run_manifest.txt").unlink()
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert manifest["phase2_producer_config_gate"]["passed"] is False
+    assert "phase2_producer_run_manifest_missing" in manifest["movement_summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="phase2_producer_run_manifest_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_phase2_producer_manifest_without_completed_recovery_flag(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_phase2_run_manifest(current_root, extra_args="")
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert manifest["phase2_producer_config_gate"]["passed"] is False
+    assert "phase2_producer_recovery_flags_missing" in manifest["movement_summary"]["failed_kinds"]
+    root_gate = manifest["phase2_producer_config_gate"]["roots"]["function_call"]
+    assert root_gate["missing_required_equivalence_args"] == ["--no-completed-recovery-proofs"]
+    with pytest.raises(ValueError, match="phase2_producer_recovery_flags_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_producer_manifest_does_not_require_no_retry_phases(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_phase2_run_manifest(current_root, extra_args="--no-completed-recovery-proofs")
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_producer_config_gate"]["passed"] is True
+    root_gate = manifest["phase2_producer_config_gate"]["roots"]["function_call"]
+    assert root_gate["missing_required_equivalence_args"] == []
+    assert "--no-retry-phases" not in root_gate["required_equivalence_args"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("run_kind", "phase2_function_call_full_matrix_current"),
+        ("expected_final_result_movement", "normal-current-baseline-comparison"),
+        ("expected_reason_movement", "none-required-by-this-wrapper"),
+        ("validation_skip_completed", "1"),
+        ("phase2_run_expected_movement_gate", "0"),
+    ],
+)
+def test_phase2_rejects_phase2_producer_manifest_value_mismatch(tmp_path, field, value):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_phase2_run_manifest(current_root, **{field: value})
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert manifest["phase2_producer_config_gate"]["passed"] is False
+    assert "phase2_producer_run_manifest_values_mismatch" in manifest["movement_summary"]["failed_kinds"]
+    root_gate = manifest["phase2_producer_config_gate"]["roots"]["function_call"]
+    assert field in root_gate["mismatched_required_run_manifest_values"]
+    with pytest.raises(ValueError, match="phase2_producer_run_manifest_values_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_ready_true_with_failed_baseline_gate(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["overall_baseline_comparison_gate"] = {
+        "passed": False,
+        "status": "failed",
+        "failed_kinds": ["baseline_log_root_missing"],
+    }
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="baseline_log_root_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_non_mapping_entry(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0] = "not-a-mapping"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_not_mapping"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_duplicate_representative_entry_id(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][1]["entry_id"] = manifest["entries"][0]["entry_id"]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="representative_entry_duplicate_id"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_wrong_baseline_git_head(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["baseline_git_head"] = "wrong-head"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="baseline_git_head_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_wrong_manifest_kind(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["manifest_kind"] = "wrong-kind"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="manifest_kind_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_wrong_baseline_id(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["baseline_id"] = "wrong-baseline"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="baseline_id_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_missing_entries(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest.pop("entries")
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entries_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_build_rejects_missing_phase1_manifest_index(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    (phase1_dir / "phase1_manifest_index.json").unlink()
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert manifest["phase1_manifest_index_gate"]["passed"] is False
+    assert "baseline_id_mismatch" in manifest["phase1_manifest_index_gate"]["failed_kinds"]
+    assert "baseline_git_head_mismatch" in manifest["phase1_manifest_index_gate"]["failed_kinds"]
+    with pytest.raises(ValueError, match="baseline_id_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
 def test_phase2_rejects_false_eq_while_proof_is_pending(tmp_path):
