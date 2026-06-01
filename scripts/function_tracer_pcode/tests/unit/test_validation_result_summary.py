@@ -509,6 +509,124 @@ def test_result_summary_after_pairs_scope_still_rejects_empty_after_set(tmp_path
     assert "baseline comparison mismatch" in result.stderr
 
 
+def test_result_summary_final_result_match_level_allows_reason_only_movement(tmp_path):
+    before_dir = tmp_path / "before"
+    before_dir.mkdir()
+    after_dir = tmp_path / "after"
+    after_dir.mkdir()
+    before_reason = make_unknown_reason(
+        reason_id=UnknownReasonId.RETURN_COVERAGE_GAP,
+        decision_effect="blocks_equivalence",
+        reason_scope="function",
+        recovery_proof_kind=UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+        action_status=UnknownRecoveryActionStatus.PLANNED,
+    )
+    after_reason = make_unknown_reason(
+        reason_id=UnknownReasonId.RETURN_COVERAGE_GAP,
+        decision_effect="blocks_equivalence",
+        reason_scope="function",
+        recovery_proof_kind=UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+    _write_log(
+        before_dir,
+        "fc_recursive_sum_B3_B7.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_recursive_sum",
+            None,
+            binary1_name="B3",
+            binary2_name="B7",
+            unknown_reasons=[before_reason.to_dict()],
+        ),
+    )
+    after_log = _write_log(
+        after_dir,
+        "fc_recursive_sum_B3_B7.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_recursive_sum",
+            None,
+            binary1_name="B3",
+            binary2_name="B7",
+            unknown_reasons=[after_reason.to_dict()],
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--function-summary",
+            "--function-name",
+            "fc_recursive_sum",
+            "--before-dir",
+            str(before_dir),
+            "--require-before-dir",
+            "--require-baseline-match",
+            "--baseline-match-scope",
+            "after-pairs",
+            "--baseline-match-level",
+            "final-results",
+            str(after_log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "Final result count delta:" in result.stdout
+    assert "Pair final result tuple delta:" in result.stdout
+    assert "Pair result tuple delta:" in result.stdout
+
+
+def test_result_summary_final_result_match_level_rejects_unknown_to_eq(tmp_path):
+    before_dir = tmp_path / "before"
+    before_dir.mkdir()
+    after_dir = tmp_path / "after"
+    after_dir.mkdir()
+    _write_log(
+        before_dir,
+        "fc_recursive_sum_B3_B7.log",
+        "Result: UNKNOWN",
+        _payload("fc_recursive_sum", None, binary1_name="B3", binary2_name="B7"),
+    )
+    after_log = _write_log(
+        after_dir,
+        "fc_recursive_sum_B3_B7.log",
+        "Result: EQUIVALENT",
+        _payload("fc_recursive_sum", True, binary1_name="B3", binary2_name="B7"),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.function_tracer_pcode.validation.result_summary",
+            "--function-summary",
+            "--function-name",
+            "fc_recursive_sum",
+            "--before-dir",
+            str(before_dir),
+            "--require-before-dir",
+            "--require-baseline-match",
+            "--baseline-match-scope",
+            "after-pairs",
+            "--baseline-match-level",
+            "final-results",
+            str(after_log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "baseline comparison mismatch" in result.stderr
+
+
 def test_matrix_runners_update_summary_outputs_only_after_success():
     script_paths = (
         "loop_run_matrix_all_parallel_multifunc.sh",
@@ -533,8 +651,11 @@ def test_matrix_runners_update_summary_outputs_only_after_success():
 
     function_call_script = Path("func_call_run_matrix_all_parallel_multifunc.sh").read_text()
     assert "VALIDATION_BASELINE_MATCH_SCOPE=${VALIDATION_BASELINE_MATCH_SCOPE:-all}" in function_call_script
+    assert "VALIDATION_BASELINE_MATCH_LEVEL=${VALIDATION_BASELINE_MATCH_LEVEL:-exact}" in function_call_script
     assert 'FUNCTION_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")' in function_call_script
+    assert 'FUNCTION_SUMMARY_ARGS+=(--baseline-match-level "$VALIDATION_BASELINE_MATCH_LEVEL")' in function_call_script
     assert 'OVERALL_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")' in function_call_script
+    assert 'OVERALL_SUMMARY_ARGS+=(--baseline-match-level "$VALIDATION_BASELINE_MATCH_LEVEL")' in function_call_script
 
 
 def test_function_call_runner_supports_full_phase2_parallel_mode():
@@ -789,6 +910,7 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-1}"' in script
     assert 'VALIDATION_REQUIRE_BEFORE_DELTA="${VALIDATION_REQUIRE_BEFORE_DELTA:-0}"' in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-exact}"' in script
     assert 'VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-1}"' in script
     assert 'VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}"' in script
     assert 'VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS="${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}"' in script
@@ -836,6 +958,20 @@ def test_phase2_pre_producer_preflight_pins_target_pairs_and_filtered_baseline_s
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
     assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
+
+
+def test_phase2_pre_producer_final_result_preflight_pins_recursive_sum_pair():
+    script = Path("phase2_run_function_call_pre_producer_final_result_preflight.sh").read_text()
+
+    assert "function_call_test_phase2_pre_producer_final_result_preflight" in script
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum}"' in script
+    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_recursive_sum:B3_B7}"' in script
+    assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert "phase2_function_call_pre_producer_final_result_preflight" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 
 

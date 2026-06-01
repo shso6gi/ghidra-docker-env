@@ -42,6 +42,8 @@ STATUS_ORDER = (
 )
 BASELINE_MATCH_SCOPE_ALL = "all"
 BASELINE_MATCH_SCOPE_AFTER_PAIRS = "after-pairs"
+BASELINE_MATCH_LEVEL_EXACT = "exact"
+BASELINE_MATCH_LEVEL_FINAL_RESULTS = "final-results"
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,7 @@ class ValidationBaselineComparison:
     validation_unknown_unit_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
     reason_record_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
     proof_action_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
+    pair_final_result_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
     pair_result_multiset_delta: Dict[Tuple[str, ...], int] = field(default_factory=dict)
     missing_pair_identities: Tuple[Tuple[str, str], ...] = ()
     added_pair_identities: Tuple[Tuple[str, str], ...] = ()
@@ -118,7 +121,21 @@ class ValidationBaselineComparison:
                 bool(self.validation_unknown_unit_multiset_delta),
                 bool(self.reason_record_multiset_delta),
                 bool(self.proof_action_multiset_delta),
+                bool(self.pair_final_result_multiset_delta),
                 bool(self.pair_result_multiset_delta),
+                bool(self.missing_pair_identities),
+                bool(self.added_pair_identities),
+            )
+        )
+
+    def has_final_result_differences(self) -> bool:
+        return any(
+            (
+                self.before_total_results != self.after_total_results,
+                bool(self.final_result_counts_delta),
+                self.unknown_final_results_delta != 0,
+                self.timeout_final_results_delta != 0,
+                bool(self.pair_final_result_multiset_delta),
                 bool(self.missing_pair_identities),
                 bool(self.added_pair_identities),
             )
@@ -263,6 +280,10 @@ def compare_validation_baseline_records(
         validation_unknown_unit_multiset_delta=unknown_diff.validation_unknown_unit_multiset_delta,
         reason_record_multiset_delta=unknown_diff.reason_record_multiset_delta,
         proof_action_multiset_delta=unknown_diff.proof_action_multiset_delta,
+        pair_final_result_multiset_delta=_diff_counts(
+            _pair_final_result_multiset(before_record_tuple),
+            _pair_final_result_multiset(after_record_tuple),
+        ),
         pair_result_multiset_delta=_diff_counts(
             _pair_result_multiset(before_record_tuple),
             _pair_result_multiset(after_record_tuple),
@@ -459,6 +480,12 @@ def format_validation_baseline_comparison(
     )
     _append_delta_block(
         lines,
+        "Pair final result tuple delta",
+        comparison.pair_final_result_multiset_delta,
+        indent,
+    )
+    _append_delta_block(
+        lines,
         "Pair result tuple delta",
         comparison.pair_result_multiset_delta,
         indent,
@@ -531,6 +558,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--baseline-match-level",
+        choices=(BASELINE_MATCH_LEVEL_EXACT, BASELINE_MATCH_LEVEL_FINAL_RESULTS),
+        default=BASELINE_MATCH_LEVEL_EXACT,
+        help=(
+            "baseline comparison strictness; final-results ignores reason/action tuple "
+            "movement after pair identities and final result counts match"
+        ),
+    )
+    parser.add_argument(
         "--function-wall-time",
         action="append",
         default=None,
@@ -557,6 +593,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             aggregate.records,
             args.require_baseline_match,
             args.baseline_match_scope,
+            args.baseline_match_level,
         )
         return 0
 
@@ -576,6 +613,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overall.overall.records,
         args.require_baseline_match,
         args.baseline_match_scope,
+        args.baseline_match_level,
     )
     return 0
 
@@ -592,6 +630,7 @@ def _require_baseline_match(
     after_records: Sequence[ValidationLogRecord],
     require_baseline_match: bool,
     baseline_match_scope: str,
+    baseline_match_level: str,
 ) -> None:
     if not require_baseline_match:
         return
@@ -602,7 +641,11 @@ def _require_baseline_match(
         baseline_match_scope,
     )
     comparison = compare_validation_baseline_records(before_records, after_records)
-    if comparison.has_differences():
+    if baseline_match_level == BASELINE_MATCH_LEVEL_FINAL_RESULTS:
+        failed = comparison.has_final_result_differences()
+    else:
+        failed = comparison.has_differences()
+    if failed:
         raise SystemExit("baseline comparison mismatch")
 
 
@@ -666,6 +709,14 @@ def _pair_result_multiset(records: Iterable[ValidationLogRecord]) -> Dict[Tuple[
     counts: Dict[Tuple[str, ...], int] = {}
     for record in records:
         key = _canonical_pair_result_tuple(record)
+        counts[key] = int(counts.get(key, 0) or 0) + 1
+    return counts
+
+
+def _pair_final_result_multiset(records: Iterable[ValidationLogRecord]) -> Dict[Tuple[str, ...], int]:
+    counts: Dict[Tuple[str, ...], int] = {}
+    for record in records:
+        key = _canonical_pair_result_tuple(record)[:3]
         counts[key] = int(counts.get(key, 0) or 0) + 1
     return counts
 

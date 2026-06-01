@@ -1025,6 +1025,8 @@ def _baseline_comparison_failures(
         failures.append("unknown_final_result_delta")
     if comparison.timeout_final_results_delta != 0:
         failures.append("timeout_final_result_delta")
+    if _non_target_final_result_movements(before_records, after_records):
+        failures.append("unexpected_non_target_final_result_movement")
     if comparison.timeout_class_multiset_delta:
         failures.append("timeout_class_delta")
     if _unexpected_pair_result_deltas(
@@ -1073,7 +1075,7 @@ def _unexpected_baseline_deltas(
         comparison,
         pair_reason_deltas=pair_reason_deltas,
     )
-    return {
+    unexpected = {
         "validation_unknown_unit_multiset_delta": _stringify_delta_mapping(
             _unexpected_tuple_deltas(
                 comparison.validation_unknown_unit_multiset_delta,
@@ -1107,6 +1109,77 @@ def _unexpected_baseline_deltas(
         "timeout_class_multiset_delta": dict(comparison.timeout_class_multiset_delta),
         "final_result_counts_delta": dict(comparison.final_result_counts_delta),
     }
+    non_target_movements = _non_target_final_result_movements(before_records, after_records)
+    if non_target_movements:
+        unexpected["non_target_final_result_movements"] = non_target_movements
+    return unexpected
+
+
+def _non_target_final_result_movements(
+    before_records: Sequence[ValidationLogRecord],
+    after_records: Sequence[ValidationLogRecord],
+) -> Sequence[Dict[str, Any]]:
+    before_by_identity = _records_by_pair_identity(before_records)
+    after_by_identity = _records_by_pair_identity(after_records)
+    movements: list = []
+    pair_tuple_deltas = _pair_unknown_tuple_deltas(before_records, after_records)
+    for identity in sorted(set(before_by_identity) & set(after_by_identity)):
+        before_record = before_by_identity[identity]
+        after_record = after_by_identity[identity]
+        if before_record.status == after_record.status:
+            continue
+        before_payload = before_record.payloads[-1] if before_record.payloads else {}
+        after_payload = after_record.payloads[-1] if after_record.payloads else {}
+        before_reasons = _reason_id_counts(_extract_final_unknown_reasons(before_payload))
+        after_reasons = _reason_id_counts(_extract_final_unknown_reasons(after_payload))
+        disappeared = sorted(
+            reason_id
+            for reason_id, count in before_reasons.items()
+            if int(after_reasons.get(reason_id, 0) or 0) < int(count or 0)
+        )
+        non_target_disappeared = [
+            reason_id for reason_id in disappeared if reason_id != TARGET_REASON_ID
+        ]
+        if not non_target_disappeared:
+            continue
+        before_bucket = _record_pair_result_bucket(before_record)
+        tuple_deltas = pair_tuple_deltas.get(before_bucket, {})
+        movements.append(
+            {
+                "pair_identity": {
+                    "function": identity[0],
+                    "binary_pair": identity[1],
+                },
+                "before_status": before_record.status,
+                "after_status": after_record.status,
+                "status_movement": f"{before_record.status}->{after_record.status}",
+                "disappeared_reasons": disappeared,
+                "non_target_disappeared_reasons": non_target_disappeared,
+                "non_target_reason_movement": True,
+                "count_kind_deltas": {
+                    count_kind: _stringify_delta_mapping(deltas)
+                    for count_kind, deltas in tuple_deltas.items()
+                    if deltas
+                },
+            }
+        )
+    return movements
+
+
+def _records_by_pair_identity(
+    records: Sequence[ValidationLogRecord],
+) -> Dict[Tuple[str, str], ValidationLogRecord]:
+    return {
+        _record_pair_result_bucket(record)[:2]: record
+        for record in records
+    }
+
+
+def _reason_id_counts(records: Sequence[Any]) -> Counter:
+    counts: Counter = Counter()
+    for record in records:
+        counts[str(record.reason_id)] += 1
+    return counts
 
 
 def _unexpected_tuple_deltas(

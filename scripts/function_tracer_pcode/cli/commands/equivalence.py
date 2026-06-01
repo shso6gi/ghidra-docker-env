@@ -83,6 +83,10 @@ def run_equivalence_check(args):
         print(
             f"  Recovery phases: {'disabled' if getattr(args, 'no_retry_phases', False) else 'enabled'}"
         )
+        print(
+            "  Completed recovery proofs: "
+            f"{'disabled' if getattr(args, 'no_completed_recovery_proofs', False) else 'enabled'}"
+        )
         print()
 
     start_headless_pyghidra(
@@ -119,6 +123,7 @@ def run_equivalence_check(args):
         normalization_mode=normalization_mode,
         enable_fact_normalization=enable_fact_normalization,
         enable_template_abstraction=enable_template_abstraction,
+        enable_completed_recovery_proofs=not getattr(args, "no_completed_recovery_proofs", False),
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

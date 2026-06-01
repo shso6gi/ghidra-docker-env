@@ -74,6 +74,7 @@ class EquivalenceChecker:
         normalization_mode: str = "safe",
         enable_fact_normalization: bool = False,
         enable_template_abstraction: bool = False,
+        enable_completed_recovery_proofs: bool = True,
     ):
         """
         Args:
@@ -93,6 +94,7 @@ class EquivalenceChecker:
         self.normalization_mode = normalization_mode
         self.enable_fact_normalization = enable_fact_normalization
         self.enable_template_abstraction = enable_template_abstraction
+        self.enable_completed_recovery_proofs = enable_completed_recovery_proofs
         self.normalization_settings = self._build_normalization_settings(
             normalization_mode,
             enable_fact_normalization,
@@ -107,6 +109,7 @@ class EquivalenceChecker:
             self.solver_runner,
             debug=debug,
             normalization_settings=self.normalization_settings,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
         )
         self.pairwise_strategy.per_query_timeout = pairwise_timeout
         self.pairwise_strategy.per_query_timeout_hard = pairwise_timeout_hard
@@ -119,12 +122,14 @@ class EquivalenceChecker:
             self.solver_runner,
             debug=debug,
             normalization_settings=self.normalization_settings,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
         )
         self.loop_template_strategy = LoopTemplatePairwiseStrategy(
             self.formula_builder,
             self.solver_runner,
             debug=debug,
             normalization_settings=self.normalization_settings,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
         )
         self.loop_template_strategy.per_query_timeout = pairwise_timeout
         self.loop_template_strategy.per_query_timeout_hard = pairwise_timeout_hard
@@ -959,6 +964,8 @@ class EquivalenceChecker:
         binary1_name: str,
         binary2_name: str,
     ) -> List[Dict[str, Any]]:
+        if not self.enable_completed_recovery_proofs:
+            return []
         records: List[Dict[str, Any]] = []
         for side, binary_name, analysis in (
             ("function1", binary1_name, analysis1),

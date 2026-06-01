@@ -40,6 +40,9 @@ CLI_EPILOG = """
   # recovery phases を無効にして比較（型修正リトライなし）
   python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --no-retry-phases
 
+  # Phase 2 producer 用: completed recovery proof による EQ 化を無効化
+  python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f func --no-completed-recovery-proofs
+
   # デバッグモードで詳細を確認
   python3 -m scripts.function_tracer_pcode.cli.main --equiv binary1 binary2 -f target_func -d -v
 
@@ -165,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-retry-phases",
         action="store_true",
         help="Recovery phases（型修正リトライなど）を無効にする（デフォルト: 有効）",
+    )
+    parser.add_argument(
+        "--no-completed-recovery-proofs",
+        action="store_true",
+        help="completed recovery proof を結果へ反映しない（Phase 2 producer 検証用）",
     )
     parser.add_argument(
         "--no-rewrite",

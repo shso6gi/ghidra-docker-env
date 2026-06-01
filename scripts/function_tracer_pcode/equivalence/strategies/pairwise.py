@@ -198,8 +198,14 @@ class PairwiseStrategy(CheckStrategy):
         solver_runner,
         debug: bool = False,
         normalization_settings: Optional[NormalizationSettings] = None,
+        enable_completed_recovery_proofs: bool = True,
     ):
-        super().__init__(formula_builder, solver_runner, debug)
+        super().__init__(
+            formula_builder,
+            solver_runner,
+            debug,
+            enable_completed_recovery_proofs=enable_completed_recovery_proofs,
+        )
         self.per_query_timeout = 5
         self.per_query_timeout_hard = 30
         self.save_unknown_queries = False

@@ -116,6 +116,7 @@ VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}
 VALIDATION_REQUIRE_BEFORE_DELTA=${VALIDATION_REQUIRE_BEFORE_DELTA:-0}  # Set to 1 for Plan 16 evidence runs.
 VALIDATION_REQUIRE_BASELINE_MATCH=${VALIDATION_REQUIRE_BASELINE_MATCH:-0}  # Set to 1 for exact canonical reproduction gates.
 VALIDATION_BASELINE_MATCH_SCOPE=${VALIDATION_BASELINE_MATCH_SCOPE:-all}  # Use after-pairs for filtered representative preflight runs.
+VALIDATION_BASELINE_MATCH_LEVEL=${VALIDATION_BASELINE_MATCH_LEVEL:-exact}  # Use final-results for final-result-only preflight gates.
 VALIDATION_SKIP_COMPLETED=${VALIDATION_SKIP_COMPLETED:-0}  # Set to 1 to resume long matrix runs.
 VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS=${VALIDATION_REQUIRE_PHASE2_OBJECT_KEYS:-0}  # Set to 1 for Phase 2 producer reruns.
 VALIDATION_RUNNER_DRY_RUN=${VALIDATION_RUNNER_DRY_RUN:-0}  # Set to 1 to print fixed pair order without running Ghidra.
@@ -231,6 +232,7 @@ fi
 echo "Require before/after delta: $VALIDATION_REQUIRE_BEFORE_DELTA"
 echo "Require baseline match: $VALIDATION_REQUIRE_BASELINE_MATCH"
 echo "Baseline match scope: $VALIDATION_BASELINE_MATCH_SCOPE"
+echo "Baseline match level: $VALIDATION_BASELINE_MATCH_LEVEL"
 echo "============================================================"
 echo ""
 
@@ -879,6 +881,7 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
         FUNCTION_SUMMARY_ARGS+=(--require-baseline-match)
     fi
     FUNCTION_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")
+    FUNCTION_SUMMARY_ARGS+=(--baseline-match-level "$VALIDATION_BASELINE_MATCH_LEVEL")
     if ! write_summary_file "$RESULT_FILE" \
         python3 -m scripts.function_tracer_pcode.validation.result_summary \
             "${FUNCTION_SUMMARY_ARGS[@]}" \
@@ -905,6 +908,7 @@ if [[ "$VALIDATION_REQUIRE_BASELINE_MATCH" != "0" ]]; then
     OVERALL_SUMMARY_ARGS+=(--require-baseline-match)
 fi
 OVERALL_SUMMARY_ARGS+=(--baseline-match-scope "$VALIDATION_BASELINE_MATCH_SCOPE")
+OVERALL_SUMMARY_ARGS+=(--baseline-match-level "$VALIDATION_BASELINE_MATCH_LEVEL")
 for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     OVERALL_SUMMARY_ARGS+=(--function-wall-time "$TARGET_FUNC=${FUNC_WALL_TIME_SECONDS[$TARGET_FUNC]:-0}")
 done

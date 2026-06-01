@@ -73,7 +73,13 @@ class CheckStrategy(ABC):
         "unsupported_memory_effect_reasons",
     )
     
-    def __init__(self, formula_builder, solver_runner, debug: bool = False):
+    def __init__(
+        self,
+        formula_builder,
+        solver_runner,
+        debug: bool = False,
+        enable_completed_recovery_proofs: bool = True,
+    ):
         """
         Args:
             formula_builder: FormulaBuilder インスタンス
@@ -83,6 +89,7 @@ class CheckStrategy(ABC):
         self.formula_builder = formula_builder
         self.solver_runner = solver_runner
         self.debug = debug
+        self.enable_completed_recovery_proofs = enable_completed_recovery_proofs
     
     @abstractmethod
     def check(
@@ -167,12 +174,15 @@ class CheckStrategy(ABC):
                 and analysis2 is not None
                 and analysis is not None
             ):
-                self._record_completed_return_coverage_proof(
-                    label,
-                    analysis,
-                    analysis1,
-                    analysis2,
-                )
+                if self.enable_completed_recovery_proofs:
+                    self._record_completed_return_coverage_proof(
+                        label,
+                        analysis,
+                        analysis1,
+                        analysis2,
+                    )
+                elif self._analysis_requires_completed_return_coverage_proof(analysis):
+                    reasons.append(f"{label}:return_coverage_gap")
             if detail:
                 self._debug_print(detail)
         return reasons
@@ -184,6 +194,8 @@ class CheckStrategy(ABC):
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
     ) -> None:
+        if not self.enable_completed_recovery_proofs:
+            return
         if self._analysis_has_active_return_coverage_blockers(analysis):
             return
         object_target_key = self._return_coverage_object_target_key(
@@ -245,6 +257,25 @@ class CheckStrategy(ABC):
                 "return_case_coverage_gap",
                 "return_case_coverage_inconclusive",
             }
+            for note in getattr(analysis, "analysis_notes", ()) or ()
+        )
+
+    def _analysis_requires_completed_return_coverage_proof(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if self._analysis_has_active_return_coverage_blockers(analysis):
+            return True
+        proof_dependent_notes = {
+            "call_wrapper_return_recovery",
+            "control_region_return_recovery",
+            "counted_scalar_loop_summary",
+            "pre_return_counted_loop_summary",
+            "state_transition_loop_summary",
+            "switch_return_recovery",
+        }
+        return any(
+            str(note) in proof_dependent_notes
             for note in getattr(analysis, "analysis_notes", ()) or ()
         )
 
@@ -411,6 +442,8 @@ class CheckStrategy(ABC):
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
     ) -> bool:
+        if not self.enable_completed_recovery_proofs:
+            return False
         return self._call_effect_summary_proof_is_complete(
             reason_record,
             analysis1,
