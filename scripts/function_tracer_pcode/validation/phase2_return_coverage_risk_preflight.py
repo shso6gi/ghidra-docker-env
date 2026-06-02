@@ -247,7 +247,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 def _iter_pair_logs(root: Path) -> Iterable[Path]:
     if not root.is_dir():
         return ()
-    return root.glob("*/*.log")
+    return root.rglob("*.log")
 
 
 def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
