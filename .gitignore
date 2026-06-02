@@ -8,8 +8,12 @@ __pycache__
 .local-jdk
 .local-jdk/
 .local-jdk.bak-*
+.local-ghidra/
+.local-ghidra-extract/
 *.smt*
 output
+logs/
+tmp/
 # targets配下のバイナリファイルを除外
 targets/**/*-x86_64-gcc-O*
 targets/**/*-x86_64-clang-O*
@@ -18,16 +22,18 @@ targets/**/*-arm64-clang-O*
 targets/**/*-mips64-gcc-O*
 targets/**/*-mips64-clang-O*
 targets/**/*.sh
+!targets/**/compile_all.sh
+targets/cate1/loop_recursion_test/
 # 不要なソルバーのファイルを除外
 solver_boolector.py
 solver_yices2.py
 solver_cvc5.py
 *.txt
+!requirements-test.txt
 *.log
 logs/equivalence_all/*/phase2_gate/*.json
 logs/equivalence_all/*/phase3_*_gate/*.json
 logs/equivalence_all/phase3_lane_index/*.json
-.local-ghidra-extract/
 
 # Observed baseline artifacts: commit metadata, keep multi-GB raw logs external.
 artifacts/baselines/*/raw/logs/

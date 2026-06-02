@@ -1,14 +1,11 @@
 {
     "name": "Ghidra 12.0.1 Development Environment",
-    "containerEnv": {
-        "PYTHONDONTWRITEBYTECODE": "1"
-    },
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "Dockerfile",
+        "context": ".."
     },
-    "mounts": [
-        "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
-    ],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -31,6 +28,6 @@
         "PYTHONDONTWRITEBYTECODE": "1",
         "DISPLAY": ""
     },
-    "postCreateCommand": "java -version && python3 -c 'import pyghidra; print(\"PyGhidra is ready!\")'",
+    "postCreateCommand": "java -version && python3 -c 'import pyghidra, z3; print(\"PyGhidra and z3 are ready\")' && z3 --version",
     "remoteUser": "root"
 }

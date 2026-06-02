@@ -42,8 +42,8 @@ if [[ "$LOOP_TARGET_SET" != "configured" ]]; then
     IFS=',' read -r -a TARGET_FUNCS <<< "$LOOP_TARGET_SET"
 fi
 
-OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"/workspaces/ghidra-docker-env/logs/equivalence_all/loop_method_b_test"}
-BASE_PATH=${BASE_PATH:-"/workspaces/ghidra-docker-env/targets/cate1/loop_method_b_test"}
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/equivalence_all/loop_method_b_test"}
+BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/cate1/loop_method_b_test"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ

@@ -1,0 +1,15 @@
+services:
+  ghidra-dev:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    working_dir: /workspace
+    environment:
+      GHIDRA_HOME: /opt/ghidra
+      GHIDRA_INSTALL_DIR: /opt/ghidra
+      JAVA_HOME: /usr/lib/jvm/temurin-21-jdk-amd64
+      PYTHONDONTWRITEBYTECODE: "1"
+      DISPLAY: ""
+    volumes:
+      - .:/workspace
+    command: bash

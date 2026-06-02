@@ -177,7 +177,10 @@ TARGET_FUNCTIONS = ["add", "subtract", "multiply", "divide", "modulo", "combined
 # TARGET_FUNCTIONS = ["bitwise_and", "bitwise_or", "bitwise_xor", "bitwise_not", "left_shift", "right_shift_logical", "right_shift_arithmetic", "xor_shift", "extract_bits", "flip_bits"]
 
 # デフォルトの出力ファイル
-OUTPUT_FILE = "/mnt/nas/research/highpcode/cate2_branch_return_trace_output.txt"
+OUTPUT_FILE = os.environ.get(
+    "FUNCTION_TRACER_OUTPUT_FILE",
+    str(_repo_root() / "output" / "cate2_branch_return_trace_output.txt"),
+)
 
 # 出力形式: "text", "json", "smt", "detailed"
 OUTPUT_FORMAT = "text"

@@ -44,8 +44,8 @@ TARGET_FUNCS=(
     # 必要に応じて追加
 )
 
-OUTPUT_BASE_DIR="/workspaces/ghidra-docker-env/logs/equivalence_all/arithmetic_long_test"
-BASE_PATH="/workspaces/ghidra-docker-env/targets/cate1/arithmetic_long_test"
+OUTPUT_BASE_DIR=${OUTPUT_BASE_DIR:-"$SCRIPT_DIR/logs/equivalence_all/arithmetic_long_test"}
+BASE_PATH=${BASE_PATH:-"$SCRIPT_DIR/targets/cate1/arithmetic_long_test"}
 PARALLEL_JOBS=${PARALLEL_JOBS:-32}  # 同時実行数。環境変数で上書き可能
 VALIDATION_BEFORE_DIR=${VALIDATION_BEFORE_DIR:-}  # before/after UNKNOWN reason 差分の比較元ログ
 VALIDATION_AUTO_BEFORE_SNAPSHOT=${VALIDATION_AUTO_BEFORE_SNAPSHOT:-1}

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     python3-dev \
+    z3 \
     gcc-13 \
     g++-13 \
     make \
@@ -61,9 +62,11 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Ghidra 12.0.1 のダウンロードとインストール
 ARG GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.0.1_build/ghidra_12.0.1_PUBLIC_20260114.zip
+ARG GHIDRA_SHA256=85bd2990945f3a78df4d1e09f1bb1f40ab77be3bac62c6e7678900788c7f0f41
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 
 RUN wget -q "${GHIDRA_URL}" -O /tmp/ghidra.zip && \
+    if [ -n "${GHIDRA_SHA256}" ]; then echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c -; fi && \
     unzip -q /tmp/ghidra.zip -d /opt && \
     mv /opt/ghidra_12.0.1_PUBLIC ${GHIDRA_INSTALL_DIR} && \
     rm /tmp/ghidra.zip
@@ -72,12 +75,12 @@ RUN wget -q "${GHIDRA_URL}" -O /tmp/ghidra.zip && \
 ENV GHIDRA_HOME=${GHIDRA_INSTALL_DIR}
 ENV PATH="${GHIDRA_HOME}:${GHIDRA_HOME}/support:${PATH}"
 
-# pip のアップグレードと PyGhidra のインストール
+# Python dependencies are pinned in the repository so git pull plus image
+# rebuild keeps the Python side of the validation environment stable.
+COPY requirements-test.txt /tmp/requirements-test.txt
 RUN python3 -m pip install --upgrade pip && \
-    pip3 install --no-cache-dir \
-    pyghidra \
-    ipython \
-    z3-solver
+    pip3 install --no-cache-dir -r /tmp/requirements-test.txt && \
+    rm /tmp/requirements-test.txt
 
 WORKDIR /workspace
 
