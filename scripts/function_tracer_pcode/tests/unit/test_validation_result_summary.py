@@ -29,6 +29,8 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     format_validation_baseline_comparison,
 )
 from scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight import (
+    main as risk_preflight_main,
+    select_risk_pair_infos,
     select_risk_pairs,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
@@ -1021,6 +1023,12 @@ def test_phase2_pre_producer_final_result_preflight_pins_recursive_sum_pair():
     assert 'RISK_BASELINE_LOG_ROOT="${RISK_BASELINE_LOG_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/logs/function_call}"' in script
     assert "--max-evidence-only-per-stratum" in script
     assert "RISK_PREFLIGHT_MAX_EVIDENCE_ONLY_PER_STRATUM" in script
+    assert "--max-pairs" in script
+    assert "RISK_PREFLIGHT_MAX_PAIRS" in script
+    assert "--sample-seed" in script
+    assert "RISK_PREFLIGHT_SAMPLE_SEED" in script
+    assert "--manifest-path" in script
+    assert "RISK_PREFLIGHT_MANIFEST" in script
     assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_dispatch_indirect}"' in script
     assert 'fc_recursive_sum:B3_B7,fc_dispatch_indirect:B1_B2,fc_dispatch_indirect:B3_B4' in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
@@ -1143,6 +1151,188 @@ def test_phase2_return_coverage_risk_preflight_caps_evidence_only_strata(tmp_pat
 
     assert sum(entry.startswith("fc_note_risk:") for entry in selected) == 2
     assert sum(entry.startswith("fc_evidence_only:") for entry in selected) == 1
+
+
+def test_phase2_return_coverage_risk_preflight_extracts_json_payload_shapes(tmp_path):
+    current = tmp_path / "current"
+    log_path = _write_log(
+        current / "fc_evidence_only",
+        "fc_evidence_only_B9_B16.log",
+        "Result: EQUIVALENT",
+        _payload(
+            "fc_evidence_only",
+            True,
+            binary1_name="function_call_test-mips64-clang-O0",
+            binary2_name="function_call_test-mips64-gcc-O3",
+            completed_recovery_proof_evidence=[
+                {
+                    "evidence": {
+                        "proof_stage": "return_partition_extraction",
+                        "object_target_key": [
+                            "return_coverage",
+                            "function1",
+                            ["function_ref", ["function", "B9", 1053512]],
+                            "return_coverage_gap",
+                            ["return_storage", "return_value", 32, None, "int"],
+                        ]
+                    },
+                },
+                {
+                    "evidence": {
+                        "proof_stage": "return_guard_coverage",
+                        "object_target_key": [
+                            "return_coverage",
+                            "function2",
+                            ["function_ref", ["function", "B16", 4831841344]],
+                            "return_coverage_gap",
+                            ["return_storage", "return_value", 32, None, "int"],
+                        ]
+                    },
+                },
+            ],
+        ),
+    )
+
+    selected_infos = select_risk_pair_infos(
+        current,
+        max_evidence_only_per_stratum=1,
+        fallback_pairs=(),
+    )
+
+    assert log_path.exists()
+    assert len(selected_infos) == 1
+    selected = selected_infos[0]
+    assert selected.entry == "fc_evidence_only:B9_B16"
+    assert selected.side_shape == "mips64/clang/O0 -> mips64/gcc/O3"
+    assert selected.proof_stages == (
+        "return_guard_coverage",
+        "return_partition_extraction",
+    )
+    assert selected.object_target_shapes != ("unknown",)
+    assert any("function1" in shape for shape in selected.object_target_shapes)
+    assert any("function2" in shape for shape in selected.object_target_shapes)
+
+
+def test_phase2_return_coverage_risk_preflight_reuses_duplicate_fallback_capacity(tmp_path):
+    current = tmp_path / "current"
+    for function_name in ("fc_a", "fc_b", "fc_c"):
+        log_path = _write_log(
+            current / function_name,
+            f"{function_name}_B1_B2.log",
+            "Result: EQUIVALENT",
+            _payload(
+                function_name,
+                True,
+                completed_recovery_proof_evidence=[
+                    {
+                        "proof_stage": "return_guard_coverage",
+                        "evidence": {
+                            "object_target_key": [
+                                "return_coverage",
+                                "function1",
+                                ["function_ref", ["function", "B1", 1]],
+                            ]
+                        },
+                    }
+                ],
+            ),
+        )
+        assert log_path.exists()
+
+    selected = select_risk_pairs(
+        current,
+        max_pairs=3,
+        max_evidence_only_per_stratum=1,
+        fallback_pairs=("fc_a:B1_B2", "fc_fallback:B3_B4"),
+    )
+
+    assert len(selected) == 3
+    assert "fc_a:B1_B2" in selected
+    assert "fc_fallback:B3_B4" in selected
+
+
+def test_phase2_return_coverage_risk_preflight_stratifies_binary_side_shape(tmp_path):
+    current = tmp_path / "current"
+    for pair, left, right in (
+        ("B1_B2", "function_call_test-arm64-clang-O0", "function_call_test-arm64-clang-O1"),
+        ("B3_B4", "function_call_test-mips64-gcc-O0", "function_call_test-mips64-gcc-O2"),
+    ):
+        log_path = _write_log(
+            current / "fc_dispatch_indirect",
+            f"fc_dispatch_indirect_{pair}.log",
+            "Result: EQUIVALENT",
+            _payload(
+                "fc_dispatch_indirect",
+                True,
+                binary1_name=left,
+                binary2_name=right,
+            ),
+        )
+        log_path.write_text(
+            log_path.read_text()
+            + "\n[ReturnAnalyzer] Analysis notes: ['switch_return_recovery']"
+        )
+
+    selected_infos = select_risk_pair_infos(
+        current,
+        max_per_stratum=1,
+        fallback_pairs=(),
+    )
+
+    assert {info.entry for info in selected_infos} == {
+        "fc_dispatch_indirect:B1_B2",
+        "fc_dispatch_indirect:B3_B4",
+    }
+    assert {info.side_shape for info in selected_infos} == {
+        "arm64/clang/O0 -> arm64/clang/O1",
+        "mips64/gcc/O0 -> mips64/gcc/O2",
+    }
+
+
+def test_phase2_return_coverage_risk_preflight_writes_manifest_and_summary(tmp_path, capsys):
+    current = tmp_path / "current"
+    manifest = tmp_path / "selection.json"
+    log_path = _write_log(
+        current / "fc_recursive_sum",
+        "fc_recursive_sum_B3_B7.log",
+        "Result: EQUIVALENT",
+        _payload(
+            "fc_recursive_sum",
+            True,
+            binary1_name="function_call_test-arm64-clang-O0",
+            binary2_name="function_call_test-arm64-clang-O1",
+        ),
+    )
+    log_path.write_text(
+        log_path.read_text()
+        + "\n[ReturnAnalyzer] Analysis notes: ['state_transition_loop_summary']"
+    )
+
+    exit_code = risk_preflight_main(
+        [
+            "--current-log-root",
+            str(current),
+            "--max-pairs",
+            "1",
+            "--sample-seed",
+            "7",
+            "--manifest-path",
+            str(manifest),
+            "--fallback-pair",
+            "fc_dispatch_indirect:B1_B2",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(manifest.read_text())
+    assert exit_code == 0
+    assert "export RISK_PREFLIGHT_SELECTED_COUNT=1" in captured.out
+    assert "Phase 2 return coverage risk preflight selection:" in captured.err
+    assert "fc_recursive_sum:B3_B7 | reason=risk-stratum" in captured.err
+    assert payload["selected_count"] == 1
+    assert payload["sample_seed"] == 7
+    assert payload["selected_pairs"][0]["entry"] == "fc_recursive_sum:B3_B7"
+    assert payload["selected_pairs"][0]["selection_reason"] == "risk-stratum"
 
 
 def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():
