@@ -268,11 +268,9 @@ class CheckStrategy(ABC):
             return True
         proof_dependent_notes = {
             "call_wrapper_return_recovery",
-            "control_region_return_recovery",
             "counted_scalar_loop_summary",
             "pre_return_counted_loop_summary",
             "state_transition_loop_summary",
-            "switch_return_recovery",
         }
         return any(
             str(note) in proof_dependent_notes

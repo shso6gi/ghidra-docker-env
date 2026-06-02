@@ -28,6 +28,9 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     format_overall_results_summary,
     format_validation_baseline_comparison,
 )
+from scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight import (
+    select_risk_pairs,
+)
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
@@ -358,7 +361,54 @@ def test_canonical_baseline_comparison_reports_pair_and_timeout_deltas(tmp_path)
     )
     assert "Canonical baseline comparison:" in text
     assert "Pair result tuple delta:" in text
+    assert "Final result movements by function:" in text
+    assert "TIMEOUT->UNKNOWN | fc_apply_indirect: 1" in text
     assert "solver_timeout: -1" in text
+
+
+def test_canonical_baseline_comparison_summarizes_eq_to_unknown_by_function(tmp_path):
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    before_logs = [
+        _write_log(
+            before_dir,
+            f"fc_dispatch_indirect_B{index}_B{index + 1}.log",
+            "Result: EQUIVALENT",
+            _payload(
+                "fc_dispatch_indirect",
+                True,
+                binary1_name=f"left-{index}",
+                binary2_name=f"right-{index}",
+            ),
+        )
+        for index in (1, 2)
+    ]
+    after_logs = [
+        _write_log(
+            after_dir,
+            f"fc_dispatch_indirect_B{index}_B{index + 1}.log",
+            "Result: UNKNOWN",
+            _payload(
+                "fc_dispatch_indirect",
+                None,
+                binary1_name=f"left-{index}",
+                binary2_name=f"right-{index}",
+                unknown_reasons=[
+                    make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP).to_dict()
+                ],
+            ),
+        )
+        for index in (1, 2)
+    ]
+
+    comparison = compare_validation_baseline_records(
+        aggregate_validation_logs(before_logs).records,
+        aggregate_validation_logs(after_logs).records,
+    )
+    text = format_validation_baseline_comparison(comparison)
+
+    assert comparison.has_final_result_differences()
+    assert "EQ->UNKNOWN | fc_dispatch_indirect: 2" in text
 
 
 def test_result_summary_require_baseline_match_rejects_canonical_mismatch(tmp_path):
@@ -401,6 +451,7 @@ def test_result_summary_require_baseline_match_rejects_canonical_mismatch(tmp_pa
     assert result.returncode != 0
     assert "Canonical baseline comparison:" in result.stdout
     assert "baseline comparison mismatch" in result.stderr
+    assert "UNKNOWN->EQ | fc_apply_indirect: 1" in result.stderr
     assert before_log.is_file()
 
 
@@ -965,14 +1016,133 @@ def test_phase2_pre_producer_final_result_preflight_pins_recursive_sum_pair():
     script = Path("phase2_run_function_call_pre_producer_final_result_preflight.sh").read_text()
 
     assert "function_call_test_phase2_pre_producer_final_result_preflight" in script
-    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum}"' in script
-    assert 'FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_recursive_sum:B3_B7}"' in script
+    assert "phase2_return_coverage_risk_preflight" in script
+    assert 'RISK_CURRENT_LOG_ROOT="${RISK_CURRENT_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_current}"' in script
+    assert 'RISK_BASELINE_LOG_ROOT="${RISK_BASELINE_LOG_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/logs/function_call}"' in script
+    assert "--max-evidence-only-per-stratum" in script
+    assert "RISK_PREFLIGHT_MAX_EVIDENCE_ONLY_PER_STRATUM" in script
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_dispatch_indirect}"' in script
+    assert 'fc_recursive_sum:B3_B7,fc_dispatch_indirect:B1_B2,fc_dispatch_indirect:B3_B4' in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
     assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
     assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
     assert "phase2_function_call_pre_producer_final_result_preflight" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
+
+
+def test_rerun_full_analysis_runs_final_result_preflight_before_full_matrix():
+    script = Path("rerun_full_analysis.sh").read_text()
+
+    final_result_preflight = script.index(
+        "./phase2_run_function_call_pre_producer_final_result_preflight.sh"
+    )
+    producer_preflight = script.index("./phase2_run_function_call_pre_producer_preflight.sh")
+    normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
+
+    assert final_result_preflight < producer_preflight < normal_full_matrix
+    assert "phase2_pre_producer_final_result_preflight_stdout.log" in script
+    assert "RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" in script
+
+
+def test_phase2_return_coverage_risk_preflight_selects_eq_pairs_by_note_strata(tmp_path):
+    current = tmp_path / "current"
+    baseline = tmp_path / "baseline"
+    payload = _payload(
+        "fc_dispatch_indirect",
+        True,
+        binary1_name="function_call_test-arm64-clang-O0",
+        binary2_name="function_call_test-arm64-clang-O1",
+    )
+    _write_log(
+        baseline / "fc_dispatch_indirect",
+        "fc_dispatch_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        payload,
+    )
+    risky_current = _write_log(
+        current / "fc_dispatch_indirect",
+        "fc_dispatch_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        payload,
+    )
+    risky_current.write_text(
+        risky_current.read_text()
+        + "\n[ReturnAnalyzer] Analysis notes: ['switch_return_recovery', 'control_region_return_recovery']"
+    )
+    plain_current = _write_log(
+        current / "fc_plain",
+        "fc_plain_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload("fc_plain", True),
+    )
+    plain_current.write_text(
+        plain_current.read_text()
+        + "\n[ReturnAnalyzer] Analysis notes: ['ordinary_note']"
+    )
+
+    selected = select_risk_pairs(
+        current,
+        baseline_log_root=baseline,
+        fallback_pairs=("fc_recursive_sum:B3_B7",),
+    )
+
+    assert selected == ("fc_dispatch_indirect:B1_B2", "fc_recursive_sum:B3_B7")
+
+
+def test_phase2_return_coverage_risk_preflight_reads_gitignored_logs(tmp_path):
+    (tmp_path / ".gitignore").write_text("logs/\n")
+    current = tmp_path / "logs" / "current"
+    risky_current = _write_log(
+        current / "fc_dispatch_indirect",
+        "fc_dispatch_indirect_B1_B2.log",
+        "Result: EQUIVALENT",
+        _payload("fc_dispatch_indirect", True),
+    )
+    risky_current.write_text(
+        risky_current.read_text()
+        + "\n[ReturnAnalyzer] Analysis notes: ['switch_return_recovery']"
+    )
+
+    selected = select_risk_pairs(tmp_path, fallback_pairs=())
+
+    assert selected == ("fc_dispatch_indirect:B1_B2",)
+
+
+def test_phase2_return_coverage_risk_preflight_caps_evidence_only_strata(tmp_path):
+    current = tmp_path / "current"
+    for pair in ("B1_B2", "B1_B3"):
+        note_log = _write_log(
+            current / "fc_note_risk",
+            f"fc_note_risk_{pair}.log",
+            "Result: EQUIVALENT",
+            _payload("fc_note_risk", True),
+        )
+        note_log.write_text(
+            note_log.read_text()
+            + "\n[ReturnAnalyzer] Analysis notes: ['state_transition_loop_summary']"
+        )
+    for pair in ("B1_B2", "B1_B3"):
+        evidence_log = _write_log(
+            current / "fc_evidence_only",
+            f"fc_evidence_only_{pair}.log",
+            "Result: EQUIVALENT",
+            _payload("fc_evidence_only", True),
+        )
+        evidence_log.write_text(
+            evidence_log.read_text()
+            + "\ncompleted_recovery_proof_evidence: [{\"proof_stage\": \"return_guard_coverage\"}]"
+        )
+
+    selected = select_risk_pairs(
+        current,
+        max_per_stratum=2,
+        max_evidence_only_per_stratum=1,
+        fallback_pairs=(),
+    )
+
+    assert sum(entry.startswith("fc_note_risk:") for entry in selected) == 2
+    assert sum(entry.startswith("fc_evidence_only:") for entry in selected) == 1
 
 
 def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():

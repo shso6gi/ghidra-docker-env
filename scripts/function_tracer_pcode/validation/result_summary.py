@@ -484,6 +484,7 @@ def format_validation_baseline_comparison(
         comparison.pair_final_result_multiset_delta,
         indent,
     )
+    lines.extend(_format_pair_final_result_movement_lines(comparison, indent))
     _append_delta_block(
         lines,
         "Pair result tuple delta",
@@ -502,6 +503,17 @@ def format_validation_baseline_comparison(
         comparison.added_pair_identities,
         indent,
     )
+    return "\n".join(lines)
+
+
+def format_validation_baseline_movement_summary(
+    comparison: ValidationBaselineComparison,
+    *,
+    indent: str = "",
+) -> str:
+    lines = _format_pair_final_result_movement_lines(comparison, indent)
+    if not lines:
+        return f"{indent}Final result movements by function: ok"
     return "\n".join(lines)
 
 
@@ -646,7 +658,10 @@ def _require_baseline_match(
     else:
         failed = comparison.has_differences()
     if failed:
-        raise SystemExit("baseline comparison mismatch")
+        raise SystemExit(
+            "baseline comparison mismatch\n"
+            + format_validation_baseline_movement_summary(comparison)
+        )
 
 
 def _apply_baseline_match_scope(
@@ -841,6 +856,64 @@ def _append_identity_block(
         return
     for function_name, binary_pair in identities:
         lines.append(f"{indent}    - {function_name} | {binary_pair}")
+
+
+def _format_pair_final_result_movement_lines(
+    comparison: ValidationBaselineComparison,
+    indent: str,
+) -> list:
+    movements = _pair_final_result_movements(
+        comparison.pair_final_result_multiset_delta
+    )
+    lines = [f"{indent}  Final result movements by function:"]
+    if not movements:
+        lines.append(f"{indent}    ok")
+        return lines
+    for before_status, after_status, function_name in sorted(movements):
+        lines.append(
+            f"{indent}    - {before_status}->{after_status} | "
+            f"{function_name}: {movements[(before_status, after_status, function_name)]}"
+        )
+    return lines
+
+
+def _pair_final_result_movements(
+    delta: Mapping[Tuple[str, ...], int],
+) -> Dict[Tuple[str, str, str], int]:
+    removed: Dict[Tuple[str, str], Dict[str, int]] = {}
+    added: Dict[Tuple[str, str], Dict[str, int]] = {}
+    for key, count in delta.items():
+        if len(key) < 3:
+            continue
+        function_name, binary_pair, status = key[:3]
+        bucket = added if count > 0 else removed
+        status_counts = bucket.setdefault((function_name, binary_pair), {})
+        status_counts[status] = int(status_counts.get(status, 0) or 0) + abs(int(count))
+
+    movements: Dict[Tuple[str, str, str], int] = {}
+    for pair_identity in sorted(set(removed) & set(added)):
+        removed_statuses = removed[pair_identity]
+        added_statuses = added[pair_identity]
+        for before_status in sorted(removed_statuses):
+            before_count = removed_statuses[before_status]
+            if before_count <= 0:
+                continue
+            for after_status in sorted(added_statuses):
+                after_count = added_statuses[after_status]
+                if after_count <= 0:
+                    continue
+                moved = min(before_count, after_count)
+                if moved <= 0:
+                    continue
+                function_name, _binary_pair = pair_identity
+                movement_key = (before_status, after_status, function_name)
+                movements[movement_key] = int(movements.get(movement_key, 0) or 0) + moved
+                removed_statuses[before_status] -= moved
+                added_statuses[after_status] -= moved
+                before_count -= moved
+                if before_count <= 0:
+                    break
+    return movements
 
 
 def _format_key(key: Any) -> str:

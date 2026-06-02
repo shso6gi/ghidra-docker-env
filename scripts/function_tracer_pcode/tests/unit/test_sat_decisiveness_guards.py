@@ -1111,6 +1111,44 @@ def test_pairwise_disabled_completed_proofs_keep_summary_dependent_return_gap(mo
     assert analysis2.completed_recovery_proof_evidence == ()
 
 
+def test_pairwise_disabled_completed_proofs_do_not_block_switch_or_control_region_recovery(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(
+        formula_builder,
+        solver_runner,
+        debug=False,
+        enable_completed_recovery_proofs=False,
+    )
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.analysis_notes = []
+    analysis2.analysis_notes = [
+        "switch_return_recovery",
+        "control_region_return_recovery",
+    ]
+    monkeypatch.setattr(
+        strategy,
+        "_check_return_case_coverage_gap",
+        lambda *_args, **_kwargs: ("covered", None),
+    )
+
+    reasons = strategy._collect_return_coverage_unsafety_reasons(
+        _base_context_for_single_int_param(),
+        [],
+        [],
+        lambda value: value,
+        lambda value: value,
+        analysis1,
+        analysis2,
+    )
+
+    assert reasons == []
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert analysis2.completed_recovery_proof_evidence == ()
+
+
 def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()

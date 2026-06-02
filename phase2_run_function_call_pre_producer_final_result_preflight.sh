@@ -1,18 +1,34 @@
 #!/usr/bin/env bash
-# Focused Phase 2 final-result movement preflight.
+# Risk-stratified Phase 2 final-result movement preflight.
 #
 # This is a shell-level safety check, not the Phase 2 expected-movement
-# validator. It runs the producer flags on the known return-coverage sentinel
-# pair and requires the filtered baseline final result to stay unchanged.
+# validator. It runs the producer flags on return-coverage recovery risk pairs
+# selected from existing logs and requires the filtered baseline final result
+# to stay unchanged.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+RISK_CURRENT_LOG_ROOT="${RISK_CURRENT_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_current}"
+RISK_BASELINE_LOG_ROOT="${RISK_BASELINE_LOG_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/raw/logs/function_call}"
+
+if [[ -z "${FUNCTION_CALL_TARGET_SET:-}" || -z "${FUNCTION_CALL_PAIR_FILTER:-}" ]]; then
+    RISK_PREFLIGHT_EXPORTS="$(
+        "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase2_return_coverage_risk_preflight \
+            --current-log-root "$RISK_CURRENT_LOG_ROOT" \
+            --baseline-log-root "$RISK_BASELINE_LOG_ROOT" \
+            --max-per-stratum "${RISK_PREFLIGHT_MAX_PER_STRATUM:-2}" \
+            --max-evidence-only-per-stratum "${RISK_PREFLIGHT_MAX_EVIDENCE_ONLY_PER_STRATUM:-1}"
+    )"
+    eval "$RISK_PREFLIGHT_EXPORTS"
+fi
 
 export OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_pre_producer_final_result_preflight}"
-export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum}"
-export FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_recursive_sum:B3_B7}"
-export PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
+export FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_dispatch_indirect}"
+export FUNCTION_CALL_PAIR_FILTER="${FUNCTION_CALL_PAIR_FILTER:-fc_recursive_sum:B3_B7,fc_dispatch_indirect:B1_B2,fc_dispatch_indirect:B3_B4}"
+export PARALLEL_JOBS="${PARALLEL_JOBS:-4}"
 export VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-0}"
 export VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"
 export VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"
