@@ -151,7 +151,22 @@ git status --short
 bash -n phase2_run_function_call_pre_producer_final_result_preflight.sh
 ```
 
-Then run the preflight before any full matrix:
+To check only the Phase 2 producer functions that contributed to the latest
+canonical-baseline gate failure, run the reduced matrix first:
+
+```bash
+./phase2_run_function_call_pre_producer_reduced_matrix.sh
+```
+
+Then run the full 20-function sequence. It enters the 20-function matrices
+directly after unit tests:
+
+```bash
+./rerun_full_analysis.sh
+```
+
+For a short targeted check of Phase 2 producer reason-tuple movement, run the
+preflight manually:
 
 ```bash
 ./phase2_run_function_call_pre_producer_final_result_preflight.sh

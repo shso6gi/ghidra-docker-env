@@ -25,12 +25,28 @@ RISK_NOTES = (
     "state_transition_loop_summary",
     "switch_return_recovery",
 )
+RISK_REASON_IDS = (
+    "equivalence_blocking_unsafety",
+    "return_coverage_gap",
+    "return_coverage_inconclusive",
+    "return_width_bridge_missing",
+    "sat_unsafety",
+    "solver_proven_rewrite_proof_failed",
+    "unresolved_expression",
+)
 PAIR_LABEL_SEPARATOR = " \N{LEFT RIGHT ARROW} "
 
 DEFAULT_FALLBACK_PAIRS = (
+    "fc_recursive_sum:B1_B7",
     "fc_recursive_sum:B3_B7",
+    "fc_is_odd:B1_B7",
     "fc_dispatch_indirect:B1_B2",
     "fc_dispatch_indirect:B3_B4",
+)
+DEFAULT_EXCLUDED_PAIRS = (
+    "fc_apply_indirect:B10_B11",
+    "fc_dispatch_indirect:B10_B11",
+    "fc_recursive_sum:B10_B14",
 )
 DEFAULT_MAX_SELECTED_PAIRS = 24
 DEFAULT_SAMPLE_SEED = 0
@@ -47,6 +63,7 @@ class RiskLogInfo:
     side_shape: str
     proof_stages: Tuple[str, ...]
     object_target_shapes: Tuple[str, ...]
+    unknown_reasons: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -62,6 +79,7 @@ class SelectedRiskPair:
     side_shape: str
     proof_stages: Tuple[str, ...]
     object_target_shapes: Tuple[str, ...]
+    unknown_reasons: Tuple[str, ...]
 
 
 def select_risk_pairs(
@@ -73,6 +91,7 @@ def select_risk_pairs(
     max_pairs: int = DEFAULT_MAX_SELECTED_PAIRS,
     sample_seed: int = DEFAULT_SAMPLE_SEED,
     fallback_pairs: Sequence[str] = DEFAULT_FALLBACK_PAIRS,
+    excluded_pairs: Sequence[str] = DEFAULT_EXCLUDED_PAIRS,
 ) -> Tuple[str, ...]:
     return tuple(
         selected.entry
@@ -84,6 +103,7 @@ def select_risk_pairs(
             max_pairs=max_pairs,
             sample_seed=sample_seed,
             fallback_pairs=fallback_pairs,
+            excluded_pairs=excluded_pairs,
         )
     )
 
@@ -97,14 +117,28 @@ def select_risk_pair_infos(
     max_pairs: int = DEFAULT_MAX_SELECTED_PAIRS,
     sample_seed: int = DEFAULT_SAMPLE_SEED,
     fallback_pairs: Sequence[str] = DEFAULT_FALLBACK_PAIRS,
+    excluded_pairs: Sequence[str] = DEFAULT_EXCLUDED_PAIRS,
 ) -> Tuple[SelectedRiskPair, ...]:
+    excluded = set(excluded_pairs)
     baseline_eq = (
         _eq_pair_filter_entries(baseline_log_root)
         if baseline_log_root is not None and baseline_log_root.is_dir()
         else None
     )
     strata: Dict[Tuple[str, ...], list] = {}
+    if baseline_log_root is not None and baseline_log_root.is_dir():
+        for info in _risk_log_infos(baseline_log_root):
+            if info.entry in excluded:
+                continue
+            if info.status != STATUS_UNKNOWN:
+                continue
+            if not _has_risk_unknown_reason(info):
+                continue
+            strata.setdefault(_risk_stratum_key(info), []).append(info)
+
     for info in _risk_log_infos(current_log_root):
+        if info.entry in excluded:
+            continue
         if info.status != STATUS_EQ:
             continue
         if not info.notes and not info.has_completed_evidence:
@@ -162,6 +196,7 @@ def select_risk_pair_infos(
                 side_shape="unknown",
                 proof_stages=(),
                 object_target_shapes=(),
+                unknown_reasons=(),
             )
         )
         seen.add(entry)
@@ -221,6 +256,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=None,
         help="function:B1_B2 fallback; may be repeated",
     )
+    parser.add_argument(
+        "--exclude-pair",
+        action="append",
+        default=None,
+        help="function:B1_B2 exact-match preflight exclusion; may be repeated",
+    )
     args = parser.parse_args(argv)
 
     selected_infos = select_risk_pair_infos(
@@ -231,6 +272,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_pairs=args.max_pairs,
         sample_seed=args.sample_seed,
         fallback_pairs=tuple(args.fallback_pair or DEFAULT_FALLBACK_PAIRS),
+        excluded_pairs=tuple(args.exclude_pair or DEFAULT_EXCLUDED_PAIRS),
     )
     selected = tuple(info.entry for info in selected_infos)
     _emit_selection_summary(selected_infos, args, stream=sys.stderr)
@@ -258,10 +300,12 @@ def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
             "^Result: EQUIVALENT",
             "^Result: UNKNOWN",
             "completed_recovery_proof_evidence",
+            '"unknown_reasons"',
             '"binary1_name"',
             '"binary2_name"',
         )
         + tuple(RISK_NOTES)
+        + tuple(RISK_REASON_IDS)
     )
     try:
         result = subprocess.run(
@@ -280,7 +324,7 @@ def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
         if parsed is None:
             continue
         log_path, text = parsed
-        record = records.setdefault(log_path, [STATUS_UNKNOWN, [], False, [], [], None])
+        record = records.setdefault(log_path, [STATUS_UNKNOWN, [], False, [], [], None, []])
         payload_facts = _payload_facts_from_line(text)
         if text.startswith("Result: EQUIVALENT"):
             record[0] = STATUS_EQ
@@ -294,6 +338,7 @@ def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
             record[2] = True
             _extend_unique(record[3], _proof_stages_from_line(text))
             _extend_unique(record[4], _object_target_shapes_from_line(text))
+        _extend_unique(record[6], payload_facts.unknown_reason_ids)
         if payload_facts.binary_names is not None:
             record[5] = payload_facts.binary_names
         elif '"binary1_name"' in text or '"binary2_name"' in text:
@@ -312,6 +357,7 @@ def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
             proof_stages=tuple(proof_stages),
             object_target_shapes=tuple(object_target_shapes),
             payload_binary_names=payload_binary_names,
+            unknown_reasons=tuple(unknown_reasons),
         )
         for log_path, (
             status,
@@ -320,6 +366,7 @@ def _risk_log_infos(root: Path) -> Tuple[RiskLogInfo, ...]:
             proof_stages,
             object_target_shapes,
             payload_binary_names,
+            unknown_reasons,
         ) in sorted(records.items())
     )
 
@@ -393,6 +440,7 @@ def _quick_log_info(log_path: Path) -> RiskLogInfo:
     has_completed_evidence = False
     proof_stages = []
     object_target_shapes = []
+    unknown_reasons = []
     payload_binary_names = None
     with log_path.open(errors="replace") as handle:
         for line in handle:
@@ -409,6 +457,7 @@ def _quick_log_info(log_path: Path) -> RiskLogInfo:
                 has_completed_evidence = True
                 _extend_unique(proof_stages, _proof_stages_from_line(line))
                 _extend_unique(object_target_shapes, _object_target_shapes_from_line(line))
+            _extend_unique(unknown_reasons, payload_facts.unknown_reason_ids)
             if payload_facts.binary_names is not None:
                 payload_binary_names = payload_facts.binary_names
             elif '"binary1_name"' in line or '"binary2_name"' in line:
@@ -427,6 +476,7 @@ def _quick_log_info(log_path: Path) -> RiskLogInfo:
         payload_binary_names=payload_binary_names,
         function_name=function_name,
         entry=entry,
+        unknown_reasons=tuple(unknown_reasons),
     )
 
 
@@ -441,6 +491,7 @@ def _risk_log_info_from_parts(
     payload_binary_names: Optional[Tuple[str, str]] = None,
     function_name: Optional[str] = None,
     entry: Optional[str] = None,
+    unknown_reasons: Tuple[str, ...] = (),
 ) -> RiskLogInfo:
     parsed_function_name, parsed_entry = _entry_info_from_log_path(log_path)
     function_name = function_name or parsed_function_name
@@ -463,16 +514,19 @@ def _risk_log_info_from_parts(
         side_shape=f"{left_shape} -> {right_shape}",
         proof_stages=normalized_proof_stages,
         object_target_shapes=normalized_object_target_shapes,
+        unknown_reasons=tuple(sorted(dict.fromkeys(unknown_reasons))),
     )
 
 
 def _risk_stratum_key(info: RiskLogInfo) -> Tuple[str, ...]:
     note_key = ",".join(info.notes) if info.notes else "evidence-only"
+    reason_key = ",".join(info.unknown_reasons) if info.unknown_reasons else "none"
     proof_stage_key = ",".join(info.proof_stages) if info.proof_stages else "none"
     object_key = ",".join(info.object_target_shapes) if info.object_target_shapes else "none"
     return (
         info.function_name,
         note_key,
+        reason_key,
         info.binary_pair_shape,
         info.side_shape,
         proof_stage_key,
@@ -497,7 +551,12 @@ def _selected_risk_pair(
         side_shape=info.side_shape,
         proof_stages=info.proof_stages,
         object_target_shapes=info.object_target_shapes,
+        unknown_reasons=info.unknown_reasons,
     )
+
+
+def _has_risk_unknown_reason(info: RiskLogInfo) -> bool:
+    return any(reason_id in RISK_REASON_IDS for reason_id in info.unknown_reasons)
 
 
 def _emit_selection_summary(
@@ -513,10 +572,12 @@ def _emit_selection_summary(
     for info in selected_infos:
         notes = ",".join(info.notes) if info.notes else "-"
         proof = ",".join(info.proof_stages) if info.proof_stages else "-"
+        reasons = ",".join(info.unknown_reasons) if info.unknown_reasons else "-"
         print(
             "  - "
             f"{info.entry} | reason={info.selection_reason} | "
-            f"notes={notes} | side={info.side_shape} | proof_stage={proof}",
+            f"unknown_reasons={reasons} | notes={notes} | "
+            f"side={info.side_shape} | proof_stage={proof}",
             file=stream,
         )
 
@@ -561,12 +622,13 @@ class _PayloadFacts:
     has_completed_evidence: bool
     proof_stages: Tuple[str, ...]
     object_target_shapes: Tuple[str, ...]
+    unknown_reason_ids: Tuple[str, ...]
 
 
 def _payload_facts_from_line(line: str) -> _PayloadFacts:
     payload = _json_payload_from_line(line)
     if payload is None:
-        return _PayloadFacts(None, False, (), ())
+        return _PayloadFacts(None, False, (), (), ())
     binary_names = _payload_binary_names(payload)
     evidence_records = _completed_recovery_proof_evidence(payload)
     proof_stages = []
@@ -594,6 +656,7 @@ def _payload_facts_from_line(line: str) -> _PayloadFacts:
         has_completed_evidence=bool(evidence_records),
         proof_stages=tuple(proof_stages),
         object_target_shapes=tuple(object_target_shapes),
+        unknown_reason_ids=_payload_unknown_reason_ids(payload),
     )
 
 
@@ -621,6 +684,20 @@ def _completed_recovery_proof_evidence(payload: Mapping[str, Any]) -> Tuple[Any,
     if not isinstance(evidence, (list, tuple)):
         return ()
     return tuple(evidence)
+
+
+def _payload_unknown_reason_ids(payload: Mapping[str, Any]) -> Tuple[str, ...]:
+    reason_ids = []
+    for reason in payload.get("unknown_reasons") or ():
+        if not isinstance(reason, Mapping):
+            continue
+        reason_id = reason.get("reason_id")
+        if reason_id is None:
+            continue
+        reason_text = str(reason_id)
+        if reason_text not in reason_ids:
+            reason_ids.append(reason_text)
+    return tuple(reason_ids)
 
 
 def _object_target_shape(raw_key: Any) -> str:

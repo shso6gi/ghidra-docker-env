@@ -1029,27 +1029,49 @@ def test_phase2_pre_producer_final_result_preflight_pins_recursive_sum_pair():
     assert "RISK_PREFLIGHT_SAMPLE_SEED" in script
     assert "--manifest-path" in script
     assert "RISK_PREFLIGHT_MANIFEST" in script
-    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_dispatch_indirect}"' in script
-    assert 'fc_recursive_sum:B3_B7,fc_dispatch_indirect:B1_B2,fc_dispatch_indirect:B3_B4' in script
+    assert 'fc_recursive_sum:B1_B7' in script or 'fc_recursive_sum:B1_B7' in Path(
+        "scripts/function_tracer_pcode/validation/phase2_return_coverage_risk_preflight.py"
+    ).read_text()
+    assert 'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-fc_recursive_sum,fc_is_odd,fc_dispatch_indirect}"' in script
+    assert (
+        'fc_recursive_sum:B1_B7,fc_recursive_sum:B3_B7,'
+        'fc_is_odd:B1_B7,fc_dispatch_indirect:B1_B2,fc_dispatch_indirect:B3_B4'
+    ) in script
     assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
     assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
-    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-exact}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
     assert "phase2_function_call_pre_producer_final_result_preflight" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 
 
-def test_rerun_full_analysis_runs_final_result_preflight_before_full_matrix():
+def test_phase2_reduced_pre_producer_matrix_pins_failure_contributor_functions():
+    script = Path("phase2_run_function_call_pre_producer_reduced_matrix.sh").read_text()
+
+    assert "function_call_test_phase2_reduced_pre_producer" in script
+    assert (
+        'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-'
+        'fc_recursive_sum,fc_is_even,fc_is_odd,fc_read_after_void}"'
+    ) in script
+    assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-all}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-exact}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert "phase2_function_call_reduced_matrix_pre_producer" in script
+    assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
+
+
+def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 
-    final_result_preflight = script.index(
-        "./phase2_run_function_call_pre_producer_final_result_preflight.sh"
-    )
-    producer_preflight = script.index("./phase2_run_function_call_pre_producer_preflight.sh")
     normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
+    producer_full_matrix = script.index(
+        "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
+    )
 
-    assert final_result_preflight < producer_preflight < normal_full_matrix
-    assert "phase2_pre_producer_final_result_preflight_stdout.log" in script
+    assert normal_full_matrix < producer_full_matrix
+    assert "./phase2_run_function_call_pre_producer_final_result_preflight.sh" not in script
+    assert "./phase2_run_function_call_pre_producer_preflight.sh" not in script
     assert "RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" in script
 
 

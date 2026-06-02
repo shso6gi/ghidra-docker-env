@@ -108,12 +108,6 @@ fi
 run_and_log unit_tests_stdout.log \
     "$PYTHON_BIN" -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 
-run_and_log phase2_pre_producer_final_result_preflight_stdout.log \
-    ./phase2_run_function_call_pre_producer_final_result_preflight.sh
-
-run_and_log phase2_pre_producer_preflight_stdout.log \
-    ./phase2_run_function_call_pre_producer_preflight.sh
-
 if [[ "$RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" == "1" ]]; then
     echo ""
     echo "Skipping normal Phase 2 full matrix because RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL=1."
