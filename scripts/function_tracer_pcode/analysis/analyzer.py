@@ -1730,6 +1730,7 @@ class ReturnAnalyzer:
             "unknown_return",
             "overlapping_unconditional_returns",
             "indirect_control_flow_unresolved",
+            "deferred_call_return_unresolved",
         }
         analysis.analysis_notes = [
             note for note in analysis.analysis_notes
@@ -1749,6 +1750,8 @@ class ReturnAnalyzer:
             )
         ):
             reasons.append("indirect_control_flow_unresolved")
+        if analysis.has_unresolved_return_value() and getattr(analysis, "deferred_calls", None):
+            reasons.append("deferred_call_return_unresolved")
 
         if analysis.recovered_from_decompiler:
             reasons = [reason for reason in reasons if reason == "unknown_return"]
@@ -2388,10 +2391,26 @@ class ReturnAnalyzer:
         active_functions: Optional[Set[Tuple[Any, ...]]] = None,
     ) -> Optional[List[ReturnInfo]]:
         """wrapper らしい unknown return を P-code/CFG ベースでのみ復元する。"""
-        if not self._analysis_needs_wrapper_recovery(analysis):
-            return None
+        needs_wrapper_recovery = self._analysis_needs_wrapper_recovery(analysis)
 
-        recovered_from_pcode = self._recover_call_wrapper_returns_from_pcode(
+        if needs_wrapper_recovery:
+            recovered_from_pcode = self._recover_call_wrapper_returns_from_pcode(
+                analysis,
+                tracer,
+                condition_tracker,
+                return_ops,
+                current_function,
+                active_functions or set(),
+            )
+            if recovered_from_pcode is not None:
+                if self.debug:
+                    self._debug_print(
+                        f"Call-wrapper recovery reconstructed {len(recovered_from_pcode)} return case(s) "
+                        "from P-code block paths"
+                    )
+                return recovered_from_pcode
+
+        recovered_uncovered = self._recover_uncovered_terminal_call_returns_from_pcode(
             analysis,
             tracer,
             condition_tracker,
@@ -2399,18 +2418,144 @@ class ReturnAnalyzer:
             current_function,
             active_functions or set(),
         )
-        if recovered_from_pcode is not None:
+        if recovered_uncovered is not None:
             if self.debug:
                 self._debug_print(
-                    f"Call-wrapper recovery reconstructed {len(recovered_from_pcode)} return case(s) "
-                    "from P-code block paths"
+                    f"Call-wrapper recovery supplemented {len(recovered_uncovered)} return case(s) "
+                    "after detecting uncovered terminal-call return path(s)"
                 )
-            return recovered_from_pcode
+            return recovered_uncovered
+
         if self.debug:
-            self._debug_print(
-                "Call-wrapper recovery declined: no safe P-code/CFG reconstruction was available"
-            )
+            if needs_wrapper_recovery:
+                self._debug_print(
+                    "Call-wrapper recovery declined: no safe P-code/CFG reconstruction was available"
+                )
+            else:
+                self._debug_print(
+                    "Call-wrapper recovery declined: no unresolved return or uncovered terminal-call path"
+                )
         return None
+
+    def _recover_uncovered_terminal_call_returns_from_pcode(
+        self,
+        analysis: FunctionReturnAnalysis,
+        tracer: PcodeTracer,
+        condition_tracker: ConditionTracker,
+        return_ops: List[Any],
+        current_function,
+        active_functions: Set[Tuple[Any, ...]],
+    ) -> Optional[List[ReturnInfo]]:
+        """既存 return partition から漏れた terminal CALL/CALLIND path だけを補完する。"""
+        if analysis is None or not analysis.returns or not return_ops:
+            return None
+
+        recovered: List[ReturnInfo] = []
+        for return_index, return_op in enumerate(return_ops):
+            raw_entries = condition_tracker.get_all_valid_block_paths_to_return(return_op)
+            path_entries = self._coerce_block_path_entries(raw_entries)
+            if not path_entries:
+                return None
+
+            site_metadata = self._describe_pcode_site(return_op, analysis.entry_point)
+            address = cast(str, site_metadata.get("address") or analysis.entry_point)
+
+            for path_index, (block_path, path_conditions) in enumerate(path_entries):
+                if self._return_path_is_covered_by_existing_return(
+                    analysis,
+                    path_conditions,
+                ):
+                    continue
+
+                terminal_call = self._find_terminal_call_on_block_path(
+                    block_path,
+                    return_op,
+                    tracer=tracer,
+                    condition_tracker=condition_tracker,
+                    current_function=current_function,
+                    path_conditions=path_conditions,
+                )
+                if terminal_call is None:
+                    if self.debug:
+                        self._debug_print(
+                            "Call-wrapper uncovered-path recovery declined: uncovered path "
+                            f"{path_index} to RETURN #{return_index} has no safe terminal CALL/CALLIND"
+                        )
+                    return None
+
+                path_recovered = self._recover_implicit_return_from_terminal_call(
+                    terminal_call,
+                    address,
+                    tracer,
+                    condition_tracker,
+                    list(path_conditions),
+                    return_index * 1000 + path_index * 100,
+                    all_path_conditions=[list(path_conditions)],
+                    active_functions=active_functions,
+                    current_function=current_function,
+                    site_metadata=site_metadata,
+                )
+                if not path_recovered:
+                    if self.debug:
+                        self._debug_print(
+                            "Call-wrapper uncovered-path recovery declined: terminal call expansion "
+                            f"failed on path {path_index} to RETURN #{return_index}"
+                        )
+                    return None
+                recovered.extend(path_recovered)
+
+        if not recovered:
+            return None
+
+        if self._call_wrapper_recovery_conflicts_with_existing_returns(
+            list(analysis.returns),
+            recovered,
+        ):
+            return None
+        if "uncovered_terminal_call_return_recovery" not in analysis.analysis_notes:
+            analysis.analysis_notes.append("uncovered_terminal_call_return_recovery")
+        merged = self._merge_equivalent_return_infos(
+            self._prune_less_precise_return_infos(list(analysis.returns) + recovered)
+        )
+        return merged
+
+    def _return_path_is_covered_by_existing_return(
+        self,
+        analysis: FunctionReturnAnalysis,
+        path_conditions: Sequence[Condition],
+    ) -> bool:
+        path_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(path_conditions or [])
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(path_conditions):
+            return True
+        path_constraint_set = ConditionSimplifier.build_constraint_set(path_conditions)
+        if path_constraint_set.is_contradictory:
+            return True
+        for ret in analysis.returns or []:
+            ret_conditions = self._return_info_effective_region_conditions(ret)
+            if path_constraint_set.implies_all(ret_conditions):
+                return True
+        return False
+
+    def _call_wrapper_recovery_conflicts_with_existing_returns(
+        self,
+        existing_returns: List[ReturnInfo],
+        recovered_returns: List[ReturnInfo],
+    ) -> bool:
+        for existing in existing_returns or []:
+            existing_conditions = self._return_info_effective_region_conditions(existing)
+            for recovered in recovered_returns or []:
+                recovered_conditions = self._return_info_effective_region_conditions(recovered)
+                combined = ConditionSimplifier.simplify_conditions_object_centric(
+                    list(existing_conditions) + list(recovered_conditions)
+                )
+                if ConditionSimplifier.object_centric_is_contradiction(combined):
+                    continue
+                if _expressions_equivalent(existing.value, recovered.value):
+                    continue
+                return True
+        return False
 
     def _recover_call_wrapper_returns_from_pcode(
         self,

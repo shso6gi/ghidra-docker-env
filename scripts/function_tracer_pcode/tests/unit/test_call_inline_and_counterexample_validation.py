@@ -3405,6 +3405,167 @@ def test_return_analyzer_prefers_pcode_wrapper_recovery_before_decompiler_fallba
     mock_pcode.assert_called_once()
 
 
+def test_return_analyzer_supplements_uncovered_terminal_call_return_path():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    param = _param_expr("param_1", 0)
+    covered_cond = _cond_eq(param, Expression.constant(0, 4))
+    uncovered_cond = _cond_ne(param, Expression.constant(0, 4))
+    existing = ReturnInfo(
+        address="0x1000",
+        value=Expression.constant(0, 4),
+        conditions=[covered_cond],
+        branch_index=0,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_tail_wrapper",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[existing],
+        return_type="int",
+    )
+    return_op = Mock()
+    terminal_call = Mock()
+    covered_block = Mock(index=1, pcode_ops=[Mock(getMnemonic=Mock(return_value="COPY")), return_op])
+    uncovered_block = Mock(index=2, pcode_ops=[terminal_call, return_op])
+    condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([covered_block], [covered_cond]),
+        ([uncovered_block], [uncovered_cond]),
+    ]
+    recovered_tail = ReturnInfo(
+        address="0x1000",
+        value=Expression.unknown("call_out_of_scope:fc_tail_wrapper"),
+        conditions=[uncovered_cond],
+        branch_index=100,
+        pcode_identity="0x1000",
+    )
+
+    with patch.object(
+        analyzer,
+        "_find_terminal_call_on_block_path",
+        return_value=terminal_call,
+    ) as mock_find_terminal:
+        with patch.object(
+            analyzer,
+            "_recover_implicit_return_from_terminal_call",
+            return_value=[recovered_tail],
+        ) as mock_recover_terminal:
+            recovered = analyzer._recover_call_wrapper_returns(
+                Mock(),
+                analysis,
+                Mock(),
+                Mock(),
+                condition_tracker,
+                [return_op],
+                set(),
+            )
+
+    assert recovered is not None
+    assert len(recovered) == 2
+    assert any(ret.value.value == 0 for ret in recovered if ret.value.expr_type == ExpressionType.CONSTANT)
+    assert any(ret.value.expr_type == ExpressionType.UNKNOWN for ret in recovered)
+    mock_find_terminal.assert_called_once()
+    assert mock_find_terminal.call_args.args[0] == [uncovered_block]
+    mock_recover_terminal.assert_called_once()
+
+
+def test_return_analyzer_does_not_supplement_when_existing_return_covers_path():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    param = _param_expr("param_1", 0)
+    covered_cond = _cond_eq(param, Expression.constant(0, 4))
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_tail_wrapper",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(0, 4),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+    )
+    return_op = Mock()
+    block = Mock(index=1, pcode_ops=[Mock(getMnemonic=Mock(return_value="CALL")), return_op])
+    condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([block], [covered_cond]),
+    ]
+
+    with patch.object(analyzer, "_find_terminal_call_on_block_path") as mock_find_terminal:
+        recovered = analyzer._recover_call_wrapper_returns(
+            Mock(),
+            analysis,
+            Mock(),
+            Mock(),
+            condition_tracker,
+            [return_op],
+            set(),
+        )
+
+    assert recovered is None
+    mock_find_terminal.assert_not_called()
+
+
+def test_return_analyzer_rejects_uncovered_terminal_call_recovery_on_overlapping_value_conflict():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    param = _param_expr("param_1", 0)
+    broad_existing_cond = _cond_ne(param, Expression.constant(1, 4))
+    uncovered_path_cond = _cond_ne(param, Expression.constant(0, 4))
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_tail_wrapper",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(0, 4),
+                conditions=[broad_existing_cond],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+    )
+    return_op = Mock()
+    terminal_call = Mock()
+    block = Mock(index=1, pcode_ops=[terminal_call, return_op])
+    condition_tracker = Mock()
+    condition_tracker.get_all_valid_block_paths_to_return.return_value = [
+        ([block], [uncovered_path_cond]),
+    ]
+    conflicting_tail = ReturnInfo(
+        address="0x1000",
+        value=Expression.constant(7, 4),
+        conditions=[uncovered_path_cond],
+        branch_index=100,
+    )
+
+    with patch.object(
+        analyzer,
+        "_find_terminal_call_on_block_path",
+        return_value=terminal_call,
+    ):
+        with patch.object(
+            analyzer,
+            "_recover_implicit_return_from_terminal_call",
+            return_value=[conflicting_tail],
+        ):
+            recovered = analyzer._recover_call_wrapper_returns(
+                Mock(),
+                analysis,
+                Mock(),
+                Mock(),
+                condition_tracker,
+                [return_op],
+                set(),
+            )
+
+    assert recovered is None
+    assert "uncovered_terminal_call_return_recovery" not in analysis.analysis_notes
+
+
 def test_merge_equivalent_return_infos_collapses_symbolic_post_state_reads_under_complementary_conditions():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     post_state_value = Expression.variable(
@@ -3463,6 +3624,40 @@ def test_function_return_analysis_skips_monolithic_fallback_for_nested_unresolve
 
     assert analysis.has_unknown_return() is False
     assert analysis.has_unresolved_return_value() is True
+    assert analysis.should_skip_monolithic_fallback() is True
+
+
+def test_return_analyzer_marks_deferred_call_return_without_unknown_event_incomplete():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:fc_tail_wrapper#0",
+        target_ref=CallTargetRef.from_name("fc_tail_wrapper"),
+        arguments=[_param_expr("param_1", 0)],
+        sequence=0,
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_tail_wrapper",
+        entry_point="0x1000",
+        parameters=[{"name": "param_1", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    deferred.placeholder_name,
+                    runtime_ref=deferred.unknown_ref,
+                ),
+                conditions=[],
+                branch_index=0,
+            )
+        ],
+        return_type="int",
+        deferred_calls={deferred.deferred_call_ref.stable_key(): deferred},
+    )
+
+    analyzer._mark_incomplete_control_flow(analysis)
+
+    assert analysis.incomplete_control_flow is True
+    assert "deferred_call_return_unresolved" in analysis.analysis_notes
     assert analysis.should_skip_monolithic_fallback() is True
 
 
