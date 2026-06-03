@@ -4,8 +4,10 @@
 # This runs the functions that contributed to the latest Phase 2 producer
 # canonical-baseline gate failure. It keeps the same producer flags as the full
 # pre-producer matrix, but disables the Phase 2 representative movement gate
-# because that gate expects the full representative set. The runner-level exact
-# canonical baseline comparison remains enabled.
+# because that gate expects the full representative set. The runner-level
+# final-result baseline comparison remains enabled; reason/action movement is
+# still reported in the summaries, but intentional producer proof metadata
+# movement does not stop the reduced matrix.
 
 set -euo pipefail
 
@@ -17,8 +19,8 @@ export PARALLEL_JOBS="${PARALLEL_JOBS:-32}"
 export VALIDATION_SKIP_COMPLETED="${VALIDATION_SKIP_COMPLETED:-0}"
 export VALIDATION_AUTO_BEFORE_SNAPSHOT="${VALIDATION_AUTO_BEFORE_SNAPSHOT:-0}"
 export VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-1}"
-export VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-all}"
-export VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-exact}"
+export VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"
+export VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"
 export PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"
 export PHASE2_RUN_KIND="${PHASE2_RUN_KIND:-phase2_function_call_reduced_matrix_pre_producer}"
 export PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT="${PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT:-none}"

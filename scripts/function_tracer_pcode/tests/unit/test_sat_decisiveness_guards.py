@@ -967,6 +967,82 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     assert "return_case_coverage_gap" in analysis1.analysis_notes
 
 
+def test_pairwise_global_blocker_dominates_pair_local_unresolved_expression(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: True)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_pairs == 1
+    assert {reason.reason_id for reason in result.unknown_reasons} == {
+        UnknownReasonId.RETURN_COVERAGE_GAP.value,
+    }
+    assert all(
+        reason.reason_id != UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        for reason in result.unknown_reasons
+    )
+    assert "return_case_coverage_gap" in analysis1.analysis_notes
+
+
+def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1 = _analysis_with_unsupported_call_effect()
+    analysis2 = FunctionReturnAnalysis(
+        function_name="func2",
+        entry_point="0x2000",
+        parameters=[_param("x")],
+        returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
+        return_type="int",
+    )
+    case1 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis1.returns[0].value,
+        return_info=analysis1.returns[0],
+        return_type=analysis1.return_type or "int",
+        parameters=analysis1.parameters,
+    )
+    case2 = ReturnCase(
+        index=0,
+        conditions=[],
+        value_expr=analysis2.returns[0].value,
+        return_info=analysis2.returns[0],
+        return_type=analysis2.return_type or "int",
+        parameters=analysis2.parameters,
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_extract_return_cases",
+        lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: True)
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.unknown_pairs == 1
+    assert {reason.reason_id for reason in result.unknown_reasons} == {
+        UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
+    }
+    assert all(
+        reason.reason_id != UnknownReasonId.UNRESOLVED_EXPRESSION.value
+        for reason in result.unknown_reasons
+    )
+
+
 def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()

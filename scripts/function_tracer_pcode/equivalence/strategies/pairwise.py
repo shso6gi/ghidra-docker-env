@@ -632,42 +632,56 @@ class PairwiseStrategy(CheckStrategy):
                     )
 
         elapsed_time = time.time() - start_time
+        coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
+            coverage_unsafety_reasons,
+            analysis1,
+            analysis2,
+            stage="S_PAIRWISE",
+        )
+        equivalence_unknown_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
+            equivalence_blocking_reasons,
+            analysis1,
+            analysis2,
+            stage="S_PAIRWISE",
+        )
+        blocking_unknown_reasons = coverage_unknown_reasons + equivalence_unknown_reasons
+
         if sat_count > 0:
             final_is_equiv = False
             self._debug_print("=" * 60)
             self._debug_print("Result: NOT EQUIVALENT (found SAT pair)")
+        elif (
+            blocking_unknown_reasons
+            and unknown_count > 0
+            and (
+                coverage_unknown_reasons
+                or not any(
+                    reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
+                    for reason in unknown_reasons
+                )
+            )
+        ):
+            final_is_equiv = None
+            unknown_reasons = blocking_unknown_reasons
+            blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
+            self._debug_print("=" * 60)
+            self._debug_print(
+                "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
+                f"{', '.join(blocking_reasons)})"
+            )
         elif unknown_count > 0:
             final_is_equiv = None
             self._debug_print("=" * 60)
             self._debug_print(f"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)")
-        elif coverage_unsafety_reasons or equivalence_blocking_reasons:
+        elif blocking_unknown_reasons:
+            final_is_equiv = None
+            unknown_reasons = blocking_unknown_reasons
+            blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
             self._debug_print("=" * 60)
-            coverage_unknown_reasons = self._unresolved_return_coverage_unknown_reasons(
-                coverage_unsafety_reasons,
-                analysis1,
-                analysis2,
-                stage="S_PAIRWISE",
+            self._debug_print(
+                "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
+                f"{', '.join(blocking_reasons)})"
             )
-            unresolved_equivalence_blocking_reasons = self._unresolved_equivalence_blocking_unknown_reasons(
-                equivalence_blocking_reasons,
-                analysis1,
-                analysis2,
-                stage="S_PAIRWISE",
-            )
-            if coverage_unknown_reasons or unresolved_equivalence_blocking_reasons:
-                final_is_equiv = None
-                unknown_reasons.extend(coverage_unknown_reasons)
-                unknown_reasons.extend(unresolved_equivalence_blocking_reasons)
-                blocking_reasons = coverage_unsafety_reasons + equivalence_blocking_reasons
-                self._debug_print(
-                    "Result: UNKNOWN (equivalence proof is blocked by incomplete analysis: "
-                    f"{', '.join(blocking_reasons)})"
-                )
-            else:
-                final_is_equiv = True
-                self._debug_print(
-                    "Result: EQUIVALENT (all pairs UNSAT; recovery proof complete)"
-                )
         elif unsat_count == total_pairs:
             final_is_equiv = True
             self._debug_print("=" * 60)
