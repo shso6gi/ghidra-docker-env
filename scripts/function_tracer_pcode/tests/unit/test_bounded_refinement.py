@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.model import (
     DeferredCallRef,
     DeferredCallInfo,
     Expression,
+    ExpressionType,
     LocationBaseRef,
     PcodeOpRef,
     ReturnInfo,
@@ -631,6 +632,113 @@ def test_bounded_call_refiner_rejects_ambiguous_same_target_key_drift_fallback()
     filtered = refiner._filter_deferred_calls_in_use(analysis)
 
     assert filtered == {}
+
+
+def test_bounded_call_refiner_preserves_original_deferred_return_when_expansion_guard_unresolved():
+    target = CallTargetRef.from_name("callee")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=target,
+        arguments=[_param()],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=1),
+    )
+    caller = create_mock_analysis(
+        "caller",
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_deferred_unknown(deferred),
+                conditions=[],
+            )
+        ],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    callee = create_mock_analysis(
+        "callee",
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_const(2),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x2000",
+                value=_const(1),
+                conditions=[Condition(Expression.unknown("phi_circular"))],
+            )
+        ],
+    )
+    refiner = BoundedCallRefiner(
+        lambda target_ref, args=None: callee if target_ref == target else None,
+        max_unroll=1,
+        debug=False,
+    )
+
+    changed = refiner.refine_analysis(caller)
+
+    assert changed is True
+    assert caller.deferred_calls == {deferred.deferred_call_ref.stable_key(): deferred}
+    assert "bounded_call_refinement_preserved_unresolved_deferred_call" in caller.analysis_notes
+    assert any(ret.value.expr_type == ExpressionType.UNKNOWN for ret in caller.returns)
+    assert any(ret.value.expr_type == ExpressionType.CONSTANT for ret in caller.returns)
+    assert all(
+        all(cond.expression.expr_type != ExpressionType.UNKNOWN for cond in ret.conditions)
+        for ret in caller.returns
+    )
+
+
+def test_bounded_call_refiner_prioritizes_unresolved_deferred_return_at_case_limit():
+    target = CallTargetRef.from_name("callee")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=target,
+        arguments=[_param()],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=1),
+    )
+    caller = create_mock_analysis(
+        "caller",
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=_deferred_unknown(deferred),
+                conditions=[],
+            )
+        ],
+    )
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+    callee = create_mock_analysis(
+        "callee",
+        returns=[
+            ReturnInfo(
+                address="0x2000",
+                value=_const(2),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x2004",
+                value=_const(3),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x2008",
+                value=_const(1),
+                conditions=[Condition(Expression.unknown("phi_circular"))],
+            ),
+        ],
+    )
+    refiner = BoundedCallRefiner(
+        lambda target_ref, args=None: callee if target_ref == target else None,
+        max_unroll=1,
+        max_cases=1,
+        debug=False,
+    )
+
+    refiner.refine_analysis(caller)
+
+    assert len(caller.returns) == 1
+    assert caller.returns[0].value.expr_type == ExpressionType.UNKNOWN
+    assert caller.deferred_calls == {deferred.deferred_call_ref.stable_key(): deferred}
+    assert "bounded_call_refinement_preserved_unresolved_deferred_call" in caller.analysis_notes
 
 
 def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():

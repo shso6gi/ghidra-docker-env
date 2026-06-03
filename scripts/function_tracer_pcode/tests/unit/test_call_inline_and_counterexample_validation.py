@@ -3661,6 +3661,52 @@ def test_return_analyzer_marks_deferred_call_return_without_unknown_event_incomp
     assert analysis.should_skip_monolithic_fallback() is True
 
 
+def test_return_analyzer_allows_deferred_call_unknown_as_safe_conservative_call_summary():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param_expr("param_1", 0)],
+        sequence=0,
+    )
+    value = Expression.unknown(
+        deferred.placeholder_name,
+        runtime_ref=deferred.unknown_ref,
+    )
+
+    assert analyzer._call_summary_is_safe(value, [], [_param_expr("param_1", 0)]) is True
+
+
+def test_return_analyzer_rejects_non_deferred_unknown_call_summary_value():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    value = Expression.unknown("phi_circular")
+
+    assert analyzer._call_summary_is_safe(value, [], [_param_expr("param_1", 0)]) is False
+
+
+def test_return_analyzer_rejects_deferred_call_summary_with_unknown_guard():
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_param_expr("param_1", 0)],
+        sequence=0,
+    )
+    value = Expression.unknown(
+        deferred.placeholder_name,
+        runtime_ref=deferred.unknown_ref,
+    )
+
+    assert (
+        analyzer._call_summary_is_safe(
+            value,
+            [Condition(Expression.unknown("phi_circular"))],
+            [_param_expr("param_1", 0)],
+        )
+        is False
+    )
+
+
 def test_return_analyzer_declines_higher_order_call_summary_without_safe_pcode_model():
     functions = [
         _FakeFunction("ptr_apply_callback", 0x402000),

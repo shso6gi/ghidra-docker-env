@@ -5660,7 +5660,10 @@ class ReturnAnalyzer:
         conditions: List[Condition],
         args: List[Expression],
     ) -> bool:
-        if self._expression_contains_unknown_or_call(value):
+        if (
+            self._expression_contains_unknown_or_call(value)
+            and not self._expression_unknowns_are_deferred_call_refs(value)
+        ):
             return False
         if not self._expression_references_only_allowed_objects(value, args):
             return False
@@ -5671,6 +5674,26 @@ class ReturnAnalyzer:
             if not self._expression_references_only_allowed_objects(cond.expression, args):
                 return False
 
+        return True
+
+    def _expression_unknowns_are_deferred_call_refs(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return True
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            return getattr(runtime_ref, "deferred_call_ref", None) is not None
+        if expr.expr_type == ExpressionType.CALL:
+            return False
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            for cond, value in expr.value:
+                if cond is not None and not self._expression_unknowns_are_deferred_call_refs(cond.expression):
+                    return False
+                if not self._expression_unknowns_are_deferred_call_refs(value):
+                    return False
+            return True
+        for operand in getattr(expr, "operands", []) or []:
+            if not self._expression_unknowns_are_deferred_call_refs(operand):
+                return False
         return True
 
     def _expression_contains_unknown_or_call(self, expr: Optional[Expression]) -> bool:
@@ -6058,7 +6081,10 @@ class ReturnAnalyzer:
         if expr_key in allowed_subtrees:
             return True
 
-        if self._expression_contains_unknown_or_call(expr):
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            return getattr(runtime_ref, "deferred_call_ref", None) is not None
+        if expr.expr_type == ExpressionType.CALL:
             return False
 
         if expr.expr_type in {ExpressionType.CONSTANT, ExpressionType.LITERAL}:

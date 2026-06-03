@@ -88,6 +88,36 @@ def _return_info_is_concrete_fallback(ret: Optional[ReturnInfo]) -> bool:
     return True
 
 
+def _expression_contains_deferred_call_ref(expr: Optional[Expression]) -> bool:
+    if expr is None:
+        return False
+    if expr.expr_type == ExpressionType.UNKNOWN:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        return getattr(runtime_ref, "deferred_call_ref", None) is not None
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        for cond, value in expr.value:
+            if cond is not None and _expression_contains_deferred_call_ref(cond.expression):
+                return True
+            if _expression_contains_deferred_call_ref(value):
+                return True
+        return False
+    for operand in getattr(expr, "operands", []) or []:
+        if _expression_contains_deferred_call_ref(operand):
+            return True
+    return False
+
+
+def _return_info_contains_deferred_call_ref(ret: Optional[ReturnInfo]) -> bool:
+    if ret is None:
+        return False
+    if _expression_contains_deferred_call_ref(getattr(ret, "value", None)):
+        return True
+    for condition in getattr(ret, "conditions", []) or []:
+        if condition is not None and _expression_contains_deferred_call_ref(condition.expression):
+            return True
+    return False
+
+
 class BoundedCallRefiner:
     """
     未解決 CALL プレースホルダを、有限回の inlining で保守的に展開する。
@@ -142,7 +172,34 @@ class BoundedCallRefiner:
         refined_returns: List[ReturnInfo] = []
 
         for ret in analysis.returns:
-            refined_returns.extend(self._expand_return_info(ret, analysis, self.max_unroll, set()))
+            expanded = self._expand_return_info(ret, analysis, self.max_unroll, set())
+            contains_deferred_call = _return_info_contains_deferred_call_ref(ret)
+            if contains_deferred_call:
+                concrete_expanded = [
+                    candidate
+                    for candidate in expanded
+                    if _return_info_is_concrete_fallback(candidate)
+                ]
+                has_unresolved_expansion = (
+                    len(concrete_expanded) != len(expanded)
+                    or len(expanded) >= self.max_cases
+                )
+                if has_unresolved_expansion:
+                    remaining_slots = max(0, self.max_cases - len(refined_returns))
+                    concrete_limit = max(0, remaining_slots - 1)
+                    refined_returns.extend(concrete_expanded[:concrete_limit])
+                else:
+                    refined_returns.extend(concrete_expanded)
+            else:
+                refined_returns.extend(expanded)
+                has_unresolved_expansion = False
+
+            if contains_deferred_call and has_unresolved_expansion:
+                refined_returns.append(ret)
+                self._record_note(
+                    analysis,
+                    "bounded_call_refinement_preserved_unresolved_deferred_call",
+                )
             if len(refined_returns) >= self.max_cases:
                 refined_returns = refined_returns[: self.max_cases]
                 break
