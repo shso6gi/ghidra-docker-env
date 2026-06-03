@@ -3,7 +3,7 @@
 
 from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
-from ..model import Expression, Condition, ExpressionType, PcodeOpRef
+from ..model import Expression, Condition, ExpressionType, PcodeOpRef, UnknownValueRef
 from ..model.intrinsics import resolve_pcode_intrinsic
 from .debug import summarize_expression
 from .condition import ConditionSimplifier, ConditionNormalizer
@@ -14,6 +14,18 @@ def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
     if ref is None:
         return ("pcode_op", None, None, None, None, None)
     return ref.stable_key()
+
+
+def _pcode_op_ref_from_tracer(tracer: Any, pcode_op: Any) -> Optional[PcodeOpRef]:
+    make_ref = getattr(tracer, "_make_pcode_op_ref", None)
+    if callable(make_ref):
+        try:
+            ref = make_ref(pcode_op)
+        except Exception:
+            ref = None
+        if ref is not None:
+            return ref
+    return PcodeOpRef.from_pcode_op(pcode_op)
 
 
 class ExpandedBranch:
@@ -177,7 +189,17 @@ class PhiHandler:
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular reference detected", depth)
-            return [ExpandedBranch(base_conditions, Expression.unknown("phi_circular"))]
+            return [
+                ExpandedBranch(
+                    base_conditions,
+                    Expression.unknown(
+                        "phi_circular",
+                        runtime_ref=UnknownValueRef.phi_circular(
+                            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, multiequal_op),
+                        ),
+                    ),
+                )
+            ]
         
         self._expanding_ops.add(op_key)
         

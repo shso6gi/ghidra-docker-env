@@ -47,6 +47,18 @@ def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
     return ref.stable_key()
 
 
+def _pcode_op_ref_from_tracer(tracer: Any, pcode_op: Any) -> Optional[PcodeOpRef]:
+    make_ref = getattr(tracer, "_make_pcode_op_ref", None)
+    if callable(make_ref):
+        try:
+            ref = make_ref(pcode_op)
+        except Exception:
+            ref = None
+        if ref is not None:
+            return ref
+    return PcodeOpRef.from_pcode_op(pcode_op)
+
+
 class ExpandedValue:
     """展開された値と条件のペア"""
     
@@ -412,7 +424,17 @@ class ExpressionExpander:
         
         if op_key in self._expanding_ops:
             self._debug_print(f"Circular MULTIEQUAL detected: {op_key}", depth)
-            return [ExpandedValue(Expression.unknown("phi_circular"), list(base_conditions))]
+            return [
+                ExpandedValue(
+                    Expression.unknown(
+                        "phi_circular",
+                        runtime_ref=UnknownValueRef.phi_circular(
+                            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, multiequal_op),
+                        ),
+                    ),
+                    list(base_conditions),
+                )
+            ]
         
         self._expanding_ops.add(op_key)
         

@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.model import (
     ReadonlyReductionWitness,
     ReturnInfo,
     StorageInfo,
+    UnknownValueRef,
     coerce_call_target_ref,
     compare_loop_summaries,
     loop_summary_method_b_key,
@@ -236,6 +237,40 @@ def test_pcode_op_ref_full_key_distinguishes_same_site_local_ordinals():
     )
 
     assert first.stable_key() != second.stable_key()
+
+
+def test_unknown_value_ref_phi_circular_keeps_pcode_origin():
+    pcode_ref = PcodeOpRef(
+        binary_id="B11",
+        function_entry_space="ram",
+        function_entry_offset=0x1000,
+        target_space="ram",
+        target_offset=0x1010,
+        seq_time=23,
+        seq_order=7,
+        opcode=27,
+        local_op_ordinal=1,
+        mnemonic="MULTIEQUAL",
+    )
+
+    ref = UnknownValueRef.phi_circular(pcode_op_ref=pcode_ref)
+
+    assert ref.stable_key() == (
+        "opaque_unknown",
+        "phi_circular",
+        None,
+        None,
+    )
+    assert ref.diagnostic_key() == (
+        "opaque_unknown",
+        "phi_circular",
+        None,
+        None,
+        "multiequal_pcode_op",
+        ("stable", pcode_ref.stable_key()),
+    )
+    assert ref.to_dict()["origin_kind"] == "multiequal_pcode_op"
+    assert ref.to_dict()["origin_ref"]["kind"] == "pcode_op"
 
 
 def test_pcode_op_ref_full_key_uses_seq_time_and_excludes_program_uid():

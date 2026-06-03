@@ -72,6 +72,8 @@ from ..semantic_width import (
 )
 from ..debug_trace import NormalizationRuleApplication
 from ..unknown_reason import (
+    UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
     UnknownReasonId,
     make_unknown_reason,
 )
@@ -481,6 +483,9 @@ class PairwiseStrategy(CheckStrategy):
                             stage="S_PAIRWISE",
                             pair_or_case=pair_id,
                             evidence_refs=(f"{pair_id}:case1", f"{pair_id}:case2"),
+                            recovery_proof_obligations=(
+                                self._unresolved_expression_recovery_proof_obligations(object_target_key)
+                            ),
                             evidence_kind="unresolved_expression_safety",
                             object_target_key=object_target_key,
                             detail="pairwise case contains solver-unresolved expression evidence",
@@ -1797,7 +1802,7 @@ class PairwiseStrategy(CheckStrategy):
         else:
             raw_kind = getattr(runtime_ref, "kind", None)
             kind = str(raw_kind or "opaque_unknown")
-        runtime_key = self._semantic_key_or_stable_key_or_none(runtime_ref)
+        runtime_key = self._diagnostic_key_or_semantic_key_or_stable_key_or_none(runtime_ref)
         if runtime_key is not None:
             ref_key = ("unknown_runtime_ref", runtime_key)
         else:
@@ -1848,6 +1853,69 @@ class PairwiseStrategy(CheckStrategy):
                 result.extend(self._unsupported_smt_op_keys(value))
         return tuple(result)
 
+    def _unresolved_expression_recovery_proof_obligations(
+        self,
+        object_target_key: Tuple[Any, ...],
+    ) -> Optional[Tuple[UnknownRecoveryProofObligation, ...]]:
+        if not self._object_target_contains_originated_phi_circular(object_target_key):
+            return None
+        return (
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                "phi_circular_guard_condition_lowering",
+                required_evidence=(
+                    "object_target_key",
+                    "multiequal_pcode_op_ref",
+                    "guard_condition_key",
+                    "typed_lowering_rule",
+                ),
+                description=(
+                    "Lower a PHI-circular guard only when its MULTIEQUAL origin "
+                    "and guard-condition provenance are preserved."
+                ),
+            ),
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.SOLVER_RETRY_OR_NORMALIZATION,
+                "recursive_summary_guard_equivalence",
+                required_evidence=(
+                    "left_phi_origin",
+                    "right_phi_origin",
+                    "guard_condition_pair",
+                    "summary_parameter_binding",
+                ),
+                description=(
+                    "Prove the recursive-summary guard relation before allowing "
+                    "the unresolved PHI-circular guard to affect equivalence."
+                ),
+            ),
+        )
+
+    @classmethod
+    def _object_target_contains_originated_phi_circular(cls, value: Any) -> bool:
+        if isinstance(value, tuple):
+            if cls._tuple_is_originated_phi_circular_runtime_ref(value):
+                return True
+            return any(cls._object_target_contains_originated_phi_circular(item) for item in value)
+        if isinstance(value, list):
+            return any(cls._object_target_contains_originated_phi_circular(item) for item in value)
+        if isinstance(value, dict):
+            return any(
+                cls._object_target_contains_originated_phi_circular(key)
+                or cls._object_target_contains_originated_phi_circular(item)
+                for key, item in value.items()
+            )
+        return False
+
+    @staticmethod
+    def _tuple_is_originated_phi_circular_runtime_ref(value: Tuple[Any, ...]) -> bool:
+        return (
+            len(value) >= 6
+            and value[0] == "opaque_unknown"
+            and value[1] == "phi_circular"
+            and value[4] == "multiequal_pcode_op"
+            and value[5] is not None
+        )
+
     def _method_b_closure_side_object_key(
         self,
         side_label: str,
@@ -1892,6 +1960,19 @@ class PairwiseStrategy(CheckStrategy):
     @staticmethod
     def _semantic_key_or_stable_key_or_none(value: Any):
         for name in ("pairwise_semantic_key", "semantic_key", "stable_key"):
+            key_fn = getattr(value, name, None)
+            if callable(key_fn):
+                try:
+                    key = key_fn()
+                except (AttributeError, TypeError, ValueError, RecursionError):
+                    key = None
+                if key is not None:
+                    return key
+        return None
+
+    @staticmethod
+    def _diagnostic_key_or_semantic_key_or_stable_key_or_none(value: Any):
+        for name in ("diagnostic_key", "pairwise_semantic_key", "semantic_key", "stable_key"):
             key_fn = getattr(value, name, None)
             if callable(key_fn):
                 try:

@@ -371,7 +371,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "required_completion_actions_sha256": (
-                    "276efcb7baf5ced5813bcd1f94a00504e02bd96532bfebea417166e4ca1a1062"
+                    "81a246c6b0db6a6732a0dc1d725b83459af08945dcf1161451087e0855af8f5a"
                 ),
             },
         ),

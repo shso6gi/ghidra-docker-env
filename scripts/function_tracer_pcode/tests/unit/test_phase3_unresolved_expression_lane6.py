@@ -19,8 +19,9 @@ from scripts.function_tracer_pcode.model import (
 )
 from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6 import (
     UNRESOLVED_EVIDENCE_KIND,
+    UNRESOLVED_GENERIC_PROOF_STAGES,
+    UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES,
     UNRESOLVED_PROOF_KIND,
-    UNRESOLVED_PROOF_STAGES,
     _extra_current_unresolved_expression_observations_from_records,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
@@ -56,6 +57,17 @@ def _pcode(binary_id: str, offset: int, mnemonic: str = "RETURN") -> PcodeOpRef:
         target_offset=offset,
         opcode=62,
         local_op_ordinal=0,
+    )
+
+
+def _phi_runtime_key(binary_id: str = "B12", offset: int = 0x2040):
+    return (
+        "opaque_unknown",
+        "phi_circular",
+        None,
+        None,
+        "multiequal_pcode_op",
+        ("stable", _pcode(binary_id, offset, mnemonic="MULTIEQUAL").stable_key()),
     )
 
 
@@ -111,6 +123,40 @@ def _unresolved_target():
         case2=right_case,
         pair_id="(0,1)",
     )
+
+
+def _originated_phi_target():
+    target = list(_unresolved_target())
+    right = list(target[3])
+    right[5] = (
+        "unresolved_locations",
+        (
+            (
+                "unresolved_location",
+                "guard_condition",
+                0,
+                False,
+                (
+                    "unresolved_classification",
+                    ("location_scope", "guard_condition"),
+                    ("unresolved_kinds", ("opaque_unknown",)),
+                    (
+                        "unknown_refs",
+                        (
+                            (
+                                "unknown_runtime_ref",
+                                _phi_runtime_key(),
+                            ),
+                        ),
+                    ),
+                    ("unsupported_ops", ()),
+                ),
+                ("return_guard", False, ("condition", ("const", ("int", 1), 1), False), ("expression", ("const", ("int", 1), 1))),
+            ),
+        ),
+    )
+    target[3] = tuple(right)
+    return tuple(target)
 
 
 def _nested_contains(value, needle) -> bool:
@@ -302,7 +348,7 @@ def test_unresolved_expression_target_accepts_nested_unknown_guard_expression():
                         (
                             (
                                 "unknown_runtime_ref",
-                                ("opaque_unknown", "phi_circular", None, None),
+                                _phi_runtime_key(),
                             ),
                         ),
                     ),
@@ -315,6 +361,41 @@ def test_unresolved_expression_target_accepts_nested_unknown_guard_expression():
     target[3] = tuple(right)
 
     assert _object_target_key_is_specific_unresolved_expression(tuple(target))
+
+
+def test_unresolved_expression_target_rejects_coarse_phi_circular_runtime_ref():
+    target = list(_unresolved_target())
+    right = list(target[3])
+    right[5] = (
+        "unresolved_locations",
+        (
+            (
+                "unresolved_location",
+                "guard_condition",
+                0,
+                False,
+                (
+                    "unresolved_classification",
+                    ("location_scope", "guard_condition"),
+                    ("unresolved_kinds", ("opaque_unknown",)),
+                    (
+                        "unknown_refs",
+                        (
+                            (
+                                "unknown_runtime_ref",
+                                ("opaque_unknown", "phi_circular", None, None),
+                            ),
+                        ),
+                    ),
+                    ("unsupported_ops", ()),
+                ),
+                ("return_guard", False, ("condition", ("const", ("int", 1), 1), False), ("expression", ("const", ("int", 1), 1))),
+            ),
+        ),
+    )
+    target[3] = tuple(right)
+
+    assert not _object_target_key_is_specific_unresolved_expression(tuple(target))
 
 
 def test_unresolved_expression_reason_tuple_stays_count_compatible():
@@ -356,17 +437,17 @@ def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actio
 
     assert status == "pending_proof"
     assert failures == ()
-    assert [action.proof_stage for action in actions] == list(UNRESOLVED_PROOF_STAGES)
+    assert [action.proof_stage for action in actions] == list(UNRESOLVED_GENERIC_PROOF_STAGES)
     assert all(action.proof_obligation_id for action in actions)
     obligations = _pending_proof_obligations(entry)
-    assert {obligation["proof_stage"] for obligation in obligations} == set(UNRESOLVED_PROOF_STAGES)
+    assert {obligation["proof_stage"] for obligation in obligations} == set(UNRESOLVED_GENERIC_PROOF_STAGES)
     assert all(obligation["reason_id"] == "unresolved_expression" for obligation in obligations)
     assert all(obligation["proof_kind"] == UNRESOLVED_PROOF_KIND for obligation in obligations)
     assert all(obligation["proof_obligation_id"] for obligation in obligations)
     assert all(obligation["completed_evidence_present"] is False for obligation in obligations)
     assert all(obligation["status"] == "pending_evidence" for obligation in obligations)
     required_actions = _required_completion_actions(entry)
-    assert {action["proof_stage"] for action in required_actions} == set(UNRESOLVED_PROOF_STAGES)
+    assert {action["proof_stage"] for action in required_actions} == set(UNRESOLVED_GENERIC_PROOF_STAGES)
     assert {
         repr(action["proof_obligation_id"])
         for action in required_actions
@@ -375,6 +456,23 @@ def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actio
         for obligation in obligations
     }
     assert all(action["required_evidence"] for action in required_actions)
+
+
+def test_unresolved_expression_phi_circular_target_uses_dedicated_proof_stages():
+    target = _originated_phi_target()
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    reason = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+        recovery_proof_obligations=strategy._unresolved_expression_recovery_proof_obligations(target),
+    )
+    actions = build_unknown_recovery_actions([reason])
+    assert [action.proof_stage for action in actions] == list(UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES)
+    assert all("guard" in " ".join(action.required_evidence) for action in actions)
+    assert all(action.proof_kind == UNRESOLVED_PROOF_KIND for action in actions)
 
 
 def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_without_actions():

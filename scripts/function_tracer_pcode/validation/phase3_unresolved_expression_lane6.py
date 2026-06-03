@@ -52,7 +52,15 @@ TARGET_REASON_IDS = ("unresolved_expression",)
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
 UNRESOLVED_EVIDENCE_KIND = "unresolved_expression_safety"
 UNRESOLVED_PROOF_KIND = "solver_retry_or_normalization"
-UNRESOLVED_PROOF_STAGES = ("typed_expression_lowering", "type_normalization")
+UNRESOLVED_GENERIC_PROOF_STAGES = (
+    "typed_expression_lowering",
+    "type_normalization",
+)
+UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES = (
+    "phi_circular_guard_condition_lowering",
+    "recursive_summary_guard_equivalence",
+)
+UNRESOLVED_PROOF_STAGES = UNRESOLVED_GENERIC_PROOF_STAGES + UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
 UNRESOLVED_REASON_TUPLE = (
     UnknownCountKind.REASON_RECORD.value,
     "unresolved_expression",
@@ -631,8 +639,38 @@ def _unresolved_expression_proof_actions_complete(
         if target_key not in stages_by_target:
             continue
         stages_by_target[target_key].add(str(stage))
-    required = set(UNRESOLVED_PROOF_STAGES)
-    return all(stages == required for stages in stages_by_target.values())
+    return all(
+        stages == set(_required_unresolved_proof_stages_for_target(target))
+        for target in current_targets
+        for target_key, stages in ((_canonical_json(target), stages_by_target[_canonical_json(target)]),)
+    )
+
+
+def _required_unresolved_proof_stages_for_target(target: Any) -> Tuple[str, ...]:
+    if _target_contains_originated_phi_circular(target):
+        return UNRESOLVED_PHI_CIRCULAR_PROOF_STAGES
+    return UNRESOLVED_GENERIC_PROOF_STAGES
+
+
+def _target_contains_originated_phi_circular(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if isinstance(normalized, tuple):
+        if (
+            len(normalized) >= 6
+            and normalized[0] == "opaque_unknown"
+            and normalized[1] == "phi_circular"
+            and normalized[4] == "multiequal_pcode_op"
+            and normalized[5] is not None
+        ):
+            return True
+        return any(_target_contains_originated_phi_circular(item) for item in normalized)
+    if isinstance(normalized, dict):
+        return any(
+            _target_contains_originated_phi_circular(key)
+            or _target_contains_originated_phi_circular(item)
+            for key, item in normalized.items()
+        )
+    return False
 
 
 def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
@@ -982,6 +1020,29 @@ def _unresolved_unknown_refs_are_specific(value: Any) -> bool:
             or not _nested_has_specific_leaf(normalized[1])
         ):
             return False
+        if normalized[0] == "unknown_runtime_ref" and not _unknown_runtime_ref_is_specific(normalized[1]):
+            return False
+    return True
+
+
+def _unknown_runtime_ref_is_specific(value: Any) -> bool:
+    runtime_key = _normalize_nested_tuple(value)
+    if not isinstance(runtime_key, tuple) or not runtime_key:
+        return False
+    if (
+        len(runtime_key) >= 2
+        and runtime_key[0] == "opaque_unknown"
+        and runtime_key[1] == "phi_circular"
+    ):
+        if len(runtime_key) < 6:
+            return False
+        origin_kind = runtime_key[4]
+        origin_ref = runtime_key[5]
+        return (
+            origin_kind == "multiequal_pcode_op"
+            and _nested_has_specific_leaf(origin_ref)
+            and not _nested_contains_missing_sentinel(origin_ref)
+        )
     return True
 
 

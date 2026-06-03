@@ -3822,6 +3822,20 @@ class StateTransitionLoopSummaryRef:
         }
 
 
+def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
+    if value is None:
+        return None
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            key = stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            key = None
+        if key is not None:
+            return ("stable", key)
+    return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
+
+
 @dataclass(frozen=True)
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
@@ -3830,6 +3844,8 @@ class UnknownValueRef:
     reason: Optional[str] = None
     target_ref: Optional[CallTargetRef] = None
     deferred_call_ref: Optional[DeferredCallRef] = None
+    origin_kind: Optional[str] = None
+    origin_ref: Optional[Any] = None
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -3900,12 +3916,30 @@ class UnknownValueRef:
         *,
         reason: Optional[str] = None,
         display_hint: Optional[str] = None,
+        origin_kind: Optional[str] = None,
+        origin_ref: Optional[Any] = None,
     ) -> "UnknownValueRef":
         normalized_reason = reason or "unknown"
         return cls(
             kind="opaque_unknown",
             reason=normalized_reason,
+            origin_kind=origin_kind,
+            origin_ref=origin_ref,
             display_hint=display_hint or normalized_reason,
+        )
+
+    @classmethod
+    def phi_circular(
+        cls,
+        *,
+        pcode_op_ref: Optional[Any] = None,
+        display_hint: str = "phi_circular",
+    ) -> "UnknownValueRef":
+        return cls.opaque(
+            reason="phi_circular",
+            display_hint=display_hint,
+            origin_kind="multiequal_pcode_op",
+            origin_ref=pcode_op_ref,
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
@@ -3915,6 +3949,15 @@ class UnknownValueRef:
             self.reason,
             target_key,
             self.deferred_call_ref.stable_key() if self.deferred_call_ref is not None else None,
+        )
+
+    def diagnostic_key(self) -> Tuple[Any, ...]:
+        key = self.stable_key()
+        if self.origin_kind is None and self.origin_ref is None:
+            return key
+        return key + (
+            self.origin_kind,
+            _runtime_ref_stable_key_or_repr(self.origin_ref),
         )
 
     def display_name(self) -> str:
@@ -3937,4 +3980,12 @@ class UnknownValueRef:
             result["deferred_call_ref"] = self.deferred_call_ref.to_dict()
         if self.target_ref is not None:
             result["target_ref"] = self.target_ref.to_dict()
+        if self.origin_kind is not None:
+            result["origin_kind"] = self.origin_kind
+        if self.origin_ref is not None:
+            to_dict = getattr(self.origin_ref, "to_dict", None)
+            if callable(to_dict):
+                result["origin_ref"] = to_dict()
+            else:
+                result["origin_ref"] = _runtime_ref_stable_key_or_repr(self.origin_ref)
         return result

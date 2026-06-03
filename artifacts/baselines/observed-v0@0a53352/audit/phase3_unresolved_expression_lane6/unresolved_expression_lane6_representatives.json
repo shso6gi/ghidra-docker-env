@@ -9,7 +9,7 @@
     "path": "artifacts/baselines/observed-v0@0a53352/raw/artifact_manifest.json",
     "sha256": "963aed25d96b8f608073a077654c530bcac10562cbcc55dbeab8dd0a4ef6b557"
   },
-  "created_at": "2026-06-03T13:52:33.271876+00:00",
+  "created_at": "2026-06-03T14:45:37.515353+00:00",
   "current_log_roots": {
     "function_call": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives"
   },
@@ -217,7 +217,7 @@
       "current_observation": {
         "final_result": "UNKNOWN",
         "log_path": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives/fc_is_even/fc_is_even_B11_B12.log",
-        "log_sha256": "6ad1cbd316a8744f41532dfd0de61b73bdf47f574aa338d2871778d2e0fe0ef4",
+        "log_sha256": "339e19d67629eef98692c175fa0fb2ada735d892ba445963e2a08579f8e0293c",
         "log_status": "present",
         "observed_binary1_name": "function_call_test-mips64-clang-O2",
         "observed_binary2_name": "function_call_test-mips64-clang-O3",
@@ -233,7 +233,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Lower the object-derived unresolved expression into a typed SMT term without erasing provenance.",
+            "detail": "Lower a PHI-circular guard only when its MULTIEQUAL origin and guard-condition provenance are preserved.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(0,0):case1",
@@ -533,7 +533,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -954,7 +976,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -1092,7 +1136,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "typed_expression_lowering",
+              "phi_circular_guard_condition_lowering",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -1389,7 +1433,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -1810,7 +1876,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -1945,14 +2033,15 @@
                 ]
               ]
             ],
-            "proof_stage": "typed_expression_lowering",
+            "proof_stage": "phi_circular_guard_condition_lowering",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
               "object_target_key",
-              "typed_expression_key",
-              "lowering_rule"
+              "multiequal_pcode_op_ref",
+              "guard_condition_key",
+              "typed_lowering_rule"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -1962,7 +2051,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Normalize operand widths and signedness before retrying the affected query.",
+            "detail": "Prove the recursive-summary guard relation before allowing the unresolved PHI-circular guard to affect equivalence.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(0,0):case1",
@@ -2262,7 +2351,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -2683,7 +2794,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -2821,7 +2954,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "type_normalization",
+              "recursive_summary_guard_equivalence",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -3118,7 +3251,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -3539,7 +3694,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -3674,14 +3851,15 @@
                 ]
               ]
             ],
-            "proof_stage": "type_normalization",
+            "proof_stage": "recursive_summary_guard_equivalence",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
-              "operand_widths",
-              "signedness_policy",
-              "normalized_expression"
+              "left_phi_origin",
+              "right_phi_origin",
+              "guard_condition_pair",
+              "summary_parameter_binding"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -3691,7 +3869,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Lower the object-derived unresolved expression into a typed SMT term without erasing provenance.",
+            "detail": "Lower a PHI-circular guard only when its MULTIEQUAL origin and guard-condition provenance are preserved.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(1,1):case1",
@@ -3896,7 +4074,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -4286,7 +4486,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -4488,7 +4710,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "typed_expression_lowering",
+              "phi_circular_guard_condition_lowering",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -4690,7 +4912,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -5080,7 +5324,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -5279,14 +5545,15 @@
                 ]
               ]
             ],
-            "proof_stage": "typed_expression_lowering",
+            "proof_stage": "phi_circular_guard_condition_lowering",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
               "object_target_key",
-              "typed_expression_key",
-              "lowering_rule"
+              "multiequal_pcode_op_ref",
+              "guard_condition_key",
+              "typed_lowering_rule"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -5296,7 +5563,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Normalize operand widths and signedness before retrying the affected query.",
+            "detail": "Prove the recursive-summary guard relation before allowing the unresolved PHI-circular guard to affect equivalence.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(1,1):case1",
@@ -5501,7 +5768,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -5891,7 +6180,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -6093,7 +6404,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "type_normalization",
+              "recursive_summary_guard_equivalence",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -6295,7 +6606,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -6685,7 +7018,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -6884,14 +7239,15 @@
                 ]
               ]
             ],
-            "proof_stage": "type_normalization",
+            "proof_stage": "recursive_summary_guard_equivalence",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
-              "operand_widths",
-              "signedness_policy",
-              "normalized_expression"
+              "left_phi_origin",
+              "right_phi_origin",
+              "guard_condition_pair",
+              "summary_parameter_binding"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -6901,7 +7257,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Lower the object-derived unresolved expression into a typed SMT term without erasing provenance.",
+            "detail": "Lower a PHI-circular guard only when its MULTIEQUAL origin and guard-condition provenance are preserved.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(3,3):case1",
@@ -7082,7 +7438,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -7302,7 +7680,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -7758,7 +8158,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -7978,7 +8400,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -8270,7 +8714,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "typed_expression_lowering",
+              "phi_circular_guard_condition_lowering",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -8448,7 +8892,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -8668,7 +9134,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -9124,7 +9612,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -9344,7 +9854,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -9633,14 +10165,15 @@
                 ]
               ]
             ],
-            "proof_stage": "typed_expression_lowering",
+            "proof_stage": "phi_circular_guard_condition_lowering",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
               "object_target_key",
-              "typed_expression_key",
-              "lowering_rule"
+              "multiequal_pcode_op_ref",
+              "guard_condition_key",
+              "typed_lowering_rule"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -9650,7 +10183,7 @@
             "aggregation_unit": "pair",
             "count_kind": "proof_action",
             "decision_effect": "blocks_decision",
-            "detail": "Normalize operand widths and signedness before retrying the affected query.",
+            "detail": "Prove the recursive-summary guard relation before allowing the unresolved PHI-circular guard to affect equivalence.",
             "evidence_kind": "unresolved_expression_safety",
             "evidence_refs": [
               "(3,3):case1",
@@ -9831,7 +10364,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -10051,7 +10606,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -10507,7 +11084,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -10727,7 +11326,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -11019,7 +11640,7 @@
             "proof_kind": "solver_retry_or_normalization",
             "proof_obligation_id": [
               "unresolved_expression",
-              "type_normalization",
+              "recursive_summary_guard_equivalence",
               "solver_retry_or_normalization",
               "unresolved_expression_safety",
               [
@@ -11197,7 +11818,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -11417,7 +12060,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B11",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -11873,7 +12538,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -12093,7 +12780,29 @@
                                   "opaque_unknown",
                                   "phi_circular",
                                   null,
-                                  null
+                                  null,
+                                  "multiequal_pcode_op",
+                                  [
+                                    "stable",
+                                    [
+                                      "pcode_op",
+                                      "B12",
+                                      [
+                                        "function_entry",
+                                        "ram",
+                                        1052320
+                                      ],
+                                      [
+                                        "seq_target",
+                                        "ram",
+                                        1052348
+                                      ],
+                                      98,
+                                      0,
+                                      60,
+                                      0
+                                    ]
+                                  ]
                                 ]
                               ]
                             ]
@@ -12382,14 +13091,15 @@
                 ]
               ]
             ],
-            "proof_stage": "type_normalization",
+            "proof_stage": "recursive_summary_guard_equivalence",
             "reason_id": "unresolved_expression",
             "reason_scope": "expression",
             "recovery_action": null,
             "required_evidence": [
-              "operand_widths",
-              "signedness_policy",
-              "normalized_expression"
+              "left_phi_origin",
+              "right_phi_origin",
+              "guard_condition_pair",
+              "summary_parameter_binding"
             ],
             "stage": "S_PAIRWISE",
             "status": "planned",
@@ -12730,7 +13440,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -13151,7 +13883,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -13511,7 +14265,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -13901,7 +14677,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -14301,7 +15099,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -14521,7 +15341,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B11",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -14977,7 +15819,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -15197,7 +16061,29 @@
                                 "opaque_unknown",
                                 "phi_circular",
                                 null,
-                                null
+                                null,
+                                "multiequal_pcode_op",
+                                [
+                                  "stable",
+                                  [
+                                    "pcode_op",
+                                    "B12",
+                                    [
+                                      "function_entry",
+                                      "ram",
+                                      1052320
+                                    ],
+                                    [
+                                      "seq_target",
+                                      "ram",
+                                      1052348
+                                    ],
+                                    98,
+                                    0,
+                                    60,
+                                    0
+                                  ]
+                                ]
                               ]
                             ]
                           ]
@@ -15831,7 +16717,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B11",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -16252,7 +17160,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B12",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -16585,7 +17515,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B11",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -16975,7 +17927,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B12",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -17348,7 +18322,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B11",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -17568,7 +18564,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B11",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -18024,7 +19042,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B12",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -18244,7 +19284,29 @@
                             "opaque_unknown",
                             "phi_circular",
                             null,
-                            null
+                            null,
+                            "multiequal_pcode_op",
+                            [
+                              "stable",
+                              [
+                                "pcode_op",
+                                "B12",
+                                [
+                                  "function_entry",
+                                  "ram",
+                                  1052320
+                                ],
+                                [
+                                  "seq_target",
+                                  "ram",
+                                  1052348
+                                ],
+                                98,
+                                0,
+                                60,
+                                0
+                              ]
+                            ]
                           ]
                         ]
                       ]
@@ -18857,7 +19919,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B11",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -19278,7 +20362,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B12",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -19611,7 +20717,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B11",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -20001,7 +21129,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B12",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -20374,7 +21524,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B11",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -20594,7 +21766,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B11",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -21050,7 +22244,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B12",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
@@ -21270,7 +22486,29 @@
                           "opaque_unknown",
                           "phi_circular",
                           null,
-                          null
+                          null,
+                          "multiequal_pcode_op",
+                          [
+                            "stable",
+                            [
+                              "pcode_op",
+                              "B12",
+                              [
+                                "function_entry",
+                                "ram",
+                                1052320
+                              ],
+                              [
+                                "seq_target",
+                                "ram",
+                                1052348
+                              ],
+                              98,
+                              0,
+                              60,
+                              0
+                            ]
+                          ]
                         ]
                       ]
                     ]
