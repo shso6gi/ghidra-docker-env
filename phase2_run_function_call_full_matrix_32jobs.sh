@@ -125,6 +125,7 @@ if [[ "$PHASE2_RUN_EXPECTED_MOVEMENT_GATE" == "1" ]]; then
             --phase1-dir "$PHASE1_DIR"
             --output-dir "$PHASE2_GATE_OUTPUT_DIR"
             --current-log-root "function_call=$OUTPUT_BASE_DIR"
+            --baseline-match-scope "${PHASE2_GATE_BASELINE_MATCH_SCOPE:-all}"
         )
         if [[ -n "${PHASE2_GATE_BASELINE_DIR:-}" ]]; then
             PHASE2_GATE_ARGS+=(--baseline-log-root "function_call=$PHASE2_GATE_BASELINE_DIR")

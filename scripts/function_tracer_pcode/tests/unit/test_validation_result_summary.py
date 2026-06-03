@@ -978,6 +978,7 @@ def test_phase2_full_function_call_wrapper_defaults_to_safe_full_run():
     assert "Skipping Phase 2 gate:" in script
     assert "phase2_equivalence_blocking_unsafety" in script
     assert "--baseline-log-root" in script
+    assert '--baseline-match-scope "${PHASE2_GATE_BASELINE_MATCH_SCOPE:-all}"' in script
     assert "files_to_copy_for_codex.txt" in script
 
 
@@ -1058,6 +1059,27 @@ def test_phase2_reduced_pre_producer_matrix_pins_failure_contributor_functions()
     assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
     assert "phase2_function_call_reduced_matrix_pre_producer" in script
+    assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
+
+
+def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
+    script = Path("phase2_run_function_call_pre_producer_gate_reduced_matrix.sh").read_text()
+
+    assert "function_call_test_phase2_gate_reduced_pre_producer" in script
+    assert (
+        'FUNCTION_CALL_TARGET_SET="${FUNCTION_CALL_TARGET_SET:-'
+        'fc_apply_indirect,fc_dispatch_indirect,fc_recursive_sum,fc_is_even,fc_is_odd}"'
+    ) in script
+    assert (
+        'fc_apply_indirect:B10_B11,fc_dispatch_indirect:B10_B11,'
+        'fc_recursive_sum:B10_B14,fc_apply_indirect:B1_B2,'
+        'fc_apply_indirect:B1_B14,fc_is_even:B1_B10,fc_is_odd:B1_B10'
+    ) in script
+    assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
+    assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-1}"' in script
+    assert 'PHASE2_GATE_BASELINE_MATCH_SCOPE="${PHASE2_GATE_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
+    assert "phase2_function_call_full_matrix_pre_producer" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 
 

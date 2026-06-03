@@ -993,6 +993,108 @@ def test_phase2_accepts_inconclusive_removal_when_gap_remains_for_same_pair(tmp_
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
+def test_phase2_accepts_return_width_bridge_reclassification_to_equivalence_blocker(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_apply_indirect",
+        "B1",
+        "B2",
+        _payload(
+            "fc_apply_indirect",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_apply_indirect",
+        "B1",
+        "B2",
+        _payload(
+            "fc_apply_indirect",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [_pending_reason()],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is True
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is True
+    assert manifest["overall_baseline_comparison_gate"]["unexpected_deltas"] == {
+        "final_result_counts_delta": {},
+        "pair_result_multiset_delta": {},
+        "proof_action_multiset_delta": {},
+        "reason_record_multiset_delta": {},
+        "timeout_class_multiset_delta": {},
+        "validation_unknown_unit_multiset_delta": {},
+    }
+    validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_after_pairs_scope_supports_reduced_gate_validation(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_extra",
+        "B1",
+        "B2",
+        _payload(
+            "fc_extra",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION)],
+        ),
+    )
+
+    all_scope_path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir / "all",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    all_scope_manifest = json.loads(all_scope_path.read_text())
+    assert all_scope_manifest["overall_baseline_comparison_gate"]["passed"] is False
+    assert "total_result_count_delta" in all_scope_manifest["movement_summary"]["failed_kinds"]
+
+    after_pairs_path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir / "after_pairs",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        baseline_match_scope="after-pairs",
+    )
+    after_pairs_manifest = json.loads(after_pairs_path.read_text())
+    assert after_pairs_manifest["phase2_ready"] is True
+    assert after_pairs_manifest["overall_baseline_comparison_gate"]["passed"] is True
+    assert after_pairs_manifest["overall_baseline_comparison_gate"]["baseline_match_scope"] == "after-pairs"
+    validate_phase2_equivalence_blocking_unsafety_movement(after_pairs_manifest)
+
+
 def test_phase2_rejects_solver_rewrite_proof_failure_to_unrelated_reason(tmp_path):
     phase1_dir = tmp_path / "phase1"
     baseline_root = tmp_path / "baseline" / "function_call"
@@ -1314,7 +1416,7 @@ def test_phase2_rejects_non_target_baseline_tuple_delta(tmp_path):
             "B1",
             "B2",
             None,
-            [make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)],
+            [make_unknown_reason(UnknownReasonId.READONLY_IDENTITY_MISSING)],
         ),
     )
     _write_log(

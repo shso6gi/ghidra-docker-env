@@ -199,6 +199,14 @@ ALLOWED_EXPOSED_REASON_TUPLES = {
         MISSING_SENTINEL,
     ),
     (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        MISSING_SENTINEL,
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    ),
+    (
         "return_width_bridge_missing",
         "blocks_equivalence",
         "query",
@@ -222,8 +230,24 @@ ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
         "blocks_equivalence",
         "function",
         "return_coverage_completion",
+        "return_guard_coverage",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
+    ),
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
         "return_partition_extraction",
         "planned",
+    ),
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        "return_partition_extraction",
+        UnknownRecoveryActionStatus.PENDING_PROOF.value,
     ),
     (
         "return_width_bridge_missing",
@@ -251,9 +275,91 @@ ALLOWED_PAIR_EXPOSED_REASONS = {
 }
 ALLOWED_PAIR_REMOVED_REASONS = {
     "return_coverage_inconclusive",
+    "return_width_bridge_missing",
+    "sat_unsafety",
     "solver_proven_rewrite_proof_failed",
     "unresolved_expression",
 }
+RETURN_COVERAGE_GAP_LEGACY_REASON_TUPLE = (
+    "return_coverage_gap",
+    "blocks_equivalence",
+    "function",
+    "return_coverage_completion",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
+RETURN_COVERAGE_GAP_LEGACY_PROOF_ACTION_TUPLES = {
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        "return_guard_coverage",
+        "planned",
+    ),
+    (
+        "return_coverage_gap",
+        "blocks_equivalence",
+        "function",
+        "return_coverage_completion",
+        "return_partition_extraction",
+        "planned",
+    ),
+}
+RETURN_WIDTH_BRIDGE_MISSING_REASON_TUPLE = (
+    "return_width_bridge_missing",
+    "blocks_equivalence",
+    "query",
+    "abi_relation_high_bit_proof",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
+RETURN_WIDTH_BRIDGE_MISSING_PROOF_ACTION_TUPLES = {
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "abi_relation_proof",
+        "abi_relation",
+        "planned",
+    ),
+    (
+        "return_width_bridge_missing",
+        "blocks_equivalence",
+        "query",
+        "high_bit_proof",
+        "high_bit_relation",
+        "planned",
+    ),
+}
+SAT_UNSAFETY_LEGACY_REASON_TUPLE = (
+    "sat_unsafety",
+    "blocks_disequivalence",
+    "pair",
+    "none",
+    MISSING_SENTINEL,
+    MISSING_SENTINEL,
+)
+ALLOWED_METADATA_ENRICHMENT_REASON_TUPLES = {
+    RETURN_COVERAGE_GAP_LEGACY_REASON_TUPLE,
+    SAT_UNSAFETY_LEGACY_REASON_TUPLE,
+}
+ALLOWED_METADATA_ENRICHMENT_PROOF_ACTION_TUPLES = (
+    RETURN_COVERAGE_GAP_LEGACY_PROOF_ACTION_TUPLES
+    | {SAT_UNSAFETY_PROOF_ACTION_TUPLE}
+)
+ALLOWED_BROAD_REMOVED_REASON_TUPLES = {
+    RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
+    RETURN_WIDTH_BRIDGE_MISSING_REASON_TUPLE,
+    SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE,
+    UNRESOLVED_EXPRESSION_REASON_TUPLE,
+}
+ALLOWED_BROAD_REMOVED_PROOF_ACTION_TUPLES = (
+    RETURN_WIDTH_BRIDGE_MISSING_PROOF_ACTION_TUPLES
+    | SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES
+    | UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES
+    | {RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE}
+)
 
 
 def build_phase2_equivalence_blocking_unsafety_movement(
@@ -262,6 +368,7 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     output_dir: Path,
     current_log_roots: Mapping[str, Path],
     baseline_log_roots: Optional[Mapping[str, Path]] = None,
+    baseline_match_scope: str = "all",
 ) -> Path:
     phase1 = Path(phase1_dir).resolve()
     output = Path(output_dir)
@@ -277,6 +384,7 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     baseline_gate = _validate_overall_baseline_comparison(
         baseline_log_roots or {},
         current_log_roots,
+        baseline_match_scope=baseline_match_scope,
     )
     summary = _movement_summary(entries, baseline_gate, producer_gate)
     manifest = {
@@ -573,6 +681,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="CATEGORY=PATH",
         help="observed-v0 baseline log root for a category; may be repeated",
     )
+    parser.add_argument(
+        "--baseline-match-scope",
+        choices=("all", "after-pairs"),
+        default="all",
+        help="Compare all baseline pairs or only identities present in current logs.",
+    )
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
     path = build_phase2_equivalence_blocking_unsafety_movement(
@@ -580,6 +694,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_dir=Path(args.output_dir),
         current_log_roots=_parse_current_log_roots(args.current_log_root or ()),
         baseline_log_roots=_parse_current_log_roots(args.baseline_log_root or ()),
+        baseline_match_scope=str(args.baseline_match_scope),
     )
     print(path)
     if args.require_ready:
@@ -972,6 +1087,8 @@ def _read_run_manifest_values(path: Path) -> Dict[str, str]:
 def _validate_overall_baseline_comparison(
     baseline_log_roots: Mapping[str, Path],
     current_log_roots: Mapping[str, Path],
+    *,
+    baseline_match_scope: str = "all",
 ) -> Dict[str, Any]:
     if not baseline_log_roots:
         return {
@@ -981,12 +1098,27 @@ def _validate_overall_baseline_comparison(
         }
     before_records = aggregate_validation_logs(_log_paths_from_roots(baseline_log_roots)).records
     after_records = aggregate_validation_logs(_log_paths_from_roots(current_log_roots)).records
+    if baseline_match_scope == "after-pairs":
+        after_identities = set(_records_by_pair_identity(after_records))
+        before_records = [
+            record
+            for record in before_records
+            if _record_pair_result_bucket(record)[:2] in after_identities
+        ]
+    elif baseline_match_scope != "all":
+        return {
+            "passed": False,
+            "failed_kinds": ["baseline_match_scope_invalid"],
+            "status": "failed",
+            "baseline_match_scope": baseline_match_scope,
+        }
     comparison = compare_validation_baseline_records(before_records, after_records)
     failed_kinds = _baseline_comparison_failures(comparison, before_records, after_records)
     return {
         "passed": not failed_kinds,
         "status": "passed" if not failed_kinds else "failed",
         "failed_kinds": failed_kinds,
+        "baseline_match_scope": baseline_match_scope,
         "before_total_results": comparison.before_total_results,
         "after_total_results": comparison.after_total_results,
         "unknown_final_results_delta": comparison.unknown_final_results_delta,
@@ -1224,12 +1356,10 @@ def _allowed_phase2_tuple_delta(
         if reason_tuple == ALLOWED_OLD_REASON_TUPLE:
             return value < 0
         if allow_reason_reclassification:
-            if reason_tuple == UNRESOLVED_EXPRESSION_REASON_TUPLE:
+            if reason_tuple in ALLOWED_BROAD_REMOVED_REASON_TUPLES:
                 return value < 0
-            if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE:
-                return value < 0
-            if reason_tuple == SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE:
-                return value < 0
+            if reason_tuple in ALLOWED_METADATA_ENRICHMENT_REASON_TUPLES and value < 0:
+                return True
             if reason_tuple in ALLOWED_EXPOSED_REASON_TUPLES:
                 return (
                     value > 0
@@ -1244,12 +1374,10 @@ def _allowed_phase2_tuple_delta(
         if reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0:
             return True
         if allow_reason_reclassification:
-            if reason_tuple in UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES:
+            if reason_tuple in ALLOWED_BROAD_REMOVED_PROOF_ACTION_TUPLES:
                 return value < 0
-            if reason_tuple == RETURN_COVERAGE_INCONCLUSIVE_PROOF_ACTION_TUPLE:
-                return value < 0
-            if reason_tuple in SOLVER_PROVEN_REWRITE_PROOF_ACTION_TUPLES:
-                return value < 0
+            if reason_tuple in ALLOWED_METADATA_ENRICHMENT_PROOF_ACTION_TUPLES and value < 0:
+                return True
             if reason_tuple in ALLOWED_EXPOSED_PROOF_ACTION_TUPLES:
                 return (
                     value > 0
@@ -1285,11 +1413,6 @@ def _allows_reason_reclassification(
 
 
 def _has_allowed_broad_reason_reduction(comparison: ValidationBaselineComparison) -> bool:
-    broad_tuples = {
-        SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE,
-        UNRESOLVED_EXPRESSION_REASON_TUPLE,
-        RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
-    }
     for deltas in (
         comparison.validation_unknown_unit_multiset_delta,
         comparison.reason_record_multiset_delta,
@@ -1298,7 +1421,10 @@ def _has_allowed_broad_reason_reduction(comparison: ValidationBaselineComparison
             if (
                 isinstance(key, tuple)
                 and len(key) == 7
-                and key[1:] in broad_tuples
+                and (
+                    key[1:] in ALLOWED_BROAD_REMOVED_REASON_TUPLES
+                    or key[1:] in ALLOWED_METADATA_ENRICHMENT_REASON_TUPLES
+                )
                 and value < 0
             ):
                 return True
@@ -1376,6 +1502,10 @@ def _allowed_pair_reason_reclassification(
         return True
     if "unresolved_expression" in removed:
         return bool(after_reasons)
+    if "return_width_bridge_missing" in removed:
+        return bool(after_reasons)
+    if "sat_unsafety" in removed:
+        return bool(after_reasons & {TARGET_REASON_ID, "return_coverage_gap"})
     if removed == {"solver_proven_rewrite_proof_failed"}:
         return added == {"sat_unsafety"}
     if removed == {"return_coverage_inconclusive"}:
@@ -1471,10 +1601,10 @@ def _has_allowed_broad_tuple_reduction(
     deltas: Mapping[Tuple[str, ...], int],
 ) -> bool:
     return any(
-        reason_tuple in {
-            RETURN_COVERAGE_INCONCLUSIVE_REASON_TUPLE,
-            UNRESOLVED_EXPRESSION_REASON_TUPLE,
-        }
+        (
+            reason_tuple in ALLOWED_BROAD_REMOVED_REASON_TUPLES
+            or reason_tuple in ALLOWED_METADATA_ENRICHMENT_REASON_TUPLES
+        )
         and value < 0
         for reason_tuple, value in deltas.items()
     )
