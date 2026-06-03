@@ -9,9 +9,9 @@
     "path": "artifacts/baselines/observed-v0@0a53352/raw/artifact_manifest.json",
     "sha256": "963aed25d96b8f608073a077654c530bcac10562cbcc55dbeab8dd0a4ef6b557"
   },
-  "created_at": "2026-06-03T13:19:29.119935+00:00",
+  "created_at": "2026-06-03T13:52:33.271876+00:00",
   "current_log_roots": {
-    "function_call": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_codex_two_pair"
+    "function_call": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives"
   },
   "entries": [
     {
@@ -216,8 +216,8 @@
       "category": "function_call",
       "current_observation": {
         "final_result": "UNKNOWN",
-        "log_path": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_codex_two_pair/fc_is_even/fc_is_even_B11_B12.log",
-        "log_sha256": "edf130a6d823feb1332893551604cee175de99ad15132e9fe78eea4296c27c2e",
+        "log_path": "logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives/fc_is_even/fc_is_even_B11_B12.log",
+        "log_sha256": "6ad1cbd316a8744f41532dfd0de61b73bdf47f574aa338d2871778d2e0fe0ef4",
         "log_status": "present",
         "observed_binary1_name": "function_call_test-mips64-clang-O2",
         "observed_binary2_name": "function_call_test-mips64-clang-O3",
@@ -513,6 +513,37 @@
                       0,
                       false,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         false,
                         [
@@ -902,6 +933,37 @@
                       "guard_condition",
                       0,
                       false,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         false,
@@ -1307,6 +1369,37 @@
                         0,
                         false,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           false,
                           [
@@ -1696,6 +1789,37 @@
                         "guard_condition",
                         0,
                         false,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           false,
@@ -2118,6 +2242,37 @@
                       0,
                       false,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         false,
                         [
@@ -2507,6 +2662,37 @@
                       "guard_condition",
                       0,
                       false,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         false,
@@ -2912,6 +3098,37 @@
                         0,
                         false,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           false,
                           [
@@ -3302,6 +3519,37 @@
                         0,
                         false,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           false,
                           [
@@ -3627,6 +3875,37 @@
                       "guard_condition",
                       1,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -3986,6 +4265,37 @@
                       "guard_condition",
                       1,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -4360,6 +4670,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -4718,6 +5059,37 @@
                         "guard_condition",
                         1,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -5109,6 +5481,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -5467,6 +5870,37 @@
                       "guard_condition",
                       1,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -5841,6 +6275,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -6199,6 +6664,37 @@
                         "guard_condition",
                         1,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -6566,6 +7062,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -6754,6 +7281,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -7180,6 +7738,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -7368,6 +7957,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -7808,6 +8428,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -7996,6 +8647,37 @@
                         "guard_condition",
                         2,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -8422,6 +9104,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -8610,6 +9323,37 @@
                         "guard_condition",
                         2,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -9067,6 +9811,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -9255,6 +10030,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -9681,6 +10487,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -9869,6 +10706,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -10309,6 +11177,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -10497,6 +11396,37 @@
                         "guard_condition",
                         2,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -10923,6 +11853,37 @@
                         1,
                         true,
                         [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
+                        [
                           "return_guard",
                           true,
                           [
@@ -11111,6 +12072,37 @@
                         "guard_condition",
                         2,
                         true,
+                        [
+                          "unresolved_classification",
+                          [
+                            "location_scope",
+                            "guard_condition"
+                          ],
+                          [
+                            "unresolved_kinds",
+                            [
+                              "opaque_unknown"
+                            ]
+                          ],
+                          [
+                            "unknown_refs",
+                            [
+                              [
+                                "unknown_runtime_ref",
+                                [
+                                  "opaque_unknown",
+                                  "phi_circular",
+                                  null,
+                                  null
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "unsupported_ops",
+                            []
+                          ]
+                        ],
                         [
                           "return_guard",
                           true,
@@ -11718,6 +12710,37 @@
                       0,
                       false,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         false,
                         [
@@ -12108,6 +13131,37 @@
                       0,
                       false,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         false,
                         [
@@ -12436,6 +13490,37 @@
                       "guard_condition",
                       1,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -12795,6 +13880,37 @@
                       "guard_condition",
                       1,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -13165,6 +14281,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -13353,6 +14500,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -13779,6 +14957,37 @@
                       1,
                       true,
                       [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
+                      [
                         "return_guard",
                         true,
                         [
@@ -13967,6 +15176,37 @@
                       "guard_condition",
                       2,
                       true,
+                      [
+                        "unresolved_classification",
+                        [
+                          "location_scope",
+                          "guard_condition"
+                        ],
+                        [
+                          "unresolved_kinds",
+                          [
+                            "opaque_unknown"
+                          ]
+                        ],
+                        [
+                          "unknown_refs",
+                          [
+                            [
+                              "unknown_runtime_ref",
+                              [
+                                "opaque_unknown",
+                                "phi_circular",
+                                null,
+                                null
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "unsupported_ops",
+                          []
+                        ]
+                      ],
                       [
                         "return_guard",
                         true,
@@ -14571,6 +15811,37 @@
                   0,
                   false,
                   [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
+                  [
                     "return_guard",
                     false,
                     [
@@ -14961,6 +16232,37 @@
                   0,
                   false,
                   [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
+                  [
                     "return_guard",
                     false,
                     [
@@ -15262,6 +16564,37 @@
                   "guard_condition",
                   1,
                   true,
+                  [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
                   [
                     "return_guard",
                     true,
@@ -15621,6 +16954,37 @@
                   "guard_condition",
                   1,
                   true,
+                  [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
                   [
                     "return_guard",
                     true,
@@ -15964,6 +17328,37 @@
                   1,
                   true,
                   [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
+                  [
                     "return_guard",
                     true,
                     [
@@ -16152,6 +17547,37 @@
                   "guard_condition",
                   2,
                   true,
+                  [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
                   [
                     "return_guard",
                     true,
@@ -16578,6 +18004,37 @@
                   1,
                   true,
                   [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
+                  [
                     "return_guard",
                     true,
                     [
@@ -16766,6 +18223,37 @@
                   "guard_condition",
                   2,
                   true,
+                  [
+                    "unresolved_classification",
+                    [
+                      "location_scope",
+                      "guard_condition"
+                    ],
+                    [
+                      "unresolved_kinds",
+                      [
+                        "opaque_unknown"
+                      ]
+                    ],
+                    [
+                      "unknown_refs",
+                      [
+                        [
+                          "unknown_runtime_ref",
+                          [
+                            "opaque_unknown",
+                            "phi_circular",
+                            null,
+                            null
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "unsupported_ops",
+                      []
+                    ]
+                  ],
                   [
                     "return_guard",
                     true,
@@ -17349,6 +18837,37 @@
                 0,
                 false,
                 [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
+                [
                   "return_guard",
                   false,
                   [
@@ -17739,6 +19258,37 @@
                 0,
                 false,
                 [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
+                [
                   "return_guard",
                   false,
                   [
@@ -18040,6 +19590,37 @@
                 "guard_condition",
                 1,
                 true,
+                [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
                 [
                   "return_guard",
                   true,
@@ -18399,6 +19980,37 @@
                 "guard_condition",
                 1,
                 true,
+                [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
                 [
                   "return_guard",
                   true,
@@ -18742,6 +20354,37 @@
                 1,
                 true,
                 [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
+                [
                   "return_guard",
                   true,
                   [
@@ -18930,6 +20573,37 @@
                 "guard_condition",
                 2,
                 true,
+                [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
                 [
                   "return_guard",
                   true,
@@ -19356,6 +21030,37 @@
                 1,
                 true,
                 [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
+                [
                   "return_guard",
                   true,
                   [
@@ -19544,6 +21249,37 @@
                 "guard_condition",
                 2,
                 true,
+                [
+                  "unresolved_classification",
+                  [
+                    "location_scope",
+                    "guard_condition"
+                  ],
+                  [
+                    "unresolved_kinds",
+                    [
+                      "opaque_unknown"
+                    ]
+                  ],
+                  [
+                    "unknown_refs",
+                    [
+                      [
+                        "unknown_runtime_ref",
+                        [
+                          "opaque_unknown",
+                          "phi_circular",
+                          null,
+                          null
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "unsupported_ops",
+                    []
+                  ]
+                ],
                 [
                   "return_guard",
                   true,

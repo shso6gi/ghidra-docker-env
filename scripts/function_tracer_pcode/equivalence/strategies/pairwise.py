@@ -1693,6 +1693,10 @@ class PairwiseStrategy(CheckStrategy):
                 (
                     "unresolved_location",
                     "return_value",
+                    self._unresolved_expression_location_classification(
+                        value_expr,
+                        "return_value",
+                    ),
                     self._expression_runtime_object_key(value_expr),
                 )
             )
@@ -1706,10 +1710,143 @@ class PairwiseStrategy(CheckStrategy):
                     "guard_condition",
                     int(index),
                     bool(getattr(condition, "negated", False)),
+                    self._unresolved_expression_location_classification(
+                        expression,
+                        "guard_condition",
+                    ),
                     self._return_condition_object_key(condition),
                 )
             )
         return tuple(locations)
+
+    def _unresolved_expression_location_classification(
+        self,
+        expr: Any,
+        location_scope: str,
+    ) -> Tuple[Any, ...]:
+        kinds: set[Any] = set()
+        unknown_refs: set[Any] = set()
+        unsupported_ops: set[Any] = set()
+        self._collect_unresolved_expression_classification(
+            expr,
+            kinds=kinds,
+            unknown_refs=unknown_refs,
+            unsupported_ops=unsupported_ops,
+        )
+        return (
+            "unresolved_classification",
+            ("location_scope", str(location_scope)),
+            ("unresolved_kinds", tuple(sorted(kinds, key=repr))),
+            ("unknown_refs", tuple(sorted(unknown_refs, key=repr))),
+            ("unsupported_ops", tuple(sorted(unsupported_ops, key=repr))),
+        )
+
+    def _collect_unresolved_expression_classification(
+        self,
+        expr: Any,
+        *,
+        kinds: set[Any],
+        unknown_refs: set[Any],
+        unsupported_ops: set[Any],
+    ) -> None:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return
+        if expression_contains_unsupported_smt_ops(expr):
+            unsupported_ops.update(self._unsupported_smt_op_keys(expr))
+            if unsupported_ops:
+                kinds.add("unsupported_smt_op")
+        if expr.expr_type == ExpressionType.UNKNOWN:
+            kind, ref_key = self._unknown_expression_classification_key(expr)
+            kinds.add(kind)
+            unknown_refs.add(ref_key)
+            return
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            branch_had_unresolved = False
+            for condition, value in expr.value:
+                if condition is not None and self._expression_contains_unresolved(condition.expression):
+                    branch_had_unresolved = True
+                    self._collect_unresolved_expression_classification(
+                        condition.expression,
+                        kinds=kinds,
+                        unknown_refs=unknown_refs,
+                        unsupported_ops=unsupported_ops,
+                    )
+                if self._expression_contains_unresolved(value):
+                    branch_had_unresolved = True
+                    self._collect_unresolved_expression_classification(
+                        value,
+                        kinds=kinds,
+                        unknown_refs=unknown_refs,
+                        unsupported_ops=unsupported_ops,
+                    )
+            if branch_had_unresolved:
+                kinds.add("phi_unresolved")
+            return
+        for operand in getattr(expr, "operands", []) or []:
+            self._collect_unresolved_expression_classification(
+                operand,
+                kinds=kinds,
+                unknown_refs=unknown_refs,
+                unsupported_ops=unsupported_ops,
+            )
+
+    def _unknown_expression_classification_key(self, expr: Any) -> Tuple[str, Tuple[Any, ...]]:
+        runtime_ref = getattr(expr, "runtime_ref", None)
+        if getattr(runtime_ref, "deferred_call_ref", None) is not None:
+            kind = "deferred_call_unknown"
+        else:
+            raw_kind = getattr(runtime_ref, "kind", None)
+            kind = str(raw_kind or "opaque_unknown")
+        runtime_key = self._semantic_key_or_stable_key_or_none(runtime_ref)
+        if runtime_key is not None:
+            ref_key = ("unknown_runtime_ref", runtime_key)
+        else:
+            ref_key = ("unknown_expression", self._expression_runtime_object_key(expr))
+        return kind, ref_key
+
+    def _unsupported_smt_op_keys(self, expr: Any) -> Tuple[Any, ...]:
+        if expr is None or getattr(expr, "expr_type", None) is None:
+            return ()
+        result: List[Tuple[Any, ...]] = []
+        expr_type = expr.expr_type
+        expr_kind = expr_type.__class__
+        if expr_type == expr_kind.CALL:
+            result.append(
+                (
+                    "unsupported_smt_op",
+                    "CALL",
+                    str(getattr(expr, "name", "") or "<anonymous>"),
+                    None,
+                )
+            )
+        elif expr_type in {expr_kind.BINARY_OP, expr_kind.UNARY_OP}:
+            if expression_contains_unsupported_smt_ops(expr.clone_with(operands=[])):
+                result.append(
+                    (
+                        "unsupported_smt_op",
+                        expr_type.name,
+                        str(getattr(expr, "operator", "") or "<missing>"),
+                        None,
+                    )
+                )
+        elif expr_type == expr_kind.INTRINSIC:
+            if expression_contains_unsupported_smt_ops(expr.clone_with(operands=[])):
+                result.append(
+                    (
+                        "unsupported_smt_op",
+                        "INTRINSIC",
+                        str(getattr(expr, "name", "") or "<anonymous>"),
+                        None if getattr(expr, "opcode", None) is None else int(getattr(expr, "opcode")),
+                    )
+                )
+        for operand in getattr(expr, "operands", []) or []:
+            result.extend(self._unsupported_smt_op_keys(operand))
+        if expr_type == expr_kind.PHI and expr.value:
+            for condition, value in expr.value:
+                if condition is not None:
+                    result.extend(self._unsupported_smt_op_keys(condition.expression))
+                result.extend(self._unsupported_smt_op_keys(value))
+        return tuple(result)
 
     def _method_b_closure_side_object_key(
         self,

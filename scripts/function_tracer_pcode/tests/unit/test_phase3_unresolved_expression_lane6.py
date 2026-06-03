@@ -128,6 +128,9 @@ def test_unresolved_expression_target_is_object_specific():
 
     assert target[0] == "unresolved_expression"
     assert _object_target_key_is_specific_unresolved_expression(target)
+    assert _nested_contains(target, "unresolved_classification")
+    assert _nested_contains(target, "opaque_unknown")
+    assert _nested_contains(target, "unknown_expression")
     assert _nested_contains(target, "unresolved_call_value")
     assert not _nested_contains(target, ("reason", "unresolved_expression"))
 
@@ -158,7 +161,39 @@ def test_unresolved_expression_target_rejects_weak_unknown_payload():
     left = list(target[2])
     locations = list(left[5])
     first_location = list(locations[1][0])
-    first_location[2] = ("expression", ("unknown", "", ("none",), 4))
+    first_location[3] = ("expression", ("unknown", "", ("none",), 4))
+    locations[1] = (tuple(first_location),)
+    left[5] = tuple(locations)
+    target[2] = tuple(left)
+
+    assert not _object_target_key_is_specific_unresolved_expression(tuple(target))
+
+
+def test_unresolved_expression_target_rejects_missing_location_classification():
+    target = list(_unresolved_target())
+    left = list(target[2])
+    locations = list(left[5])
+    first_location = list(locations[1][0])
+    first_location.pop(2)
+    locations[1] = (tuple(first_location),)
+    left[5] = tuple(locations)
+    target[2] = tuple(left)
+
+    assert not _object_target_key_is_specific_unresolved_expression(tuple(target))
+
+
+def test_unresolved_expression_target_rejects_empty_location_classification():
+    target = list(_unresolved_target())
+    left = list(target[2])
+    locations = list(left[5])
+    first_location = list(locations[1][0])
+    first_location[2] = (
+        "unresolved_classification",
+        ("location_scope", "return_value"),
+        ("unresolved_kinds", ()),
+        ("unknown_refs", ()),
+        ("unsupported_ops", ()),
+    )
     locations[1] = (tuple(first_location),)
     left[5] = tuple(locations)
     target[2] = tuple(left)
@@ -258,6 +293,21 @@ def test_unresolved_expression_target_accepts_nested_unknown_guard_expression():
                 "guard_condition",
                 0,
                 False,
+                (
+                    "unresolved_classification",
+                    ("location_scope", "guard_condition"),
+                    ("unresolved_kinds", ("opaque_unknown",)),
+                    (
+                        "unknown_refs",
+                        (
+                            (
+                                "unknown_runtime_ref",
+                                ("opaque_unknown", "phi_circular", None, None),
+                            ),
+                        ),
+                    ),
+                    ("unsupported_ops", ()),
+                ),
                 tuple(guard),
             ),
         ),

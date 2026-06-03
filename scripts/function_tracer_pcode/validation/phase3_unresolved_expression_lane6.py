@@ -911,15 +911,103 @@ def _unresolved_location_is_specific(value: Any) -> bool:
     if location[0] != "unresolved_location":
         return False
     if location[1] == "return_value":
-        return len(location) == 3 and _expression_provenance_is_specific(location[2])
+        return (
+            len(location) == 4
+            and _unresolved_location_classification_is_specific(location[2], "return_value")
+            and _expression_provenance_is_specific(location[3])
+        )
     if location[1] == "guard_condition":
         return (
-            len(location) == 5
+            len(location) == 6
             and _nonnegative_int_like(location[2])
             and isinstance(location[3], bool)
-            and _return_guard_like_key_is_specific(location[4])
+            and _unresolved_location_classification_is_specific(location[4], "guard_condition")
+            and _return_guard_like_key_is_specific(location[5])
         )
     return False
+
+
+def _unresolved_location_classification_is_specific(value: Any, expected_scope: str) -> bool:
+    classification = _normalize_nested_tuple(value)
+    if (
+        not isinstance(classification, tuple)
+        or len(classification) != 5
+        or classification[0] != "unresolved_classification"
+    ):
+        return False
+    if _nested_contains_diagnostic_reason(classification) or _nested_contains_missing_sentinel(classification):
+        return False
+    scope = classification[1]
+    kinds = classification[2]
+    unknown_refs = classification[3]
+    unsupported_ops = classification[4]
+    if (
+        not isinstance(scope, tuple)
+        or len(scope) != 2
+        or scope[0] != "location_scope"
+        or scope[1] != expected_scope
+    ):
+        return False
+    if (
+        not isinstance(kinds, tuple)
+        or len(kinds) != 2
+        or kinds[0] != "unresolved_kinds"
+        or not isinstance(kinds[1], tuple)
+        or not kinds[1]
+        or not all(_text_identity_is_specific(kind) for kind in kinds[1])
+    ):
+        return False
+    if not _unresolved_unknown_refs_are_specific(unknown_refs):
+        return False
+    if not _unsupported_smt_ops_are_specific(unsupported_ops):
+        return False
+    return bool(unknown_refs[1]) or bool(unsupported_ops[1])
+
+
+def _unresolved_unknown_refs_are_specific(value: Any) -> bool:
+    unknown_refs = _normalize_nested_tuple(value)
+    if (
+        not isinstance(unknown_refs, tuple)
+        or len(unknown_refs) != 2
+        or unknown_refs[0] != "unknown_refs"
+        or not isinstance(unknown_refs[1], tuple)
+    ):
+        return False
+    for ref in unknown_refs[1]:
+        normalized = _normalize_nested_tuple(ref)
+        if (
+            not isinstance(normalized, tuple)
+            or len(normalized) != 2
+            or normalized[0] not in {"unknown_runtime_ref", "unknown_expression"}
+            or not _nested_has_specific_leaf(normalized[1])
+        ):
+            return False
+    return True
+
+
+def _unsupported_smt_ops_are_specific(value: Any) -> bool:
+    unsupported_ops = _normalize_nested_tuple(value)
+    if (
+        not isinstance(unsupported_ops, tuple)
+        or len(unsupported_ops) != 2
+        or unsupported_ops[0] != "unsupported_ops"
+        or not isinstance(unsupported_ops[1], tuple)
+    ):
+        return False
+    for op in unsupported_ops[1]:
+        normalized = _normalize_nested_tuple(op)
+        if (
+            not isinstance(normalized, tuple)
+            or len(normalized) != 4
+            or normalized[0] != "unsupported_smt_op"
+            or not _text_identity_is_specific(normalized[1])
+            or not _text_identity_is_specific(normalized[2])
+        ):
+            return False
+        opcode = normalized[3]
+        if opcode is not None and not _nonnegative_int_like(opcode):
+            return False
+    return True
 
 
 def _return_guard_like_key_is_specific(value: Any) -> bool:
