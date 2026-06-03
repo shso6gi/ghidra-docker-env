@@ -345,33 +345,33 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         expected_post_fix_status_counts={"pending_proof": 1},
         expected_post_fix_obligation_counts={
             "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 48,
+            "pending_proof_obligation_count": 6,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
         expected_post_fix_entry_identities=(
             {
-                "id": "representative-unresolved-expression-is-even-mips64",
+                "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "function": "fc_is_even",
-                "binary_pair": "B10_B15",
+                "binary_pair": "B11_B12",
             },
         ),
         expected_post_fix_entry_states=(
             {
-                "id": "representative-unresolved-expression-is-even-mips64",
+                "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "function": "fc_is_even",
-                "binary_pair": "B10_B15",
+                "binary_pair": "B11_B12",
                 "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 48,
+                "pending_proof_obligation_count": 6,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 48,
+                "required_completion_action_count": 6,
             },
         ),
         expected_required_completion_action_hashes=(
             {
-                "id": "representative-unresolved-expression-is-even-mips64",
+                "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
                 "required_completion_actions_sha256": (
-                    "bab18a41bb56dbe4df32dc1d387c83d1095bf1a6616d76b007e09fe257309272"
+                    "65357b3f739a3a4558bcb3caf5acb60d44726e555b1905688b377aae87f99a87"
                 ),
             },
         ),
@@ -801,6 +801,9 @@ def _materialize_post_fix_gate(repo: Path, spec: Phase3PostFixGateSpec) -> Dict[
     gate["post_fix_summary"] = summary_info["summary"]
     gate["post_fix_status_counts"] = _post_fix_status_counts(payload)
     gate["post_fix_obligation_summary"] = _post_fix_obligation_summary(payload)
+    gate["extra_current_unresolved_expression_summary"] = (
+        _extra_current_unresolved_expression_summary(payload)
+    )
     try:
         spec.validator(payload)
     except Exception as exc:
@@ -824,6 +827,42 @@ def _post_fix_status_counts(payload: Mapping[str, Any]) -> Dict[str, int]:
             continue
         counts[status] = counts.get(status, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _extra_current_unresolved_expression_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    observations = payload.get("extra_current_unresolved_expression_observations")
+    if not isinstance(observations, (list, tuple)):
+        observations = ()
+    post_fix_summary = payload.get("post_fix_summary")
+    declared_count = (
+        post_fix_summary.get("extra_current_unresolved_expression_count")
+        if isinstance(post_fix_summary, Mapping)
+        else None
+    )
+    if not isinstance(declared_count, int) or isinstance(declared_count, bool):
+        declared_count = len(observations)
+    identities = []
+    for observation in observations:
+        if not isinstance(observation, Mapping):
+            continue
+        identities.append(
+            {
+                "category": observation.get("category") or MISSING_SENTINEL,
+                "function": observation.get("function") or MISSING_SENTINEL,
+                "binary_pair": observation.get("binary_pair") or MISSING_SENTINEL,
+                "unresolved_expression_reason_record_count": (
+                    observation.get("unresolved_expression_reason_record_count")
+                    if isinstance(observation.get("unresolved_expression_reason_record_count"), int)
+                    and not isinstance(observation.get("unresolved_expression_reason_record_count"), bool)
+                    else MISSING_SENTINEL
+                ),
+            }
+        )
+    return {
+        "count": declared_count,
+        "observed_count": len(identities),
+        "identities": sorted(identities, key=lambda item: repr(item)),
+    }
 
 
 def _post_fix_obligation_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:

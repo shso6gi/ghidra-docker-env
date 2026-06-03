@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     UNRESOLVED_EVIDENCE_KIND,
     UNRESOLVED_PROOF_KIND,
     UNRESOLVED_PROOF_STAGES,
+    _extra_current_unresolved_expression_observations_from_records,
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
     _pending_proof_obligations,
@@ -290,9 +291,9 @@ def test_unresolved_expression_post_fix_status_moves_to_pending_proof_when_actio
     )
     actions = build_unknown_recovery_actions([reason])
     entry = {
-        "id": "representative-unresolved-expression-is-even-mips64",
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
         "function": "fc_is_even",
-        "binary_pair": "B10_B15",
+        "binary_pair": "B11_B12",
         "target_object_keys": [target],
         "current_observation": {
             "final_result": "UNKNOWN",
@@ -336,9 +337,9 @@ def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_wit
         object_target_key=target,
     )
     entry = {
-        "id": "representative-unresolved-expression-is-even-mips64",
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
         "function": "fc_is_even",
-        "binary_pair": "B10_B15",
+        "binary_pair": "B11_B12",
         "target_object_keys": [target],
         "current_observation": {
             "final_result": "UNKNOWN",
@@ -351,3 +352,59 @@ def test_unresolved_expression_post_fix_status_keeps_object_evidence_pending_wit
 
     assert status == "pending_object_evidence"
     assert failures == ()
+
+
+def test_extra_current_unresolved_expression_observations_exclude_manifest_entries():
+    target = _unresolved_target()
+    unresolved = make_unknown_reason(
+        UnknownReasonId.UNRESOLVED_EXPRESSION,
+        stage="S_PAIRWISE",
+        pair_or_case="(0,1)",
+        evidence_kind=UNRESOLVED_EVIDENCE_KIND,
+        object_target_key=target,
+    )
+    gap = make_unknown_reason(
+        UnknownReasonId.RETURN_COVERAGE_GAP,
+        stage="S_PAIRWISE",
+        evidence_refs=("function1:return_coverage_gap",),
+    )
+    records = {
+        ("function_call", "fc_is_even", "B11_B12"): {
+            "relative_log_path": "fc_is_even/fc_is_even_B11_B12.log",
+            "payload": {
+                "is_equivalent": None,
+                "unknown_reasons": [unresolved.to_dict()],
+            },
+        },
+        ("function_call", "fc_is_even", "B10_B15"): {
+            "relative_log_path": "fc_is_even/fc_is_even_B10_B15.log",
+            "payload": {
+                "is_equivalent": None,
+                "unknown_reasons": [unresolved.to_dict(), gap.to_dict()],
+            },
+        },
+        ("function_call", "fc_is_even", "B1_B2"): {
+            "relative_log_path": "fc_is_even/fc_is_even_B1_B2.log",
+            "payload": {
+                "is_equivalent": None,
+                "unknown_reasons": [gap.to_dict()],
+            },
+        },
+    }
+
+    observations = _extra_current_unresolved_expression_observations_from_records(
+        records,
+        manifest_keys=(("function_call", "fc_is_even", "B11_B12"),),
+    )
+
+    assert observations == (
+        {
+            "category": "function_call",
+            "function": "fc_is_even",
+            "binary_pair": "B10_B15",
+            "log_path": "fc_is_even/fc_is_even_B10_B15.log",
+            "final_result": "UNKNOWN",
+            "unresolved_expression_reason_record_count": 1,
+            "observed_reason_ids": ["return_coverage_gap", "unresolved_expression"],
+        },
+    )

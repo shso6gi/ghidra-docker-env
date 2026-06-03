@@ -63,8 +63,8 @@ UNRESOLVED_REASON_TUPLE = (
     MISSING_SENTINEL,
 )
 FUNCTION_CALL_BINARY_NAMES = {
-    "B10": "function_call_test-mips64-clang-O1",
-    "B15": "function_call_test-mips64-gcc-O2",
+    "B11": "function_call_test-mips64-clang-O2",
+    "B12": "function_call_test-mips64-clang-O3",
 }
 
 
@@ -85,14 +85,14 @@ def _expected_reason_record(movement_id: str) -> Dict[str, Any]:
 
 DEFAULT_REPRESENTATIVES: Tuple[Mapping[str, Any], ...] = (
     {
-        "id": "representative-unresolved-expression-is-even-mips64",
+        "id": "representative-unresolved-expression-is-even-recursive-summary-current-transition",
         "category": "function_call",
         "function": "fc_is_even",
-        "binary_pair": "B10_B15",
-        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B10"],
-        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B15"],
+        "binary_pair": "B11_B12",
+        "expected_observed_binary1_name": FUNCTION_CALL_BINARY_NAMES["B11"],
+        "expected_observed_binary2_name": FUNCTION_CALL_BINARY_NAMES["B12"],
         "required_reason_ids": ["unresolved_expression"],
-        "role": "high-volume unresolved pairwise expression diagnostics for typed SMT lowering",
+        "role": "recursive-summary guard unresolved-expression current-transition diagnostic",
         "expected_movements": [
             _expected_reason_record("unresolved-expression-reason-record"),
         ],
@@ -181,6 +181,11 @@ def build_phase3_unresolved_expression_lane6_post_fix_gate(
     phase3_sha = _sha256_file(phase3_manifest_path)
     target_keys = tuple(_entry_key(entry) for entry in phase3_manifest.get("entries") or ())
     current_records = _records_by_key(current_log_roots, target_keys=target_keys)
+    all_current_records = _records_by_key(current_log_roots)
+    extra_current_observations = _extra_current_unresolved_expression_observations_from_records(
+        all_current_records,
+        manifest_keys=target_keys,
+    )
     entries = [
         _materialize_post_fix_entry(entry, current_records)
         for entry in phase3_manifest.get("entries") or ()
@@ -218,6 +223,7 @@ def build_phase3_unresolved_expression_lane6_post_fix_gate(
                 for check in checks
                 if isinstance(check, Mapping) and check.get("status") == "failed"
             ],
+            "extra_current_unresolved_expression_count": len(extra_current_observations),
             "entry_statuses": [
                 {
                     "id": entry.get("id"),
@@ -231,6 +237,7 @@ def build_phase3_unresolved_expression_lane6_post_fix_gate(
         },
         "checks": checks,
         "entries": entries,
+        "extra_current_unresolved_expression_observations": extra_current_observations,
     }
     path = output / "unresolved_expression_lane6_post_fix_gate.json"
     _write_json(path, manifest)
@@ -320,6 +327,46 @@ def _observation(
             for action in build_unknown_recovery_actions(reasons)
         ],
     }
+
+
+def _extra_current_unresolved_expression_observations_from_records(
+    records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    *,
+    manifest_keys: Sequence[Tuple[str, str, str]],
+) -> Sequence[Dict[str, Any]]:
+    manifest_key_set = set(manifest_keys or ())
+    observations: list[Dict[str, Any]] = []
+    for key, record in sorted(records.items(), key=lambda item: item[0]):
+        if key in manifest_key_set:
+            continue
+        category, function, binary_pair = key
+        observation = _observation(
+            {
+                "category": category,
+                "function": function,
+                "binary_pair": binary_pair,
+            },
+            record,
+        )
+        unresolved_records = [
+            reason
+            for reason in observation.get("reason_records") or ()
+            if isinstance(reason, Mapping) and reason.get("reason_id") == "unresolved_expression"
+        ]
+        if observation.get("final_result") != STATUS_UNKNOWN or not unresolved_records:
+            continue
+        observations.append(
+            {
+                "category": category,
+                "function": function,
+                "binary_pair": binary_pair,
+                "log_path": observation.get("log_path") or MISSING_SENTINEL,
+                "final_result": observation.get("final_result") or MISSING_SENTINEL,
+                "unresolved_expression_reason_record_count": len(unresolved_records),
+                "observed_reason_ids": list(observation.get("observed_reason_ids") or ()),
+            }
+        )
+    return tuple(observations)
 
 
 def _reason_to_dict(reason: Any) -> Dict[str, Any]:

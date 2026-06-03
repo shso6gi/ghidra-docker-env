@@ -49,6 +49,7 @@ def _write_gate(
     include_required_completion_actions=True,
     omit_required_completion_actions=False,
     required_action_updates=None,
+    extra_unresolved_observations=None,
 ) -> None:
     path = repo / spec.gate_relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,34 +94,37 @@ def _write_gate(
         }
         required_action.update(required_action_updates or {})
         entry["required_completion_actions"] = [required_action]
-    path.write_text(
-        json.dumps(
-            {
-                "manifest_version": 1,
-                "manifest_kind": manifest_kind or spec.manifest_kind,
-                "artifact_role": artifact_role,
-                "baseline_id": baseline_id,
-                "baseline_git_head": baseline_git_head,
-                spec.ready_key: ready,
-                "post_fix_regression_gate": {
-                    "summary": {
-                        "failed": (
-                            summary_failed
-                            if summary_failed is not None
-                            else (0 if ready else 1)
-                        ),
-                        "failed_kinds": (
-                            summary_failed_kinds
-                            if summary_failed_kinds is not None
-                            else ([] if ready else ["unit_failure"])
-                        ),
-                    }
-                },
-                "entries": [entry],
-            },
-            sort_keys=True,
+    payload = {
+        "manifest_version": 1,
+        "manifest_kind": manifest_kind or spec.manifest_kind,
+        "artifact_role": artifact_role,
+        "baseline_id": baseline_id,
+        "baseline_git_head": baseline_git_head,
+        spec.ready_key: ready,
+        "post_fix_regression_gate": {
+            "summary": {
+                "failed": (
+                    summary_failed
+                    if summary_failed is not None
+                    else (0 if ready else 1)
+                ),
+                "failed_kinds": (
+                    summary_failed_kinds
+                    if summary_failed_kinds is not None
+                    else ([] if ready else ["unit_failure"])
+                ),
+            }
+        },
+        "entries": [entry],
+    }
+    if extra_unresolved_observations is not None:
+        payload["extra_current_unresolved_expression_observations"] = list(
+            extra_unresolved_observations
         )
-    )
+        payload["post_fix_summary"] = {
+            "extra_current_unresolved_expression_count": len(extra_unresolved_observations)
+        }
+    path.write_text(json.dumps(payload, sort_keys=True))
 
 
 def _retired_transfer_action():
@@ -166,6 +170,45 @@ def test_phase3_post_fix_gate_index_accepts_ready_gates(tmp_path):
     assert manifest["summary"]["failed"] == 0
     assert [gate["lane_id"] for gate in manifest["gates"]] == ["lane_one", "lane_two"]
     validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=specs)
+
+
+def test_phase3_post_fix_gate_index_summarizes_extra_unresolved_expression_observations(tmp_path):
+    repo = tmp_path / "repo"
+    spec = _spec(6, "phase3_unresolved_expression_lane6")
+    _write_gate(
+        repo,
+        spec,
+        extra_unresolved_observations=[
+            {
+                "category": "function_call",
+                "function": "fc_is_even",
+                "binary_pair": "B11_B12",
+                "unresolved_expression_reason_record_count": 3,
+            }
+        ],
+    )
+
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=(spec,),
+    )
+    manifest = json.loads(path.read_text())
+
+    summary = manifest["gates"][0]["extra_current_unresolved_expression_summary"]
+    assert summary == {
+        "count": 1,
+        "observed_count": 1,
+        "identities": [
+            {
+                "category": "function_call",
+                "function": "fc_is_even",
+                "binary_pair": "B11_B12",
+                "unresolved_expression_reason_record_count": 3,
+            }
+        ],
+    }
+    validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=(spec,))
 
 
 def test_phase3_post_fix_gate_index_rejects_non_mapping_manifest(tmp_path):
