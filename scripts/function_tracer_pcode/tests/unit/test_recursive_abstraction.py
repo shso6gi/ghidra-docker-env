@@ -200,6 +200,67 @@ def test_recursive_abstraction_matches_unknown_targets_via_call_target_expressio
     assert left_value.name == right_value.name
 
 
+def test_recursive_abstraction_debug_reports_empty_deferred_calls(capsys):
+    analysis1 = create_mock_analysis("left")
+    analysis2 = create_mock_analysis("right")
+
+    result = abstract_recursive_calls(analysis1, analysis2, debug=True)
+
+    assert result.applied is False
+    output = capsys.readouterr().out
+    assert "no compatible deferred-call matches" in output
+    assert "left_deferred_calls=0 right_deferred_calls=0" in output
+
+
+def test_recursive_abstraction_debug_reports_argument_mismatch_for_shared_target(capsys):
+    n1 = _param("n", 0)
+    n2 = _param("m", 0)
+    callback1 = _param("callback", 1, size=8)
+    callback2 = _param("fn", 1, size=8)
+    placeholder1 = "call_out_of_scope:left#0"
+    placeholder2 = "call_out_of_scope:right#0"
+    info1 = DeferredCallInfo(
+        placeholder1,
+        CallTargetRef.unknown(),
+        [Expression.binary_op("INT_SUB", n1, _const(1))],
+        call_target_expr=callback1,
+        sequence=0,
+    )
+    info2 = DeferredCallInfo(
+        placeholder2,
+        CallTargetRef.unknown(),
+        [Expression.binary_op("INT_SUB", n2, _const(2))],
+        call_target_expr=callback2,
+        sequence=0,
+    )
+
+    analysis1 = create_mock_analysis(
+        "left",
+        parameters=[
+            {"name": "n", "index": 0, "data_type": "int", "size": 4},
+            {"name": "callback", "index": 1, "data_type": "void *", "size": 8},
+        ],
+        returns=[ReturnInfo(address="0x1000", value=_deferred_unknown(info1), conditions=[])],
+    )
+    analysis2 = create_mock_analysis(
+        "right",
+        parameters=[
+            {"name": "m", "index": 0, "data_type": "int", "size": 4},
+            {"name": "fn", "index": 1, "data_type": "void *", "size": 8},
+        ],
+        returns=[ReturnInfo(address="0x2000", value=_deferred_unknown(info2), conditions=[])],
+    )
+    analysis1.deferred_calls = {placeholder1: info1}
+    analysis2.deferred_calls = {placeholder2: info2}
+
+    result = abstract_recursive_calls(analysis1, analysis2, debug=True)
+
+    assert result.applied is False
+    output = capsys.readouterr().out
+    assert "shared_targets=1" in output
+    assert "target-only match with argument mismatch" in output
+
+
 def test_checker_uses_recursive_abstraction_stage_after_pairwise_unknown():
     checker = EquivalenceChecker(debug=False)
     analysis1 = create_mock_analysis("left")

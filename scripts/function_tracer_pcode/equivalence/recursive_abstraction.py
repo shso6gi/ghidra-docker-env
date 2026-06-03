@@ -51,6 +51,12 @@ def abstract_recursive_calls(
     deferred1 = list((analysis1.deferred_calls or {}).values())
     deferred2 = list((analysis2.deferred_calls or {}).values())
     if not deferred1 or not deferred2:
+        if debug:
+            print(
+                "[recursive_abstraction] no compatible deferred-call matches; "
+                f"left_deferred_calls={len(deferred1)} "
+                f"right_deferred_calls={len(deferred2)}"
+            )
         return RecursiveAbstractionResult(analysis1=analysis1, analysis2=analysis2, matches=[])
 
     grouped1 = _group_deferred_calls(analysis1, deferred1)
@@ -76,6 +82,8 @@ def abstract_recursive_calls(
             next_summary_index += 1
 
     if not matches:
+        if debug:
+            _debug_no_recursive_matches(grouped1, grouped2)
         return RecursiveAbstractionResult(analysis1=analysis1, analysis2=analysis2, matches=[])
 
     mapping1 = {match.deferred_key1: match for match in matches}
@@ -101,6 +109,45 @@ def _group_deferred_calls(
             continue
         grouped.setdefault(key, []).append(info)
     return grouped
+
+
+def _debug_no_recursive_matches(
+    grouped1: Dict[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]], List[DeferredCallInfo]],
+    grouped2: Dict[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]], List[DeferredCallInfo]],
+) -> None:
+    left_targets = _target_inventory(grouped1)
+    right_targets = _target_inventory(grouped2)
+    shared_targets = sorted(set(left_targets) & set(right_targets), key=repr)
+    print(
+        "[recursive_abstraction] no compatible deferred-call matches; "
+        f"left_groups={len(grouped1)} right_groups={len(grouped2)} "
+        f"shared_targets={len(shared_targets)}"
+    )
+    for target in shared_targets[:5]:
+        left_args = sorted(left_targets.get(target, ()), key=repr)
+        right_args = sorted(right_targets.get(target, ()), key=repr)
+        print(
+            "[recursive_abstraction] target-only match with argument mismatch: "
+            f"target={_short_debug_key(target)} "
+            f"left_arg_keys={_short_debug_key(left_args[:3])} "
+            f"right_arg_keys={_short_debug_key(right_args[:3])}"
+        )
+
+
+def _target_inventory(
+    grouped: Dict[Tuple[Tuple[object, ...], Tuple[Tuple[object, ...], ...]], List[DeferredCallInfo]],
+) -> Dict[Tuple[object, ...], Tuple[Tuple[Tuple[object, ...], ...], ...]]:
+    inventory: Dict[Tuple[object, ...], List[Tuple[Tuple[object, ...], ...]]] = {}
+    for target_key, arg_key in grouped:
+        inventory.setdefault(target_key, []).append(arg_key)
+    return {target: tuple(args) for target, args in inventory.items()}
+
+
+def _short_debug_key(value: object, *, limit: int = 600) -> str:
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def _deferred_call_key(
