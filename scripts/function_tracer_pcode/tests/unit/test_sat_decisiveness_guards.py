@@ -1574,6 +1574,38 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     assert actions[0].proof_obligation_id == reason.proof_obligation_id
 
 
+def test_pairwise_keeps_global_coverage_gap_with_sat_unsafety(monkeypatch):
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    analysis1, analysis2 = _return_coverage_gap_analyses()
+    analysis1.effect_summary = _analysis_with_unsupported_call_effect().effect_summary
+    _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+    strategy._solve_query_twostage = Mock(
+        return_value=QueryResult(
+            is_equivalent=False,
+            counterexample_raw={"x_1": 0, "x_2": 0},
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.sat_pairs == 0
+    assert result.unknown_pairs == 1
+    reason_ids = {reason.reason_id for reason in result.unknown_reasons}
+    assert UnknownReasonId.SAT_UNSAFETY.value in reason_ids
+    assert UnknownReasonId.RETURN_COVERAGE_GAP.value in reason_ids
+    assert result.unknown_reasons[0].reason_id == UnknownReasonId.SAT_UNSAFETY.value
+    assert any(
+        reason.reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
+        and reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
+        for reason in result.unknown_reasons
+    )
+
+
 def test_pairwise_sat_unsafety_completed_proof_allows_decisive_sat(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()

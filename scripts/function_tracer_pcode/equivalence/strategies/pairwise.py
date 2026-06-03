@@ -650,6 +650,13 @@ class PairwiseStrategy(CheckStrategy):
             stage="S_PAIRWISE",
         )
         blocking_unknown_reasons = coverage_unknown_reasons + equivalence_unknown_reasons
+        blocking_reasons_replace_pair_unknowns = (
+            self._blocking_unknown_reasons_should_replace_pair_unknowns(
+                unknown_reasons,
+                coverage_unknown_reasons,
+                equivalence_unknown_reasons,
+            )
+        )
 
         if sat_count > 0:
             final_is_equiv = False
@@ -658,13 +665,7 @@ class PairwiseStrategy(CheckStrategy):
         elif (
             blocking_unknown_reasons
             and unknown_count > 0
-            and (
-                coverage_unknown_reasons
-                or not any(
-                    reason.reason_id == UnknownReasonId.SAT_UNSAFETY.value
-                    for reason in unknown_reasons
-                )
-            )
+            and blocking_reasons_replace_pair_unknowns
         ):
             final_is_equiv = None
             unknown_reasons = blocking_unknown_reasons
@@ -676,6 +677,11 @@ class PairwiseStrategy(CheckStrategy):
             )
         elif unknown_count > 0:
             final_is_equiv = None
+            if blocking_unknown_reasons:
+                unknown_reasons = self._append_blocking_unknown_reasons(
+                    unknown_reasons,
+                    blocking_unknown_reasons,
+                )
             self._debug_print("=" * 60)
             self._debug_print(f"Result: UNKNOWN (timeout/unknown in {unknown_count} pairs)")
         elif blocking_unknown_reasons:
@@ -739,6 +745,60 @@ class PairwiseStrategy(CheckStrategy):
         finally:
             self._active_safety_checker = None
             self._active_normalization_stats = None
+
+    @staticmethod
+    def _blocking_unknown_reasons_should_replace_pair_unknowns(
+        pair_unknown_reasons: Sequence[Any],
+        coverage_unknown_reasons: Sequence[Any],
+        equivalence_unknown_reasons: Sequence[Any],
+    ) -> bool:
+        """Return whether global blockers should replace pair-local reasons."""
+
+        if not pair_unknown_reasons:
+            return True
+        if not coverage_unknown_reasons and not equivalence_unknown_reasons:
+            return False
+
+        replaceable_pair_reasons = {
+            UnknownReasonId.UNRESOLVED_EXPRESSION.value,
+            UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value,
+            UnknownReasonId.SOLVER_PROVEN_REWRITE_PROOF_FAILED.value,
+            UnknownReasonId.SOLVER_PROVEN_REWRITE_NO_CHANGE.value,
+            UnknownReasonId.NORMALIZATION_NO_CHANGE.value,
+            UnknownReasonId.UNKNOWN.value,
+        }
+        pair_reason_ids = {
+            getattr(reason, "reason_id", None)
+            for reason in pair_unknown_reasons
+        }
+        return bool(pair_reason_ids) and pair_reason_ids <= replaceable_pair_reasons
+
+    @classmethod
+    def _append_blocking_unknown_reasons(
+        cls,
+        pair_unknown_reasons: Sequence[Any],
+        blocking_unknown_reasons: Sequence[Any],
+    ) -> List[Any]:
+        result = list(pair_unknown_reasons)
+        seen = {cls._unknown_reason_dedup_key(reason) for reason in result}
+        for reason in blocking_unknown_reasons:
+            key = cls._unknown_reason_dedup_key(reason)
+            if key in seen:
+                continue
+            result.append(reason)
+            seen.add(key)
+        return result
+
+    @staticmethod
+    def _unknown_reason_dedup_key(reason: Any) -> Tuple[Any, ...]:
+        return (
+            getattr(reason, "reason_id", None),
+            getattr(reason, "stage", None),
+            getattr(reason, "pair_or_case", None),
+            tuple(getattr(reason, "evidence_refs", ()) or ()),
+            getattr(reason, "evidence_kind", None),
+            getattr(reason, "proof_obligation_id", None),
+        )
 
     def _unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
         reason_text = str(reason or "")
