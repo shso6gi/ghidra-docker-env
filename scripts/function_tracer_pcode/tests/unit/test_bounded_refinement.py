@@ -519,6 +519,120 @@ def test_bounded_call_refiner_synthesizes_deferred_call_inside_phi():
     assert "call_out_of_scope" not in caller.returns[0].value.to_string()
 
 
+def test_bounded_call_refiner_keeps_deferred_metadata_when_runtime_ref_key_drifted():
+    target = CallTargetRef.from_name("callee")
+    recorded = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#recorded",
+        target_ref=target,
+        arguments=[_param()],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=1),
+    )
+    drifted_ref = DeferredCallRef(target_ref=target, sequence=2)
+    runtime_ref = UnknownValueRef.deferred_call(
+        deferred_call_ref=drifted_ref,
+        target_ref=target,
+    )
+    analysis = create_mock_analysis(
+        "caller",
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    "call_out_of_scope:callee#drifted",
+                    runtime_ref=runtime_ref,
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    analysis.deferred_calls = {recorded.deferred_call_ref.stable_key(): recorded}
+    refiner = BoundedCallRefiner(lambda _target_ref: None, max_unroll=1, debug=False)
+
+    filtered = refiner._filter_deferred_calls_in_use(analysis)
+
+    assert filtered == {recorded.deferred_call_ref.stable_key(): recorded}
+
+
+def test_bounded_call_refiner_does_not_keep_unreferenced_same_target_metadata():
+    target = CallTargetRef.from_name("callee")
+    used = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#used",
+        target_ref=target,
+        arguments=[_param("n", 0)],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=1),
+    )
+    unused = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#unused",
+        target_ref=target,
+        arguments=[Expression.binary_op("INT_SUB", _param("n", 0), _const(1))],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=2),
+    )
+    analysis = create_mock_analysis(
+        "caller",
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    used.placeholder_name,
+                    runtime_ref=used.unknown_ref,
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    analysis.deferred_calls = {
+        used.deferred_call_ref.stable_key(): used,
+        unused.deferred_call_ref.stable_key(): unused,
+    }
+    refiner = BoundedCallRefiner(lambda _target_ref: None, max_unroll=1, debug=False)
+
+    filtered = refiner._filter_deferred_calls_in_use(analysis)
+
+    assert filtered == {used.deferred_call_ref.stable_key(): used}
+
+
+def test_bounded_call_refiner_rejects_ambiguous_same_target_key_drift_fallback():
+    target = CallTargetRef.from_name("callee")
+    first = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#first",
+        target_ref=target,
+        arguments=[_param("n", 0)],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=1),
+    )
+    second = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#second",
+        target_ref=target,
+        arguments=[Expression.binary_op("INT_SUB", _param("n", 0), _const(1))],
+        deferred_call_ref=DeferredCallRef(target_ref=target, sequence=2),
+    )
+    drifted_ref = DeferredCallRef(target_ref=target, sequence=99)
+    analysis = create_mock_analysis(
+        "caller",
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    "call_out_of_scope:callee#drifted",
+                    runtime_ref=UnknownValueRef.deferred_call(
+                        deferred_call_ref=drifted_ref,
+                        target_ref=target,
+                    ),
+                ),
+                conditions=[],
+            )
+        ],
+    )
+    analysis.deferred_calls = {
+        first.deferred_call_ref.stable_key(): first,
+        second.deferred_call_ref.stable_key(): second,
+    }
+    refiner = BoundedCallRefiner(lambda _target_ref: None, max_unroll=1, debug=False)
+
+    filtered = refiner._filter_deferred_calls_in_use(analysis)
+
+    assert filtered == {}
+
+
 def test_bounded_call_refiner_unrolls_direct_self_recursion_without_diverging():
     n = _param()
     recursive_placeholder = "call_out_of_scope:sum#0"

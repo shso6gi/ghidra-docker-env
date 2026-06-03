@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..model import (
     CallTargetRef,
@@ -773,6 +773,7 @@ class BoundedCallRefiner:
         analysis: FunctionReturnAnalysis,
     ) -> Dict[Tuple[object, ...], DeferredCallInfo]:
         used: Set[Tuple[object, ...]] = set()
+        used_targets: Set[Tuple[Any, ...]] = set()
 
         def visit_expression(expr: Optional[Expression]) -> None:
             if expr is None:
@@ -787,7 +788,14 @@ class BoundedCallRefiner:
                 )
                 if deferred_key is not None:
                     used.add(deferred_key)
-                    return
+                target_ref = getattr(runtime_ref, "target_ref", None)
+                target_key = (
+                    target_ref.stable_key()
+                    if hasattr(target_ref, "stable_key")
+                    else None
+                )
+                if target_key is not None:
+                    used_targets.add(target_key)
                 return
             if expr.expr_type == ExpressionType.PHI and expr.value:
                 for cond, value in expr.value:
@@ -803,8 +811,38 @@ class BoundedCallRefiner:
             for cond in ret.conditions:
                 visit_expression(cond.expression)
 
-        return {
-            key: info
-            for key, info in analysis.deferred_calls.items()
-            if key in used
-        }
+        candidates: List[
+            Tuple[
+                Tuple[object, ...],
+                Tuple[object, ...],
+                DeferredCallInfo,
+                Optional[Tuple[Any, ...]],
+            ]
+        ] = []
+        target_candidate_counts: Dict[Tuple[Any, ...], int] = {}
+        for key, info in analysis.deferred_calls.items():
+            info_ref = getattr(info, "deferred_call_ref", None)
+            info_key = (
+                info_ref.stable_key()
+                if hasattr(info_ref, "stable_key")
+                else key
+            )
+            info_target_ref = getattr(info, "target_ref", None)
+            info_target_key = (
+                info_target_ref.stable_key()
+                if hasattr(info_target_ref, "stable_key")
+                else None
+            )
+            candidates.append((key, info_key, info, info_target_key))
+            if info_target_key is not None:
+                target_candidate_counts[info_target_key] = target_candidate_counts.get(info_target_key, 0) + 1
+
+        filtered: Dict[Tuple[object, ...], DeferredCallInfo] = {}
+        for key, info_key, info, info_target_key in candidates:
+            if key in used or info_key in used or (
+                info_target_key is not None
+                and info_target_key in used_targets
+                and target_candidate_counts.get(info_target_key, 0) == 1
+            ):
+                filtered[info_key] = info
+        return filtered

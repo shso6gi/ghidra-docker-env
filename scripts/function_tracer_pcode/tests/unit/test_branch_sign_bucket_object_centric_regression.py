@@ -6,7 +6,9 @@ from scripts.function_tracer_pcode.analysis.condition import ConditionNormalizer
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effect_summary import CanonicalLocation, EffectSummary, StoreEffect
 from scripts.function_tracer_pcode.model import (
+    CallTargetRef,
     Condition,
+    DeferredCallInfo,
     Expression,
     ExpressionType,
     READONLY_SUM_OPCODE,
@@ -392,6 +394,53 @@ def test_return_analyzer_prioritizes_exact_region_over_broad_phi_fallback():
     for fallback_info in fallback_infos:
         fallback_region = ConditionSimplifier.build_constraint_set(fallback_info.conditions)
         assert fallback_region.overlaps_with(exact_region.conditions) is False
+
+
+def test_return_analyzer_preserves_deferred_call_region_without_shadow_proof():
+    analyzer = ReturnAnalyzer(program=None, debug=False)
+    value = _param("param_1")
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[Expression.binary_op("INT_SUB", value, _const(1))],
+        sequence=0,
+    )
+    unresolved_recursive_case = ReturnInfo(
+        address="0x2400",
+        value=Expression.unknown(
+            deferred.placeholder_name,
+            runtime_ref=deferred.unknown_ref,
+        ),
+        conditions=[
+            Condition(
+                Expression.binary_op(
+                    "INT_NOTEQUAL",
+                    Expression.binary_op(
+                        "INT_ADD",
+                        Expression.unknown("phi_circular"),
+                        _const(0xFFFFFFFF),
+                    ),
+                    _const(0),
+                )
+            )
+        ],
+        branch_index=20,
+    )
+    concrete_case = ReturnInfo(
+        address="0x2400",
+        value=_const(0),
+        conditions=[_cond("INT_EQUAL", value, _const(0))],
+        branch_index=10,
+    )
+
+    can_shadow = analyzer._return_region_can_be_shadowed_by_prior(
+        unresolved_recursive_case.conditions,
+        unresolved_recursive_case,
+        concrete_case,
+        prior_conditions=concrete_case.conditions,
+    )
+
+    assert can_shadow is False
 
 
 def test_return_analyzer_orders_proven_specific_region_before_broad_region():

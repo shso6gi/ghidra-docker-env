@@ -8620,6 +8620,16 @@ class ReturnAnalyzer:
             else self._return_info_effective_region_conditions(prior)
         )
         if not self._return_region_conditions_mutually_imply(region, prior_conditions):
+            if (
+                self._expression_contains_deferred_call_value(current.value)
+                and not _expressions_equivalent(prior.value, current.value)
+            ):
+                if self.debug:
+                    self._debug_print(
+                        "preserving deferred-call return region because prior concrete "
+                        "case does not prove the unresolved region redundant"
+                    )
+                return False
             return True
 
         prior_score = self._readonly_reduction_contract_priority_score(prior)
@@ -8631,6 +8641,25 @@ class ReturnAnalyzer:
 
         # Same condition region with different values is not a valid partition
         # refinement unless one side carries a proof-backed semantic contract.
+        return False
+
+    def _expression_contains_deferred_call_value(self, expr: Optional[Expression]) -> bool:
+        if expr is None:
+            return False
+        if getattr(expr, "expr_type", None) == ExpressionType.UNKNOWN:
+            runtime_ref = getattr(expr, "runtime_ref", None)
+            if getattr(runtime_ref, "deferred_call_ref", None) is not None:
+                return True
+        if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
+            for condition, value in expr.value or []:
+                if condition is not None and self._expression_contains_deferred_call_value(condition.expression):
+                    return True
+                if self._expression_contains_deferred_call_value(value):
+                    return True
+            return False
+        for operand in getattr(expr, "operands", None) or ():
+            if self._expression_contains_deferred_call_value(operand):
+                return True
         return False
 
     def _return_region_conditions_imply(
