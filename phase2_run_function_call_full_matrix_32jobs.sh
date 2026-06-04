@@ -148,8 +148,13 @@ if [[ "$PHASE2_RUN_EXPECTED_MOVEMENT_GATE" == "1" ]]; then
         echo "Copy logs to a review machine with artifacts/baselines/observed-v0@0a53352/phase1 and rerun the gate there." >&2
     fi
 else
-    echo "Skipping Phase 2 expected-movement gate for normal full matrix run."
-    echo "Use phase2_run_function_call_full_matrix_pre_producer_32jobs.sh for producer validation."
+    if [[ "$PHASE2_RUN_KIND" == "phase2_function_call_full_matrix_pre_producer" ]]; then
+        echo "Skipping Phase 2 expected-movement gate for full pre-producer matrix run."
+        echo "Use phase2_run_function_call_pre_producer_gate_reduced_matrix.sh for the require-ready expected-movement gate."
+    else
+        echo "Skipping Phase 2 expected-movement gate for normal full matrix run."
+        echo "Use phase2_run_function_call_full_matrix_pre_producer_32jobs.sh for producer validation."
+    fi
 fi
 
 echo ""

@@ -995,7 +995,8 @@ def test_phase2_pre_producer_wrapper_pins_producer_only_flags():
         line for line in script.splitlines() if line.startswith("export FUNCTION_CALL_EXTRA_EQUIV_ARGS=")
     )
     assert "--no-retry-phases" not in default_line
-    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-1}"' in script
+    assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-0}"' in script
+    assert "phase2_run_function_call_pre_producer_gate_reduced_matrix.sh" in script
     assert "phase2_function_call_full_matrix_pre_producer" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_32jobs.sh"' in script
 
