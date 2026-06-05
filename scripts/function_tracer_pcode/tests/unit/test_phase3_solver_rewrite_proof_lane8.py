@@ -431,6 +431,42 @@ def test_phase3_solver_rewrite_proof_lane8_default_accepts_sat_unsafety_reclassi
     validate_phase3_solver_rewrite_proof_lane8_post_fix_gate(gate)
 
 
+def test_phase3_solver_rewrite_proof_lane8_accepts_reason_derived_sat_reclassification_action(tmp_path):
+    sat_reason = _sat_unsafety_reason()
+    raw_dir, baseline_root, pre_fix_current_root = _setup_logs(
+        tmp_path,
+        current_payload=_payload(reasons=[sat_reason]),
+    )
+    post_fix_current_root = tmp_path / "post_fix_current"
+    reason_derived_action = build_unknown_recovery_actions([sat_reason])[0].to_dict()
+    reason_derived_action["object_target_key"] = None
+    reason_derived_action["proof_obligation_id"] = None
+    _write_log(post_fix_current_root, _payload(reasons=[sat_reason], actions=[reason_derived_action]))
+
+    pre_fix_path = build_phase3_solver_rewrite_proof_lane8_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3",
+        current_log_roots={"function_call": pre_fix_current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+    manifest = json.loads(pre_fix_path.read_text())
+    assert manifest["phase3_lane8_ready"] is True
+
+    post_fix_path = build_phase3_solver_rewrite_proof_lane8_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={"function_call": post_fix_current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+    gate = json.loads(post_fix_path.read_text())
+
+    assert gate["phase3_lane8_post_fix_ready"] is True
+    assert gate["entries"][0]["post_fix_status"] == "retired_to_sat_unsafety"
+    validate_phase3_solver_rewrite_proof_lane8_post_fix_gate(gate)
+
+
 def test_phase3_solver_rewrite_proof_lane8_default_rejects_sat_reclassification_without_target(tmp_path):
     sat_reason = make_unknown_reason(
         "sat_unsafety",

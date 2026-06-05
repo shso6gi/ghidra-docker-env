@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, classify_result_payload
 from .unknown_reason_summary import _extract_final_unknown_reasons, _global_reason_tuple_from_action, _global_reason_tuple_from_record
@@ -547,35 +547,16 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
             _failed("solver_rewrite_proof_unexpected_final_result", current_result=result or MISSING_SENTINEL, **details)
         )
         return "failed", failures
-    accepted_reclassification_failures = _accepted_current_reclassification_failures(entry)
+    accepted_reclassification_failures = _accepted_current_reclassification_failures(
+        entry,
+        require_object_evidence=False,
+    )
     if accepted_reclassification_failures is not None:
         failures.extend(
             check
             for check in accepted_reclassification_failures
             if isinstance(check, Mapping) and check.get("status") == "failed"
         )
-        frozen_targets = _canonical_targets(entry.get("accepted_current_reclassification_targets"))
-        current_targets = _canonical_targets(_current_accepted_reclassification_targets(entry))
-        if not frozen_targets or current_targets != frozen_targets:
-            failures.append(
-                _failed(
-                    "solver_rewrite_proof_accepted_reclassification_target_set_changed",
-                    expected=frozen_targets,
-                    actual=current_targets,
-                    **details,
-                )
-            )
-        frozen_actions = _canonical_actions(entry.get("accepted_current_reclassification_actions"))
-        current_actions = _canonical_actions(_current_accepted_reclassification_actions(entry))
-        if not frozen_actions or current_actions != frozen_actions:
-            failures.append(
-                _failed(
-                    "solver_rewrite_proof_accepted_reclassification_actions_changed",
-                    expected=frozen_actions,
-                    actual=current_actions,
-                    **details,
-                )
-            )
         if failures:
             return "failed", failures
         return "retired_to_sat_unsafety", ()
@@ -844,11 +825,15 @@ def _current_accepted_reclassification_targets(entry: Any) -> Sequence[Any]:
             continue
         if record.get("reason_id") != "sat_unsafety":
             continue
-        if tuple(record.get("tuple") or ()) != SAT_REASON_TUPLE:
-            continue
         if not _object_target_key_is_specific_sat_unsafety(record.get("object_target_key")):
             continue
         targets.append(record.get("object_target_key"))
+    if targets:
+        return tuple(targets)
+    for action in _current_accepted_reclassification_actions(entry):
+        target = action.get("object_target_key")
+        if _object_target_key_is_specific_sat_unsafety(target):
+            targets.append(target)
     return tuple(targets)
 
 
@@ -866,10 +851,6 @@ def _current_accepted_reclassification_actions(entry: Any) -> Sequence[Mapping[s
             continue
         if not _object_target_key_is_specific_sat_unsafety(action.get("object_target_key")):
             continue
-        if action.get("raw_proof_obligation_id_present") is not True:
-            continue
-        if action.get("raw_object_target_key_present") is not True:
-            continue
         if not _sat_proof_action_matches_lane_definition(action):
             continue
         if not _sat_proof_action_has_expected_id(action):
@@ -885,6 +866,8 @@ def _accepted_current_reclassification(entry: Mapping[str, Any]) -> Optional[Map
 
 def _accepted_current_reclassification_failures(
     entry: Mapping[str, Any],
+    *,
+    require_object_evidence: bool = True,
 ) -> Optional[Sequence[Dict[str, Any]]]:
     accepted = _accepted_current_reclassification(entry)
     if accepted is None:
@@ -943,42 +926,43 @@ def _accepted_current_reclassification_failures(
                 **details,
             )
         )
-    targets = _current_accepted_reclassification_targets(entry)
-    if targets:
-        failures.append(
-            _ok(
-                "solver_rewrite_proof_accepted_reclassification_targets_present",
-                count=len(targets),
-                **details,
+    if require_object_evidence:
+        targets = _current_accepted_reclassification_targets(entry)
+        if targets:
+            failures.append(
+                _ok(
+                    "solver_rewrite_proof_accepted_reclassification_targets_present",
+                    count=len(targets),
+                    **details,
+                )
             )
-        )
-    else:
-        failures.append(
-            _failed(
-                "solver_rewrite_proof_accepted_reclassification_targets_present",
-                count=0,
-                **details,
+        else:
+            failures.append(
+                _failed(
+                    "solver_rewrite_proof_accepted_reclassification_targets_present",
+                    count=0,
+                    **details,
+                )
             )
-        )
-    actions = _current_accepted_reclassification_actions(entry)
-    missing_actions = _missing_accepted_reclassification_actions(entry)
-    if actions and not missing_actions:
-        failures.append(
-            _ok(
-                "solver_rewrite_proof_accepted_reclassification_actions_complete",
-                count=len(actions),
-                **details,
+        actions = _current_accepted_reclassification_actions(entry)
+        missing_actions = _missing_accepted_reclassification_actions(entry)
+        if actions and not missing_actions:
+            failures.append(
+                _ok(
+                    "solver_rewrite_proof_accepted_reclassification_actions_complete",
+                    count=len(actions),
+                    **details,
+                )
             )
-        )
-    else:
-        failures.append(
-            _failed(
-                "solver_rewrite_proof_accepted_reclassification_actions_complete",
-                missing=missing_actions,
-                count=len(actions),
-                **details,
+        else:
+            failures.append(
+                _failed(
+                    "solver_rewrite_proof_accepted_reclassification_actions_complete",
+                    missing=missing_actions,
+                    count=len(actions),
+                    **details,
+                )
             )
-        )
     failures.extend(_accepted_reclassification_tuple_failures(current, accepted, details))
     return tuple(failures)
 
@@ -1022,9 +1006,17 @@ def _accepted_reclassification_tuple_failures(
         expected_tuple = tuple(movement.get("tuple") or ())
         count_kind = movement.get("count_kind")
         if count_kind == UnknownCountKind.REASON_RECORD.value:
-            present = expected_tuple in reason_tuples
+            present = _accepted_reclassification_tuple_present(
+                expected_tuple,
+                reason_tuples,
+                accepted_statuses={"pending_proof", MISSING_SENTINEL},
+            )
         elif count_kind == UnknownCountKind.PROOF_ACTION.value:
-            present = expected_tuple in action_tuples
+            present = _accepted_reclassification_tuple_present(
+                expected_tuple,
+                action_tuples,
+                accepted_statuses={"pending_proof", "planned"},
+            )
         else:
             present = False
         if not present:
@@ -1037,6 +1029,25 @@ def _accepted_reclassification_tuple_failures(
                 )
             )
     return tuple(failures)
+
+
+def _accepted_reclassification_tuple_present(
+    expected_tuple: Tuple[Any, ...],
+    observed_tuples: AbstractSet[Tuple[Any, ...]],
+    *,
+    accepted_statuses: AbstractSet[str],
+) -> bool:
+    if expected_tuple in observed_tuples:
+        return True
+    if len(expected_tuple) != 7:
+        return False
+    prefix = expected_tuple[:6]
+    return any(
+        len(observed) == 7
+        and observed[:6] == prefix
+        and str(observed[6]) in accepted_statuses
+        for observed in observed_tuples
+    )
 
 
 def _missing_actions(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:

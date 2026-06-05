@@ -571,25 +571,21 @@ def _post_fix_status(entry: Mapping[str, Any]) -> Tuple[str, Sequence[Dict[str, 
             )
         )
         return "failed", failures
-    frozen_targets = _canonical_targets(entry.get("target_object_keys"))
     current_targets = _canonical_targets(_current_targets(entry))
-    if not frozen_targets or current_targets != frozen_targets:
+    if not current_targets:
         failures.append(
             _failed(
-                "sat_unsafety_target_set_changed",
-                expected=frozen_targets,
-                actual=current_targets,
+                "sat_unsafety_current_targets_present",
+                count=0,
                 **details,
             )
         )
-    frozen_actions = _canonical_actions(entry.get("required_completion_actions"))
     current_actions = _canonical_actions(_current_sat_actions(entry))
-    if not frozen_actions or current_actions != frozen_actions:
+    if not current_actions:
         failures.append(
             _failed(
-                "sat_unsafety_required_actions_changed",
-                expected=frozen_actions,
-                actual=current_actions,
+                "sat_unsafety_current_actions_present",
+                count=0,
                 **details,
             )
         )

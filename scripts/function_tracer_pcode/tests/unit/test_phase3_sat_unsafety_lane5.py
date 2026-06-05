@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5 import (
     _observation,
     _object_target_key_is_specific_sat_unsafety,
     _pending_proof_obligations,
+    _post_fix_status,
     _proof_action_has_expected_id,
     _proof_action_matches_lane_definition,
 )
@@ -290,6 +291,54 @@ def test_sat_unsafety_pending_proof_obligations_materialize_required_evidence():
     assert obligations[0]["proof_obligation_id"]
     assert obligations[0]["completed_evidence_present"] is False
     assert obligations[0]["status"] == "pending_evidence"
+
+
+def test_sat_unsafety_post_fix_accepts_current_sat_action_when_target_details_change():
+    reason = _sat_reason()
+    action = build_unknown_recovery_actions([reason])[0].to_dict()
+    action["raw_object_target_key_present"] = True
+    action["raw_proof_obligation_id_present"] = True
+    entry = {
+        "id": "representative-sat-unsafety-is-even-guard",
+        "function": "fc_is_even",
+        "binary_pair": "B9_B10",
+        "target_object_keys": [("sat_unsafety", ("pair", "frozen-target"))],
+        "required_completion_actions": [
+            {"reason_id": "sat_unsafety", "object_target_key": ("sat_unsafety", ("pair", "frozen-action"))}
+        ],
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [action],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "pending_proof"
+    assert failures == ()
+
+
+def test_sat_unsafety_post_fix_rejects_current_sat_target_without_action():
+    reason = _sat_reason()
+    entry = {
+        "id": "representative-sat-unsafety-is-even-guard",
+        "function": "fc_is_even",
+        "binary_pair": "B9_B10",
+        "current_observation": {
+            "final_result": "UNKNOWN",
+            "reason_records": [reason.to_dict()],
+            "proof_actions": [],
+        },
+    }
+
+    status, failures = _post_fix_status(entry)
+
+    assert status == "failed"
+    assert {failure["kind"] for failure in failures} >= {
+        "sat_unsafety_current_actions_present",
+        "sat_unsafety_current_actions_complete",
+    }
 
 
 def test_sat_unsafety_observation_supplements_registered_unresolved_actions():

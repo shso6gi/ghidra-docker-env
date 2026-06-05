@@ -31,6 +31,7 @@ PHASE1_DIR="${PHASE1_DIR:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/ph
 PHASE1_FUNCTION_CALL_LOG_ROOT="${PHASE1_FUNCTION_CALL_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_current}"
 PHASE1_LOOP_LOG_ROOT="${PHASE1_LOOP_LOG_ROOT:-$BASELINE_LOOP_LOG_ROOT}"
 PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"
+PHASE3_GENERATE_MISSING_REPRESENTATIVE_LOGS="${PHASE3_GENERATE_MISSING_REPRESENTATIVE_LOGS:-0}"
 
 require_ready_args=()
 if [[ "$PHASE3_REQUIRE_READY" != "0" ]]; then
@@ -98,6 +99,28 @@ if missing:
 PY
 }
 
+require_or_generate_manifest_logs() {
+    local category="$1"
+    local manifest="$2"
+    local root="$3"
+    local runner="$4"
+
+    if require_manifest_logs "$category" "$manifest" "$root" "$runner"; then
+        return 0
+    fi
+
+    if [[ "$PHASE3_GENERATE_MISSING_REPRESENTATIVE_LOGS" == "0" ]]; then
+        return 2
+    fi
+
+    echo
+    echo "Generating missing representative logs with: $runner"
+    echo "============================================================"
+    env VALIDATION_RUNNER_DRY_RUN=0 VALIDATION_SKIP_COMPLETED=0 "$runner"
+    echo "============================================================"
+    require_manifest_logs "$category" "$manifest" "$root" "$runner"
+}
+
 run_gate() {
     echo
     echo "============================================================"
@@ -118,18 +141,20 @@ LANE9_MANIFEST="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/audit/phase3
 
 echo "Preflight: checking required Phase 3 representative logs."
 preflight_failed=0
-require_manifest_logs function_call "$LANE1_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_coverage_lane1_representatives" "./phase3_run_function_call_return_coverage_lane1_representatives.sh" || preflight_failed=1
-require_manifest_logs function_call "$LANE2_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_width_bridge_lane2_representatives" "./phase3_run_function_call_return_width_bridge_lane2_representatives.sh" || preflight_failed=1
-require_manifest_logs loop "$LANE3_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_readonly_identity_lane3_representatives" "./phase3_run_loop_readonly_identity_lane3_representatives.sh" || preflight_failed=1
-require_manifest_logs loop "$LANE4_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_method_b_closure_lane4_representatives" "./phase3_run_loop_method_b_closure_lane4_representatives.sh" || preflight_failed=1
-require_manifest_logs function_call "$LANE5_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_sat_unsafety_lane5_representatives" "./phase3_run_function_call_sat_unsafety_lane5_representatives.sh" || preflight_failed=1
-require_manifest_logs function_call "$LANE6_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives" "./phase3_run_function_call_unresolved_expression_lane6_representatives.sh" || preflight_failed=1
-require_manifest_logs loop "$LANE7_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_solver_rewrite_lane7_representatives" "./phase3_run_loop_solver_rewrite_lane7_representatives.sh" || preflight_failed=1
-require_manifest_logs function_call "$LANE8_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_solver_rewrite_proof_lane8_representatives" "./phase3_run_function_call_solver_rewrite_proof_lane8_representatives.sh" || preflight_failed=1
-require_manifest_logs function_call "$LANE9_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_solver_timeout_lane9_representatives" "./phase3_run_function_call_solver_timeout_lane9_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE1_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_coverage_lane1_representatives" "./phase3_run_function_call_return_coverage_lane1_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE2_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_width_bridge_lane2_representatives" "./phase3_run_function_call_return_width_bridge_lane2_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs loop "$LANE3_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_readonly_identity_lane3_representatives" "./phase3_run_loop_readonly_identity_lane3_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs loop "$LANE4_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_method_b_closure_lane4_representatives" "./phase3_run_loop_method_b_closure_lane4_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE5_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_sat_unsafety_lane5_representatives" "./phase3_run_function_call_sat_unsafety_lane5_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE6_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_unresolved_expression_lane6_representatives" "./phase3_run_function_call_unresolved_expression_lane6_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs loop "$LANE7_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_solver_rewrite_lane7_representatives" "./phase3_run_loop_solver_rewrite_lane7_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE8_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_solver_rewrite_proof_lane8_representatives" "./phase3_run_function_call_solver_rewrite_proof_lane8_representatives.sh" || preflight_failed=1
+require_or_generate_manifest_logs function_call "$LANE9_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_solver_timeout_lane9_representatives" "./phase3_run_function_call_solver_timeout_lane9_representatives.sh" || preflight_failed=1
 if [[ "$preflight_failed" != "0" ]]; then
     echo "Error: log-only Phase 3 post-fix gate rebuild cannot continue until the missing representative logs are generated or copied." >&2
     echo "If this follows copy_full_rerun_artifacts.bat, the remote share did not contain the missing representative log directories." >&2
+    echo "To let this script generate missing representative logs, run:" >&2
+    echo "  PHASE3_GENERATE_MISSING_REPRESENTATIVE_LOGS=1 ./phase3_rebuild_all_post_fix_gates_from_logs.sh" >&2
     echo "Run the listed representative scripts on the analysis host, or run PARALLEL_JOBS=32 ./rerun_full_analysis.sh to regenerate them as part of the full sequence." >&2
     exit 2
 fi
