@@ -811,6 +811,12 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
     done
 
     wait
+    if (( COUNT != FUNC_TOTAL_PAIRS )); then
+        echo "Error: selected function-call pair execution count mismatch for $TARGET_FUNC" >&2
+        echo "  selected: $FUNC_TOTAL_PAIRS" >&2
+        echo "  executed: $COUNT" >&2
+        exit 1
+    fi
     echo ""
     func_end_ts=$(date +%s.%N)
     func_elapsed_seconds=$(calculate_elapsed_seconds "$func_start_ts" "$func_end_ts")
@@ -865,6 +871,19 @@ for TARGET_FUNC in "${TARGET_FUNCS[@]}"; do
 
     # --- tee を使って画面とファイルの両方に出力 ---
     mapfile -t FUNC_LOG_FILES < <(collect_expected_log_files "$OUTPUT_DIR" "$TARGET_FUNC")
+    if (( FUNC_TOTAL_PAIRS > 0 && ${#FUNC_LOG_FILES[@]} != FUNC_TOTAL_PAIRS )); then
+        echo "Error: selected function-call pair log count mismatch for $TARGET_FUNC" >&2
+        echo "  selected: $FUNC_TOTAL_PAIRS" >&2
+        echo "  logs    : ${#FUNC_LOG_FILES[@]}" >&2
+        for PAIR_SPEC in "${PAIR_SPECS[@]}"; do
+            IFS=$'\t' read -r ROW_ID COL_ID <<< "$PAIR_SPEC"
+            LOG_FILE="${OUTPUT_DIR}/${TARGET_FUNC}_${ROW_ID}_${COL_ID}.log"
+            if [[ ! -f "$LOG_FILE" ]]; then
+                echo "  missing log: $LOG_FILE" >&2
+            fi
+        done
+        exit 1
+    fi
 
     FUNCTION_SUMMARY_ARGS=(
         --function-summary
