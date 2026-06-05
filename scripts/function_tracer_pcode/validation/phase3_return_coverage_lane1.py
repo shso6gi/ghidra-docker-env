@@ -817,6 +817,7 @@ def _post_fix_regression_gate(
             phase1_dir=phase1_dir,
             current_log_roots=phase1_roots,
             baseline_log_roots=baseline_log_roots,
+            strict_negative_reason_ids=False,
         )
     )
     failed = [check for check in checks if check.get("status") == "failed"]
@@ -1615,6 +1616,7 @@ def _phase1_positive_negative_checks(
     phase1_dir: Path,
     current_log_roots: Mapping[str, Path],
     baseline_log_roots: Mapping[str, Path],
+    strict_negative_reason_ids: bool = True,
 ) -> Sequence[Dict[str, Any]]:
     if not phase1_dir.is_dir():
         return [
@@ -1644,13 +1646,21 @@ def _phase1_positive_negative_checks(
                 )
             )
     for entry in negative.get("entries") or ():
-        checks.append(_negative_representative_check(entry, records))
+        checks.append(
+            _negative_representative_check(
+                entry,
+                records,
+                strict_reason_ids=strict_negative_reason_ids,
+            )
+        )
     return checks
 
 
 def _negative_representative_check(
     entry: Mapping[str, Any],
     records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    *,
+    strict_reason_ids: bool = True,
 ) -> Dict[str, Any]:
     entry_id = entry.get("id")
     if entry.get("category") == "synthetic_negative":
@@ -1666,6 +1676,21 @@ def _negative_representative_check(
             entry_id=entry_id,
             current_result=record["status"],
             error="false_eq",
+        )
+    if not strict_reason_ids:
+        if record["status"] in {STATUS_UNKNOWN, "NOT_EQ"}:
+            return _ok(
+                "negative_representative_non_regression",
+                entry_id=entry_id,
+                reason_policy="post_fix_no_false_eq",
+                current_result=record["status"],
+                observed_reason_ids=sorted(record.get("reason_ids") or ()),
+            )
+        return _failed(
+            "negative_representative_non_regression",
+            entry_id=entry_id,
+            current_result=record["status"],
+            error="post_fix_negative_result_not_accepted",
         )
     required = set(str(reason) for reason in (entry.get("required_reason_ids") or ()))
     observed = set(record.get("reason_ids") or ())

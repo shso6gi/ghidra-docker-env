@@ -858,6 +858,87 @@ def test_phase3_return_coverage_post_fix_gate_accepts_completed_proof_with_opera
     validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
 
 
+def test_phase3_return_coverage_post_fix_gate_accepts_negative_reason_reclassified_after_fix(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _write_completed_eq_log(current_root, frozen_recursive)
+    _write_log(
+        current_root,
+        "fc_negative_fixture",
+        "B11",
+        "B12",
+        [
+            make_unknown_reason(
+                UnknownReasonId.UNRESOLVED_EXPRESSION,
+                stage="S_PAIRWISE",
+                detail="post-fix reason moved off return coverage",
+            )
+        ],
+    )
+    (phase1_dir / "negative_manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "negative-return-coverage-reclassified",
+                        "category": "function_call",
+                        "function": "fc_negative_fixture",
+                        "binary_pair": "B11_B12",
+                        "expected_result": "UNKNOWN",
+                        "must_not_be_equivalent": True,
+                        "required_reason_ids": ["return_coverage_gap"],
+                    }
+                ]
+            }
+        )
+    )
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is True
+    negative_check = next(
+        check
+        for check in manifest["post_fix_regression_gate"]["checks"]
+        if check.get("entry_id") == "negative-return-coverage-reclassified"
+    )
+    assert negative_check["status"] == "ok"
+    assert negative_check["reason_policy"] == "post_fix_no_false_eq"
+    assert negative_check["observed_reason_ids"] == ["unresolved_expression"]
+    validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
 def test_phase3_return_coverage_post_fix_gate_accepts_retired_transition_one_sided_gap(
     tmp_path,
 ):
