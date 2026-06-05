@@ -27,6 +27,7 @@ echo.
 echo Artifact copy finished.
 echo   From: %REMOTE%
 echo   To  : %LOCAL%
+echo Note: In the robocopy summary, Extras are not copy failures. With /MIR, Extras are local-only items that are removed from logs\equivalence_all. Only robocopy exit codes 8 or higher are treated as failures here.
 exit /b 0
 
 :copy_files
