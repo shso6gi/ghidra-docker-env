@@ -90,11 +90,18 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
         ready_key="phase3_lane1_post_fix_ready",
         validator=validate_phase3_return_coverage_lane1_post_fix_gate,
         expected_entry_count=2,
-        allowed_post_fix_statuses=("completed_recovery", "pending_proof"),
-        expected_post_fix_status_counts={"completed_recovery": 1, "pending_proof": 1},
+        allowed_post_fix_statuses=(
+            "completed_recovery",
+            "completed_recovery_with_operational_unknown",
+            "pending_proof",
+        ),
+        expected_post_fix_status_counts={
+            "completed_recovery": 1,
+            "completed_recovery_with_operational_unknown": 1,
+        },
         expected_post_fix_obligation_counts={
-            "pending_proof_entry_count": 1,
-            "pending_proof_obligation_count": 4,
+            "pending_proof_entry_count": 0,
+            "pending_proof_obligation_count": 0,
             "pending_retry_entry_count": 0,
             "pending_retry_obligation_count": 0,
         },
@@ -124,10 +131,10 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
                 "id": "representative-return-coverage-gap-even-both-sides",
                 "function": "fc_is_even",
                 "binary_pair": "B11_B12",
-                "post_fix_status": "pending_proof",
-                "pending_proof_obligation_count": 4,
+                "post_fix_status": "completed_recovery_with_operational_unknown",
+                "pending_proof_obligation_count": 0,
                 "pending_retry_obligation_count": 0,
-                "required_completion_action_count": 4,
+                "required_completion_action_count": 0,
             },
         ),
         expected_required_completion_action_hashes=(
@@ -140,7 +147,7 @@ DEFAULT_PHASE3_POST_FIX_GATE_SPECS: Sequence[Phase3PostFixGateSpec] = (
             {
                 "id": "representative-return-coverage-gap-even-both-sides",
                 "required_completion_actions_sha256": (
-                    "77530b320d3a19f3a34f0cc8a19dc8d45ab95cfef98e070300b2c7e4ee02ee13"
+                    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
                 ),
             },
         ),

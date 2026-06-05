@@ -284,6 +284,48 @@ def _write_completed_eq_log(root: Path, frozen_entry, evidence_updates=None):
     _write_payload_log(path, payload)
 
 
+def _write_completed_unknown_log(root: Path, frozen_entry, reasons, *, numeric_function_identity=False):
+    function = frozen_entry["function"]
+    left = frozen_entry["expected_observed_left_binary_id"]
+    right = frozen_entry["expected_observed_right_binary_id"]
+    path = root / function / f"{function}_{left}_{right}.log"
+    payload = _payload(
+        function,
+        frozen_entry["expected_observed_binary1_name"],
+        frozen_entry["expected_observed_binary2_name"],
+        reasons,
+    )
+    payload["decision_gated_by_pending_proof"] = False
+    evidence_records = []
+    for action in frozen_entry["current_observation"]["proof_actions"]:
+        if action["reason_id"] != "return_coverage_gap":
+            continue
+        object_target_key = json.loads(json.dumps(action["object_target_key"]))
+        if numeric_function_identity:
+            object_target_key[2][1][1] = 3734179612044370016
+        evidence_records.append(
+            {
+                "side": object_target_key[1],
+                "function_name": function,
+                "binary_name": frozen_entry["expected_observed_binary2_name"],
+                "binary_id": object_target_key[2][1][1],
+                "evidence": {
+                    "object_derived": True,
+                    "status": "complete",
+                    "reason_id": action["reason_id"],
+                    "recovery_proof_kind": action["proof_kind"],
+                    "proof_stage": action["proof_stage"],
+                    "evidence_kind": action["evidence_kind"],
+                    "coverage_status": "covered",
+                    "object_target_key": object_target_key,
+                    "proof_obligation_id": action["proof_obligation_id"],
+                },
+            }
+        )
+    payload["completed_recovery_proof_evidence"] = evidence_records
+    _write_payload_log(path, payload)
+
+
 def _write_completed_eq_log_with_current_return_coverage_targets(
     root: Path,
     frozen_entry,
@@ -748,6 +790,129 @@ def test_phase3_return_coverage_post_fix_gate_accepts_completed_eq_with_frozen_p
         json.dumps(action["proof_obligation_id"], sort_keys=True)
         for action in frozen_recursive["current_observation"]["proof_actions"]
     }
+    validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_accepts_completed_proof_with_operational_unknown(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    frozen_even = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_is_even"
+    )
+    _write_completed_eq_log(current_root, frozen_recursive)
+    _write_completed_unknown_log(
+        current_root,
+        frozen_even,
+        [
+            make_unknown_reason(
+                UnknownReasonId.UNRESOLVED_EXPRESSION,
+                stage="S_PAIRWISE",
+                detail="unrelated expression backlog",
+            )
+        ],
+        numeric_function_identity=True,
+    )
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is True
+    even = next(entry for entry in manifest["entries"] if entry["function"] == "fc_is_even")
+    assert even["post_fix_status"] == "completed_recovery_with_operational_unknown"
+    assert even["current_observation"]["final_result"] == "UNKNOWN"
+    assert even["current_observation"]["observed_reason_ids"] == ["unresolved_expression"]
+    assert even["post_fix_failures"] == []
+    validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+
+
+def test_phase3_return_coverage_post_fix_gate_accepts_retired_transition_one_sided_gap(
+    tmp_path,
+):
+    raw_dir = tmp_path / "baseline" / "raw"
+    current_root = tmp_path / "current" / "function_call"
+    baseline_root = tmp_path / "baseline_logs" / "function_call"
+    phase1_dir = tmp_path / "phase1"
+    _write_artifact_manifest(raw_dir)
+    _write_representative_logs(current_root)
+    _write_representative_logs(baseline_root)
+    _write_retired_transition_logs(baseline_root, current_root)
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    _write_minimal_phase1_manifests(phase1_dir)
+    pre_fix_path = build_phase3_return_coverage_lane1_manifest(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-pre",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+    )
+    pre_fix_manifest = json.loads(pre_fix_path.read_text())
+    frozen_recursive = next(
+        entry
+        for entry in pre_fix_manifest["entries"]
+        if entry["function"] == "fc_recursive_sum"
+    )
+    _write_completed_eq_log(current_root, frozen_recursive)
+    _write_log(
+        current_root,
+        "fc_is_odd",
+        "B11",
+        "B16",
+        [_reason_from_ref("function2:return_coverage_gap")],
+    )
+
+    path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(pre_fix_path),
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase3_lane1_post_fix_ready"] is True
+    transition = next(
+        entry
+        for entry in manifest["retired_transitions"]
+        if entry["binary_pair"] == "B11_B16"
+    )
+    assert transition["selection_status"] == "retired_by_reclassification"
+    assert transition["selection_failures"] == []
+    assert transition["final_result_invariant"]["final_result_unchanged_unknown"] is True
     validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
 
 

@@ -493,7 +493,12 @@ def build_phase3_return_coverage_lane1_post_fix_gate(
         if isinstance(raw_entry, Mapping)
     ]
     transition_entries = [
-        _materialize_retired_transition(raw_entry, current_records, baseline_records)
+        _materialize_retired_transition(
+            raw_entry,
+            current_records,
+            baseline_records,
+            require_current_expected_movements=False,
+        )
         for raw_entry in frozen_transitions
         if isinstance(raw_entry, Mapping)
     ]
@@ -791,7 +796,12 @@ def _post_fix_regression_gate(
                 binary_pair=entry.get("binary_pair"),
                 post_fix_status=entry.get("post_fix_status"),
             )
-            if entry.get("post_fix_status") in {"pending_proof", "completed_recovery"}
+            if entry.get("post_fix_status")
+            in {
+                "pending_proof",
+                "completed_recovery",
+                "completed_recovery_with_operational_unknown",
+            }
             else _failed(
                 "return_coverage_post_fix_expected_movement",
                 entry_id=entry.get("id"),
@@ -1821,6 +1831,7 @@ def _materialize_post_fix_entry(
         "current_observation": current,
     }
     failures = []
+    completed_recovery_with_operational_unknown = False
     if current.get("log_status") == "missing":
         failures.append("current_log_missing")
     else:
@@ -1830,7 +1841,13 @@ def _materialize_post_fix_entry(
             failures.append("current_observed_payload_direction_mismatch")
         current_result = current.get("final_result")
         if current_result == STATUS_UNKNOWN:
-            failures.extend(_expected_movement_failures(entry, current, "current"))
+            movement_failures = list(_expected_movement_failures(entry, current, "current"))
+            if movement_failures:
+                completion_failures = list(_completed_operational_unknown_failures(entry, current))
+                if completion_failures:
+                    failures.extend(movement_failures)
+                else:
+                    completed_recovery_with_operational_unknown = True
         elif current_result == STATUS_EQ:
             failures.extend(_completed_recovery_failures(entry, current))
         elif current_result == STATUS_TIMEOUT:
@@ -1839,6 +1856,8 @@ def _materialize_post_fix_entry(
             failures.append(f"current_result_not_accepted:{current_result or MISSING_SENTINEL}")
     if failures:
         entry["post_fix_status"] = "failed"
+    elif completed_recovery_with_operational_unknown:
+        entry["post_fix_status"] = "completed_recovery_with_operational_unknown"
     elif current.get("final_result") == STATUS_EQ:
         entry["post_fix_status"] = "completed_recovery"
     else:
@@ -1898,6 +1917,146 @@ def _completed_recovery_failures(
                 f"{action.get('evidence_kind') or MISSING_SENTINEL}"
             )
     return failures
+
+
+def _completed_operational_unknown_failures(
+    entry: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> Sequence[str]:
+    failures = []
+    if current.get("decision_gated_by_pending_proof") is True:
+        failures.append("decision_gated_by_pending_proof")
+    active_return_reasons = sorted(
+        reason_id
+        for reason_id in (current.get("observed_reason_ids") or ())
+        if reason_id in OBSERVED_RETURN_REASON_IDS
+    )
+    failures.extend(
+        f"active_return_coverage_reason_not_cleared:{reason_id}"
+        for reason_id in active_return_reasons
+    )
+    pending_actions = [
+        action
+        for action in current.get("proof_actions") or ()
+        if isinstance(action, Mapping)
+        and action.get("reason_id") in OBSERVED_RETURN_REASON_IDS
+        and action.get("status") == "pending_proof"
+    ]
+    if pending_actions:
+        failures.append("pending_return_coverage_proof_action_still_active")
+    required_actions = _frozen_required_return_coverage_actions(entry)
+    if not required_actions:
+        failures.append("frozen_return_coverage_proof_actions_missing")
+        return failures
+    completed = tuple(current.get("completed_recovery_proof_evidence") or ())
+    if not completed:
+        failures.append("return_coverage_completed_proof_required")
+        return failures
+    for action in required_actions:
+        if not any(
+            _completed_evidence_covers_operational_unknown_action(evidence, action)
+            for evidence in completed
+        ):
+            failures.append(
+                "return_coverage_completed_proof_required:"
+                f"{action.get('proof_stage') or MISSING_SENTINEL}:"
+                f"{action.get('evidence_kind') or MISSING_SENTINEL}"
+            )
+    return failures
+
+
+def _completed_evidence_covers_operational_unknown_action(
+    evidence_summary: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> bool:
+    if not isinstance(evidence_summary, Mapping):
+        return False
+    evidence = evidence_summary.get("evidence")
+    if not isinstance(evidence, Mapping):
+        evidence = evidence_summary
+    if evidence_summary.get("object_derived") is not True and evidence.get("object_derived") is not True:
+        return False
+    if str(evidence_summary.get("status") or evidence.get("status") or "") not in {
+        "complete",
+        "completed",
+        "proven",
+    }:
+        return False
+    proof_kind = (
+        evidence_summary.get("proof_kind")
+        or evidence.get("recovery_proof_kind")
+        or evidence.get("proof_kind")
+    )
+    if (
+        str(evidence_summary.get("reason_id") or evidence.get("reason_id") or MISSING_SENTINEL)
+        != str(action.get("reason_id") or MISSING_SENTINEL)
+        or str(evidence_summary.get("proof_stage") or evidence.get("proof_stage") or MISSING_SENTINEL)
+        != str(action.get("proof_stage") or MISSING_SENTINEL)
+        or str(proof_kind or MISSING_SENTINEL)
+        != str(action.get("proof_kind") or MISSING_SENTINEL)
+        or str(evidence_summary.get("evidence_kind") or evidence.get("evidence_kind") or MISSING_SENTINEL)
+        != str(action.get("evidence_kind") or MISSING_SENTINEL)
+    ):
+        return False
+    object_target_key = _normalize_nested_tuple(
+        evidence_summary.get("object_target_key") or evidence.get("object_target_key")
+    )
+    action_target_key = _normalize_nested_tuple(action.get("object_target_key"))
+    if not _return_coverage_operational_unknown_target_is_usable(object_target_key):
+        return False
+    if (
+        isinstance(object_target_key, tuple)
+        and isinstance(action_target_key, tuple)
+        and len(object_target_key) > 1
+        and len(action_target_key) > 1
+        and object_target_key[1] != action_target_key[1]
+    ):
+        return False
+    if object_target_key != action_target_key and str(evidence.get("coverage_status") or "") != "covered":
+        return False
+    return not _completed_evidence_has_active_blocker(evidence)
+
+
+def _return_coverage_operational_unknown_target_is_usable(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if not isinstance(normalized, tuple) or len(normalized) != 7:
+        return False
+    (
+        kind,
+        side_label,
+        function_key,
+        reason_kind,
+        return_storage_key,
+        return_partition_key,
+        guard_disjunction_key,
+    ) = normalized
+    if (
+        kind != "return_coverage"
+        or side_label not in {"function1", "function2"}
+        or reason_kind not in TARGET_REASON_IDS
+    ):
+        return False
+    return all(
+        (
+            _analysis_key_has_address_identity(function_key),
+            _return_storage_key_is_specific(return_storage_key),
+            _return_partition_key_is_specific(return_partition_key),
+            _guard_disjunction_key_is_specific(guard_disjunction_key),
+        )
+    )
+
+
+def _analysis_key_has_address_identity(value: Any) -> bool:
+    normalized = _normalize_nested_tuple(value)
+    if not isinstance(normalized, tuple) or len(normalized) < 2:
+        return False
+    if normalized[0] != "function_ref":
+        return False
+    function_ref = normalized[1]
+    if not isinstance(function_ref, tuple) or len(function_ref) < 3:
+        return False
+    kind, _binary_identity, address_offset = function_ref[:3]
+    return kind in {"function", "code_address"} and _address_like_is_specific(address_offset)
 
 
 def _pending_proof_obligations(entry: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
@@ -2209,6 +2368,8 @@ def _materialize_retired_transition(
     raw_entry: Mapping[str, Any],
     current_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
     baseline_records: Mapping[Tuple[str, str, str], Mapping[str, Any]],
+    *,
+    require_current_expected_movements: bool = True,
 ) -> Dict[str, Any]:
     category = str(raw_entry["category"])
     function = str(raw_entry["function"])
@@ -2285,10 +2446,11 @@ def _materialize_retired_transition(
         failures.append(f"current_retired_proof_action_tuple_still_active:{retired_reason_id}")
     if reclassified_to_reason_id not in current_reasons:
         failures.append(f"current_missing_reclassified_{reclassified_to_reason_id}")
-    movement_entry = {
-        "expected_movements": raw_entry.get("current_expected_movements") or (),
-    }
-    failures.extend(_expected_movement_failures(movement_entry, current, "current"))
+    if require_current_expected_movements:
+        movement_entry = {
+            "expected_movements": raw_entry.get("current_expected_movements") or (),
+        }
+        failures.extend(_expected_movement_failures(movement_entry, current, "current"))
     entry["selection_status"] = "retired_by_reclassification" if not failures else "failed"
     entry["selection_failures"] = sorted(set(failures))
     return entry
