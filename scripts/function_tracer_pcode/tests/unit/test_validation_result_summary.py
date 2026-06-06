@@ -1396,6 +1396,8 @@ def test_phase3_lane1_representative_wrapper_pins_pairs_and_manifest_hash():
     assert "Phase 3 lane 1 dry run finished before post-fix gate." in script
     assert 'PHASE3_REQUIRE_READY="${PHASE3_REQUIRE_READY:-1}"' in script
     assert 'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert 'PHASE1_FUNCTION_CALL_LOG_ROOT="${PHASE1_FUNCTION_CALL_LOG_ROOT:-$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_full_current}"' in script
+    assert 'PHASE1_LOOP_LOG_ROOT="${PHASE1_LOOP_LOG_ROOT:-$BASELINE_RAW_DIR/logs/loop}"' in script
     assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
     assert "--phase3-manifest-sha256" in script
     assert "--gate-stage post-fix" in script

@@ -121,6 +121,76 @@ require_or_generate_manifest_logs() {
     require_manifest_logs "$category" "$manifest" "$root" "$runner"
 }
 
+require_phase1_non_regression_logs() {
+    "$PYTHON_BIN" - "$PHASE1_DIR" "$PHASE1_FUNCTION_CALL_LOG_ROOT" "$PHASE1_LOOP_LOG_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+phase1_dir, function_call_root, loop_root = sys.argv[1:]
+roots = {
+    "function_call": Path(function_call_root),
+    "loop": Path(loop_root),
+}
+manifests = (
+    Path(phase1_dir) / "positive_manifest.json",
+    Path(phase1_dir) / "negative_manifest.json",
+)
+missing = []
+for manifest_path in manifests:
+    if not manifest_path.is_file():
+        missing.append((str(manifest_path), "<manifest>", "<missing>", "<missing>"))
+        continue
+    manifest = json.loads(manifest_path.read_text())
+    for entry in manifest.get("entries") or ():
+        if not isinstance(entry, dict):
+            continue
+        category = str(entry.get("category") or "")
+        if category == "synthetic_negative":
+            continue
+        root = roots.get(category)
+        function = str(entry.get("function") or "")
+        binary_pair = str(entry.get("binary_pair") or "")
+        parts = binary_pair.split("_")
+        if root is None or not function or len(parts) != 2:
+            missing.append((entry.get("id"), category or "<missing>", function or "<missing>", binary_pair or "<missing>"))
+            continue
+        left, right = parts
+        candidates = (
+            root / function / f"{function}_{left}_{right}.log",
+            root / function / f"{function}_{right}_{left}.log",
+        )
+        if not any(candidate.is_file() for candidate in candidates):
+            missing.append(
+                (
+                    entry.get("id"),
+                    category,
+                    function,
+                    binary_pair,
+                    " or ".join(str(candidate) for candidate in candidates),
+                )
+            )
+
+if missing:
+    print("Error: required Phase 1 positive/negative non-regression logs are missing for lane 1 post-fix gate rebuild.", file=sys.stderr)
+    print(f"  phase1_dir              : {phase1_dir}", file=sys.stderr)
+    print(f"  function_call_log_root  : {function_call_root}", file=sys.stderr)
+    print(f"  loop_log_root           : {loop_root}", file=sys.stderr)
+    print("  missing entries:", file=sys.stderr)
+    for item in missing:
+        if len(item) == 4:
+            entry_id, category, function, binary_pair = item
+            print(f"    - id={entry_id} category={category} function={function} binary_pair={binary_pair}", file=sys.stderr)
+            continue
+        entry_id, category, function, binary_pair, candidates = item
+        print(f"    - id={entry_id} category={category} function={function} binary_pair={binary_pair}", file=sys.stderr)
+        print(f"      expected log: {candidates}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Generate or copy the Phase 2 full-current function_call logs, or set PHASE1_FUNCTION_CALL_LOG_ROOT/PHASE1_LOOP_LOG_ROOT to the correct roots.", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
 run_gate() {
     echo
     echo "============================================================"
@@ -141,6 +211,7 @@ LANE9_MANIFEST="$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352/audit/phase3
 
 echo "Preflight: checking required Phase 3 representative logs."
 preflight_failed=0
+require_phase1_non_regression_logs || preflight_failed=1
 require_or_generate_manifest_logs function_call "$LANE1_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_coverage_lane1_representatives" "./phase3_run_function_call_return_coverage_lane1_representatives.sh" || preflight_failed=1
 require_or_generate_manifest_logs function_call "$LANE2_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase3_return_width_bridge_lane2_representatives" "./phase3_run_function_call_return_width_bridge_lane2_representatives.sh" || preflight_failed=1
 require_or_generate_manifest_logs loop "$LANE3_MANIFEST" "$SCRIPT_DIR/logs/equivalence_all/loop_test_phase3_readonly_identity_lane3_representatives" "./phase3_run_loop_readonly_identity_lane3_representatives.sh" || preflight_failed=1
