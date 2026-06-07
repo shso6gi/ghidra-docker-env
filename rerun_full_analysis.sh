@@ -108,6 +108,12 @@ fi
 run_and_log unit_tests_stdout.log \
     "$PYTHON_BIN" -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 
+run_and_log phase0c_observed_baseline_census_gate_stdout.log \
+    ./phase0c_validate_observed_baseline_census_gate.sh
+
+run_and_log phase0d_not_eq_audit_gate_stdout.log \
+    ./phase0d_validate_not_eq_audit_gate.sh
+
 if [[ "$RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" == "1" ]]; then
     echo ""
     echo "Skipping normal Phase 2 full matrix because RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL=1."

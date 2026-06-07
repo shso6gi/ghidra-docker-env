@@ -1087,15 +1087,65 @@ def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
 def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 
+    phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
+    phase0d_gate = script.index("./phase0d_validate_not_eq_audit_gate.sh")
     normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
     producer_full_matrix = script.index(
         "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
     )
 
+    assert phase0c_gate < phase0d_gate
+    assert phase0d_gate < normal_full_matrix
+    assert "phase0c_observed_baseline_census_gate_stdout.log" in script
+    assert "phase0d_not_eq_audit_gate_stdout.log" in script
     assert normal_full_matrix < producer_full_matrix
     assert "./phase2_run_function_call_pre_producer_final_result_preflight.sh" not in script
     assert "./phase2_run_function_call_pre_producer_preflight.sh" not in script
     assert "RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" in script
+
+
+def test_phase0d_not_eq_audit_gate_wrapper_validates_frozen_audit():
+    script_path = Path("phase0d_validate_not_eq_audit_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase0d_not_eq_audit_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase0d_not_eq_audit_gate'
+    ) in script
+    assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
+    assert '--audit-manifest "$BASELINE_ROOT/audit/not_eq_audit_manifest.json"' in script
+    assert '--oracle-manifest "$BASELINE_ROOT/derived_oracle/oracle_manifest_draft.json"' in script
+    assert "--require-ready" in script
+
+
+def test_phase0c_observed_baseline_census_gate_wrapper_validates_frozen_raw_logs():
+    script_path = Path("phase0c_validate_observed_baseline_census_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase0c_observed_baseline_census_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase0c_observed_baseline_census_gate'
+    ) in script
+    assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
+    assert "--require-ready" in script
 
 
 def test_phase2_return_coverage_risk_preflight_selects_eq_pairs_by_note_strata(tmp_path):
