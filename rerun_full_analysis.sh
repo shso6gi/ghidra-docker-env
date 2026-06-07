@@ -114,8 +114,17 @@ run_and_log phase0a_observed_baseline_integrity_gate_stdout.log \
 run_and_log phase0c_observed_baseline_census_gate_stdout.log \
     ./phase0c_validate_observed_baseline_census_gate.sh
 
+run_and_log phase0c_canonical_reproduction_gate_stdout.log \
+    ./phase0c_validate_canonical_reproduction_gate.sh
+
 run_and_log phase0d_not_eq_audit_gate_stdout.log \
     ./phase0d_validate_not_eq_audit_gate.sh
+
+run_and_log phase1_concrete_manifest_gate_stdout.log \
+    ./phase1_validate_concrete_manifest_gate.sh
+
+run_and_log phase1_5_regression_gates_stdout.log \
+    ./phase15_validate_regression_gates.sh
 
 if [[ "$RERUN_FULL_ANALYSIS_SKIP_NORMAL_FULL" == "1" ]]; then
     echo ""

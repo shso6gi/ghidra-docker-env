@@ -1089,18 +1089,27 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
 
     phase0a_gate = script.index("./phase0a_validate_observed_baseline_integrity_gate.sh")
     phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
+    phase0c_reproduction_gate = script.index("./phase0c_validate_canonical_reproduction_gate.sh")
     phase0d_gate = script.index("./phase0d_validate_not_eq_audit_gate.sh")
+    phase1_gate = script.index("./phase1_validate_concrete_manifest_gate.sh")
+    phase15_gate = script.index("./phase15_validate_regression_gates.sh")
     normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
     producer_full_matrix = script.index(
         "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
     )
 
     assert phase0a_gate < phase0c_gate
-    assert phase0c_gate < phase0d_gate
-    assert phase0d_gate < normal_full_matrix
+    assert phase0c_gate < phase0c_reproduction_gate
+    assert phase0c_reproduction_gate < phase0d_gate
+    assert phase0d_gate < phase1_gate
+    assert phase1_gate < phase15_gate
+    assert phase15_gate < normal_full_matrix
     assert "phase0a_observed_baseline_integrity_gate_stdout.log" in script
     assert "phase0c_observed_baseline_census_gate_stdout.log" in script
+    assert "phase0c_canonical_reproduction_gate_stdout.log" in script
     assert "phase0d_not_eq_audit_gate_stdout.log" in script
+    assert "phase1_concrete_manifest_gate_stdout.log" in script
+    assert "phase1_5_regression_gates_stdout.log" in script
     assert normal_full_matrix < producer_full_matrix
     assert "./phase2_run_function_call_pre_producer_final_result_preflight.sh" not in script
     assert "./phase2_run_function_call_pre_producer_preflight.sh" not in script
@@ -1151,6 +1160,30 @@ def test_phase0c_observed_baseline_census_gate_wrapper_validates_frozen_raw_logs
     assert "--require-ready" in script
 
 
+def test_phase0c_canonical_reproduction_gate_wrapper_validates_exact_match():
+    script_path = Path("phase0c_validate_canonical_reproduction_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert 'FUNCTION_CALL_CURRENT_LOG_ROOT="${FUNCTION_CALL_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/function_call}"' in script
+    assert 'LOOP_CURRENT_LOG_ROOT="${LOOP_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/loop}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase0c_canonical_reproduction_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase0c_canonical_reproduction_gate'
+    ) in script
+    assert '--current-log-root "function_call=$FUNCTION_CALL_CURRENT_LOG_ROOT"' in script
+    assert '--current-log-root "loop=$LOOP_CURRENT_LOG_ROOT"' in script
+    assert "--require-ready" in script
+
+
 def test_phase0a_observed_baseline_integrity_gate_wrapper_validates_frozen_raw_hashes():
     script_path = Path("phase0a_validate_observed_baseline_integrity_gate.sh")
     script = script_path.read_text()
@@ -1183,16 +1216,101 @@ def test_phase0_observed_baseline_gate_wrapper_runs_all_lightweight_gates():
     assert 'cd "$SCRIPT_DIR"' in script
     assert "./phase0a_validate_observed_baseline_integrity_gate.sh" in script
     assert "./phase0c_validate_observed_baseline_census_gate.sh" in script
+    assert "./phase0c_validate_canonical_reproduction_gate.sh" in script
     assert "./phase0d_validate_not_eq_audit_gate.sh" in script
     assert script.index("./phase0a_validate_observed_baseline_integrity_gate.sh") < script.index(
         "./phase0c_validate_observed_baseline_census_gate.sh"
     )
     assert script.index("./phase0c_validate_observed_baseline_census_gate.sh") < script.index(
+        "./phase0c_validate_canonical_reproduction_gate.sh"
+    )
+    assert script.index("./phase0c_validate_canonical_reproduction_gate.sh") < script.index(
         "./phase0d_validate_not_eq_audit_gate.sh"
     )
 
 
-def test_log_only_pre_full_gate_wrapper_runs_phase0_then_phase3_log_only_gates():
+def test_phase1_concrete_manifest_gate_wrapper_validates_frozen_manifests():
+    script_path = Path("phase1_validate_concrete_manifest_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert 'PHASE1_DIR="${PHASE1_DIR:-$BASELINE_ROOT/phase1}"' in script
+    assert 'BASELINE_RAW_DIR="${BASELINE_RAW_DIR:-$BASELINE_ROOT/raw}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase1_concrete_manifest_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase1_concrete_manifest_gate'
+    ) in script
+    assert '--phase1-dir "$PHASE1_DIR"' in script
+    assert '--baseline-raw-dir "$BASELINE_RAW_DIR"' in script
+    assert "--require-ready" in script
+
+
+def test_phase15_regression_gate_wrapper_validates_exact_pre_semantic_fix_match():
+    script_path = Path("phase15_validate_regression_gates.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert 'BASELINE_RAW_DIR="${BASELINE_RAW_DIR:-$BASELINE_ROOT/raw}"' in script
+    assert 'PHASE1_DIR="${PHASE1_DIR:-$BASELINE_ROOT/phase1}"' in script
+    assert 'FUNCTION_CALL_CURRENT_LOG_ROOT="${FUNCTION_CALL_CURRENT_LOG_ROOT:-$BASELINE_RAW_DIR/logs/function_call}"' in script
+    assert 'LOOP_CURRENT_LOG_ROOT="${LOOP_CURRENT_LOG_ROOT:-$BASELINE_RAW_DIR/logs/loop}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase1_5_regression_gates}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase15_regression_gates'
+    ) in script
+    assert '--baseline-raw-dir "$BASELINE_RAW_DIR"' in script
+    assert '--phase1-dir "$PHASE1_DIR"' in script
+    assert '--current-log-root "function_call=$FUNCTION_CALL_CURRENT_LOG_ROOT"' in script
+    assert '--current-log-root "loop=$LOOP_CURRENT_LOG_ROOT"' in script
+    assert "--require-ready" in script
+
+
+def test_phase2_equivalence_blocking_unsafety_reduced_log_gate_wrapper_validates_existing_logs():
+    script_path = Path("phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert 'PHASE1_DIR="${PHASE1_DIR:-$BASELINE_ROOT/phase1}"' in script
+    assert (
+        'BASELINE_FUNCTION_CALL_LOG_ROOT="${BASELINE_FUNCTION_CALL_LOG_ROOT:-'
+        '$BASELINE_ROOT/raw/logs/function_call}"'
+    ) in script
+    assert (
+        'PHASE2_FUNCTION_CALL_LOG_ROOT="${PHASE2_FUNCTION_CALL_LOG_ROOT:-'
+        '$SCRIPT_DIR/logs/equivalence_all/function_call_test_phase2_gate_reduced_pre_producer}"'
+    ) in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase2_equivalence_blocking_unsafety_reduced_log_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase2_equivalence_blocking_unsafety'
+    ) in script
+    assert '--current-log-root "function_call=$PHASE2_FUNCTION_CALL_LOG_ROOT"' in script
+    assert '--baseline-log-root "function_call=$BASELINE_FUNCTION_CALL_LOG_ROOT"' in script
+    assert "--baseline-match-scope after-pairs" in script
+    assert "--require-ready" in script
+
+
+def test_log_only_pre_full_gate_wrapper_runs_phase0_phase1_phase15_phase2_then_phase3_log_only_gates():
     script_path = Path("validate_log_only_pre_full_gates.sh")
     script = script_path.read_text()
 
@@ -1200,8 +1318,20 @@ def test_log_only_pre_full_gate_wrapper_runs_phase0_then_phase3_log_only_gates()
     assert "set -euo pipefail" in script
     assert 'cd "$SCRIPT_DIR"' in script
     assert "./phase0_validate_observed_baseline_gates.sh" in script
+    assert "./phase1_validate_concrete_manifest_gate.sh" in script
+    assert "./phase15_validate_regression_gates.sh" in script
+    assert "./phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh" in script
     assert "./phase3_rebuild_all_post_fix_gates_from_logs.sh" in script
     assert script.index("./phase0_validate_observed_baseline_gates.sh") < script.index(
+        "./phase1_validate_concrete_manifest_gate.sh"
+    )
+    assert script.index("./phase1_validate_concrete_manifest_gate.sh") < script.index(
+        "./phase15_validate_regression_gates.sh"
+    )
+    assert script.index("./phase15_validate_regression_gates.sh") < script.index(
+        "./phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh"
+    )
+    assert script.index("./phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh") < script.index(
         "./phase3_rebuild_all_post_fix_gates_from_logs.sh"
     )
 
