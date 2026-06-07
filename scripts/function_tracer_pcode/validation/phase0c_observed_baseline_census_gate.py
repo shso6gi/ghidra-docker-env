@@ -61,6 +61,11 @@ EXPECTED_VALIDATION_UNKNOWN_UNITS = {
     "function_call": 2491,
     "loop": 1297,
 }
+EXPECTED_CATEGORY_PAIR_LOG_COUNTS = {
+    "function_call": 2400,
+    "loop": 600,
+}
+EXPECTED_COMBINED_PAIR_LOG_COUNT = 3000
 EXPECTED_COMBINED_FINAL_RESULT_COUNTS = {
     "EQ": 1617,
     "NOT_EQ": 72,
@@ -91,6 +96,8 @@ def build_phase0c_observed_baseline_census_gate(
     output_dir: Path,
     expected_final_result_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
     expected_validation_unknown_units: Optional[Mapping[str, int]] = None,
+    expected_category_pair_log_counts: Optional[Mapping[str, int]] = None,
+    expected_combined_pair_log_count: int = EXPECTED_COMBINED_PAIR_LOG_COUNT,
     expected_combined_final_result_counts: Optional[Mapping[str, int]] = None,
     expected_combined_validation_unknown_units: int = EXPECTED_COMBINED_VALIDATION_UNKNOWN_UNITS,
     expected_combined_unknown_by_reason: Optional[Mapping[str, int]] = None,
@@ -105,6 +112,7 @@ def build_phase0c_observed_baseline_census_gate(
         for category, counts in (expected_final_result_counts or EXPECTED_FINAL_RESULT_COUNTS).items()
     }
     expected_unknown_units = dict(expected_validation_unknown_units or EXPECTED_VALIDATION_UNKNOWN_UNITS)
+    expected_pair_log_counts = dict(expected_category_pair_log_counts or EXPECTED_CATEGORY_PAIR_LOG_COUNTS)
     expected_combined_counts = dict(
         expected_combined_final_result_counts or EXPECTED_COMBINED_FINAL_RESULT_COUNTS
     )
@@ -117,16 +125,47 @@ def build_phase0c_observed_baseline_census_gate(
     checks.extend(_baseline_identity_checks(raw_manifest))
 
     combined_final_counts: Counter[str] = Counter()
+    combined_pair_log_count = 0
     combined_unknown_units = 0
     combined_unknown_by_reason: Counter[str] = Counter()
 
     for category in sorted(expected_counts):
         summary = _summarize_category(raw_dir / "logs" / category)
         category_summaries[category] = summary
+        combined_pair_log_count += int(summary["pair_log_count"])
         combined_final_counts.update(summary["final_result_counts"])
         combined_unknown_units += int(summary["validation_unknown_units"])
         combined_unknown_by_reason.update(summary["unknown_by_reason"])
 
+        checks.append(
+            _ok("category_pair_log_count_expected", category=category, count=summary["pair_log_count"])
+            if int(summary["pair_log_count"]) == int(expected_pair_log_counts.get(category, -1))
+            else _failed(
+                "category_pair_log_count_expected",
+                category=category,
+                expected=expected_pair_log_counts.get(category),
+                actual=summary["pair_log_count"],
+            )
+        )
+        checks.append(
+            _ok("category_pair_identities_unique", category=category, count=summary["pair_identity_count"])
+            if not summary["duplicate_pair_identities"]
+            else _failed(
+                "category_pair_identities_unique",
+                category=category,
+                duplicate_pair_identities=summary["duplicate_pair_identities"],
+            )
+        )
+        checks.append(
+            _ok("category_no_error_or_incomplete_results", category=category)
+            if summary["final_result_counts"].get("ERROR", 0) == 0
+            and summary["final_result_counts"].get("INCOMPLETE", 0) == 0
+            else _failed(
+                "category_no_error_or_incomplete_results",
+                category=category,
+                counts=summary["final_result_counts"],
+            )
+        )
         checks.append(
             _ok("category_final_result_counts_expected", category=category, counts=summary["final_result_counts"])
             if summary["final_result_counts"] == _normalize_status_counts(expected_counts[category])
@@ -164,6 +203,13 @@ def build_phase0c_observed_baseline_census_gate(
                 "combined_final_result_counts_expected",
                 expected=_normalize_status_counts(expected_combined_counts),
                 actual=combined_final_result_counts,
+            ),
+            _ok("combined_pair_log_count_expected", count=combined_pair_log_count)
+            if combined_pair_log_count == expected_combined_pair_log_count
+            else _failed(
+                "combined_pair_log_count_expected",
+                expected=expected_combined_pair_log_count,
+                actual=combined_pair_log_count,
             ),
             _ok("combined_validation_unknown_units_expected", count=combined_unknown_units)
             if combined_unknown_units == expected_combined_validation_unknown_units
@@ -215,14 +261,17 @@ def build_phase0c_observed_baseline_census_gate(
         },
         "expected": {
             "category_final_result_counts": expected_counts,
+            "category_pair_log_counts": expected_pair_log_counts,
             "category_validation_unknown_units": expected_unknown_units,
             "combined_final_result_counts": _normalize_status_counts(expected_combined_counts),
+            "combined_pair_log_count": expected_combined_pair_log_count,
             "combined_validation_unknown_units": expected_combined_validation_unknown_units,
             "combined_unknown_by_reason": expected_combined_reasons,
         },
         "observed": {
             "categories": category_summaries,
             "combined_final_result_counts": combined_final_result_counts,
+            "combined_pair_log_count": combined_pair_log_count,
             "combined_validation_unknown_units": combined_unknown_units,
             "combined_unknown_by_reason": combined_unknown_by_reason_dict,
         },
@@ -268,13 +317,21 @@ def _summarize_category(log_root: Path) -> Dict[str, Any]:
     root = Path(log_root)
     log_paths = sorted(root.glob("*/*.log"))
     aggregate = aggregate_validation_logs(log_paths)
+    pair_identity_counts = Counter(_pair_identity(record) for record in aggregate.records)
+    duplicate_pair_identities = [
+        {"function": key[0], "binary_pair": key[1], "count": count}
+        for key, count in sorted(pair_identity_counts.items())
+        if count > 1
+    ]
     payloads = [payload for record in aggregate.records for payload in record.payloads]
     unknown_summary = summarize_validation_unknowns(payloads)
     overall_unknown_by_reason = _parse_overall_unknown_by_reason(root / "overall_summary.txt")
     correspondence = tuple(diagnostic.to_dict() for diagnostic in diagnose_unknown_reason_correspondence(unknown_summary))
     return {
         "log_root": str(log_root),
-        "log_count": len(log_paths),
+        "pair_log_count": len(log_paths),
+        "pair_identity_count": len(pair_identity_counts),
+        "duplicate_pair_identities": duplicate_pair_identities[:20],
         "final_result_counts": _normalize_status_counts(aggregate.counts),
         "validation_unknown_units": sum(overall_unknown_by_reason.values()),
         "unknown_results": unknown_summary.unknown_results,
@@ -309,6 +366,15 @@ def _summarize_category(log_root: Path) -> Dict[str, Any]:
             sorted(Counter(item["classification"] for item in correspondence).items())
         ),
     }
+
+
+def _pair_identity(record: Any) -> Tuple[str, str]:
+    if "↔" in record.pair_label:
+        left, right = (part.strip() for part in record.pair_label.split("↔", 1))
+        binary_pair = "_".join(sorted((left, right)))
+    else:
+        binary_pair = record.pair_label
+    return (record.function_name, binary_pair)
 
 
 def _parse_overall_unknown_by_reason(path: Path) -> Dict[str, int]:

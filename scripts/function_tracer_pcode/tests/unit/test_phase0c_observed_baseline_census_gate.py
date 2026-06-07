@@ -24,6 +24,8 @@ def test_phase0c_observed_baseline_census_gate_accepts_fixture_counts(tmp_path):
             "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
         },
         expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 2, "loop": 2},
+        expected_combined_pair_log_count=4,
         expected_combined_final_result_counts={
             "EQ": 1,
             "NOT_EQ": 1,
@@ -40,6 +42,7 @@ def test_phase0c_observed_baseline_census_gate_accepts_fixture_counts(tmp_path):
 
     assert gate["phase0c_observed_baseline_census_ready"] is True
     assert gate["count_model"]["primary_census_count_kind"] == "validation_unknown_unit"
+    assert gate["observed"]["combined_pair_log_count"] == 4
     assert gate["observed"]["combined_validation_unknown_units"] == 2
     validate_phase0c_observed_baseline_census_gate(gate)
 
@@ -55,6 +58,8 @@ def test_phase0c_observed_baseline_census_gate_rejects_reason_drift(tmp_path):
             "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
         },
         expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 2, "loop": 2},
+        expected_combined_pair_log_count=4,
         expected_combined_final_result_counts={
             "EQ": 1,
             "NOT_EQ": 1,
@@ -86,6 +91,8 @@ def test_phase0c_observed_baseline_census_gate_rejects_baseline_identity_drift(t
             "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
         },
         expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 2, "loop": 2},
+        expected_combined_pair_log_count=4,
         expected_combined_final_result_counts={
             "EQ": 1,
             "NOT_EQ": 1,
@@ -102,6 +109,44 @@ def test_phase0c_observed_baseline_census_gate_rejects_baseline_identity_drift(t
 
     assert gate["phase0c_observed_baseline_census_ready"] is False
     with pytest.raises(ValueError, match="baseline_id_expected"):
+        validate_phase0c_observed_baseline_census_gate(gate)
+
+
+def test_phase0c_observed_baseline_census_gate_rejects_duplicate_pair_identity(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+    duplicate = raw_dir / "logs" / "function_call" / "fc_demo_alias" / "fc_demo_alias_B2_B1.log"
+    _write_log(
+        duplicate,
+        "Result: EQUIVALENT",
+        _payload("fc_guarded_call", True),
+    )
+
+    path = build_phase0c_observed_baseline_census_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        expected_final_result_counts={
+            "function_call": {"EQ": 2, "UNKNOWN": 1},
+            "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
+        },
+        expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 3, "loop": 2},
+        expected_combined_pair_log_count=5,
+        expected_combined_final_result_counts={
+            "EQ": 2,
+            "NOT_EQ": 1,
+            "UNKNOWN": 1,
+            "TIMEOUT": 1,
+        },
+        expected_combined_validation_unknown_units=2,
+        expected_combined_unknown_by_reason={
+            "return_coverage_gap": 1,
+            "solver_unknown_timeout": 1,
+        },
+    )
+    gate = json.loads(path.read_text())
+
+    assert gate["phase0c_observed_baseline_census_ready"] is False
+    with pytest.raises(ValueError, match="category_pair_identities_unique"):
         validate_phase0c_observed_baseline_census_gate(gate)
 
 

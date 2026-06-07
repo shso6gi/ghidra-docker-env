@@ -108,6 +108,9 @@ fi
 run_and_log unit_tests_stdout.log \
     "$PYTHON_BIN" -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 
+run_and_log phase0a_observed_baseline_integrity_gate_stdout.log \
+    ./phase0a_validate_observed_baseline_integrity_gate.sh
+
 run_and_log phase0c_observed_baseline_census_gate_stdout.log \
     ./phase0c_validate_observed_baseline_census_gate.sh
 

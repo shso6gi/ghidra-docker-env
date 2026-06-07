@@ -1087,6 +1087,7 @@ def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
 def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 
+    phase0a_gate = script.index("./phase0a_validate_observed_baseline_integrity_gate.sh")
     phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
     phase0d_gate = script.index("./phase0d_validate_not_eq_audit_gate.sh")
     normal_full_matrix = script.index("./phase2_run_function_call_full_matrix_32jobs.sh")
@@ -1094,8 +1095,10 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
         "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
     )
 
+    assert phase0a_gate < phase0c_gate
     assert phase0c_gate < phase0d_gate
     assert phase0d_gate < normal_full_matrix
+    assert "phase0a_observed_baseline_integrity_gate_stdout.log" in script
     assert "phase0c_observed_baseline_census_gate_stdout.log" in script
     assert "phase0d_not_eq_audit_gate_stdout.log" in script
     assert normal_full_matrix < producer_full_matrix
@@ -1146,6 +1149,61 @@ def test_phase0c_observed_baseline_census_gate_wrapper_validates_frozen_raw_logs
     ) in script
     assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
     assert "--require-ready" in script
+
+
+def test_phase0a_observed_baseline_integrity_gate_wrapper_validates_frozen_raw_hashes():
+    script_path = Path("phase0a_validate_observed_baseline_integrity_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase0a_observed_baseline_integrity_gate}"'
+    ) in script
+    assert 'PHASE0A_VALIDATE_FILE_CONTENT_HASHES="${PHASE0A_VALIDATE_FILE_CONTENT_HASHES:-1}"' in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase0a_observed_baseline_integrity_gate "${ARGS[@]}"'
+    ) in script
+    assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
+    assert "--require-ready" in script
+    assert "ARGS+=(--skip-file-content-hashes)" in script
+
+
+def test_phase0_observed_baseline_gate_wrapper_runs_all_lightweight_gates():
+    script_path = Path("phase0_validate_observed_baseline_gates.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert "./phase0a_validate_observed_baseline_integrity_gate.sh" in script
+    assert "./phase0c_validate_observed_baseline_census_gate.sh" in script
+    assert "./phase0d_validate_not_eq_audit_gate.sh" in script
+    assert script.index("./phase0a_validate_observed_baseline_integrity_gate.sh") < script.index(
+        "./phase0c_validate_observed_baseline_census_gate.sh"
+    )
+    assert script.index("./phase0c_validate_observed_baseline_census_gate.sh") < script.index(
+        "./phase0d_validate_not_eq_audit_gate.sh"
+    )
+
+
+def test_log_only_pre_full_gate_wrapper_runs_phase0_then_phase3_log_only_gates():
+    script_path = Path("validate_log_only_pre_full_gates.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert "./phase0_validate_observed_baseline_gates.sh" in script
+    assert "./phase3_rebuild_all_post_fix_gates_from_logs.sh" in script
+    assert script.index("./phase0_validate_observed_baseline_gates.sh") < script.index(
+        "./phase3_rebuild_all_post_fix_gates_from_logs.sh"
+    )
 
 
 def test_phase2_return_coverage_risk_preflight_selects_eq_pairs_by_note_strata(tmp_path):
