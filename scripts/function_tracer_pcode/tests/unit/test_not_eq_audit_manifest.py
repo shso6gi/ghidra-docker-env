@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.validation.freeze_observed_baseline import (
 from scripts.function_tracer_pcode.validation.not_eq_audit_manifest import (
     build_not_eq_audit_manifest,
     validate_not_eq_audit_manifest,
+    validate_oracle_manifest,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
@@ -140,6 +141,8 @@ def test_build_not_eq_audit_manifest_lists_not_eq_entries_with_required_fields(t
     assert entry["target_proof_lane"] == "not_eq_counterexample_replay"
     assert entry["oracle_decision_status"] == "draft_expected_equivalent_not_reviewed"
     assert entry["replay_harness"]["status"] == "missing"
+    validate_oracle_manifest(oracle)
+    validate_not_eq_audit_manifest(audit, oracle_manifest=oracle)
 
 
 def test_validate_not_eq_audit_manifest_rejects_invalid_classification():
@@ -154,6 +157,73 @@ def test_validate_not_eq_audit_manifest_rejects_invalid_classification():
 
     with pytest.raises(ValueError, match="invalid NOT_EQ audit classification"):
         validate_not_eq_audit_manifest(audit)
+
+
+def test_validate_not_eq_audit_manifest_rejects_count_mismatch():
+    audit = {
+        "entry_count": 2,
+        "classification_counts": {"unresolved": 1},
+        "classification_enum": [
+            "ground_truth_not_eq",
+            "suspected_false_not_eq",
+            "ub_or_domain_mismatch",
+            "unresolved",
+        ],
+        "entries": [
+            {
+                "classification": "unresolved",
+                "current_result": "NOT_EQ",
+                "oracle_manifest_ref": {"oracle_review_status": "draft"},
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="entry_count"):
+        validate_not_eq_audit_manifest(audit)
+
+
+def test_validate_oracle_manifest_rejects_scope_mismatch():
+    oracle = _oracle_manifest(
+        [
+            {
+                **_oracle_entry(),
+                "scope_target": {"category": "function_call", "function": "other_function"},
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="scope_target"):
+        validate_oracle_manifest(oracle)
+
+
+def test_validate_not_eq_audit_manifest_rejects_missing_oracle_entry():
+    audit_entry = _audit_entry_for_oracle_ref("function_call:fc_missing")
+    oracle = _oracle_manifest([_oracle_entry()])
+
+    with pytest.raises(ValueError, match="references missing oracle entry"):
+        validate_not_eq_audit_manifest({"entries": [audit_entry]}, oracle_manifest=oracle)
+
+
+def test_validate_not_eq_audit_manifest_rejects_oracle_scope_escape():
+    audit_entry = _audit_entry_for_oracle_ref("function_call:fc_guarded_call:B10_B11")
+    audit_entry["binary_pair"] = "B10_B12"
+    oracle = _oracle_manifest(
+        [
+            {
+                **_oracle_entry(),
+                "entry_key": "function_call:fc_guarded_call:B10_B11",
+                "oracle_scope": "pair",
+                "scope_target": {
+                    "category": "function_call",
+                    "function": "fc_guarded_call",
+                    "binary_pair": "B10_B11",
+                },
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="outside oracle scope"):
+        validate_not_eq_audit_manifest({"entries": [audit_entry]}, oracle_manifest=oracle)
 
 
 def test_validate_not_eq_audit_manifest_requires_accepted_evidence_for_ground_truth():
@@ -227,3 +297,55 @@ def _complete_ground_truth_entry(include_oracle_exception=True):
     if not include_oracle_exception:
         entry.pop("oracle_exception", None)
     return entry
+
+
+def _oracle_manifest(entries):
+    return {
+        "manifest_version": 1,
+        "oracle_manifest_kind": "same_source_expected_equivalence_draft",
+        "baseline_id": "observed-v0@0a53352",
+        "baseline_git_head": "0a53352cf3c9528abfb654906ed7b963474bedc5",
+        "audit_manifest_ref": "audit/not_eq_audit_manifest.json",
+        "entries": entries,
+    }
+
+
+def _oracle_entry():
+    return {
+        "function": "fc_guarded_call",
+        "category": "function_call",
+        "oracle_scope": "function_category",
+        "scope_target": {
+            "category": "function_call",
+            "function": "fc_guarded_call",
+        },
+        "manifest_version": 1,
+        "oracle_owner": "phase_0d_bootstrap",
+        "oracle_review_status": "draft",
+        "expected_equivalent": True,
+        "oracle_source": "same_source_default_pending_review",
+        "oracle_exception_reason": None,
+        "domain_assumptions": [
+            "same-source sample default; not accepted ground truth",
+        ],
+        "last_verified_by_evidence": {"status": "not_reviewed"},
+        "entry_key": "function_call:fc_guarded_call",
+    }
+
+
+def _audit_entry_for_oracle_ref(entry_key):
+    return {
+        "function": "fc_guarded_call",
+        "category": "function_call",
+        "binary_pair": "B10_B11",
+        "left_binary_id": "B10",
+        "right_binary_id": "B11",
+        "current_result": "NOT_EQ",
+        "expected_equivalent": True,
+        "classification": "unresolved",
+        "oracle_manifest_ref": {
+            "entry_key": entry_key,
+            "oracle_review_status": "draft",
+            "expected_equivalent": True,
+        },
+    }

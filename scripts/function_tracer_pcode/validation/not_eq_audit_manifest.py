@@ -26,6 +26,8 @@ CLASSIFICATIONS = frozenset(
         "unresolved",
     }
 )
+ORACLE_REVIEW_STATUSES = frozenset({"draft", "reviewed", "accepted"})
+ORACLE_SCOPES = frozenset({"function_category", "pair"})
 
 
 def build_not_eq_audit_manifest(
@@ -84,23 +86,67 @@ def build_not_eq_audit_manifest(
             entries=tuple(oracle_entries.values()),
             audit_output_path=Path(output_path),
         )
+        validate_oracle_manifest(oracle_manifest)
         _write_json(oracle_path, oracle_manifest)
         _attach_oracle_manifest_path(audit, oracle_path, Path(output_path))
 
-    validate_not_eq_audit_manifest(audit)
+    validate_not_eq_audit_manifest(audit, oracle_manifest=oracle_manifest if oracle_output_path is not None else None)
     _write_json(Path(output_path), audit)
     return Path(output_path)
 
 
-def validate_not_eq_audit_manifest(audit: Mapping[str, Any]) -> None:
+def validate_not_eq_audit_manifest(
+    audit: Mapping[str, Any],
+    *,
+    oracle_manifest: Optional[Mapping[str, Any]] = None,
+) -> None:
+    entries = audit.get("entries") or ()
+    if "entry_count" in audit and int(audit.get("entry_count") or 0) != len(entries):
+        raise ValueError("NOT_EQ audit entry_count does not match entries")
+    classification_counts = audit.get("classification_counts")
+    if isinstance(classification_counts, Mapping):
+        actual_counts = dict(sorted(Counter(str(entry.get("classification") or "") for entry in entries).items()))
+        if {str(key): int(value) for key, value in classification_counts.items()} != actual_counts:
+            raise ValueError("NOT_EQ audit classification_counts do not match entries")
+    classification_enum = audit.get("classification_enum")
+    if classification_enum is not None and tuple(classification_enum) != tuple(sorted(CLASSIFICATIONS)):
+        raise ValueError("NOT_EQ audit classification_enum is not canonical")
+    oracle_entries = None
+    if oracle_manifest is not None:
+        validate_oracle_manifest(oracle_manifest)
+        oracle_entries = _oracle_entries_by_key(oracle_manifest)
     for index, entry in enumerate(audit.get("entries") or ()):
         if not isinstance(entry, Mapping):
             raise ValueError(f"NOT_EQ audit entry {index} is not an object")
         classification = str(entry.get("classification") or "")
         if classification not in CLASSIFICATIONS:
             raise ValueError(f"invalid NOT_EQ audit classification: {classification!r}")
+        if entry.get("current_result") not in {None, STATUS_NOT_EQ}:
+            raise ValueError(f"NOT_EQ audit entry {index} current_result is not NOT_EQ")
+        if oracle_entries is not None:
+            _validate_audit_oracle_ref(entry, index, oracle_entries)
         if classification == "ground_truth_not_eq":
             _validate_ground_truth_entry(entry, index)
+
+
+def validate_oracle_manifest(oracle: Mapping[str, Any]) -> None:
+    if int(oracle.get("manifest_version") or 0) != ORACLE_MANIFEST_VERSION:
+        raise ValueError("oracle manifest_version mismatch")
+    if oracle.get("oracle_manifest_kind") != "same_source_expected_equivalence_draft":
+        raise ValueError("oracle manifest kind mismatch")
+    if not oracle.get("baseline_id"):
+        raise ValueError("oracle manifest missing baseline_id")
+    if not oracle.get("baseline_git_head"):
+        raise ValueError("oracle manifest missing baseline_git_head")
+    seen_keys: set[str] = set()
+    for index, entry in enumerate(oracle.get("entries") or ()):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"oracle entry {index} is not an object")
+        _validate_oracle_entry(entry, index)
+        entry_key = str(entry.get("entry_key") or "")
+        if entry_key in seen_keys:
+            raise ValueError(f"duplicate oracle entry_key: {entry_key}")
+        seen_keys.add(entry_key)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -247,6 +293,97 @@ def _validate_ground_truth_entry(entry: Mapping[str, Any], index: int) -> None:
         raise ValueError(f"ground_truth_not_eq entry {index} requires return compare width proof")
     if not _status_proven(entry.get("ub_exclusion_rule"), {"proven", "ub_excluded"}):
         raise ValueError(f"ground_truth_not_eq entry {index} requires UB exclusion proof")
+
+
+def _validate_oracle_entry(entry: Mapping[str, Any], index: int) -> None:
+    required_fields = {
+        "function",
+        "category",
+        "oracle_scope",
+        "scope_target",
+        "manifest_version",
+        "oracle_owner",
+        "oracle_review_status",
+        "expected_equivalent",
+        "oracle_source",
+        "oracle_exception_reason",
+        "domain_assumptions",
+        "last_verified_by_evidence",
+        "entry_key",
+    }
+    missing = sorted(field for field in required_fields if field not in entry)
+    if missing:
+        raise ValueError(f"oracle entry {index} missing required fields: {', '.join(missing)}")
+    if int(entry.get("manifest_version") or 0) != ORACLE_MANIFEST_VERSION:
+        raise ValueError(f"oracle entry {index} manifest_version mismatch")
+    if entry.get("oracle_review_status") not in ORACLE_REVIEW_STATUSES:
+        raise ValueError(f"oracle entry {index} invalid review status")
+    if entry.get("oracle_scope") not in ORACLE_SCOPES:
+        raise ValueError(f"oracle entry {index} invalid scope")
+    if not isinstance(entry.get("expected_equivalent"), bool):
+        raise ValueError(f"oracle entry {index} expected_equivalent must be boolean")
+    if not isinstance(entry.get("domain_assumptions"), Sequence) or isinstance(entry.get("domain_assumptions"), (str, bytes)):
+        raise ValueError(f"oracle entry {index} domain_assumptions must be a list")
+    if not isinstance(entry.get("last_verified_by_evidence"), Mapping):
+        raise ValueError(f"oracle entry {index} last_verified_by_evidence must be an object")
+    expected_key = _oracle_entry_key(str(entry.get("category")), str(entry.get("function")))
+    if entry.get("oracle_scope") == "pair":
+        scope_target = entry.get("scope_target")
+        if not isinstance(scope_target, Mapping) or not scope_target.get("binary_pair"):
+            raise ValueError(f"oracle entry {index} pair scope requires binary_pair")
+        expected_key = f"{expected_key}:{scope_target.get('binary_pair')}"
+    if entry.get("entry_key") != expected_key:
+        raise ValueError(f"oracle entry {index} entry_key does not match scope")
+    _validate_oracle_scope_target(entry, index)
+
+
+def _validate_oracle_scope_target(entry: Mapping[str, Any], index: int) -> None:
+    scope_target = entry.get("scope_target")
+    if not isinstance(scope_target, Mapping):
+        raise ValueError(f"oracle entry {index} scope_target must be an object")
+    if scope_target.get("category") != entry.get("category") or scope_target.get("function") != entry.get("function"):
+        raise ValueError(f"oracle entry {index} scope_target does not match entry")
+    if entry.get("oracle_scope") == "function_category" and "binary_pair" in scope_target:
+        raise ValueError(f"oracle entry {index} function_category scope must not include binary_pair")
+
+
+def _oracle_entries_by_key(oracle: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    return {
+        str(entry.get("entry_key")): entry
+        for entry in oracle.get("entries") or ()
+        if isinstance(entry, Mapping)
+    }
+
+
+def _validate_audit_oracle_ref(
+    entry: Mapping[str, Any],
+    index: int,
+    oracle_entries: Mapping[str, Mapping[str, Any]],
+) -> None:
+    ref = entry.get("oracle_manifest_ref")
+    if not isinstance(ref, Mapping):
+        raise ValueError(f"NOT_EQ audit entry {index} missing oracle_manifest_ref")
+    key = str(ref.get("entry_key") or "")
+    oracle_entry = oracle_entries.get(key)
+    if oracle_entry is None:
+        raise ValueError(f"NOT_EQ audit entry {index} references missing oracle entry: {key}")
+    if ref.get("expected_equivalent") != oracle_entry.get("expected_equivalent"):
+        raise ValueError(f"NOT_EQ audit entry {index} oracle expected_equivalent mismatch")
+    if ref.get("oracle_review_status") != oracle_entry.get("oracle_review_status"):
+        raise ValueError(f"NOT_EQ audit entry {index} oracle review status mismatch")
+    if not _oracle_entry_covers_audit_entry(oracle_entry, entry):
+        raise ValueError(f"NOT_EQ audit entry {index} is outside oracle scope")
+
+
+def _oracle_entry_covers_audit_entry(oracle_entry: Mapping[str, Any], audit_entry: Mapping[str, Any]) -> bool:
+    if oracle_entry.get("category") != audit_entry.get("category"):
+        return False
+    if oracle_entry.get("function") != audit_entry.get("function"):
+        return False
+    if oracle_entry.get("oracle_scope") == "pair":
+        scope_target = oracle_entry.get("scope_target")
+        return isinstance(scope_target, Mapping) and scope_target.get("binary_pair") == audit_entry.get("binary_pair")
+    return oracle_entry.get("oracle_scope") == "function_category"
 
 
 def _has_expected_equivalent_conflict(entry: Mapping[str, Any]) -> bool:
