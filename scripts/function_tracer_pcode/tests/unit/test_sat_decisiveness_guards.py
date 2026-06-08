@@ -2636,7 +2636,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
     assert reason.recovery_action == "call_effect_summary_proof_required"
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.object_target_key[0] == "deferred_call"
-    assert pcode_ref.stable_key() in reason.object_target_key
+    assert _nested_contains(reason.object_target_key, pcode_ref.stable_key())
 
 
 def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_proof():
@@ -2679,7 +2679,7 @@ def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_pr
     assert reason.recovery_proof_kind == UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
     assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
     assert reason.object_target_key[0] == "unsupported_call_effect"
-    assert pcode_ref.stable_key() in reason.object_target_key
+    assert _nested_contains(reason.object_target_key, pcode_ref.stable_key())
 
 
 def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
@@ -2737,8 +2737,13 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
 
     assert reason.object_target_key[0] == "unsupported_call_effect"
     assert reason.object_target_key[2] == ("function_ref", ("function", "B10", 0x401000))
-    assert reason.object_target_key[3] == pcode_ref.stable_key()
-    assert reason.object_target_key[4] == ("code_address", "B10", 0x401234)
+    assert reason.object_target_key[3][0] == "runtime_ref"
+    assert ("pcode_op_ref", pcode_ref.stable_key()) in reason.object_target_key[3]
+    assert ("callee_identity", ("code_address", "B10", 0x401234)) in reason.object_target_key[3]
+    assert reason.object_target_key[4][0] == "callsite_storage"
+    assert ("pcode_op_ref", pcode_ref.stable_key()) in reason.object_target_key[4]
+    assert ("callee_identity", ("code_address", "B10", 0x401234)) in reason.object_target_key[4]
+    assert reason.object_target_key[5] == ("effect_ordinal", 9)
     assert _object_target_key_is_specific(reason.object_target_key) is True
     assert reason.proof_obligation_id == build_proof_obligation_id(
         UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value,
@@ -2860,8 +2865,8 @@ def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_
     )
 
     assert reason.object_target_key[0] == "unsupported_call_effect"
-    assert unsupported_pcode.stable_key() in reason.object_target_key
-    assert deferred_pcode.stable_key() not in reason.object_target_key
+    assert _nested_contains(reason.object_target_key, unsupported_pcode.stable_key())
+    assert not _nested_contains(reason.object_target_key, deferred_pcode.stable_key())
 
 
 def test_deferred_call_object_key_distinguishes_unknown_target_expression_provenance():
@@ -2920,8 +2925,14 @@ def test_deferred_call_object_key_distinguishes_unknown_target_expression_proven
 
     assert left_reason.object_target_key != right_reason.object_target_key
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
-    assert ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))) in left_reason.object_target_key
-    assert ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))) in right_reason.object_target_key
+    assert _nested_contains(
+        left_reason.object_target_key,
+        ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
+    )
+    assert _nested_contains(
+        right_reason.object_target_key,
+        ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))),
+    )
 
 
 def test_deferred_call_object_key_distinguishes_truncated_target_expression_provenance():
@@ -3023,6 +3034,7 @@ def test_unsupported_call_effect_object_key_distinguishes_target_expression_prov
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
+            binary_id="B10",
             parameters=[_param("x")],
             returns=[ReturnInfo(address="0x1000", value=Expression.parameter("x", 0, size=4), conditions=[])],
             return_type="int",
@@ -3059,8 +3071,28 @@ def test_unsupported_call_effect_object_key_distinguishes_target_expression_prov
 
     assert left_reason.object_target_key != right_reason.object_target_key
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
-    assert ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))) in left_reason.object_target_key
-    assert ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))) in right_reason.object_target_key
+    assert _nested_contains(
+        left_reason.object_target_key,
+        ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
+    )
+    assert _nested_contains(
+        left_reason.object_target_key,
+        (
+            "callee_identity",
+            (
+                "unknown",
+                "B10",
+                (
+                    "target_expression",
+                    ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
+                ),
+            ),
+        ),
+    )
+    assert _nested_contains(
+        right_reason.object_target_key,
+        ("typed_target_expression", ("expression", ("parameter", "gp", ("int", 1), 8))),
+    )
 
 
 def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_expression_id():

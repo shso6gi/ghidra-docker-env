@@ -1084,6 +1084,21 @@ def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 
 
+def test_phase2_reduced_log_gate_preflights_current_object_key_schema():
+    script = Path("phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh").read_text()
+
+    assert "Preflight: checking Phase 2 reduced pre-producer logs" in script
+    assert "scripts.function_tracer_pcode.validation.log_reuse_gate" in script
+    assert "--require-phase2-object-keys" in script
+    assert "fc_apply_indirect/fc_apply_indirect_B10_B11.log" in script
+    assert "fc_dispatch_indirect/fc_dispatch_indirect_B10_B11.log" in script
+    assert "fc_recursive_sum/fc_recursive_sum_B10_B14.log" in script
+    assert "object-key schema" in script
+    assert "PHASE2_GENERATE_REDUCED_PRE_PRODUCER_LOGS" in script
+    assert 'OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$PHASE2_FUNCTION_CALL_LOG_ROOT}"' in script
+    assert "phase2_run_function_call_pre_producer_gate_reduced_matrix.sh" in script
+
+
 def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 

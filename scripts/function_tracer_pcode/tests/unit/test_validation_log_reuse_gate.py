@@ -49,18 +49,63 @@ def _full_object_target_key():
         "function1",
         ("function_ref", ("function", "B10", 0x401000)),
         (
-            "pcode_op",
-            "B10",
-            ("function_entry", "ram", 0x401000),
-            ("seq_target", "ram", 0x401020),
-            31,
-            7,
-            8,
-            0,
+            "runtime_ref",
+            "unsupported_call_effect",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    (
+                        "target_expression",
+                        ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
+                    ),
+                ),
+            ),
+            ("typed_target_expression", ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8)))),
         ),
-        None,
-        ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
-        7,
+        (
+            "callsite_storage",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    (
+                        "target_expression",
+                        ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8))),
+                    ),
+                ),
+            ),
+            ("target_expression", ("typed_target_expression", ("expression", ("parameter", "fp", ("int", 0), 8)))),
+        ),
+        ("effect_ordinal", 7),
         "target_identity_unavailable",
     )
 
@@ -161,8 +206,8 @@ def test_log_reuse_gate_rejects_phase2_obligation_without_runtime_and_storage_ev
 def test_log_reuse_gate_rejects_call_effect_key_without_integer_effect_ordinal(tmp_path):
     path = tmp_path / "pair.log"
     target = _full_object_target_key()
-    missing_ordinal = target[:6] + (None,) + target[7:]
-    text_ordinal = target[:6] + ("7",) + target[7:]
+    missing_ordinal = target[:5] + (("effect_ordinal", None),) + target[6:]
+    text_ordinal = target[:5] + (("effect_ordinal", "7"),) + target[6:]
     _write_log(
         path,
         _payload(

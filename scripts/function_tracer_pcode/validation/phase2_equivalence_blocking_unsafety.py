@@ -853,17 +853,110 @@ def _object_target_key_is_specific(value: Any) -> bool:
 
 
 def _unsupported_call_effect_key_is_specific(value: Tuple[Any, ...]) -> bool:
-    if len(value) < 8:
+    if len(value) < 7:
         return False
+    runtime_ref = value[3]
+    callsite_storage = value[4]
+    effect_ordinal = value[5]
     return all(
         (
             value[1] in {"function1", "function2"},
             _analysis_key_is_specific(value[2]),
-            _pcode_ref_is_specific(value[3]),
-            _typed_target_expression_is_specific(value[5]),
-            _nonnegative_int(value[6]),
-            value[7] is not None,
+            _runtime_ref_is_specific(runtime_ref),
+            _callsite_storage_key_is_specific(callsite_storage),
+            _effect_ordinal_key_is_specific(effect_ordinal),
+            value[6] is not None,
         )
+    )
+
+
+def _runtime_ref_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 5 or value[0] != "runtime_ref":
+        return False
+    return all(
+        (
+            value[1] == "unsupported_call_effect",
+            _tagged_pcode_ref_is_specific(value[2]),
+            _tagged_callee_identity_is_specific(value[3]),
+            _tagged_typed_target_expression_is_specific(value[4]),
+        )
+    )
+
+
+def _callsite_storage_key_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) < 4 or value[0] != "callsite_storage":
+        return False
+    return all(
+        (
+            _tagged_pcode_ref_is_specific(value[1]),
+            _tagged_callee_identity_is_specific(value[2]),
+            _tagged_target_expression_is_specific(value[3]),
+        )
+    )
+
+
+def _effect_ordinal_key_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "effect_ordinal"
+        and _nonnegative_int(value[1])
+    )
+
+
+def _tagged_pcode_ref_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "pcode_op_ref"
+        and _pcode_ref_is_specific(value[1])
+    )
+
+
+def _tagged_callee_identity_is_specific(value: Any) -> bool:
+    if not isinstance(value, tuple) or len(value) != 2 or value[0] != "callee_identity":
+        return False
+    callee = value[1]
+    if not isinstance(callee, tuple) or len(callee) < 2:
+        return False
+    if callee[0] == "unknown":
+        return (
+            len(callee) == 3
+            and _binary_id_is_specific(callee[1])
+            and _unknown_callee_target_expression_is_specific(callee[2])
+        )
+    return (
+        len(callee) >= 3
+        and callee[0] in {"function", "code_address"}
+        and _binary_id_is_specific(callee[1])
+        and _nonnegative_int_like(callee[2])
+    )
+
+
+def _unknown_callee_target_expression_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "target_expression"
+        and _typed_target_expression_is_specific(value[1])
+    )
+
+
+def _tagged_typed_target_expression_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "typed_target_expression"
+        and _typed_target_expression_is_specific(value[1])
+    )
+
+
+def _tagged_target_expression_is_specific(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and value[0] == "target_expression"
+        and _typed_target_expression_is_specific(value[1])
     )
 
 

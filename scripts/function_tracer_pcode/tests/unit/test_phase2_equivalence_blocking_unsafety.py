@@ -174,18 +174,57 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
         "function1",
         ("function_ref", ("function", "B10", 0x401000)),
         (
-            "pcode_op",
-            "B10",
-            ("function_entry", "ram", 0x401000),
-            ("seq_target", "ram", 0x401020),
-            31,
-            7,
-            8,
-            0,
+            "runtime_ref",
+            "unsupported_call_effect",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+                ),
+            ),
+            ("typed_target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
         ),
-        None,
-        ("typed_target_expression", ("storage", ("register", "a0", 8))),
-        7,
+        (
+            "callsite_storage",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+                ),
+            ),
+            ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+        ),
+        ("effect_ordinal", 7),
         "target_identity_unavailable",
     )
     return make_unknown_reason(
@@ -230,18 +269,57 @@ def test_phase2_call_effect_specificity_rejects_legacy_pcode_ref():
         "function1",
         ("function_ref", ("function", "B10", 0x401000)),
         (
-            "pcode_op",
-            "B10",
-            ("function_entry", "ram", 0x401000),
-            ("seq_target", "ram", 0x401020),
-            31,
-            7,
-            8,
-            0,
+            "runtime_ref",
+            "unsupported_call_effect",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+                ),
+            ),
+            ("typed_target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
         ),
-        None,
-        ("typed_target_expression", ("storage", ("register", "a0", 8))),
-        7,
+        (
+            "callsite_storage",
+            (
+                "pcode_op_ref",
+                (
+                    "pcode_op",
+                    "B10",
+                    ("function_entry", "ram", 0x401000),
+                    ("seq_target", "ram", 0x401020),
+                    31,
+                    7,
+                    8,
+                    0,
+                ),
+            ),
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    "B10",
+                    ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+                ),
+            ),
+            ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+        ),
+        ("effect_ordinal", 7),
         "target_identity_unavailable",
     )
 
@@ -283,14 +361,68 @@ def test_phase2_call_effect_specificity_requires_canonical_function_binary_id():
 
 def test_phase2_call_effect_specificity_requires_integer_effect_ordinal():
     full_target = _pending_reason().object_target_key
-    missing_ordinal_target = full_target[:6] + (None,) + full_target[7:]
-    text_ordinal_target = full_target[:6] + ("7",) + full_target[7:]
-    bool_ordinal_target = full_target[:6] + (True,) + full_target[7:]
+    missing_ordinal_target = full_target[:5] + (("effect_ordinal", None),) + full_target[6:]
+    text_ordinal_target = full_target[:5] + (("effect_ordinal", "7"),) + full_target[6:]
+    bool_ordinal_target = full_target[:5] + (("effect_ordinal", True),) + full_target[6:]
 
     assert _object_target_key_is_specific(missing_ordinal_target) is False
     assert _object_target_key_is_specific(text_ordinal_target) is False
     assert _object_target_key_is_specific(bool_ordinal_target) is False
     assert _object_target_key_is_specific(full_target) is True
+
+
+def test_phase2_call_effect_specificity_rejects_missing_callee_identity_sentinel():
+    full_target = _pending_reason().object_target_key
+    runtime_ref_without_callee = full_target[3][:3] + (("callee_identity", None),) + full_target[3][4:]
+    unknown_without_provenance = full_target[3][:3] + (("callee_identity", ("unknown", "B10")),) + full_target[3][4:]
+    unknown_without_binary = (
+        full_target[3][:3]
+        + (
+            (
+                "callee_identity",
+                (
+                    "unknown",
+                    None,
+                    ("target_expression", ("typed_target_expression", ("storage", ("register", "a0", 8)))),
+                ),
+            ),
+        )
+        + full_target[3][4:]
+    )
+
+    assert _object_target_key_is_specific(full_target[:3] + (runtime_ref_without_callee,) + full_target[4:]) is False
+    assert _object_target_key_is_specific(full_target[:3] + (unknown_without_provenance,) + full_target[4:]) is False
+    assert _object_target_key_is_specific(full_target[:3] + (unknown_without_binary,) + full_target[4:]) is False
+    assert _object_target_key_is_specific(full_target) is True
+
+
+def test_phase2_call_effect_specificity_rejects_known_callee_without_concrete_address():
+    full_target = _pending_reason().object_target_key
+    function_without_entry = (
+        full_target[3][:3]
+        + (("callee_identity", ("function", "B10", None)),)
+        + full_target[3][4:]
+    )
+    code_address_without_address = (
+        full_target[4][:2]
+        + (("callee_identity", ("code_address", "B10", "bad")),)
+        + full_target[4][3:]
+    )
+    function_with_entry = (
+        full_target[3][:3]
+        + (("callee_identity", ("function", "B10", 0x401234)),)
+        + full_target[3][4:]
+    )
+    code_address_with_address = (
+        full_target[4][:2]
+        + (("callee_identity", ("code_address", "B10", 0x401234)),)
+        + full_target[4][3:]
+    )
+
+    assert _object_target_key_is_specific(full_target[:3] + (function_without_entry,) + full_target[4:]) is False
+    assert _object_target_key_is_specific(full_target[:4] + (code_address_without_address,) + full_target[5:]) is False
+    assert _object_target_key_is_specific(full_target[:3] + (function_with_entry,) + full_target[4:]) is True
+    assert _object_target_key_is_specific(full_target[:4] + (code_address_with_address,) + full_target[5:]) is True
 
 
 def _old_blocking_reason():

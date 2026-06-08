@@ -1411,19 +1411,62 @@ class CheckStrategy(ABC):
         analysis: Optional[FunctionReturnAnalysis] = None,
         side_label: Optional[str] = None,
     ) -> Tuple[Any, ...]:
+        pcode_key = self._stable_key_or_none(getattr(site, "pcode_op_ref", None))
+        target_key = self._call_target_key_for_analysis(getattr(site, "target_ref", None), analysis)
+        target_expr_key = self._typed_target_expression_key(getattr(site, "target_expr", None))
+        callee_identity_key = self._call_effect_callee_identity_key(
+            target_key,
+            target_expr_key,
+            analysis,
+        )
+        effect_ordinal = int(getattr(site, "order_key", 0) or 0)
         target = (
             "unsupported_call_effect",
             side_label,
             self._analysis_entry_key(analysis) if analysis is not None else None,
-            self._stable_key_or_none(getattr(site, "pcode_op_ref", None)),
-            self._call_target_key_for_analysis(getattr(site, "target_ref", None), analysis),
-            self._typed_target_expression_key(getattr(site, "target_expr", None)),
-            int(getattr(site, "order_key", 0) or 0),
+            (
+                "runtime_ref",
+                "unsupported_call_effect",
+                ("pcode_op_ref", pcode_key),
+                ("callee_identity", callee_identity_key),
+                ("typed_target_expression", target_expr_key),
+            ),
+            (
+                "callsite_storage",
+                ("pcode_op_ref", pcode_key),
+                ("callee_identity", callee_identity_key),
+                ("target_expression", target_expr_key),
+            ),
+            ("effect_ordinal", effect_ordinal),
             getattr(site, "reason", None),
         )
         if analysis is not None:
             return self._artifact_stable_key_for_analysis(target, analysis)
         return target
+
+    @staticmethod
+    def _call_effect_callee_identity_key(
+        target_key: Any,
+        target_expr_key: Any,
+        analysis: Optional[FunctionReturnAnalysis],
+    ) -> Any:
+        if target_key is not None:
+            if isinstance(target_key, tuple) and target_key and target_key[0] == "unknown":
+                binary_id = target_key[1] if len(target_key) >= 2 else None
+                if binary_id is None and analysis is not None:
+                    binary_id = getattr(analysis, "binary_id", None)
+                return (
+                    "unknown",
+                    str(binary_id) if binary_id is not None else None,
+                    ("target_expression", target_expr_key),
+                )
+            return target_key
+        binary_id = getattr(analysis, "binary_id", None) if analysis is not None else None
+        return (
+            "unknown",
+            str(binary_id) if binary_id is not None else None,
+            ("target_expression", target_expr_key),
+        )
 
     @classmethod
     def _artifact_stable_key_for_analysis(
