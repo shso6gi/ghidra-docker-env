@@ -18,6 +18,7 @@ from .phase2_equivalence_blocking_unsafety import (
     EXPECTED_PROOF_STAGE,
     TARGET_REASON_ID,
     _object_target_key_is_specific,
+    _phase2_required_evidence_obligation_present,
 )
 from .unknown_reason_summary import (
     RESULT_JSON_END,
@@ -133,6 +134,8 @@ def _phase2_reason_failures(reason: Any) -> Iterable[str]:
         yield "phase2_evidence_kind_missing"
     elif reason.evidence_kind not in EXPECTED_PHASE2_EVIDENCE_KINDS:
         yield "phase2_evidence_kind_mismatch"
+    if not _phase2_required_evidence_obligation_present(reason):
+        yield "phase2_recovery_proof_obligation_required_evidence_mismatch"
     if not _object_target_key_is_specific(reason.object_target_key):
         yield "phase2_object_target_key_missing_or_not_specific"
 

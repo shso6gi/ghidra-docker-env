@@ -6,6 +6,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownReasonId,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.validation.log_reuse_gate import (
@@ -83,6 +84,18 @@ def _phase2_reason(object_target_key, *, evidence_kind="call_effect_summary"):
         decision_effect="blocks_equivalence",
         reason_scope="function",
         recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=(
+                    "call_effect_summary",
+                    "runtime_ref",
+                    "callsite_storage",
+                ),
+                description="Collect object-derived call/effect evidence before using UNSAT as equivalence proof.",
+            ),
+        ),
         proof_stage="object_evidence_collected",
         evidence_kind=evidence_kind,
         object_target_key=object_target_key,
@@ -130,6 +143,19 @@ def test_log_reuse_gate_rejects_unexpected_phase2_evidence_kind(tmp_path):
     failures = validation_log_reuse_failures(path, require_phase2_object_keys=True)
 
     assert "phase2_evidence_kind_mismatch" in failures
+
+
+def test_log_reuse_gate_rejects_phase2_obligation_without_runtime_and_storage_evidence(tmp_path):
+    path = tmp_path / "pair.log"
+    payload = _payload(_phase2_reason(_full_object_target_key()))
+    payload["unknown_reasons"][0]["recovery_proof_obligations"][0]["required_evidence"] = [
+        "call_effect_summary",
+    ]
+    _write_log(path, payload)
+
+    failures = validation_log_reuse_failures(path, require_phase2_object_keys=True)
+
+    assert "phase2_recovery_proof_obligation_required_evidence_mismatch" in failures
 
 
 def test_log_reuse_gate_rejects_call_effect_key_without_integer_effect_ordinal(tmp_path):

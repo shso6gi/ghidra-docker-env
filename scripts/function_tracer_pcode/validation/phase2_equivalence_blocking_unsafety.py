@@ -47,6 +47,11 @@ EXPECTED_RECOVERY_ACTION = "call_effect_summary_proof_required"
 EXPECTED_PROOF_KIND = UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF.value
 EXPECTED_PROOF_STAGE = "object_evidence_collected"
 EXPECTED_ACTION_STATUS = UnknownRecoveryActionStatus.PENDING_PROOF.value
+EXPECTED_REQUIRED_EVIDENCE = (
+    "call_effect_summary",
+    "runtime_ref",
+    "callsite_storage",
+)
 REQUIRED_PRODUCER_EQUIV_ARGS = (
     "--no-completed-recovery-proofs",
 )
@@ -566,6 +571,17 @@ def _phase2_entry_failures(entries: Sequence[Mapping[str, Any]]) -> Sequence[str
             failures.append("entry_failed_kinds_on_expected_movement")
         if status != "expected_movement" and not failed_kinds:
             failures.append("entry_failure_without_failed_kinds")
+        if status == "expected_movement":
+            accepted_records = entry.get("accepted_reason_records")
+            if not _is_non_string_sequence(accepted_records) or not accepted_records:
+                failures.append("entry_expected_movement_without_accepted_reason")
+            else:
+                for record in accepted_records:
+                    if not isinstance(record, Mapping):
+                        failures.append("entry_accepted_reason_not_mapping")
+                        continue
+                    if tuple(record.get("required_evidence") or ()) != EXPECTED_REQUIRED_EVIDENCE:
+                        failures.append("entry_accepted_reason_required_evidence_mismatch")
     return failures
 
 
@@ -751,6 +767,7 @@ def _validate_representative_expected_movement(
             "decision_effect": reason.decision_effect,
             "reason_scope": reason.reason_scope,
             "recovery_proof_kind": reason.recovery_proof_kind,
+            "required_evidence": list(_phase2_required_evidence(reason)),
             "proof_stage": reason.proof_stage,
             "action_status": reason.action_status,
             "evidence_kind": reason.evidence_kind,
@@ -789,6 +806,8 @@ def _reason_movement_failures(reason: Any, expected: Mapping[str, Any]) -> Seque
         failures.append("evidence_kind_mismatch")
     if reason.recovery_action != EXPECTED_RECOVERY_ACTION:
         failures.append("recovery_action_mismatch")
+    if not _phase2_required_evidence_obligation_present(reason):
+        failures.append("recovery_proof_obligation_required_evidence_mismatch")
     if not _object_target_key_is_specific(reason.object_target_key):
         failures.append("object_target_key_missing_or_not_specific")
     expected_proof_obligation_id = None
@@ -803,6 +822,21 @@ def _reason_movement_failures(reason: Any, expected: Mapping[str, Any]) -> Seque
     if reason.proof_obligation_id != expected_proof_obligation_id:
         failures.append("proof_obligation_id_mismatch")
     return failures
+
+
+def _phase2_required_evidence_obligation_present(reason: Any) -> bool:
+    return bool(_phase2_required_evidence(reason))
+
+
+def _phase2_required_evidence(reason: Any) -> Tuple[str, ...]:
+    for obligation in getattr(reason, "recovery_proof_obligations", ()) or ():
+        if getattr(obligation, "proof_kind", None) != EXPECTED_PROOF_KIND:
+            continue
+        if getattr(obligation, "proof_stage", None) != EXPECTED_PROOF_STAGE:
+            continue
+        if tuple(getattr(obligation, "required_evidence", ()) or ()) == EXPECTED_REQUIRED_EVIDENCE:
+            return EXPECTED_REQUIRED_EVIDENCE
+    return ()
 
 
 def _object_target_key_is_specific(value: Any) -> bool:

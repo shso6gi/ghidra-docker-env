@@ -8,6 +8,7 @@ import pytest
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
     UnknownReasonId,
     build_proof_obligation_id,
     make_unknown_reason,
@@ -160,7 +161,10 @@ def _payload(function: str, left_binary: str, right_binary: str, is_equivalent, 
         "is_equivalent": is_equivalent,
         "is_timeout": False,
         "error_message": None,
-        "unknown_reasons": [reason.to_dict() for reason in reasons],
+        "unknown_reasons": [
+            reason.to_dict() if hasattr(reason, "to_dict") else reason
+            for reason in reasons
+        ],
     }
 
 
@@ -189,6 +193,18 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
         decision_effect="blocks_equivalence",
         reason_scope="function",
         recovery_proof_kind=UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.CALL_EFFECT_SUMMARY_PROOF,
+                "object_evidence_collected",
+                required_evidence=(
+                    "call_effect_summary",
+                    "runtime_ref",
+                    "callsite_storage",
+                ),
+                description="Collect object-derived call/effect evidence before using UNSAT as equivalence proof.",
+            ),
+        ),
         proof_stage="object_evidence_collected",
         evidence_kind="call_effect_summary",
         object_target_key=target,
@@ -380,6 +396,17 @@ def test_phase2_validator_rejects_ready_true_without_producer_gate(tmp_path):
     manifest["phase2_ready"] = True
 
     with pytest.raises(ValueError, match="phase2_producer_config_gate_missing"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_tampered_accepted_required_evidence(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["accepted_reason_records"][0]["required_evidence"] = [
+        "call_effect_summary",
+    ]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_accepted_reason_required_evidence_mismatch"):
         validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
@@ -661,6 +688,45 @@ def test_phase2_rejects_missing_object_target_key_and_non_full_proof_id(tmp_path
     assert manifest["phase2_ready"] is False
     assert "proof_obligation_id_mismatch" in manifest["movement_summary"]["failed_kinds"]
     assert "object_target_key_missing_or_not_specific" in manifest["movement_summary"]["failed_kinds"]
+
+
+def test_phase2_rejects_call_effect_obligation_without_runtime_and_storage_evidence(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    reason_payload = _pending_reason().to_dict()
+    reason_payload["recovery_proof_obligations"][0]["required_evidence"] = [
+        "call_effect_summary",
+    ]
+    _write_all_representative_logs(
+        current_root,
+        {
+            "fc_apply_indirect": _payload(
+                "fc_apply_indirect",
+                "B10",
+                "B11",
+                None,
+                [reason_payload],
+            ),
+        },
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert (
+        "recovery_proof_obligation_required_evidence_mismatch"
+        in manifest["movement_summary"]["failed_kinds"]
+    )
 
 
 def test_phase2_rejects_aggregate_call_effect_blocker_key_with_log_prose(tmp_path):
