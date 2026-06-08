@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.equivalence.unknown_reason import (
 )
 from scripts.function_tracer_pcode.validation.phase2_equivalence_blocking_unsafety import (
     _object_target_key_is_specific,
+    _parse_current_log_roots,
     build_phase2_equivalence_blocking_unsafety_movement,
     validate_phase2_equivalence_blocking_unsafety_movement,
 )
@@ -78,6 +79,7 @@ def _write_phase2_run_manifest(
     expected_final_result_movement: str = "none",
     expected_reason_movement: str = "call_effect_summary_proof/object_evidence_collected/pending_proof",
     validation_skip_completed: str = "0",
+    validation_require_phase2_object_keys: str = "1",
     phase2_run_expected_movement_gate: str = "1",
 ):
     root.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,7 @@ def _write_phase2_run_manifest(
                 "expected_final_result_movement=" + expected_final_result_movement,
                 "expected_reason_movement=" + expected_reason_movement,
                 "validation_skip_completed=" + validation_skip_completed,
+                "validation_require_phase2_object_keys=" + validation_require_phase2_object_keys,
                 "function_call_extra_equiv_args=" + extra_args,
                 "phase2_run_expected_movement_gate=" + phase2_run_expected_movement_gate,
             ]
@@ -228,6 +231,11 @@ def test_phase2_call_effect_specificity_rejects_legacy_pcode_ref():
 
     assert _object_target_key_is_specific(legacy_target) is False
     assert _object_target_key_is_specific(full_target) is True
+
+
+def test_phase2_log_root_parser_rejects_unknown_category_typo():
+    with pytest.raises(ValueError, match="unknown log root category"):
+        _parse_current_log_roots(("functoin_call=/tmp/does-not-exist",))
 
 
 def test_phase2_call_effect_specificity_requires_canonical_function_binary_id():
@@ -458,6 +466,7 @@ def test_phase2_producer_manifest_does_not_require_no_retry_phases(tmp_path):
         ("expected_final_result_movement", "normal-current-baseline-comparison"),
         ("expected_reason_movement", "none-required-by-this-wrapper"),
         ("validation_skip_completed", "1"),
+        ("validation_require_phase2_object_keys", "0"),
         ("phase2_run_expected_movement_gate", "0"),
     ],
 )

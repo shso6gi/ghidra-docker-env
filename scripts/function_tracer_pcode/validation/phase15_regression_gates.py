@@ -35,6 +35,7 @@ from .result_summary import (
 
 MANIFEST_VERSION = 1
 MISSING_SENTINEL = "<missing>"
+KNOWN_LOG_ROOT_CATEGORIES = frozenset({"function_call", "loop"})
 
 
 def build_phase15_regression_gates(
@@ -366,7 +367,10 @@ def _normalize_current_roots(
     current_log_roots: Optional[Mapping[str, Path]],
 ) -> Dict[str, Path]:
     if current_log_roots:
-        return {str(category): Path(path) for category, path in current_log_roots.items()}
+        return {
+            _normalize_log_root_category(str(category)): Path(path)
+            for category, path in current_log_roots.items()
+        }
     log_root = raw_dir / "logs"
     return {
         path.name: path
@@ -381,8 +385,18 @@ def _parse_current_log_roots(values: Iterable[str]) -> Dict[str, Path]:
         if "=" not in value:
             raise ValueError(f"--current-log-root must be CATEGORY=PATH, got {value!r}")
         category, raw_path = value.split("=", 1)
-        result[category] = Path(raw_path)
+        result[_normalize_log_root_category(category)] = Path(raw_path)
     return result
+
+
+def _normalize_log_root_category(category: str) -> str:
+    normalized = str(category).strip()
+    if normalized not in KNOWN_LOG_ROOT_CATEGORIES:
+        expected = ", ".join(sorted(KNOWN_LOG_ROOT_CATEGORIES))
+        raise ValueError(
+            f"unknown --current-log-root category: {normalized}; expected one of {expected}"
+        )
+    return normalized
 
 
 def _records_by_key(

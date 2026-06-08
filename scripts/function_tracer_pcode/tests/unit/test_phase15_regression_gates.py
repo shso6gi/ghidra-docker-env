@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.validation.freeze_observed_baseline import (
     freeze_observed_baseline,
 )
 from scripts.function_tracer_pcode.validation.phase15_regression_gates import (
+    _parse_current_log_roots,
     build_phase15_regression_gates,
     validate_phase15_regression_gates,
 )
@@ -39,6 +40,11 @@ def _reason(reason_id):
         "reason_scope": "function",
         "recovery_proof_kind": "call_effect_summary_proof",
     }
+
+
+def test_phase15_log_root_parser_rejects_unknown_category_typo():
+    with pytest.raises(ValueError, match="unknown --current-log-root category"):
+        _parse_current_log_roots(("functoin_call=/tmp/does-not-exist",))
 
 
 def _write_log(root: Path, function_name: str, left: str, right: str, payload):

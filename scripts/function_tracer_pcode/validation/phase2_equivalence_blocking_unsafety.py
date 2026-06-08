@@ -55,6 +55,7 @@ REQUIRED_PRODUCER_RUN_MANIFEST_VALUES = {
     "expected_final_result_movement": "none",
     "expected_reason_movement": "call_effect_summary_proof/object_evidence_collected/pending_proof",
     "validation_skip_completed": "0",
+    "validation_require_phase2_object_keys": "1",
     "phase2_run_expected_movement_gate": "1",
 }
 MISSING_SENTINEL = UNKNOWN_TUPLE_MISSING
@@ -63,6 +64,7 @@ TARGET_REPRESENTATIVE_IDS = (
     "representative-equivalence-blocking-unsafety-dispatch",
     "representative-equivalence-blocking-unsafety-recursive-stress",
 )
+KNOWN_LOG_ROOT_CATEGORIES = frozenset({"function_call", "loop"})
 ALLOWED_NEW_REASON_TUPLE = (
     TARGET_REASON_ID,
     "blocks_equivalence",
@@ -1849,6 +1851,12 @@ def _parse_current_log_roots(values: Iterable[str]) -> Dict[str, Path]:
         if "=" not in value:
             raise ValueError(f"--current-log-root must be CATEGORY=PATH, got {value!r}")
         category, raw_path = value.split("=", 1)
+        category = category.strip()
+        if category not in KNOWN_LOG_ROOT_CATEGORIES:
+            expected = ", ".join(sorted(KNOWN_LOG_ROOT_CATEGORIES))
+            raise ValueError(
+                f"unknown log root category: {category}; expected one of {expected}"
+            )
         result[category] = Path(raw_path)
     return result
 
