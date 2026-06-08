@@ -78,6 +78,46 @@ def test_phase1_concrete_manifest_gate_rejects_duplicate_concrete_entry_id(tmp_p
         validate_phase1_concrete_manifest_gate(gate)
 
 
+def test_phase1_concrete_manifest_gate_rejects_incomplete_synthetic_negative_evidence(tmp_path):
+    baseline_root, phase1_dir = _ready_phase1_fixture(tmp_path)
+    synthetic_path = phase1_dir / "synthetic_manifest.json"
+    synthetic = json.loads(synthetic_path.read_text())
+    synthetic["synthetic_negative_entries"][0]["object_evidence"].pop("object_facts")
+    synthetic_path.write_text(json.dumps(synthetic), encoding="utf-8")
+
+    gate_path = build_phase1_concrete_manifest_gate(
+        phase1_dir=phase1_dir,
+        baseline_raw_dir=baseline_root / "raw",
+        output_dir=tmp_path / "gate",
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_concrete_manifest_ready"] is False
+    assert "synthetic_manifest_validator" in gate["summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="synthetic_manifest_validator"):
+        validate_phase1_concrete_manifest_gate(gate)
+
+
+def test_phase1_concrete_manifest_gate_rejects_synthetic_negative_binary_hash_gap(tmp_path):
+    baseline_root, phase1_dir = _ready_phase1_fixture(tmp_path)
+    synthetic_path = phase1_dir / "synthetic_manifest.json"
+    synthetic = json.loads(synthetic_path.read_text())
+    synthetic["synthetic_negative_entries"][0]["binary_hashes"].pop("S1")
+    synthetic_path.write_text(json.dumps(synthetic), encoding="utf-8")
+
+    gate_path = build_phase1_concrete_manifest_gate(
+        phase1_dir=phase1_dir,
+        baseline_raw_dir=baseline_root / "raw",
+        output_dir=tmp_path / "gate",
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_concrete_manifest_ready"] is False
+    assert "synthetic_manifest_validator" in gate["summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="synthetic_manifest_validator"):
+        validate_phase1_concrete_manifest_gate(gate)
+
+
 def _ready_phase1_fixture(tmp_path: Path):
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(
@@ -341,6 +381,8 @@ def _synthetic_negative_entry(entry_id, negative_case, function, left, right):
             "expected_equivalent": False,
             "oracle_exception": False,
             "eq_goal_excluded": True,
+            "oracle_source": "synthetic_negative_source_pair",
+            "counterexample": {"left_return": 1, "right_return": 0},
             "counterexample_replay_status": "passed",
             "abi_storage_width_proof": "passed",
             "return_compare_width_proof": "passed",

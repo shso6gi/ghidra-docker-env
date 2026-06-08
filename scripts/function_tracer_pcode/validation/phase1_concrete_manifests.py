@@ -768,11 +768,84 @@ def _validate_synthetic_negative_entry(entry: Mapping[str, Any]) -> None:
         raise ValueError(f"synthetic negative entry {entry.get('id')} must expect NOT_EQ")
     if entry.get("negative_case") not in NEGATIVE_MINIMUM_CASES:
         raise ValueError(f"synthetic negative entry {entry.get('id')} has unknown negative case")
+    if entry.get("category") != "synthetic_negative":
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must use synthetic_negative category")
+    if entry.get("current_result") not in (None, "NOT_EQ"):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must have NOT_EQ current result")
+    expected_pair = _canonical_binary_pair_from_sides(entry.get("left_binary_id"), entry.get("right_binary_id"))
+    if entry.get("binary_pair") != expected_pair:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} binary_pair does not match sides")
+    _validate_synthetic_binary_hashes(entry)
+    _validate_synthetic_source_revision(entry)
+    _validate_synthetic_build_metadata(entry)
+    _validate_synthetic_expected_counts(entry)
+    _validate_synthetic_object_evidence(entry)
     source = entry.get("ground_truth_source")
     if not _ground_truth_source_is_accepted_not_eq(source):
         raise ValueError(
             f"synthetic negative entry {entry.get('id')} requires accepted ground_truth_source"
         )
+
+
+def _validate_synthetic_binary_hashes(entry: Mapping[str, Any]) -> None:
+    hashes = entry.get("binary_hashes")
+    if not isinstance(hashes, Mapping):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing binary_hashes")
+    for side in (entry.get("left_binary_id"), entry.get("right_binary_id")):
+        digest = hashes.get(str(side))
+        if not _is_sha256_hex(digest):
+            raise ValueError(f"synthetic negative entry {entry.get('id')} missing concrete binary hash for {side}")
+
+
+def _validate_synthetic_source_revision(entry: Mapping[str, Any]) -> None:
+    source = entry.get("source_revision")
+    if not isinstance(source, Mapping):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing source_revision")
+    if _is_sha256_hex(source.get("sha256")):
+        return
+    if _is_sha256_hex(source.get("left_source_sha256")) and _is_sha256_hex(source.get("right_source_sha256")):
+        return
+    raise ValueError(f"synthetic negative entry {entry.get('id')} missing concrete source hashes")
+
+
+def _validate_synthetic_build_metadata(entry: Mapping[str, Any]) -> None:
+    flags = entry.get("build_flags")
+    if not isinstance(flags, Sequence) or isinstance(flags, (str, bytes)) or not flags:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing build_flags")
+    settings = entry.get("build_import_decompiler_settings")
+    if not isinstance(settings, Mapping):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing build/import/decompiler settings")
+    for field_name in ("ghidra_version", "language_id", "compiler_spec_id"):
+        if not settings.get(field_name):
+            raise ValueError(f"synthetic negative entry {entry.get('id')} missing {field_name}")
+
+
+def _validate_synthetic_expected_counts(entry: Mapping[str, Any]) -> None:
+    counts = entry.get("expected_counts")
+    if not isinstance(counts, Mapping):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing expected_counts")
+    final_result = counts.get("final_result")
+    if not isinstance(final_result, Mapping) or final_result.get("NOT_EQ") != 1:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must freeze NOT_EQ expected count")
+    validation_unknown = counts.get("validation_unknown_unit")
+    if not isinstance(validation_unknown, Mapping) or dict(validation_unknown):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must freeze empty validation UNKNOWN counts")
+
+
+def _validate_synthetic_object_evidence(entry: Mapping[str, Any]) -> None:
+    evidence = entry.get("object_evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing object_evidence")
+    source = evidence.get("evidence_source")
+    if source not in {"pyghidra_object_probe", "synthetic_ghidra_object_manifest"}:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} must use object-derived evidence")
+    facts = evidence.get("object_facts")
+    if not isinstance(facts, Mapping) or not facts:
+        raise ValueError(f"synthetic negative entry {entry.get('id')} missing object_facts")
+    ref = evidence.get("evidence_ref")
+    if ref is not None:
+        if not isinstance(ref, Mapping) or not ref.get("path") or not _is_sha256_hex(ref.get("sha256")):
+            raise ValueError(f"synthetic negative entry {entry.get('id')} has incomplete object evidence ref")
 
 
 def _ground_truth_source_is_accepted_not_eq(source: object) -> bool:
@@ -795,6 +868,10 @@ def _ground_truth_source_is_accepted_not_eq(source: object) -> bool:
     for field_name, expected in required_statuses.items():
         if source.get(field_name) != expected:
             return False
+    if not source.get("oracle_source"):
+        return False
+    if not isinstance(source.get("counterexample"), Mapping) or not source.get("counterexample"):
+        return False
     if not source.get("ub_exclusion_rule"):
         return False
     if source.get("expected_equivalent") is True and not (
@@ -802,6 +879,16 @@ def _ground_truth_source_is_accepted_not_eq(source: object) -> bool:
     ):
         return False
     return True
+
+
+def _canonical_binary_pair_from_sides(left: Any, right: Any) -> str:
+    return "_".join(sorted((str(left), str(right)), key=_binary_sort_key))
+
+
+def _is_sha256_hex(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
 
 
 def _phase1_readiness(

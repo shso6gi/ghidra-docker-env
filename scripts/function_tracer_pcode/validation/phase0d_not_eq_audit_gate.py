@@ -10,6 +10,7 @@ and domain evidence upgrades individual entries.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import Counter
 from datetime import datetime, timezone
@@ -33,6 +34,52 @@ EXPECTED_CLASSIFICATION_COUNTS = {
 EXPECTED_ORACLE_REVIEW_STATUS_COUNTS = {
     "draft": 3,
 }
+REQUIRED_AUDIT_ENTRY_FIELDS = (
+    "function",
+    "category",
+    "binary_pair",
+    "left_binary_id",
+    "right_binary_id",
+    "side_or_role",
+    "current_result",
+    "expected_equivalent",
+    "oracle_manifest_ref",
+    "classification",
+    "counterexample_model_ref",
+    "sat_unsafety_status",
+    "coverage_status",
+    "coverage_status_source",
+    "coverage_gap_status",
+    "call_memory_effect_status",
+    "target_proof_lane",
+    "oracle_decision_status",
+    "replay_harness",
+    "input_width_policy",
+    "return_compare_width",
+    "memory_initial_state",
+    "ub_exclusion_rule",
+    "audit_source",
+)
+EXPECTED_TARGET_PROOF_LANE_COUNTS = {
+    "not_eq_counterexample_replay": 72,
+}
+EXPECTED_REPLAY_STATUS_COUNTS = {
+    "missing": 72,
+}
+EXPECTED_COVERAGE_STATUS_SOURCE_COUNTS = {
+    "/pairwise_stats": 54,
+    "<missing>": 18,
+}
+EXPECTED_AUDIT_CATEGORY_COUNTS = {
+    "function_call": 71,
+    "loop": 1,
+}
+EXPECTED_ORACLE_SCOPE_COUNTS = {
+    "function_category": 3,
+}
+EXPECTED_ORACLE_EXPECTED_EQUIVALENT_COUNTS = {
+    "true": 3,
+}
 
 
 def build_phase0d_not_eq_audit_gate(
@@ -44,6 +91,12 @@ def build_phase0d_not_eq_audit_gate(
     expected_entry_count: int = EXPECTED_ENTRY_COUNT,
     expected_classification_counts: Optional[Mapping[str, int]] = None,
     expected_oracle_review_status_counts: Optional[Mapping[str, int]] = None,
+    expected_target_proof_lane_counts: Optional[Mapping[str, int]] = None,
+    expected_replay_status_counts: Optional[Mapping[str, int]] = None,
+    expected_coverage_status_source_counts: Optional[Mapping[str, int]] = None,
+    expected_audit_category_counts: Optional[Mapping[str, int]] = None,
+    expected_oracle_scope_counts: Optional[Mapping[str, int]] = None,
+    expected_oracle_expected_equivalent_counts: Optional[Mapping[str, int]] = None,
 ) -> Path:
     raw_dir = Path(baseline_raw_dir)
     output = Path(output_dir)
@@ -68,6 +121,37 @@ def build_phase0d_not_eq_audit_gate(
         )
     )
     checks.extend(_oracle_scope_checks(audit, oracle))
+    checks.extend(_audit_source_log_checks(audit, raw_dir))
+    audit_posture = _audit_acceptance_posture(audit)
+    checks.extend(
+        _audit_acceptance_posture_checks(
+            audit_posture,
+            expected_target_proof_lane_counts=dict(
+                expected_target_proof_lane_counts or EXPECTED_TARGET_PROOF_LANE_COUNTS
+            ),
+            expected_replay_status_counts=dict(expected_replay_status_counts or EXPECTED_REPLAY_STATUS_COUNTS),
+            expected_coverage_status_source_counts=dict(
+                expected_coverage_status_source_counts or EXPECTED_COVERAGE_STATUS_SOURCE_COUNTS
+            ),
+        )
+    )
+    concrete_identity_report = _audit_concrete_identity_report(audit)
+    checks.extend(
+        _audit_concrete_identity_checks(
+            concrete_identity_report,
+            expected_audit_category_counts=dict(expected_audit_category_counts or EXPECTED_AUDIT_CATEGORY_COUNTS),
+        )
+    )
+    oracle_posture = _oracle_posture(oracle)
+    checks.extend(
+        _oracle_posture_checks(
+            oracle_posture,
+            expected_oracle_scope_counts=dict(expected_oracle_scope_counts or EXPECTED_ORACLE_SCOPE_COUNTS),
+            expected_oracle_expected_equivalent_counts=dict(
+                expected_oracle_expected_equivalent_counts or EXPECTED_ORACLE_EXPECTED_EQUIVALENT_COUNTS
+            ),
+        )
+    )
 
     summary = _summary(checks)
     manifest = {
@@ -82,10 +166,12 @@ def build_phase0d_not_eq_audit_gate(
         },
         "audit_manifest_ref": {
             "path": str(Path(audit_manifest)),
+            "sha256": _sha256_file(Path(audit_manifest)),
             "entry_count": len(audit.get("entries") or ()),
         },
         "oracle_manifest_ref": {
             "path": str(Path(oracle_manifest)),
+            "sha256": _sha256_file(Path(oracle_manifest)),
             "entry_count": len(oracle.get("entries") or ()),
         },
         "expected_entry_count": expected_entry_count,
@@ -95,6 +181,9 @@ def build_phase0d_not_eq_audit_gate(
         ),
         "classification_counts": _classification_counts(audit),
         "oracle_review_status_counts": _oracle_review_status_counts(oracle),
+        "audit_acceptance_posture": audit_posture,
+        "audit_concrete_identities": concrete_identity_report,
+        "oracle_posture": oracle_posture,
         "phase0d_not_eq_audit_ready": summary["failed"] == 0,
         "summary": summary,
         "checks": checks,
@@ -252,12 +341,346 @@ def _oracle_scope_checks(audit: Mapping[str, Any], oracle: Mapping[str, Any]) ->
     ]
 
 
+def _audit_source_log_checks(audit: Mapping[str, Any], raw_dir: Path) -> Sequence[Dict[str, Any]]:
+    missing = []
+    mismatched = []
+    checked_count = 0
+    for index, entry in enumerate(audit.get("entries") or ()):
+        if not isinstance(entry, Mapping):
+            continue
+        source = entry.get("audit_source")
+        if not isinstance(source, Mapping):
+            missing.append(_audit_entry_identity(index, entry))
+            continue
+        rel_path = source.get("log_path")
+        expected_hash = source.get("log_sha256")
+        if not rel_path or not expected_hash:
+            missing.append(_audit_entry_identity(index, entry))
+            continue
+        path = raw_dir / str(rel_path)
+        if not path.is_file():
+            missing.append({**_audit_entry_identity(index, entry), "path": str(rel_path)})
+            continue
+        checked_count += 1
+        actual_hash = _sha256_file(path)
+        if actual_hash != expected_hash:
+            mismatched.append(
+                {
+                    **_audit_entry_identity(index, entry),
+                    "path": str(rel_path),
+                    "expected": expected_hash,
+                    "actual": actual_hash,
+                }
+            )
+    return [
+        _ok("not_eq_audit_source_logs_present", count=checked_count)
+        if not missing
+        else _failed("not_eq_audit_source_logs_present", missing=missing),
+        _ok("not_eq_audit_source_log_hashes_match", count=checked_count)
+        if not mismatched
+        else _failed("not_eq_audit_source_log_hashes_match", mismatched=mismatched[:20]),
+    ]
+
+
 def _classification_counts(audit: Mapping[str, Any]) -> Dict[str, int]:
     return dict(sorted(Counter(str(entry.get("classification") or "") for entry in audit.get("entries") or ()).items()))
 
 
 def _oracle_review_status_counts(oracle: Mapping[str, Any]) -> Dict[str, int]:
     return dict(sorted(Counter(str(entry.get("oracle_review_status") or "") for entry in oracle.get("entries") or ()).items()))
+
+
+def _audit_acceptance_posture(audit: Mapping[str, Any]) -> Dict[str, Any]:
+    entries = tuple(entry for entry in audit.get("entries") or () if isinstance(entry, Mapping))
+    missing_required_fields = []
+    ground_truth_conflicts_without_override = []
+    ground_truth_entries_without_accepted_oracle = []
+    target_proof_lane_counts: Counter[str] = Counter()
+    replay_status_counts: Counter[str] = Counter()
+    coverage_status_source_counts: Counter[str] = Counter()
+    for index, entry in enumerate(entries):
+        missing = [field for field in REQUIRED_AUDIT_ENTRY_FIELDS if field not in entry]
+        if missing:
+            missing_required_fields.append(
+                {
+                    "index": index,
+                    "function": entry.get("function"),
+                    "binary_pair": entry.get("binary_pair"),
+                    "missing_fields": missing,
+                }
+            )
+        target_proof_lane_counts[str(entry.get("target_proof_lane") or "")] += 1
+        replay = entry.get("counterexample_model_ref")
+        replay_status_counts[
+            str(replay.get("replay_status") if isinstance(replay, Mapping) else "<missing>")
+        ] += 1
+        coverage_status_source_counts[str(entry.get("coverage_status_source") or "<missing>")] += 1
+        if entry.get("classification") != "ground_truth_not_eq":
+            continue
+        oracle_ref = entry.get("oracle_manifest_ref")
+        if not isinstance(oracle_ref, Mapping) or oracle_ref.get("oracle_review_status") != "accepted":
+            ground_truth_entries_without_accepted_oracle.append(_audit_entry_identity(index, entry))
+        if _has_expected_equivalent_conflict(entry) and not _has_accepted_not_eq_override(entry):
+            ground_truth_conflicts_without_override.append(_audit_entry_identity(index, entry))
+    return {
+        "required_entry_fields": list(REQUIRED_AUDIT_ENTRY_FIELDS),
+        "missing_required_field_entries": missing_required_fields,
+        "missing_required_field_entry_count": len(missing_required_fields),
+        "ground_truth_conflicts_without_override": ground_truth_conflicts_without_override,
+        "ground_truth_conflict_without_override_count": len(ground_truth_conflicts_without_override),
+        "ground_truth_entries_without_accepted_oracle": ground_truth_entries_without_accepted_oracle,
+        "ground_truth_without_accepted_oracle_count": len(ground_truth_entries_without_accepted_oracle),
+        "target_proof_lane_counts": dict(sorted(target_proof_lane_counts.items())),
+        "replay_status_counts": dict(sorted(replay_status_counts.items())),
+        "coverage_status_source_counts": dict(sorted(coverage_status_source_counts.items())),
+    }
+
+
+def _audit_acceptance_posture_checks(
+    posture: Mapping[str, Any],
+    *,
+    expected_target_proof_lane_counts: Mapping[str, int],
+    expected_replay_status_counts: Mapping[str, int],
+    expected_coverage_status_source_counts: Mapping[str, int],
+) -> Sequence[Dict[str, Any]]:
+    target_counts = posture.get("target_proof_lane_counts") or {}
+    replay_counts = posture.get("replay_status_counts") or {}
+    coverage_sources = posture.get("coverage_status_source_counts") or {}
+    return [
+        _ok("not_eq_audit_required_fields_present")
+        if int(posture.get("missing_required_field_entry_count") or 0) == 0
+        else _failed(
+            "not_eq_audit_required_fields_present",
+            missing_entries=posture.get("missing_required_field_entries"),
+        ),
+        _ok("not_eq_ground_truth_conflicts_have_override")
+        if int(posture.get("ground_truth_conflict_without_override_count") or 0) == 0
+        else _failed(
+            "not_eq_ground_truth_conflicts_have_override",
+            conflicts=posture.get("ground_truth_conflicts_without_override"),
+        ),
+        _ok("not_eq_ground_truth_requires_accepted_oracle")
+        if int(posture.get("ground_truth_without_accepted_oracle_count") or 0) == 0
+        else _failed(
+            "not_eq_ground_truth_requires_accepted_oracle",
+            entries=posture.get("ground_truth_entries_without_accepted_oracle"),
+        ),
+        _ok("not_eq_audit_target_proof_lane_counts_expected", counts=dict(target_counts))
+        if dict(target_counts) == dict(expected_target_proof_lane_counts)
+        else _failed(
+            "not_eq_audit_target_proof_lane_counts_expected",
+            expected=dict(expected_target_proof_lane_counts),
+            actual=dict(target_counts),
+        ),
+        _ok("not_eq_audit_replay_status_counts_expected", counts=dict(replay_counts))
+        if dict(replay_counts) == dict(expected_replay_status_counts)
+        else _failed(
+            "not_eq_audit_replay_status_counts_expected",
+            expected=dict(expected_replay_status_counts),
+            actual=dict(replay_counts),
+        ),
+        _ok("not_eq_audit_coverage_status_source_counts_expected", counts=dict(coverage_sources))
+        if dict(coverage_sources) == dict(expected_coverage_status_source_counts)
+        else _failed(
+            "not_eq_audit_coverage_status_source_counts_expected",
+            expected=dict(expected_coverage_status_source_counts),
+            actual=dict(coverage_sources),
+        ),
+    ]
+
+
+def _audit_entry_identity(index: int, entry: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "index": index,
+        "function": entry.get("function"),
+        "category": entry.get("category"),
+        "binary_pair": entry.get("binary_pair"),
+        "classification": entry.get("classification"),
+    }
+
+
+def _audit_concrete_identity_report(audit: Mapping[str, Any]) -> Dict[str, Any]:
+    entries = []
+    identity_counts: Counter[tuple[str, str, str]] = Counter()
+    category_counts: Counter[str] = Counter()
+    missing = []
+    pair_mismatches = []
+    for index, entry in enumerate(audit.get("entries") or ()):
+        if not isinstance(entry, Mapping):
+            continue
+        identity = {
+            "index": index,
+            "category": entry.get("category"),
+            "function": entry.get("function"),
+            "binary_pair": entry.get("binary_pair"),
+            "left_binary_id": entry.get("left_binary_id"),
+            "right_binary_id": entry.get("right_binary_id"),
+        }
+        entries.append(identity)
+        required_missing = [
+            field
+            for field in ("category", "function", "binary_pair", "left_binary_id", "right_binary_id")
+            if not entry.get(field)
+        ]
+        if required_missing:
+            missing.append({**identity, "missing_fields": required_missing})
+            continue
+        key = (str(entry["category"]), str(entry["function"]), str(entry["binary_pair"]))
+        identity_counts[key] += 1
+        category_counts[str(entry["category"])] += 1
+        expected_pair = _canonical_binary_pair_from_sides(entry["left_binary_id"], entry["right_binary_id"])
+        if str(entry["binary_pair"]) != expected_pair:
+            pair_mismatches.append({**identity, "expected_binary_pair": expected_pair})
+    duplicates = [
+        {
+            "category": key[0],
+            "function": key[1],
+            "binary_pair": key[2],
+            "count": count,
+        }
+        for key, count in sorted(identity_counts.items())
+        if count > 1
+    ]
+    return {
+        "entry_count": len(entries),
+        "unique_concrete_identity_count": len(identity_counts),
+        "category_counts": dict(sorted(category_counts.items())),
+        "duplicate_concrete_identities": duplicates,
+        "missing_concrete_identity_fields": missing,
+        "binary_pair_side_mismatches": pair_mismatches,
+        "entries": entries,
+    }
+
+
+def _audit_concrete_identity_checks(
+    report: Mapping[str, Any],
+    *,
+    expected_audit_category_counts: Mapping[str, int],
+) -> Sequence[Dict[str, Any]]:
+    duplicates = list(report.get("duplicate_concrete_identities") or ())
+    missing = list(report.get("missing_concrete_identity_fields") or ())
+    pair_mismatches = list(report.get("binary_pair_side_mismatches") or ())
+    category_counts = dict(report.get("category_counts") or {})
+    return [
+        _ok("not_eq_audit_concrete_identities_unique", count=report.get("unique_concrete_identity_count"))
+        if not duplicates
+        else _failed("not_eq_audit_concrete_identities_unique", duplicates=duplicates),
+        _ok("not_eq_audit_concrete_identity_fields_present", count=report.get("entry_count"))
+        if not missing
+        else _failed("not_eq_audit_concrete_identity_fields_present", missing=missing),
+        _ok("not_eq_audit_binary_pair_matches_sides", count=report.get("entry_count"))
+        if not pair_mismatches
+        else _failed("not_eq_audit_binary_pair_matches_sides", mismatches=pair_mismatches),
+        _ok("not_eq_audit_category_counts_expected", counts=category_counts)
+        if category_counts == dict(expected_audit_category_counts)
+        else _failed(
+            "not_eq_audit_category_counts_expected",
+            expected=dict(expected_audit_category_counts),
+            actual=category_counts,
+        ),
+    ]
+
+
+def _oracle_posture(oracle: Mapping[str, Any]) -> Dict[str, Any]:
+    scope_counts: Counter[str] = Counter()
+    expected_equivalent_counts: Counter[str] = Counter()
+    scope_target_mismatches = []
+    pair_scoped_entries = []
+    for index, entry in enumerate(oracle.get("entries") or ()):
+        if not isinstance(entry, Mapping):
+            continue
+        scope = str(entry.get("oracle_scope") or "")
+        scope_counts[scope] += 1
+        expected_equivalent_counts["true" if entry.get("expected_equivalent") is True else "false"] += 1
+        target = entry.get("scope_target")
+        if not isinstance(target, Mapping) or target.get("category") != entry.get("category") or target.get("function") != entry.get("function"):
+            scope_target_mismatches.append(
+                {
+                    "index": index,
+                    "entry_key": entry.get("entry_key"),
+                    "category": entry.get("category"),
+                    "function": entry.get("function"),
+                    "scope_target": target,
+                }
+            )
+        if scope == "pair":
+            pair_scoped_entries.append(
+                {
+                    "index": index,
+                    "entry_key": entry.get("entry_key"),
+                    "scope_target": target,
+                }
+            )
+    return {
+        "scope_counts": dict(sorted(scope_counts.items())),
+        "expected_equivalent_counts": dict(sorted(expected_equivalent_counts.items())),
+        "scope_target_mismatches": scope_target_mismatches,
+        "scope_target_mismatch_count": len(scope_target_mismatches),
+        "pair_scoped_entries": pair_scoped_entries,
+        "pair_scoped_entry_count": len(pair_scoped_entries),
+    }
+
+
+def _oracle_posture_checks(
+    posture: Mapping[str, Any],
+    *,
+    expected_oracle_scope_counts: Mapping[str, int],
+    expected_oracle_expected_equivalent_counts: Mapping[str, int],
+) -> Sequence[Dict[str, Any]]:
+    scope_counts = dict(posture.get("scope_counts") or {})
+    expected_counts = dict(posture.get("expected_equivalent_counts") or {})
+    return [
+        _ok("oracle_scope_counts_expected", counts=scope_counts)
+        if scope_counts == dict(expected_oracle_scope_counts)
+        else _failed("oracle_scope_counts_expected", expected=dict(expected_oracle_scope_counts), actual=scope_counts),
+        _ok("oracle_expected_equivalent_counts_expected", counts=expected_counts)
+        if expected_counts == dict(expected_oracle_expected_equivalent_counts)
+        else _failed(
+            "oracle_expected_equivalent_counts_expected",
+            expected=dict(expected_oracle_expected_equivalent_counts),
+            actual=expected_counts,
+        ),
+        _ok("oracle_scope_targets_match_entries")
+        if int(posture.get("scope_target_mismatch_count") or 0) == 0
+        else _failed("oracle_scope_targets_match_entries", mismatches=posture.get("scope_target_mismatches")),
+        _ok("oracle_pair_scope_absent_until_exception_review")
+        if int(posture.get("pair_scoped_entry_count") or 0) == 0
+        else _failed("oracle_pair_scope_absent_until_exception_review", pair_scoped_entries=posture.get("pair_scoped_entries")),
+    ]
+
+
+def _canonical_binary_pair_from_sides(left: Any, right: Any) -> str:
+    return "_".join(sorted((str(left), str(right)), key=_binary_sort_key))
+
+
+def _binary_sort_key(binary_id: str) -> tuple[int, str]:
+    text = str(binary_id)
+    if len(text) > 1 and text[0].upper() == "B" and text[1:].isdigit():
+        return (0, f"{int(text[1:]):04d}")
+    if len(text) > 1 and text[0].upper() == "S" and text[1:].isdigit():
+        return (1, f"{int(text[1:]):04d}")
+    return (2, text)
+
+
+def _has_expected_equivalent_conflict(entry: Mapping[str, Any]) -> bool:
+    if entry.get("expected_equivalent") is True:
+        return True
+    oracle_ref = entry.get("oracle_manifest_ref")
+    return isinstance(oracle_ref, Mapping) and oracle_ref.get("expected_equivalent") is True
+
+
+def _has_accepted_not_eq_override(entry: Mapping[str, Any]) -> bool:
+    for field_name in ("oracle_exception", "eq_goal_exclusion"):
+        value = entry.get(field_name)
+        if not isinstance(value, Mapping):
+            continue
+        if value.get("status") == "accepted":
+            return True
+        if value.get("review_status") == "accepted":
+            return True
+        if value.get("oracle_review_status") == "accepted":
+            return True
+    return False
 
 
 def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -288,6 +711,14 @@ def _read_json(path: Path) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"expected JSON object in {path}")
     return payload
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_json(path: Path, payload: Any) -> None:
