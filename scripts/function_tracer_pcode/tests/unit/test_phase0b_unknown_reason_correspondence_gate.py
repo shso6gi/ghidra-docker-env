@@ -60,6 +60,39 @@ def test_phase0b_unknown_reason_correspondence_gate_derives_combined_expected_fo
     validate_phase0b_unknown_reason_correspondence_gate(gate)
 
 
+def test_phase0b_validator_rejects_tampered_ready_summary(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0b_unknown_reason_correspondence_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        **_fixture_expected_classification_counts(),
+    )
+    gate = json.loads(path.read_text())
+    gate["checks"][0]["status"] = "failed"
+    gate["summary"]["failed"] = 0
+    gate["summary"]["failed_kinds"] = []
+    gate["phase0b_unknown_reason_correspondence_ready"] = True
+
+    with pytest.raises(ValueError, match="summary_failed_mismatch"):
+        validate_phase0b_unknown_reason_correspondence_gate(gate)
+
+
+def test_phase0b_validator_rejects_tampered_combined_counts(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0b_unknown_reason_correspondence_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        **_fixture_expected_classification_counts(),
+    )
+    gate = json.loads(path.read_text())
+    gate["combined_classification_counts"] = {}
+
+    with pytest.raises(ValueError, match="combined_classification_counts_consistency"):
+        validate_phase0b_unknown_reason_correspondence_gate(gate)
+
+
 def test_phase0b_unknown_reason_correspondence_gate_rejects_unknown_log_without_typed_payload(tmp_path):
     raw_dir = _write_fixture(tmp_path)
     stale = raw_dir / "logs" / "function_call" / "fc_stale" / "fc_stale_B1_B2.log"

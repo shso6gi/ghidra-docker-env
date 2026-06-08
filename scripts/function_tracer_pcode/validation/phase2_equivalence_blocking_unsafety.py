@@ -381,17 +381,19 @@ def build_phase2_equivalence_blocking_unsafety_movement(
     phase1 = Path(phase1_dir).resolve()
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    normalized_current_log_roots = _normalize_log_root_mapping(current_log_roots)
+    normalized_baseline_log_roots = _normalize_log_root_mapping(baseline_log_roots or {})
     representative = _read_json(phase1 / "representative_manifest.json")
     phase1_index = _read_optional_json(phase1 / "phase1_manifest_index.json")
     phase1_index_gate = _phase1_manifest_index_gate(phase1_index)
-    current_records = _records_by_key(current_log_roots)
+    current_records = _records_by_key(normalized_current_log_roots)
     entries = []
     for entry in _target_representatives(representative):
         entries.append(_validate_representative_expected_movement(entry, current_records))
-    producer_gate = _validate_phase2_producer_config(current_log_roots)
+    producer_gate = _validate_phase2_producer_config(normalized_current_log_roots)
     baseline_gate = _validate_overall_baseline_comparison(
-        baseline_log_roots or {},
-        current_log_roots,
+        normalized_baseline_log_roots,
+        normalized_current_log_roots,
         baseline_match_scope=baseline_match_scope,
     )
     summary = _movement_summary(entries, baseline_gate, producer_gate)
@@ -410,11 +412,11 @@ def build_phase2_equivalence_blocking_unsafety_movement(
         },
         "current_log_roots": {
             category: str(path)
-            for category, path in sorted(current_log_roots.items())
+            for category, path in sorted(normalized_current_log_roots.items())
         },
         "baseline_log_roots": {
             category: str(path)
-            for category, path in sorted((baseline_log_roots or {}).items())
+            for category, path in sorted(normalized_baseline_log_roots.items())
         },
         "movement_summary": summary,
         "phase2_producer_config_gate": producer_gate,
@@ -581,8 +583,45 @@ def _phase2_entry_failures(entries: Sequence[Mapping[str, Any]]) -> Sequence[str
                     if not isinstance(record, Mapping):
                         failures.append("entry_accepted_reason_not_mapping")
                         continue
-                    if tuple(record.get("required_evidence") or ()) != EXPECTED_REQUIRED_EVIDENCE:
-                        failures.append("entry_accepted_reason_required_evidence_mismatch")
+                    failures.extend(_accepted_reason_record_failures(record))
+    return failures
+
+
+def _accepted_reason_record_failures(record: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    if record.get("reason_id") != TARGET_REASON_ID:
+        failures.append("entry_accepted_reason_target_reason_mismatch")
+    if record.get("decision_effect") != "blocks_equivalence":
+        failures.append("entry_accepted_reason_decision_effect_mismatch")
+    if record.get("reason_scope") != "function":
+        failures.append("entry_accepted_reason_scope_mismatch")
+    if record.get("recovery_proof_kind") != EXPECTED_PROOF_KIND:
+        failures.append("entry_accepted_reason_proof_kind_mismatch")
+    if record.get("proof_stage") != EXPECTED_PROOF_STAGE:
+        failures.append("entry_accepted_reason_proof_stage_mismatch")
+    if record.get("action_status") != EXPECTED_ACTION_STATUS:
+        failures.append("entry_accepted_reason_action_status_mismatch")
+    if record.get("recovery_action") != EXPECTED_RECOVERY_ACTION:
+        failures.append("entry_accepted_reason_recovery_action_mismatch")
+    evidence_kind = record.get("evidence_kind")
+    if evidence_kind not in EXPECTED_REQUIRED_EVIDENCE:
+        failures.append("entry_accepted_reason_evidence_kind_mismatch")
+    if tuple(record.get("required_evidence") or ()) != EXPECTED_REQUIRED_EVIDENCE:
+        failures.append("entry_accepted_reason_required_evidence_mismatch")
+    object_target_key = _json_tuple(record.get("object_target_key"))
+    if not _object_target_key_is_specific(object_target_key):
+        failures.append("entry_accepted_reason_object_target_key_not_specific")
+    expected_proof_obligation_id = None
+    if object_target_key is not None and evidence_kind is not None:
+        expected_proof_obligation_id = build_proof_obligation_id(
+            str(record.get("reason_id") or MISSING_SENTINEL),
+            str(record.get("proof_stage") or MISSING_SENTINEL),
+            str(record.get("recovery_proof_kind") or MISSING_SENTINEL),
+            str(evidence_kind),
+            object_target_key,
+        )
+    if _json_tuple(record.get("proof_obligation_id")) != expected_proof_obligation_id:
+        failures.append("entry_accepted_reason_proof_obligation_id_mismatch")
     return failures
 
 
@@ -678,6 +717,14 @@ def _phase2_movement_summary_failures(
 
 def _is_non_string_sequence(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _json_tuple(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_json_tuple(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_json_tuple(item) for item in value)
+    return value
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -2011,6 +2058,19 @@ def _parse_current_log_roots(values: Iterable[str]) -> Dict[str, Path]:
                 f"unknown log root category: {category}; expected one of {expected}"
             )
         result[category] = Path(raw_path)
+    return result
+
+
+def _normalize_log_root_mapping(values: Mapping[str, Path]) -> Dict[str, Path]:
+    result: Dict[str, Path] = {}
+    for category, path in values.items():
+        normalized = str(category).strip()
+        if normalized not in KNOWN_LOG_ROOT_CATEGORIES:
+            expected = ", ".join(sorted(KNOWN_LOG_ROOT_CATEGORIES))
+            raise ValueError(
+                f"unknown log root category: {normalized}; expected one of {expected}"
+            )
+        result[normalized] = Path(path)
     return result
 
 

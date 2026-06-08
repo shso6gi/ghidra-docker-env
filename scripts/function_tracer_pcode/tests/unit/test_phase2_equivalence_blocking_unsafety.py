@@ -332,6 +332,19 @@ def test_phase2_log_root_parser_rejects_unknown_category_typo():
         _parse_current_log_roots(("functoin_call=/tmp/does-not-exist",))
 
 
+def test_phase2_build_rejects_unknown_current_log_root_category(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    _representative_manifest(phase1_dir)
+
+    with pytest.raises(ValueError, match="unknown log root category"):
+        build_phase2_equivalence_blocking_unsafety_movement(
+            phase1_dir=phase1_dir,
+            output_dir=tmp_path / "phase2",
+            current_log_roots={"functoin_call": tmp_path / "logs"},
+            baseline_log_roots={"function_call": tmp_path / "baseline"},
+        )
+
+
 def test_phase2_call_effect_specificity_requires_canonical_function_binary_id():
     full_target = _pending_reason().object_target_key
     missing_binary_target = (
@@ -555,6 +568,36 @@ def test_phase2_validator_rejects_tampered_accepted_required_evidence(tmp_path):
     manifest["phase2_ready"] = True
 
     with pytest.raises(ValueError, match="entry_accepted_reason_required_evidence_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rechecks_accepted_proof_obligation_id(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["accepted_reason_records"][0]["proof_obligation_id"] = "stale-id"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_accepted_reason_proof_obligation_id_mismatch"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rechecks_accepted_object_target_key_specificity(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["accepted_reason_records"][0]["object_target_key"] = [
+        "runtime_ref",
+        "B10",
+    ]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_accepted_reason_object_target_key_not_specific"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rechecks_accepted_recovery_action(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    manifest["entries"][0]["accepted_reason_records"][0]["recovery_action"] = "solver_retry"
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="entry_accepted_reason_recovery_action_mismatch"):
         validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 

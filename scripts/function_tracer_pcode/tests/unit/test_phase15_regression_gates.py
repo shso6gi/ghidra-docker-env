@@ -296,6 +296,45 @@ def test_phase15_regression_gate_accepts_prefix_exact_match(tmp_path):
     validate_phase15_regression_gates(gate)
 
 
+def test_phase15_validator_rejects_tampered_ready_gate_summary(tmp_path):
+    baseline_root, phase1_dir, current_root = _fixture(tmp_path)
+
+    gate_path = build_phase15_regression_gates(
+        baseline_raw_dir=baseline_root / "raw",
+        phase1_dir=phase1_dir,
+        output_dir=baseline_root / "phase1_5",
+        current_log_roots={"function_call": current_root},
+    )
+
+    gate = json.loads(gate_path.read_text())
+    gate["gate_summary"]["failed"] = 0
+    gate["gate_summary"]["failed_kinds"] = []
+    gate["gate_summary"]["locked_gates"] = ["conservative_decision_regression"]
+    gate["phase1_5_ready"] = True
+    gate["checks"][0]["status"] = "failed"
+    with pytest.raises(ValueError, match="gate_summary_failed_mismatch"):
+        validate_phase15_regression_gates(gate)
+
+
+def test_phase15_validator_rejects_wrong_baseline_identity(tmp_path):
+    baseline_root, phase1_dir, current_root = _fixture(tmp_path)
+
+    gate_path = build_phase15_regression_gates(
+        baseline_raw_dir=baseline_root / "raw",
+        phase1_dir=phase1_dir,
+        output_dir=baseline_root / "phase1_5",
+        current_log_roots={"function_call": current_root},
+    )
+
+    gate = json.loads(gate_path.read_text())
+    gate["baseline_id"] = "accepted-v0"
+    gate["baseline_git_head"] = "0a53352bogus"
+    with pytest.raises(ValueError, match="baseline_id_mismatch"):
+        validate_phase15_regression_gates(gate)
+    with pytest.raises(ValueError, match="baseline_git_head_mismatch"):
+        validate_phase15_regression_gates({**gate, "baseline_id": "observed-v0@0a53352"})
+
+
 def test_phase15_regression_gate_rejects_false_eq_guard_regression(tmp_path):
     baseline_root, phase1_dir, current_root = _fixture(
         tmp_path,

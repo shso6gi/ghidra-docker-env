@@ -161,15 +161,87 @@ def build_phase0b_unknown_reason_correspondence_gate(
 
 
 def validate_phase0b_unknown_reason_correspondence_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase0b_unknown_reason_correspondence_ready") is True:
+    failures = _phase0b_unknown_reason_correspondence_failures(manifest)
+    if not failures:
         return
+    raise ValueError(f"Phase 0B UNKNOWN reason correspondence gate failed: {', '.join(map(str, failures))}")
+
+
+def _phase0b_unknown_reason_correspondence_failures(manifest: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    if not isinstance(manifest, Mapping):
+        return ("manifest_not_mapping",)
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        failures.append("manifest_version_mismatch")
+    if manifest.get("manifest_kind") != "phase0b_unknown_reason_correspondence_gate":
+        failures.append("manifest_kind_mismatch")
+    if manifest.get("artifact_role") != "derived_observed_baseline_unknown_reason_correspondence_diagnostics":
+        failures.append("artifact_role_mismatch")
+    if manifest.get("baseline_id") != EXPECTED_BASELINE_ID:
+        failures.append("baseline_id_expected")
+    if manifest.get("baseline_git_head") != EXPECTED_GIT_HEAD:
+        failures.append("baseline_git_head_expected")
     summary = manifest.get("summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 0B UNKNOWN reason correspondence gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 0B UNKNOWN reason correspondence gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 0B UNKNOWN reason correspondence gate failed: {', '.join(map(str, failed))}")
+        failures.append("summary_missing")
+        summary = {}
+    checks = manifest.get("checks")
+    if not _is_non_string_sequence(checks):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _summary(tuple(check for check in checks if isinstance(check, Mapping)))
+    for key in ("total", "passed", "failed", "failed_kinds"):
+        if summary.get(key) != expected_summary.get(key):
+            failures.append(f"summary_{key}_mismatch")
+    categories = manifest.get("categories")
+    expected = manifest.get("expected")
+    if not isinstance(categories, Mapping):
+        failures.append("categories_missing")
+        categories = {}
+    if not isinstance(expected, Mapping):
+        failures.append("expected_missing")
+        expected = {}
+    combined_counts = Counter()
+    blocking_counts = Counter()
+    for category, report in categories.items():
+        if not isinstance(report, Mapping):
+            failures.append("category_report_not_mapping")
+            continue
+        combined_counts.update(
+            {str(key): int(value) for key, value in (report.get("classification_counts") or {}).items()}
+        )
+        blocking_counts.update(
+            {str(key): int(value) for key, value in (report.get("blocking_classification_counts") or {}).items()}
+        )
+        unexpected = set(str(item) for item in (report.get("unexpected_classifications") or ()))
+        if unexpected:
+            failures.append("correspondence_classifications_known")
+        if not set(report.get("classification_counts") or {}).issubset(ALLOWED_CORRESPONDENCE_CLASSIFICATIONS):
+            failures.append("correspondence_classifications_known")
+    expected_combined = {
+        str(key): int(value)
+        for key, value in ((expected.get("combined_classification_counts") if isinstance(expected, Mapping) else {}) or {}).items()
+    }
+    actual_combined = {str(key): int(value) for key, value in combined_counts.items()}
+    if dict(sorted(actual_combined.items())) != dict(sorted(expected_combined.items())):
+        failures.append("combined_classification_counts_expected")
+    actual_manifest_combined = {
+        str(key): int(value)
+        for key, value in (manifest.get("combined_classification_counts") or {}).items()
+    }
+    if dict(sorted(actual_manifest_combined.items())) != dict(sorted(actual_combined.items())):
+        failures.append("combined_classification_counts_consistency")
+    actual_manifest_blocking = {
+        str(key): int(value)
+        for key, value in (manifest.get("combined_blocking_classification_counts") or {}).items()
+    }
+    if dict(sorted(actual_manifest_blocking.items())) != dict(sorted(blocking_counts.items())):
+        failures.append("combined_blocking_classification_counts_consistency")
+    if blocking_counts:
+        failures.append("correspondence_blocking_classifications_absent")
+    if manifest.get("phase0b_unknown_reason_correspondence_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase0b_ready_consistency")
+    return tuple(sorted(set(failures + list(expected_summary.get("failed_kinds") or ()))))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -365,6 +437,10 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") == "failed"),
         "failed_kinds": failed_kinds,
     }
+
+
+def _is_non_string_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:

@@ -36,6 +36,18 @@ from .result_summary import (
 MANIFEST_VERSION = 1
 MISSING_SENTINEL = "<missing>"
 KNOWN_LOG_ROOT_CATEGORIES = frozenset({"function_call", "loop"})
+EXPECTED_BASELINE_ID = "observed-v0@0a53352"
+EXPECTED_BASELINE_GIT_HEAD = "0a53352cf3c9528abfb654906ed7b963474bedc5"
+EXPECTED_MANIFEST_KIND = "phase1_5_pre_semantic_fix_regression_gates"
+EXPECTED_STAGE = "pre_semantic_fix"
+EXPECTED_LOCKED_GATES = (
+    "conservative_decision_regression",
+    "object_derived_evidence_emission_regression",
+    "false_eq_guard_regression",
+    "proof_action_multiset_regression",
+    "positive_concrete_pair_regression",
+    "representative_record_tuple_regression",
+)
 
 
 def build_phase15_regression_gates(
@@ -110,15 +122,55 @@ def build_phase15_regression_gates(
 
 
 def validate_phase15_regression_gates(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase1_5_ready") is True:
+    failures = _phase15_regression_gate_failures(manifest)
+    if not failures:
         return
+    raise ValueError(f"Phase 1.5 regression gates failed: {', '.join(map(str, failures))}")
+
+
+def _phase15_regression_gate_failures(manifest: Mapping[str, Any]) -> Sequence[str]:
+    failures = []
+    if not isinstance(manifest, Mapping):
+        return ("manifest_not_mapping",)
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        failures.append("manifest_version_mismatch")
+    if manifest.get("manifest_kind") != EXPECTED_MANIFEST_KIND:
+        failures.append("manifest_kind_mismatch")
+    if manifest.get("stage") != EXPECTED_STAGE:
+        failures.append("stage_mismatch")
+    if manifest.get("baseline_id") != EXPECTED_BASELINE_ID:
+        failures.append("baseline_id_mismatch")
+    if manifest.get("baseline_git_head") != EXPECTED_BASELINE_GIT_HEAD:
+        failures.append("baseline_git_head_mismatch")
+
     summary = manifest.get("gate_summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 1.5 readiness is false and gate summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 1.5 readiness is false without failed gate kinds")
-    raise ValueError(f"Phase 1.5 regression gates failed: {', '.join(map(str, failed))}")
+        failures.append("gate_summary_missing")
+        summary = {}
+    checks = manifest.get("checks")
+    if not _is_non_string_sequence(checks):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _gate_summary(tuple(check for check in checks if isinstance(check, Mapping)))
+    for key in ("baseline_comparison_mode", "total", "passed", "failed", "failed_kinds", "locked_gates"):
+        if summary.get(key) != expected_summary.get(key):
+            failures.append(f"gate_summary_{key}_mismatch")
+    if tuple(summary.get("locked_gates") or ()) != EXPECTED_LOCKED_GATES:
+        failures.append("locked_gates_mismatch")
+    if manifest.get("phase1_5_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase1_5_ready_consistency")
+    refs = manifest.get("phase1_manifest_refs")
+    if not isinstance(refs, Mapping):
+        failures.append("phase1_manifest_refs_missing")
+    else:
+        for name in ("index", "positive", "negative", "representative", "synthetic"):
+            ref = refs.get(name)
+            if not isinstance(ref, Mapping) or not ref.get("path") or not _is_sha256_hex(ref.get("sha256")):
+                failures.append("phase1_manifest_ref_missing_or_unhashed")
+                break
+    if expected_summary.get("failed") and not expected_summary.get("failed_kinds"):
+        failures.append("gate_summary_failed_kinds_missing")
+    return tuple(sorted(set(failures + list(expected_summary.get("failed_kinds") or ()))))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -514,14 +566,19 @@ def _gate_summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") != "ok"),
         "failed_kinds": failed_kinds,
         "locked_gates": [
-            "conservative_decision_regression",
-            "object_derived_evidence_emission_regression",
-            "false_eq_guard_regression",
-            "proof_action_multiset_regression",
-            "positive_concrete_pair_regression",
-            "representative_record_tuple_regression",
+            *EXPECTED_LOCKED_GATES,
         ],
     }
+
+
+def _is_non_string_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
 
 
 def _entries(manifest: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
