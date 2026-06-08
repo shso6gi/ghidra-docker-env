@@ -197,6 +197,7 @@ SAT_UNSAFETY_PROOF_ACTION_TUPLES = {
     SAT_UNSAFETY_PENDING_PROOF_ACTION_TUPLE,
 }
 ALLOWED_EXPOSED_REASON_TUPLES = {
+    UNRESOLVED_EXPRESSION_REASON_TUPLE,
     (
         "return_coverage_gap",
         "blocks_equivalence",
@@ -273,7 +274,7 @@ ALLOWED_EXPOSED_PROOF_ACTION_TUPLES = {
         "planned",
     ),
     ALLOWED_NEW_REASON_TUPLE,
-} | SAT_UNSAFETY_PROOF_ACTION_TUPLES
+} | SAT_UNSAFETY_PROOF_ACTION_TUPLES | UNRESOLVED_EXPRESSION_PROOF_ACTION_TUPLES
 ALLOWED_PAIR_EXPOSED_REASONS = {
     TARGET_REASON_ID,
     "return_coverage_gap",
@@ -1485,8 +1486,8 @@ def _allowed_phase2_tuple_delta(
         if reason_tuple == ALLOWED_OLD_REASON_TUPLE:
             return value < 0
         if allow_reason_reclassification:
-            if reason_tuple in ALLOWED_BROAD_REMOVED_REASON_TUPLES:
-                return value < 0
+            if reason_tuple in ALLOWED_BROAD_REMOVED_REASON_TUPLES and value < 0:
+                return True
             if reason_tuple in ALLOWED_METADATA_ENRICHMENT_REASON_TUPLES and value < 0:
                 return True
             if reason_tuple in ALLOWED_EXPOSED_REASON_TUPLES:
@@ -1503,8 +1504,8 @@ def _allowed_phase2_tuple_delta(
         if reason_tuple == ALLOWED_NEW_REASON_TUPLE and value > 0:
             return True
         if allow_reason_reclassification:
-            if reason_tuple in ALLOWED_BROAD_REMOVED_PROOF_ACTION_TUPLES:
-                return value < 0
+            if reason_tuple in ALLOWED_BROAD_REMOVED_PROOF_ACTION_TUPLES and value < 0:
+                return True
             if reason_tuple in ALLOWED_METADATA_ENRICHMENT_PROOF_ACTION_TUPLES and value < 0:
                 return True
             if reason_tuple in ALLOWED_EXPOSED_PROOF_ACTION_TUPLES:
@@ -1626,6 +1627,8 @@ def _allowed_pair_reason_reclassification(
     if not added <= ALLOWED_PAIR_EXPOSED_REASONS:
         return False
     if not removed and added and before_reasons & ALLOWED_PAIR_REMOVED_REASONS:
+        if added == {TARGET_REASON_ID} and int(pair_reason_delta.get(TARGET_REASON_ID, 0) or 0) > 0:
+            return True
         return _has_pair_broad_reason_reduction(pair_reason_delta, before_reasons)
     if "unresolved_expression" in removed and added:
         return True
@@ -1711,6 +1714,17 @@ def _allowed_positive_tuple_deltas(
                 proof_action_deltas,
                 SAT_UNSAFETY_PROOF_ACTION_TUPLES,
             )
+        elif _has_target_reason_exposure(reason_record_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.REASON_RECORD.value],
+                reason_record_deltas,
+                ALLOWED_EXPOSED_REASON_TUPLES,
+            )
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.PROOF_ACTION.value],
+                proof_action_deltas,
+                ALLOWED_EXPOSED_PROOF_ACTION_TUPLES,
+            )
         if _has_allowed_broad_tuple_reduction(validation_unit_deltas):
             _add_positive_tuple_allowance(
                 result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
@@ -1722,6 +1736,12 @@ def _allowed_positive_tuple_deltas(
                 result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
                 validation_unit_deltas,
                 SAT_UNSAFETY_REASON_TUPLES,
+            )
+        elif _has_target_reason_exposure(validation_unit_deltas):
+            _add_positive_tuple_allowance(
+                result[UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value],
+                validation_unit_deltas,
+                ALLOWED_EXPOSED_REASON_TUPLES,
             )
     return result
 
@@ -1743,6 +1763,12 @@ def _has_solver_proven_rewrite_reduction(
     deltas: Mapping[Tuple[str, ...], int],
 ) -> bool:
     return int(deltas.get(SOLVER_PROVEN_REWRITE_PROOF_FAILED_REASON_TUPLE, 0) or 0) < 0
+
+
+def _has_target_reason_exposure(
+    deltas: Mapping[Tuple[str, ...], int],
+) -> bool:
+    return int(deltas.get(ALLOWED_NEW_REASON_TUPLE, 0) or 0) > 0
 
 
 def _add_positive_tuple_allowance(

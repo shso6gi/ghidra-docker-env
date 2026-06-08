@@ -433,6 +433,22 @@ def _old_blocking_reason():
     )
 
 
+def _legacy_sat_unsafety_reason():
+    return make_unknown_reason(
+        UnknownReasonId.SAT_UNSAFETY,
+        recovery_proof_kind=UnknownRecoveryProofKind.NONE,
+        recovery_proof_obligations=(),
+        proof_stage=None,
+    )
+
+
+def _pending_sat_unsafety_reason():
+    return make_unknown_reason(
+        UnknownReasonId.SAT_UNSAFETY,
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+
+
 def _write_all_representative_logs(root: Path, payload_by_function=None):
     payload_by_function = payload_by_function or {}
     _write_phase2_run_manifest(root)
@@ -1530,6 +1546,118 @@ def test_phase2_rejects_reason_addition_without_broad_reason_reduction(tmp_path)
         and "sat_unsafety,unresolved_expression" in key
         for key in unexpected["pair_result_multiset_delta"]
     )
+
+
+def test_phase2_accepts_target_reason_exposure_without_final_result_movement(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_target_exposure",
+        "B1",
+        "B2",
+        _payload(
+            "fc_target_exposure",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING)],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_target_exposure",
+        "B1",
+        "B2",
+        _payload(
+            "fc_target_exposure",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-arm64-clang-O1",
+            None,
+            [
+                make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING),
+                _pending_reason(),
+            ],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is True
+    unexpected = manifest["overall_baseline_comparison_gate"]["unexpected_deltas"]
+    assert unexpected["pair_result_multiset_delta"] == {}
+
+
+def test_phase2_accepts_target_exposure_with_existing_blocker_detail_backlog(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(current_root)
+    _write_log(
+        baseline_root,
+        "fc_existing_blocker_detail",
+        "B1",
+        "B10",
+        _payload(
+            "fc_existing_blocker_detail",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-mips64-clang-O1",
+            None,
+            [
+                _legacy_sat_unsafety_reason(),
+                make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION),
+            ],
+        ),
+    )
+    _write_log(
+        current_root,
+        "fc_existing_blocker_detail",
+        "B1",
+        "B10",
+        _payload(
+            "fc_existing_blocker_detail",
+            "function_call_test-arm64-clang-O0",
+            "function_call_test-mips64-clang-O1",
+            None,
+            [
+                _pending_sat_unsafety_reason(),
+                _pending_sat_unsafety_reason(),
+                _pending_sat_unsafety_reason(),
+                make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION),
+                make_unknown_reason(UnknownReasonId.UNRESOLVED_EXPRESSION),
+                _pending_reason(),
+                _pending_reason(),
+            ],
+        ),
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is True
+    unexpected = manifest["overall_baseline_comparison_gate"]["unexpected_deltas"]
+    assert unexpected["reason_record_multiset_delta"] == {}
+    assert unexpected["proof_action_multiset_delta"] == {}
+    assert unexpected["validation_unknown_unit_multiset_delta"] == {}
 
 
 def test_phase2_rejects_non_target_unknown_to_eq_return_coverage_gap_disappearance(tmp_path):
