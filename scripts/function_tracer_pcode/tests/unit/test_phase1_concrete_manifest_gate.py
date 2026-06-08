@@ -118,6 +118,42 @@ def test_phase1_concrete_manifest_gate_rejects_synthetic_negative_binary_hash_ga
         validate_phase1_concrete_manifest_gate(gate)
 
 
+def test_phase1_concrete_manifest_gate_rejects_tampered_ready_manifest_hash(tmp_path):
+    baseline_root, phase1_dir = _ready_phase1_fixture(tmp_path)
+
+    gate_path = build_phase1_concrete_manifest_gate(
+        phase1_dir=phase1_dir,
+        baseline_raw_dir=baseline_root / "raw",
+        output_dir=tmp_path / "gate",
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_concrete_manifest_ready"] is True
+    gate["phase1_manifest_ref"]["manifest_hashes"]["positive"] = "0" * 64
+    gate["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_manifest_hashes"):
+        validate_phase1_concrete_manifest_gate(gate)
+
+
+def test_phase1_concrete_manifest_gate_rejects_missing_materialized_context(tmp_path):
+    baseline_root, phase1_dir = _ready_phase1_fixture(tmp_path)
+
+    gate_path = build_phase1_concrete_manifest_gate(
+        phase1_dir=phase1_dir,
+        baseline_raw_dir=baseline_root / "raw",
+        output_dir=tmp_path / "gate",
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_concrete_manifest_ready"] is True
+    gate.pop("baseline_raw_artifact_ref")
+    gate["phase1_manifest_ref"]["manifest_hashes"]["positive"] = "0" * 64
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase1_concrete_manifest_gate(gate)
+
+
 def _ready_phase1_fixture(tmp_path: Path):
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(

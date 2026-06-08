@@ -75,6 +75,9 @@ def build_phase1_concrete_manifest_gate(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "baseline_id": index.get("baseline_id"),
         "baseline_git_head": index.get("baseline_git_head"),
+        "baseline_raw_artifact_ref": {
+            "path": str(raw_dir / "artifact_manifest.json"),
+        },
         "phase1_manifest_ref": {
             "phase1_dir": str(phase1_root),
             "index_path": str(index_path),
@@ -92,15 +95,49 @@ def build_phase1_concrete_manifest_gate(
 
 
 def validate_phase1_concrete_manifest_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase1_concrete_manifest_ready") is True:
-        return
+    failures = []
+    checks = manifest.get("checks")
+    if not isinstance(checks, (list, tuple)):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _summary(tuple(check for check in checks if isinstance(check, Mapping)))
     summary = manifest.get("summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 1 concrete manifest gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 1 concrete manifest gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 1 concrete manifest gate failed: {', '.join(map(str, failed))}")
+        failures.append("summary_missing")
+        summary = {}
+    for key in ("total", "passed", "failed"):
+        value = summary.get(key)
+        if isinstance(value, bool):
+            failures.append(f"summary_{key}_count")
+        elif value != expected_summary.get(key):
+            failures.append(f"summary_{key}_mismatch")
+    if tuple(summary.get("failed_kinds") or ()) != tuple(expected_summary.get("failed_kinds") or ()):
+        failures.append("summary_failed_kinds_mismatch")
+    if manifest.get("phase1_concrete_manifest_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase1_ready_consistency")
+
+    materialized = _materialize_phase1_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in ("baseline_id", "baseline_git_head", "counts", "concrete_identities"):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        manifest_hashes = ((manifest.get("phase1_manifest_ref") or {}).get("manifest_hashes"))
+        materialized_hashes = ((materialized.get("phase1_manifest_ref") or {}).get("manifest_hashes"))
+        if not _strict_json_equal(manifest_hashes, materialized_hashes):
+            failures.append("materialized_manifest_hashes")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
+
+    failed = tuple(expected_summary.get("failed_kinds") or ())
+    if failures or failed:
+        all_failures = tuple(dict.fromkeys([*failures, *failed]))
+        raise ValueError(f"Phase 1 concrete manifest gate failed: {', '.join(map(str, all_failures))}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -120,6 +157,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_ready:
         validate_phase1_concrete_manifest_gate(_read_json(path))
     return 0
+
+
+def _materialize_phase1_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    phase1_ref = manifest.get("phase1_manifest_ref")
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    if not isinstance(phase1_ref, Mapping) or not isinstance(baseline_ref, Mapping):
+        return None
+    phase1_dir = phase1_ref.get("phase1_dir")
+    raw_manifest_path = baseline_ref.get("path")
+    if not isinstance(phase1_dir, str) or not isinstance(raw_manifest_path, str):
+        return None
+    phase1_root = Path(phase1_dir)
+    raw_manifest_file = Path(raw_manifest_path)
+    if raw_manifest_file.name != "artifact_manifest.json":
+        return None
+    raw_dir = raw_manifest_file.parent
+    index_path = phase1_root / "phase1_manifest_index.json"
+    if not index_path.is_file() or not raw_manifest_file.is_file():
+        return None
+
+    index = _read_json(index_path)
+    manifests = {
+        name: _read_json(phase1_root / expected_path)
+        for name, (expected_path, _expected_kind) in EXPECTED_MANIFESTS.items()
+    }
+    checks = []
+    checks.extend(_index_checks(index))
+    checks.extend(_manifest_identity_checks(index, manifests))
+    checks.extend(_validator_checks(index, manifests))
+    checks.extend(_source_artifact_checks(manifests, raw_dir))
+    checks.extend(_object_evidence_ref_checks(manifests["positive"], phase1_root))
+    checks.extend(_synthetic_artifact_ref_checks(manifests["synthetic"], phase1_root))
+    checks.extend(_minimum_negative_case_checks(manifests["negative"]))
+    concrete_identity_report = _concrete_identity_report(manifests)
+    checks.extend(_concrete_identity_checks(concrete_identity_report))
+    manifest_hashes = {
+        "index": _sha256_file(index_path),
+        **{
+            name: _sha256_file(phase1_root / expected_path)
+            for name, (expected_path, _expected_kind) in EXPECTED_MANIFESTS.items()
+        },
+    }
+    return {
+        "baseline_id": index.get("baseline_id"),
+        "baseline_git_head": index.get("baseline_git_head"),
+        "phase1_manifest_ref": {
+            "phase1_dir": str(phase1_root),
+            "index_path": str(index_path),
+            "manifest_hashes": manifest_hashes,
+        },
+        "counts": dict(index.get("counts") or {}),
+        "concrete_identities": concrete_identity_report,
+        "checks": checks,
+    }
 
 
 def _index_checks(index: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
@@ -457,6 +548,15 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": len(failed),
         "failed_kinds": sorted({str(check.get("kind")) for check in failed}),
     }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:

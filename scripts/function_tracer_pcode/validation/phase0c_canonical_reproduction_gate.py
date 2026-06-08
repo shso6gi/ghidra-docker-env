@@ -126,15 +126,49 @@ def build_phase0c_canonical_reproduction_gate(
 
 
 def validate_phase0c_canonical_reproduction_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase0c_canonical_reproduction_ready") is True:
-        return
+    failures = []
+    checks = manifest.get("checks")
+    if not isinstance(checks, (list, tuple)):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _summary(tuple(check for check in checks if isinstance(check, Mapping)))
     summary = manifest.get("summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 0C canonical reproduction gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 0C canonical reproduction gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 0C canonical reproduction gate failed: {', '.join(map(str, failed))}")
+        failures.append("summary_missing")
+        summary = {}
+    for key in ("total", "passed", "failed"):
+        value = summary.get(key)
+        if isinstance(value, bool):
+            failures.append(f"summary_{key}_count")
+        elif value != expected_summary.get(key):
+            failures.append(f"summary_{key}_mismatch")
+    if tuple(summary.get("failed_kinds") or ()) != tuple(expected_summary.get("failed_kinds") or ()):
+        failures.append("summary_failed_kinds_mismatch")
+    if manifest.get("phase0c_canonical_reproduction_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase0c_ready_consistency")
+
+    materialized = _materialize_phase0c_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in ("baseline_id", "baseline_git_head", "current_log_roots"):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        if not _strict_json_equal(manifest.get("category_comparisons"), materialized.get("category_comparisons")):
+            failures.append("materialized_category_comparisons")
+        if not _strict_json_equal(manifest.get("combined_comparison"), materialized.get("combined_comparison")):
+            failures.append("materialized_combined_comparison")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
+
+    failed = tuple(expected_summary.get("failed_kinds") or ())
+    if failures or failed:
+        all_failures = tuple(dict.fromkeys([*failures, *failed]))
+        raise ValueError(f"Phase 0C canonical reproduction gate failed: {', '.join(map(str, all_failures))}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -179,6 +213,75 @@ def _normalize_current_roots(
     return {
         category: current.get(category, raw_dir / "logs" / category)
         for category in categories
+    }
+
+
+def _materialize_phase0c_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    current_log_roots = manifest.get("current_log_roots")
+    baseline_log_roots = manifest.get("baseline_log_roots")
+    if not isinstance(baseline_ref, Mapping) or not isinstance(current_log_roots, Mapping):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
+        return None
+    raw_manifest_file = Path(raw_manifest_path)
+    if raw_manifest_file.name != "artifact_manifest.json":
+        return None
+    raw_dir = raw_manifest_file.parent
+    if not raw_manifest_file.is_file():
+        return None
+    if isinstance(baseline_log_roots, Mapping) and baseline_log_roots:
+        categories = tuple(str(category) for category in baseline_log_roots)
+    else:
+        categories = DEFAULT_CATEGORIES
+    raw_manifest = _read_json(raw_manifest_file)
+    current_roots = {
+        str(category): Path(str(path))
+        for category, path in current_log_roots.items()
+    }
+
+    checks = list(_baseline_identity_checks(raw_manifest))
+    category_comparisons: Dict[str, Any] = {}
+    combined_before = []
+    combined_after = []
+    for category in categories:
+        before_root = raw_dir / "logs" / category
+        current_root = current_roots[category]
+        before_records = aggregate_validation_logs(_log_paths(before_root)).records
+        after_records = aggregate_validation_logs(_log_paths(current_root)).records
+        combined_before.extend(before_records)
+        combined_after.extend(after_records)
+        comparison = compare_validation_baseline_records(before_records, after_records)
+        surface_hashes = _surface_hashes(before_records, after_records)
+        category_comparisons[category] = {
+            **_comparison_to_dict(comparison),
+            "canonical_surface_hashes": surface_hashes,
+            "canonical_surface_hash_match": surface_hashes["baseline"] == surface_hashes["current"],
+        }
+        checks.extend(_comparison_checks(f"category:{category}", comparison))
+        checks.append(_surface_hash_check(f"category:{category}", surface_hashes))
+
+    combined_comparison = compare_validation_baseline_records(combined_before, combined_after)
+    checks.extend(_comparison_checks("combined", combined_comparison))
+    combined_surface_hashes = _surface_hashes(combined_before, combined_after)
+    checks.append(_surface_hash_check("combined", combined_surface_hashes))
+    return {
+        "baseline_id": raw_manifest.get("baseline_id"),
+        "baseline_git_head": raw_manifest.get("git_head"),
+        "current_log_roots": {
+            category: str(path)
+            for category, path in sorted(current_roots.items())
+        },
+        "category_comparisons": category_comparisons,
+        "combined_comparison": {
+            **_comparison_to_dict(combined_comparison),
+            "canonical_surface_hashes": combined_surface_hashes,
+            "canonical_surface_hash_match": (
+                combined_surface_hashes["baseline"] == combined_surface_hashes["current"]
+            ),
+        },
+        "checks": checks,
     }
 
 
@@ -308,6 +411,15 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") == "failed"),
         "failed_kinds": failed_kinds,
     }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:

@@ -120,6 +120,48 @@ def test_phase0c_canonical_reproduction_gate_rejects_unknown_current_log_root_ca
         )
 
 
+def test_phase0c_canonical_reproduction_gate_rejects_tampered_ready_comparison(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_canonical_reproduction_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={
+            "function_call": raw_dir / "logs" / "function_call",
+            "loop": raw_dir / "logs" / "loop",
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_canonical_reproduction_ready"] is True
+
+    gate["combined_comparison"]["canonical_surface_hash_match"] = False
+    gate["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_combined_comparison"):
+        validate_phase0c_canonical_reproduction_gate(gate)
+
+
+def test_phase0c_canonical_reproduction_gate_rejects_missing_materialized_context(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_canonical_reproduction_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        current_log_roots={
+            "function_call": raw_dir / "logs" / "function_call",
+            "loop": raw_dir / "logs" / "loop",
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_canonical_reproduction_ready"] is True
+
+    gate.pop("baseline_raw_artifact_ref")
+    gate["combined_comparison"]["canonical_surface_hash_match"] = False
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase0c_canonical_reproduction_gate(gate)
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

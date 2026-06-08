@@ -305,6 +305,15 @@ def _validator(manifest):
         raise ValueError("validator failure")
 
 
+def _all_ok_checks(checks):
+    return [
+        {**check, "status": "ok"}
+        if isinstance(check, dict)
+        else check
+        for check in checks
+    ]
+
+
 def _specs():
     return (
         Phase3LaneSpec(
@@ -446,6 +455,60 @@ def test_phase3_lane_index_validator_rejects_tampered_lane_without_failed_check(
     manifest["lanes"][0]["lane_baseline_git_head"] = "wrong-head"
 
     with pytest.raises(ValueError, match="derived_failed_kinds"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
+
+
+def test_phase3_lane_index_validator_rejects_tampered_materialized_lane_snapshot(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest["lanes"][0]["manifest_sha256"] = "0" * 64
+    manifest["checks"] = _all_ok_checks(manifest["checks"])
+    manifest["summary"] = {
+        "total": len(manifest["checks"]),
+        "failed": 0,
+        "failed_kinds": [],
+        "failed_kind_counts": {},
+        "failed_lanes": [],
+        "failed_index_kinds": [],
+    }
+    manifest["phase3_lanes_ready"] = True
+
+    with pytest.raises(ValueError, match="materialized_lanes"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
+
+
+def test_phase3_lane_index_validator_rejects_tampered_summary_consistency(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="summary_failed_count"):
         validate_phase3_lane_index(manifest, lane_specs=specs)
 
 

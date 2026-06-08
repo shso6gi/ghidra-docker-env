@@ -339,7 +339,7 @@ def validate_phase3_lane_index(
     summary_failed = summary.get("failed") if isinstance(summary, Mapping) else MISSING_SENTINEL
     if not isinstance(summary, Mapping):
         failures.append("summary")
-    elif not isinstance(summary_failed, int):
+    elif not isinstance(summary_failed, int) or isinstance(summary_failed, bool):
         failures.append("summary_failed_count")
 
     checks = manifest.get("checks")
@@ -352,6 +352,9 @@ def validate_phase3_lane_index(
             failures.append("summary_failed_count")
         if failed_kinds != failed_check_kinds:
             failures.append("summary_failed_kinds")
+        computed_summary = _summary(checks)
+        if isinstance(summary, Mapping) and not _strict_json_equal(dict(summary), computed_summary):
+            failures.append("summary_consistency")
 
     lanes = manifest.get("lanes")
     if not isinstance(lanes, (list, tuple)):
@@ -370,8 +373,30 @@ def validate_phase3_lane_index(
             specs,
             lanes,
         )
+        if isinstance(checks, (list, tuple)) and not _strict_json_equal(list(checks), list(derived_checks)):
+            failures.append("derived_checks")
         if failed_check_kinds != _failed_check_kinds(derived_checks):
             failures.append("derived_failed_kinds")
+        materialized_context = _materialized_lane_context(manifest)
+        if materialized_context is not None:
+            materialized_lanes = [
+                _materialize_lane(materialized_context["baseline_root"], materialized_context["repo_root"], spec)
+                for spec in specs
+            ]
+            materialized_checks = _index_checks(
+                {
+                    "baseline_id": manifest.get("baseline_id"),
+                    "git_head": manifest.get("baseline_git_head"),
+                },
+                specs,
+                materialized_lanes,
+            )
+            if not _strict_json_equal(list(lanes), materialized_lanes):
+                failures.append("materialized_lanes")
+            if isinstance(checks, (list, tuple)) and not _strict_json_equal(list(checks), list(materialized_checks)):
+                failures.append("materialized_checks")
+            if failed_check_kinds != _failed_check_kinds(materialized_checks):
+                failures.append("materialized_failed_kinds")
 
     ready = manifest.get("phase3_lanes_ready")
     if ready is True:
@@ -1407,6 +1432,36 @@ def _failed_check_kinds(checks: Sequence[Any]) -> list[str]:
         for check in checks
         if isinstance(check, Mapping) and check.get("status") == "failed"
     ]
+
+
+def _materialized_lane_context(manifest: Mapping[str, Any]) -> Optional[Dict[str, Path]]:
+    repo_root = manifest.get("repo_root")
+    if not isinstance(repo_root, str) or not repo_root:
+        return None
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    if not isinstance(baseline_ref, Mapping):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
+        return None
+    path = Path(raw_manifest_path)
+    if path.name != "artifact_manifest.json" or path.parent.name != "raw":
+        return None
+    baseline_root = path.parent.parent
+    if not baseline_root.exists():
+        return None
+    repo = Path(repo_root)
+    if not repo.exists():
+        return None
+    return {"baseline_root": baseline_root, "repo_root": repo}
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return _canonical_json(left) == _canonical_json(right)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _lane_spec_rows_from_specs(specs: Sequence[Phase3LaneSpec]) -> list[Dict[str, Any]]:
