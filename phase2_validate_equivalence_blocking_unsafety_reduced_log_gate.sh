@@ -20,7 +20,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/phase2_equivalence_bl
 if [[ "${PHASE2_GENERATE_REDUCED_PRE_PRODUCER_LOGS:-0}" == "1" ]]; then
   echo "Generating Phase 2 reduced pre-producer logs before validation."
   OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$PHASE2_FUNCTION_CALL_LOG_ROOT}" \
-    PARALLEL_JOBS="${PARALLEL_JOBS:-8}" \
+    PARALLEL_JOBS="${PARALLEL_JOBS:-32}" \
     ./phase2_run_function_call_pre_producer_gate_reduced_matrix.sh
 fi
 
@@ -50,7 +50,7 @@ if [[ "$preflight_failed" != "0" ]]; then
   echo ""
   echo "The reduced log gate cannot be used as commit acceptance until these logs are regenerated with the current producer."
   echo "Generate them on the analysis host, then copy the logs back:"
-  echo "  PARALLEL_JOBS=8 ./phase2_run_function_call_pre_producer_gate_reduced_matrix.sh"
+  echo "  PARALLEL_JOBS=32 ./phase2_run_function_call_pre_producer_gate_reduced_matrix.sh"
   echo ""
   echo "Or let this wrapper generate them before validation:"
   echo "  PHASE2_GENERATE_REDUCED_PRE_PRODUCER_LOGS=1 ./phase2_validate_equivalence_blocking_unsafety_reduced_log_gate.sh"

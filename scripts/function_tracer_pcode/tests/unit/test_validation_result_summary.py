@@ -1078,6 +1078,7 @@ def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
     ) in script
     assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
     assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
+    assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-1}"' in script
     assert 'PHASE2_GATE_BASELINE_MATCH_SCOPE="${PHASE2_GATE_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
     assert "phase2_function_call_full_matrix_pre_producer" in script
@@ -1096,12 +1097,14 @@ def test_phase2_reduced_log_gate_preflights_current_object_key_schema():
     assert "object-key schema" in script
     assert "PHASE2_GENERATE_REDUCED_PRE_PRODUCER_LOGS" in script
     assert 'OUTPUT_BASE_DIR="${OUTPUT_BASE_DIR:-$PHASE2_FUNCTION_CALL_LOG_ROOT}"' in script
+    assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
     assert "phase2_run_function_call_pre_producer_gate_reduced_matrix.sh" in script
 
 
 def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
     script = Path("rerun_full_analysis.sh").read_text()
 
+    assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
     phase0a_gate = script.index("./phase0a_validate_observed_baseline_integrity_gate.sh")
     phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
     phase0c_reproduction_gate = script.index("./phase0c_validate_canonical_reproduction_gate.sh")
