@@ -335,6 +335,44 @@ def test_phase15_validator_rejects_wrong_baseline_identity(tmp_path):
         validate_phase15_regression_gates({**gate, "baseline_id": "observed-v0@0a53352"})
 
 
+def test_phase15_validator_rejects_tampered_ready_baseline_comparison(tmp_path):
+    baseline_root, phase1_dir, current_root = _fixture(tmp_path)
+
+    gate_path = build_phase15_regression_gates(
+        baseline_raw_dir=baseline_root / "raw",
+        phase1_dir=phase1_dir,
+        output_dir=baseline_root / "phase1_5",
+        current_log_roots={"function_call": current_root},
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_5_ready"] is True
+    gate["baseline_comparisons"]["function_call"]["before_total_results"] = 999
+    gate["gate_summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_baseline_comparisons"):
+        validate_phase15_regression_gates(gate)
+
+
+def test_phase15_validator_rejects_missing_materialized_context(tmp_path):
+    baseline_root, phase1_dir, current_root = _fixture(tmp_path)
+
+    gate_path = build_phase15_regression_gates(
+        baseline_raw_dir=baseline_root / "raw",
+        phase1_dir=phase1_dir,
+        output_dir=baseline_root / "phase1_5",
+        current_log_roots={"function_call": current_root},
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_5_ready"] is True
+    gate.pop("baseline_raw_artifact_ref")
+    gate["baseline_comparisons"]["function_call"]["before_total_results"] = 999
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase15_regression_gates(gate)
+
+
 def test_phase15_regression_gate_rejects_false_eq_guard_regression(tmp_path):
     baseline_root, phase1_dir, current_root = _fixture(
         tmp_path,

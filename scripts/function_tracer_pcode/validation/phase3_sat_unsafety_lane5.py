@@ -200,7 +200,17 @@ def build_phase3_sat_unsafety_lane5_manifest(
 
 
 def validate_phase3_sat_unsafety_lane5_manifest(manifest: Mapping[str, Any]) -> None:
-    failures = list((manifest.get("readiness") or {}).get("failed_checks") or ())
+    readiness = manifest.get("readiness")
+    failures = []
+    if isinstance(readiness, Mapping):
+        failures.extend(readiness.get("failed_checks") or ())
+        failures.extend(
+            _failed(str(kind))
+            for kind in (readiness.get("failed_kinds") or ())
+            if kind not in {check.get("kind") for check in failures if isinstance(check, Mapping)}
+        )
+    else:
+        failures.append(_failed("sat_unsafety_readiness_missing"))
     if manifest.get("manifest_kind") != "phase3_sat_unsafety_lane5_representatives":
         failures.append(_failed("sat_unsafety_manifest_kind"))
     if not manifest.get("phase3_lane5_ready"):
@@ -289,11 +299,16 @@ def build_phase3_sat_unsafety_lane5_post_fix_gate(
 
 
 def validate_phase3_sat_unsafety_lane5_post_fix_gate(manifest: Mapping[str, Any]) -> None:
-    failures = [
-        check
-        for check in manifest.get("checks") or ()
-        if isinstance(check, Mapping) and check.get("status") == "failed"
-    ]
+    checks = manifest.get("checks")
+    failures = []
+    if isinstance(checks, list):
+        failures.extend(
+            check
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        )
+    else:
+        failures.append(_failed("sat_unsafety_post_fix_checks_missing"))
     if manifest.get("manifest_kind") != "phase3_sat_unsafety_lane5_post_fix_gate":
         failures.append(_failed("sat_unsafety_post_fix_manifest_kind"))
     if not manifest.get("phase3_lane5_post_fix_ready"):
@@ -626,10 +641,12 @@ def _post_fix_checks(
         checks.append(_ok("phase3_pre_fix_manifest_kind"))
     else:
         checks.append(_failed("phase3_pre_fix_manifest_kind"))
-    if phase3_manifest.get("phase3_lane5_ready") is True:
-        checks.append(_ok("phase3_pre_fix_manifest_ready"))
+    try:
+        validate_phase3_sat_unsafety_lane5_manifest(phase3_manifest)
+    except ValueError as exc:
+        checks.append(_failed("phase3_pre_fix_manifest_ready", error=str(exc)))
     else:
-        checks.append(_failed("phase3_pre_fix_manifest_ready"))
+        checks.append(_ok("phase3_pre_fix_manifest_ready"))
     checks.append(_identity_set_check("phase3_pre_fix_entries", phase3_manifest.get("entries"), DEFAULT_REPRESENTATIVES))
     implementation = phase3_manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):

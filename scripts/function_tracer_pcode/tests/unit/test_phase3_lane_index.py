@@ -490,6 +490,39 @@ def test_phase3_lane_index_validator_rejects_tampered_materialized_lane_snapshot
         validate_phase3_lane_index(manifest, lane_specs=specs)
 
 
+def test_phase3_lane_index_validator_rejects_missing_materialized_context(tmp_path):
+    baseline = tmp_path / "baseline"
+    repo = tmp_path / "repo"
+    _write_baseline(baseline)
+    specs = _specs()
+    for spec in specs:
+        _write_manifest(baseline, spec)
+        _write_runner(repo, spec)
+
+    path = build_phase3_lane_index(
+        baseline_root=baseline,
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        lane_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest.pop("baseline_raw_artifact_ref")
+    manifest["lanes"][0]["manifest_sha256"] = "0" * 64
+    manifest["checks"] = _all_ok_checks(manifest["checks"])
+    manifest["summary"] = {
+        "total": len(manifest["checks"]),
+        "failed": 0,
+        "failed_kinds": [],
+        "failed_kind_counts": {},
+        "failed_lanes": [],
+        "failed_index_kinds": [],
+    }
+    manifest["phase3_lanes_ready"] = True
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase3_lane_index(manifest, lane_specs=specs)
+
+
 def test_phase3_lane_index_validator_rejects_tampered_summary_consistency(tmp_path):
     baseline = tmp_path / "baseline"
     repo = tmp_path / "repo"

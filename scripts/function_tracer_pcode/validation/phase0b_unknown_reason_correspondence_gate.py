@@ -241,6 +241,29 @@ def _phase0b_unknown_reason_correspondence_failures(manifest: Mapping[str, Any])
         failures.append("correspondence_blocking_classifications_absent")
     if manifest.get("phase0b_unknown_reason_correspondence_ready") is not (expected_summary.get("failed") == 0):
         failures.append("phase0b_ready_consistency")
+    materialized = _materialize_phase0b_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in (
+            "baseline_id",
+            "baseline_git_head",
+            "baseline_log_roots",
+            "current_log_roots",
+            "diagnostic_model",
+            "expected",
+            "categories",
+            "combined_classification_counts",
+            "combined_blocking_classification_counts",
+        ):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
     return tuple(sorted(set(failures + list(expected_summary.get("failed_kinds") or ()))))
 
 
@@ -269,6 +292,104 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_ready:
         validate_phase0b_unknown_reason_correspondence_gate(_read_json(path))
     return 0
+
+
+def _materialize_phase0b_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    current_log_roots = manifest.get("current_log_roots")
+    expected = manifest.get("expected")
+    baseline_log_roots = manifest.get("baseline_log_roots")
+    if (
+        not isinstance(baseline_ref, Mapping)
+        or not isinstance(current_log_roots, Mapping)
+        or not isinstance(expected, Mapping)
+    ):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
+        return None
+    raw_manifest_file = Path(raw_manifest_path)
+    if raw_manifest_file.name != "artifact_manifest.json" or not raw_manifest_file.is_file():
+        return None
+    raw_dir = raw_manifest_file.parent
+    raw_manifest = _read_json(raw_manifest_file)
+    if isinstance(baseline_log_roots, Mapping) and baseline_log_roots:
+        categories = tuple(str(category) for category in baseline_log_roots)
+    else:
+        categories = tuple(str(category) for category in current_log_roots)
+    if not categories:
+        return None
+    current_roots = {
+        str(category): Path(str(path))
+        for category, path in current_log_roots.items()
+    }
+    expected_category_counts = {
+        str(category): {str(key): int(value) for key, value in (counts or {}).items()}
+        for category, counts in (expected.get("category_classification_counts") or {}).items()
+    }
+    expected_combined_counts = {
+        str(key): int(value)
+        for key, value in (expected.get("combined_classification_counts") or {}).items()
+    }
+
+    checks = list(_baseline_identity_checks(raw_manifest))
+    category_reports: Dict[str, Any] = {}
+    combined_counts: Counter[str] = Counter()
+    combined_blocking_counts: Counter[str] = Counter()
+    for category in categories:
+        if category not in current_roots:
+            return None
+        report = _build_category_report(current_roots[category])
+        category_reports[category] = report
+        combined_counts.update(report["classification_counts"])
+        combined_blocking_counts.update(report["blocking_classification_counts"])
+        checks.extend(_category_checks(category, report, expected_category_counts.get(category, {})))
+
+    checks.append(
+        _ok("correspondence_blocking_classifications_absent")
+        if not combined_blocking_counts
+        else _failed(
+            "correspondence_blocking_classifications_absent",
+            blocking_classification_counts=dict(sorted(combined_blocking_counts.items())),
+        )
+    )
+    checks.append(
+        _ok("combined_classification_counts_expected", counts=dict(sorted(combined_counts.items())))
+        if dict(sorted(combined_counts.items())) == dict(sorted(expected_combined_counts.items()))
+        else _failed(
+            "combined_classification_counts_expected",
+            expected=dict(sorted(expected_combined_counts.items())),
+            actual=dict(sorted(combined_counts.items())),
+        )
+    )
+    return {
+        "baseline_id": raw_manifest.get("baseline_id"),
+        "baseline_git_head": raw_manifest.get("git_head"),
+        "baseline_log_roots": {
+            category: str(raw_dir / "logs" / category)
+            for category in categories
+        },
+        "current_log_roots": {
+            category: str(path)
+            for category, path in sorted(current_roots.items())
+        },
+        "diagnostic_model": {
+            "required_classification_enum": sorted(ALLOWED_CORRESPONDENCE_CLASSIFICATIONS),
+            "blocking_classifications": sorted(BLOCKING_CORRESPONDENCE_CLASSIFICATIONS),
+            "non_blocking_classifications": sorted(
+                ALLOWED_CORRESPONDENCE_CLASSIFICATIONS - BLOCKING_CORRESPONDENCE_CLASSIFICATIONS
+            ),
+            "comparison": "validation_unknown_unit_vs_reason_record_vs_proof_action",
+        },
+        "expected": {
+            "category_classification_counts": expected_category_counts,
+            "combined_classification_counts": expected_combined_counts,
+        },
+        "categories": category_reports,
+        "combined_classification_counts": dict(sorted(combined_counts.items())),
+        "combined_blocking_classification_counts": dict(sorted(combined_blocking_counts.items())),
+        "checks": checks,
+    }
 
 
 def _normalize_current_roots(
@@ -437,6 +558,15 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") == "failed"),
         "failed_kinds": failed_kinds,
     }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _is_non_string_sequence(value: Any) -> bool:

@@ -201,15 +201,18 @@ def build_phase3_readonly_identity_lane3_manifest(
 
 
 def validate_phase3_readonly_identity_lane3_manifest(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase3_lane3_ready") is True:
-        return
     readiness = manifest.get("readiness")
     failures = []
     if isinstance(readiness, Mapping):
         failures.extend(str(kind) for kind in readiness.get("failure_kinds") or ())
-    if not failures:
+    else:
+        failures.append("readiness_missing")
+    if manifest.get("phase3_lane3_ready") is not True:
+        failures.append("phase3_lane3_not_ready")
+    if manifest.get("phase3_lane3_ready") is False and not failures:
         raise ValueError("Phase 3 lane 3 readiness is false without failure details")
-    raise ValueError(f"Phase 3 lane 3 representative manifest is not ready: {', '.join(failures)}")
+    if failures:
+        raise ValueError(f"Phase 3 lane 3 representative manifest is not ready: {', '.join(failures)}")
 
 
 def build_phase3_readonly_identity_lane3_post_fix_gate(
@@ -280,17 +283,22 @@ def build_phase3_readonly_identity_lane3_post_fix_gate(
 
 
 def validate_phase3_readonly_identity_lane3_post_fix_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase3_lane3_post_fix_ready") is True:
-        return
     gate = manifest.get("post_fix_regression_gate")
     failures = []
     if isinstance(gate, Mapping):
         summary = gate.get("summary")
         if isinstance(summary, Mapping):
             failures.extend(str(kind) for kind in summary.get("failed_kinds") or ())
-    if not failures:
+        else:
+            failures.append("post_fix_summary_missing")
+    else:
+        failures.append("post_fix_regression_gate_missing")
+    if manifest.get("phase3_lane3_post_fix_ready") is not True:
+        failures.append("phase3_lane3_post_fix_not_ready")
+    if manifest.get("phase3_lane3_post_fix_ready") is False and not failures:
         raise ValueError("Phase 3 lane 3 post-fix gate is false without failure details")
-    raise ValueError(f"Phase 3 lane 3 post-fix gate is not ready: {', '.join(failures)}")
+    if failures:
+        raise ValueError(f"Phase 3 lane 3 post-fix gate is not ready: {', '.join(failures)}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -489,14 +497,12 @@ def _phase3_pre_fix_manifest_checks(
             manifest_kind=phase3_manifest.get("manifest_kind", MISSING_SENTINEL),
         )
     )
-    checks.append(
-        _ok("phase3_pre_fix_manifest_ready")
-        if phase3_manifest.get("phase3_lane3_ready") is True
-        else _failed(
-            "phase3_pre_fix_manifest_ready",
-            phase3_lane3_ready=phase3_manifest.get("phase3_lane3_ready", MISSING_SENTINEL),
-        )
-    )
+    try:
+        validate_phase3_readonly_identity_lane3_manifest(phase3_manifest)
+    except ValueError as exc:
+        checks.append(_failed("phase3_pre_fix_manifest_ready", error=str(exc)))
+    else:
+        checks.append(_ok("phase3_pre_fix_manifest_ready"))
     checks.append(
         _ok("phase3_pre_fix_entries_non_empty", count=len(frozen_entries))
         if frozen_entries

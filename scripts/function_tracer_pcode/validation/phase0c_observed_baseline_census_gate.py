@@ -285,15 +285,45 @@ def build_phase0c_observed_baseline_census_gate(
 
 
 def validate_phase0c_observed_baseline_census_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase0c_observed_baseline_census_ready") is True:
-        return
+    failures = []
+    checks = manifest.get("checks")
+    if not isinstance(checks, (list, tuple)):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _summary(tuple(check for check in checks if isinstance(check, Mapping)))
     summary = manifest.get("summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 0C observed baseline census gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 0C observed baseline census gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 0C observed baseline census gate failed: {', '.join(map(str, failed))}")
+        failures.append("summary_missing")
+        summary = {}
+    for key in ("total", "passed", "failed"):
+        value = summary.get(key)
+        if isinstance(value, bool):
+            failures.append(f"summary_{key}_count")
+        elif value != expected_summary.get(key):
+            failures.append(f"summary_{key}_mismatch")
+    if tuple(summary.get("failed_kinds") or ()) != tuple(expected_summary.get("failed_kinds") or ()):
+        failures.append("summary_failed_kinds_mismatch")
+    if manifest.get("phase0c_observed_baseline_census_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase0c_ready_consistency")
+
+    materialized = _materialize_phase0c_census_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in ("baseline_id", "baseline_git_head", "count_model", "expected", "observed"):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
+
+    failed = tuple(expected_summary.get("failed_kinds") or ())
+    if failures or failed:
+        all_failures = tuple(dict.fromkeys([*failures, *failed]))
+        raise ValueError(f"Phase 0C observed baseline census gate failed: {', '.join(map(str, all_failures))}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -311,6 +341,202 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_ready:
         validate_phase0c_observed_baseline_census_gate(_read_json(path))
     return 0
+
+
+def _materialize_phase0c_census_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    expected = manifest.get("expected")
+    if not isinstance(baseline_ref, Mapping) or not isinstance(expected, Mapping):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
+        return None
+    raw_manifest_file = Path(raw_manifest_path)
+    if raw_manifest_file.name != "artifact_manifest.json" or not raw_manifest_file.is_file():
+        return None
+    raw_dir = raw_manifest_file.parent
+    raw_manifest = _read_json(raw_manifest_file)
+    expected_counts = {
+        str(category): {str(status): int(count) for status, count in (counts or {}).items()}
+        for category, counts in (expected.get("category_final_result_counts") or {}).items()
+    }
+    expected_unknown_units = {
+        str(category): int(count)
+        for category, count in (expected.get("category_validation_unknown_units") or {}).items()
+    }
+    expected_pair_log_counts = {
+        str(category): int(count)
+        for category, count in (expected.get("category_pair_log_counts") or {}).items()
+    }
+    if not expected_counts or not expected_unknown_units or not expected_pair_log_counts:
+        return None
+    expected_combined_pair_log_count = expected.get("combined_pair_log_count")
+    expected_combined_validation_unknown_units = expected.get("combined_validation_unknown_units")
+    if isinstance(expected_combined_pair_log_count, bool) or isinstance(
+        expected_combined_validation_unknown_units,
+        bool,
+    ):
+        return None
+    try:
+        expected_combined_pair_log_count = int(expected_combined_pair_log_count)
+        expected_combined_validation_unknown_units = int(expected_combined_validation_unknown_units)
+    except (TypeError, ValueError):
+        return None
+    expected_combined_counts = {
+        str(status): int(count)
+        for status, count in (expected.get("combined_final_result_counts") or {}).items()
+    }
+    expected_combined_reasons = {
+        str(reason): int(count)
+        for reason, count in (expected.get("combined_unknown_by_reason") or {}).items()
+    }
+
+    checks = list(_baseline_identity_checks(raw_manifest))
+    category_summaries: Dict[str, Any] = {}
+    combined_final_counts: Counter[str] = Counter()
+    combined_pair_log_count = 0
+    combined_unknown_units = 0
+    combined_unknown_by_reason: Counter[str] = Counter()
+
+    for category in sorted(expected_counts):
+        category_summary = _summarize_category(raw_dir / "logs" / category)
+        category_summaries[category] = category_summary
+        combined_pair_log_count += int(category_summary["pair_log_count"])
+        combined_final_counts.update(category_summary["final_result_counts"])
+        combined_unknown_units += int(category_summary["validation_unknown_units"])
+        combined_unknown_by_reason.update(category_summary["unknown_by_reason"])
+
+        checks.append(
+            _ok("category_pair_log_count_expected", category=category, count=category_summary["pair_log_count"])
+            if int(category_summary["pair_log_count"]) == int(expected_pair_log_counts.get(category, -1))
+            else _failed(
+                "category_pair_log_count_expected",
+                category=category,
+                expected=expected_pair_log_counts.get(category),
+                actual=category_summary["pair_log_count"],
+            )
+        )
+        checks.append(
+            _ok("category_pair_identities_unique", category=category, count=category_summary["pair_identity_count"])
+            if not category_summary["duplicate_pair_identities"]
+            else _failed(
+                "category_pair_identities_unique",
+                category=category,
+                duplicate_pair_identities=category_summary["duplicate_pair_identities"],
+            )
+        )
+        checks.append(
+            _ok("category_no_error_or_incomplete_results", category=category)
+            if category_summary["final_result_counts"].get("ERROR", 0) == 0
+            and category_summary["final_result_counts"].get("INCOMPLETE", 0) == 0
+            else _failed(
+                "category_no_error_or_incomplete_results",
+                category=category,
+                counts=category_summary["final_result_counts"],
+            )
+        )
+        checks.append(
+            _ok("category_final_result_counts_expected", category=category, counts=category_summary["final_result_counts"])
+            if category_summary["final_result_counts"] == _normalize_status_counts(expected_counts[category])
+            else _failed(
+                "category_final_result_counts_expected",
+                category=category,
+                expected=_normalize_status_counts(expected_counts[category]),
+                actual=category_summary["final_result_counts"],
+            )
+        )
+        checks.append(
+            _ok(
+                "category_validation_unknown_units_expected",
+                category=category,
+                count=category_summary["validation_unknown_units"],
+            )
+            if int(category_summary["validation_unknown_units"]) == int(expected_unknown_units.get(category, -1))
+            else _failed(
+                "category_validation_unknown_units_expected",
+                category=category,
+                expected=expected_unknown_units.get(category),
+                actual=category_summary["validation_unknown_units"],
+            )
+        )
+        checks.extend(_count_kind_schema_checks(category, category_summary))
+        checks.extend(_correspondence_classification_checks(category, category_summary))
+
+    combined_final_result_counts = _normalize_status_counts(combined_final_counts)
+    combined_unknown_by_reason_dict = dict(sorted(combined_unknown_by_reason.items()))
+    checks.extend(
+        [
+            _ok("combined_final_result_counts_expected", counts=combined_final_result_counts)
+            if combined_final_result_counts == _normalize_status_counts(expected_combined_counts)
+            else _failed(
+                "combined_final_result_counts_expected",
+                expected=_normalize_status_counts(expected_combined_counts),
+                actual=combined_final_result_counts,
+            ),
+            _ok("combined_pair_log_count_expected", count=combined_pair_log_count)
+            if combined_pair_log_count == expected_combined_pair_log_count
+            else _failed(
+                "combined_pair_log_count_expected",
+                expected=expected_combined_pair_log_count,
+                actual=combined_pair_log_count,
+            ),
+            _ok("combined_validation_unknown_units_expected", count=combined_unknown_units)
+            if combined_unknown_units == expected_combined_validation_unknown_units
+            else _failed(
+                "combined_validation_unknown_units_expected",
+                expected=expected_combined_validation_unknown_units,
+                actual=combined_unknown_units,
+            ),
+            _ok("combined_unknown_by_reason_expected", counts=combined_unknown_by_reason_dict)
+            if combined_unknown_by_reason_dict == expected_combined_reasons
+            else _failed(
+                "combined_unknown_by_reason_expected",
+                expected=expected_combined_reasons,
+                actual=combined_unknown_by_reason_dict,
+            ),
+            _ok("primary_census_count_kind", count_kind=PRIMARY_CENSUS_COUNT_KIND),
+        ]
+    )
+    return {
+        "baseline_id": raw_manifest.get("baseline_id"),
+        "baseline_git_head": raw_manifest.get("git_head"),
+        "count_model": {
+            "primary_census_count_kind": PRIMARY_CENSUS_COUNT_KIND,
+            "count_kinds": [
+                UnknownCountKind.FINAL_RESULT.value,
+                UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
+                UnknownCountKind.REASON_RECORD.value,
+                UnknownCountKind.PROOF_ACTION.value,
+            ],
+            "global_reason_tuple_key": [
+                "count_kind",
+                "reason_id",
+                "decision_effect",
+                "reason_scope",
+                "recovery_proof_kind",
+                "proof_stage",
+                "action_status",
+            ],
+            "optional_field_missing_sentinel": UNKNOWN_TUPLE_MISSING,
+        },
+        "expected": {
+            "category_final_result_counts": expected_counts,
+            "category_pair_log_counts": expected_pair_log_counts,
+            "category_validation_unknown_units": expected_unknown_units,
+            "combined_final_result_counts": _normalize_status_counts(expected_combined_counts),
+            "combined_pair_log_count": expected_combined_pair_log_count,
+            "combined_validation_unknown_units": expected_combined_validation_unknown_units,
+            "combined_unknown_by_reason": expected_combined_reasons,
+        },
+        "observed": {
+            "categories": category_summaries,
+            "combined_final_result_counts": combined_final_result_counts,
+            "combined_pair_log_count": combined_pair_log_count,
+            "combined_validation_unknown_units": combined_unknown_units,
+            "combined_unknown_by_reason": combined_unknown_by_reason_dict,
+        },
+        "checks": checks,
+    }
 
 
 def _summarize_category(log_root: Path) -> Dict[str, Any]:
@@ -489,6 +715,15 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") == "failed"),
         "failed_kinds": failed_kinds,
     }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:

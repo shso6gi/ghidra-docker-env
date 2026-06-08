@@ -2854,6 +2854,22 @@ def test_phase3_post_fix_gate_index_rejects_deleted_gate_after_index_build(tmp_p
         validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=specs)
 
 
+def test_phase3_post_fix_gate_index_rejects_missing_materialized_context(tmp_path):
+    repo = tmp_path / "repo"
+    specs = (_spec(1, "lane_one"),)
+    _write_gate(repo, specs[0])
+    path = build_phase3_post_fix_gate_index(
+        repo_root=repo,
+        output_dir=tmp_path / "out",
+        gate_specs=specs,
+    )
+    manifest = json.loads(path.read_text())
+    manifest.pop("repo_root")
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase3_post_fix_gate_index(manifest, repo_root=repo, gate_specs=specs)
+
+
 def test_phase3_post_fix_gate_index_rejects_gate_baseline_head_drift(tmp_path):
     repo = tmp_path / "repo"
     specs = (_spec(1, "lane_one"),)

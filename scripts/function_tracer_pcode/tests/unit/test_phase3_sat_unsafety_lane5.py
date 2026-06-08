@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
+from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
@@ -32,9 +35,12 @@ from scripts.function_tracer_pcode.validation.phase3_sat_unsafety_lane5 import (
     _observation,
     _object_target_key_is_specific_sat_unsafety,
     _pending_proof_obligations,
+    _post_fix_checks,
     _post_fix_status,
     _proof_action_has_expected_id,
     _proof_action_matches_lane_definition,
+    validate_phase3_sat_unsafety_lane5_manifest,
+    validate_phase3_sat_unsafety_lane5_post_fix_gate,
 )
 
 
@@ -197,6 +203,69 @@ def test_sat_unsafety_target_is_specific_and_action_uses_full_proof_id():
     action_dict = action.to_dict()
     assert _proof_action_matches_lane_definition(action_dict)
     assert _proof_action_has_expected_id(action_dict)
+
+
+def test_sat_unsafety_manifest_validator_rejects_ready_without_readiness():
+    manifest = {
+        "manifest_kind": "phase3_sat_unsafety_lane5_representatives",
+        "phase3_lane5_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="sat_unsafety_readiness_missing"):
+        validate_phase3_sat_unsafety_lane5_manifest(manifest)
+
+
+def test_sat_unsafety_manifest_validator_rejects_hidden_failed_kind():
+    manifest = {
+        "manifest_kind": "phase3_sat_unsafety_lane5_representatives",
+        "phase3_lane5_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_sat_unsafety_failure"],
+            "checks": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="hidden_sat_unsafety_failure"):
+        validate_phase3_sat_unsafety_lane5_manifest(manifest)
+
+
+def test_sat_unsafety_post_fix_gate_validator_rejects_ready_without_checks():
+    manifest = {
+        "manifest_kind": "phase3_sat_unsafety_lane5_post_fix_gate",
+        "phase3_lane5_post_fix_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="sat_unsafety_post_fix_checks_missing"):
+        validate_phase3_sat_unsafety_lane5_post_fix_gate(manifest)
+
+
+def test_sat_unsafety_post_fix_checks_reject_tampered_pre_fix_manifest_ready():
+    manifest = {
+        "manifest_kind": "phase3_sat_unsafety_lane5_representatives",
+        "phase3_lane5_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_sat_unsafety_pre_fix_failure"],
+            "checks": [],
+        },
+        "entries": [],
+    }
+
+    checks = _post_fix_checks(
+        baseline_manifest={"baseline_id": "observed-v0@0a53352"},
+        phase3_manifest=manifest,
+        phase3_manifest_path=Path("sat_unsafety_lane5_representatives.json"),
+        actual_phase3_sha256="a" * 64,
+        expected_phase3_sha256="a" * 64,
+        entries=(),
+    )
+
+    ready_check = next(check for check in checks if check["kind"] == "phase3_pre_fix_manifest_ready")
+    assert ready_check["status"] == "failed"
+    assert "hidden_sat_unsafety_pre_fix_failure" in ready_check["error"]
 
 
 def test_sat_unsafety_target_normalizes_ghidra_program_ids_out_of_deferred_calls():

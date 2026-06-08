@@ -280,7 +280,17 @@ def build_phase3_solver_rewrite_proof_lane8_manifest(
 
 
 def validate_phase3_solver_rewrite_proof_lane8_manifest(manifest: Mapping[str, Any]) -> None:
-    failures = list((manifest.get("readiness") or {}).get("failed_checks") or ())
+    readiness = manifest.get("readiness")
+    failures = []
+    if isinstance(readiness, Mapping):
+        failures.extend(readiness.get("failed_checks") or ())
+        failures.extend(
+            _failed(str(kind))
+            for kind in (readiness.get("failed_kinds") or ())
+            if kind not in {check.get("kind") for check in failures if isinstance(check, Mapping)}
+        )
+    else:
+        failures.append(_failed("solver_rewrite_proof_readiness_missing"))
     if manifest.get("manifest_kind") != "phase3_solver_rewrite_proof_lane8_representatives":
         failures.append(_failed("solver_rewrite_proof_manifest_kind"))
     if not manifest.get("phase3_lane8_ready"):
@@ -364,11 +374,16 @@ def build_phase3_solver_rewrite_proof_lane8_post_fix_gate(
 
 
 def validate_phase3_solver_rewrite_proof_lane8_post_fix_gate(manifest: Mapping[str, Any]) -> None:
-    failures = [
-        check
-        for check in manifest.get("checks") or ()
-        if isinstance(check, Mapping) and check.get("status") == "failed"
-    ]
+    checks = manifest.get("checks")
+    failures = []
+    if isinstance(checks, list):
+        failures.extend(
+            check
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        )
+    else:
+        failures.append(_failed("solver_rewrite_proof_post_fix_checks_missing"))
     if manifest.get("manifest_kind") != "phase3_solver_rewrite_proof_lane8_post_fix_gate":
         failures.append(_failed("solver_rewrite_proof_post_fix_manifest_kind"))
     if not manifest.get("phase3_lane8_post_fix_ready"):
@@ -603,11 +618,12 @@ def _post_fix_checks(
         if phase3_manifest.get("manifest_kind") == "phase3_solver_rewrite_proof_lane8_representatives"
         else _failed("phase3_pre_fix_manifest_kind")
     )
-    checks.append(
-        _ok("phase3_pre_fix_manifest_ready")
-        if phase3_manifest.get("phase3_lane8_ready") is True
-        else _failed("phase3_pre_fix_manifest_ready")
-    )
+    try:
+        validate_phase3_solver_rewrite_proof_lane8_manifest(phase3_manifest)
+    except ValueError as exc:
+        checks.append(_failed("phase3_pre_fix_manifest_ready", error=str(exc)))
+    else:
+        checks.append(_ok("phase3_pre_fix_manifest_ready"))
     checks.append(_identity_set_check("phase3_pre_fix_entries", phase3_manifest.get("entries"), DEFAULT_REPRESENTATIVES))
     implementation = phase3_manifest.get("implementation_manifest")
     if isinstance(implementation, Mapping):

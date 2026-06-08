@@ -514,13 +514,17 @@ def validate_synthetic_manifest(manifest: Mapping[str, Any]) -> None:
 
 
 def validate_phase1_readiness(index: Mapping[str, Any]) -> None:
-    if index.get("phase1_ready") is True:
-        return
     readiness = index.get("readiness")
+    issues = []
     if not isinstance(readiness, Mapping):
-        raise ValueError("Phase 1 readiness is false and readiness details are missing")
-    issues = readiness.get("blocking_issues") or ()
+        issues.append({"kind": "readiness_missing"})
+    else:
+        issues.extend(issue for issue in readiness.get("blocking_issues") or () if isinstance(issue, Mapping))
+    if index.get("phase1_ready") is not True and not issues:
+        issues.append({"kind": "phase1_not_ready"})
     if not issues:
+        return
+    if index.get("phase1_ready") is False and issues == [{"kind": "phase1_not_ready"}]:
         raise ValueError("Phase 1 readiness is false without blocking issues")
     kinds = ", ".join(str(issue.get("kind")) for issue in issues if isinstance(issue, Mapping))
     raise ValueError(f"Phase 1 manifest set is not ready: {kinds}")

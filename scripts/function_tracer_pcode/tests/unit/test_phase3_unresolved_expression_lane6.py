@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
+from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
@@ -26,8 +29,11 @@ from scripts.function_tracer_pcode.validation.phase3_unresolved_expression_lane6
     UNRESOLVED_REASON_TUPLE,
     _object_target_key_is_specific_unresolved_expression,
     _pending_proof_obligations,
+    _post_fix_checks,
     _post_fix_status,
     _required_completion_actions,
+    validate_phase3_unresolved_expression_lane6_manifest,
+    validate_phase3_unresolved_expression_lane6_post_fix_gate,
 )
 
 
@@ -179,6 +185,69 @@ def test_unresolved_expression_target_is_object_specific():
     assert _nested_contains(target, "unknown_expression")
     assert _nested_contains(target, "unresolved_call_value")
     assert not _nested_contains(target, ("reason", "unresolved_expression"))
+
+
+def test_unresolved_expression_manifest_validator_rejects_ready_without_readiness():
+    manifest = {
+        "manifest_kind": "phase3_unresolved_expression_lane6_representatives",
+        "phase3_lane6_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="unresolved_expression_readiness_missing"):
+        validate_phase3_unresolved_expression_lane6_manifest(manifest)
+
+
+def test_unresolved_expression_manifest_validator_rejects_hidden_failed_kind():
+    manifest = {
+        "manifest_kind": "phase3_unresolved_expression_lane6_representatives",
+        "phase3_lane6_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_unresolved_expression_failure"],
+            "checks": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="hidden_unresolved_expression_failure"):
+        validate_phase3_unresolved_expression_lane6_manifest(manifest)
+
+
+def test_unresolved_expression_post_fix_gate_validator_rejects_ready_without_checks():
+    manifest = {
+        "manifest_kind": "phase3_unresolved_expression_lane6_post_fix_gate",
+        "phase3_lane6_post_fix_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="unresolved_expression_post_fix_checks_missing"):
+        validate_phase3_unresolved_expression_lane6_post_fix_gate(manifest)
+
+
+def test_unresolved_expression_post_fix_checks_reject_tampered_pre_fix_manifest_ready():
+    manifest = {
+        "manifest_kind": "phase3_unresolved_expression_lane6_representatives",
+        "phase3_lane6_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_unresolved_expression_pre_fix_failure"],
+            "checks": [],
+        },
+        "entries": [],
+    }
+
+    checks = _post_fix_checks(
+        baseline_manifest={"baseline_id": "observed-v0@0a53352"},
+        phase3_manifest=manifest,
+        phase3_manifest_path=Path("unresolved_expression_lane6_representatives.json"),
+        actual_phase3_sha256="a" * 64,
+        expected_phase3_sha256="a" * 64,
+        entries=(),
+    )
+
+    ready_check = next(check for check in checks if check["kind"] == "phase3_pre_fix_manifest_ready")
+    assert ready_check["status"] == "failed"
+    assert "hidden_unresolved_expression_pre_fix_failure" in ready_check["error"]
 
 
 def test_unresolved_expression_target_rejects_nested_diagnostic_reason():

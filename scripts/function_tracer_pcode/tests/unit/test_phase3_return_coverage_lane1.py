@@ -692,6 +692,16 @@ def test_build_phase3_return_coverage_manifest_freezes_concrete_representatives(
         check["kind"] for check in pre_fix_gate["checks"]
     }
     validate_phase3_return_coverage_lane1_manifest(manifest)
+    tampered_readiness = json.loads(json.dumps(manifest))
+    tampered_readiness["readiness"]["failure_kinds"] = ["hidden_lane1_failure"]
+    with pytest.raises(ValueError, match="hidden_lane1_failure"):
+        validate_phase3_return_coverage_lane1_manifest(tampered_readiness)
+    tampered_pre_fix = json.loads(json.dumps(manifest))
+    tampered_pre_fix["pre_fix_regression_gate"]["summary"]["failed_kinds"] = [
+        "hidden_lane1_pre_fix_failure"
+    ]
+    with pytest.raises(ValueError, match="hidden_lane1_pre_fix_failure"):
+        validate_phase3_return_coverage_lane1_manifest(tampered_pre_fix)
 
 
 def test_phase3_return_coverage_post_fix_gate_accepts_completed_eq_with_frozen_proof_ids(tmp_path):
@@ -791,6 +801,44 @@ def test_phase3_return_coverage_post_fix_gate_accepts_completed_eq_with_frozen_p
         for action in frozen_recursive["current_observation"]["proof_actions"]
     }
     validate_phase3_return_coverage_lane1_post_fix_gate(manifest)
+    tampered_post_fix = json.loads(json.dumps(manifest))
+    tampered_post_fix["post_fix_regression_gate"]["summary"]["failed_kinds"] = [
+        "hidden_lane1_post_fix_failure"
+    ]
+    with pytest.raises(ValueError, match="hidden_lane1_post_fix_failure"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(tampered_post_fix)
+    tampered_pre_fix = json.loads(pre_fix_path.read_text())
+    tampered_pre_fix["readiness"]["failure_kinds"] = [
+        "hidden_lane1_pre_fix_manifest_failure"
+    ]
+    tampered_pre_fix_path = pre_fix_path.with_name(
+        "tampered_return_coverage_lane1_representatives.json"
+    )
+    tampered_pre_fix_path.write_text(json.dumps(tampered_pre_fix))
+    tampered_pre_fix_gate_path = build_phase3_return_coverage_lane1_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "phase3-post-tampered-pre-fix",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase1_dir=phase1_dir,
+        phase3_manifest_path=tampered_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(tampered_pre_fix_path),
+    )
+    tampered_pre_fix_gate = json.loads(tampered_pre_fix_gate_path.read_text())
+    assert tampered_pre_fix_gate["phase3_lane1_post_fix_ready"] is False
+    assert (
+        "phase3_pre_fix_manifest_ready"
+        in tampered_pre_fix_gate["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    )
+    ready_check = next(
+        check
+        for check in tampered_pre_fix_gate["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_manifest_ready"
+    )
+    assert ready_check["status"] == "failed"
+    assert "hidden_lane1_pre_fix_manifest_failure" in ready_check["error"]
+    with pytest.raises(ValueError, match="phase3_pre_fix_manifest_ready"):
+        validate_phase3_return_coverage_lane1_post_fix_gate(tampered_pre_fix_gate)
 
 
 def test_phase3_return_coverage_post_fix_gate_accepts_completed_proof_with_operational_unknown(

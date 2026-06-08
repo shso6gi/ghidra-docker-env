@@ -665,7 +665,9 @@ def validate_phase3_post_fix_gate_index(
             failures.append("derived_checks")
         if failed_check_kinds != _failed_check_kinds(derived_checks):
             failures.append("derived_failed_kinds")
-        if isinstance(manifest_repo_root, str) and manifest_repo_root:
+        if not isinstance(manifest_repo_root, str) or not manifest_repo_root:
+            failures.append("materialized_context_missing")
+        else:
             materialized_gates = [
                 _materialize_post_fix_gate(repo, spec)
                 for spec in specs

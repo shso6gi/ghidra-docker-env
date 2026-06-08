@@ -93,6 +93,40 @@ def test_phase0b_validator_rejects_tampered_combined_counts(tmp_path):
         validate_phase0b_unknown_reason_correspondence_gate(gate)
 
 
+def test_phase0b_validator_rejects_tampered_ready_category_report(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0b_unknown_reason_correspondence_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        **_fixture_expected_classification_counts(),
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0b_unknown_reason_correspondence_ready"] is True
+    gate["categories"]["function_call"]["typed_payload_count"] = 999
+    gate["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_categories"):
+        validate_phase0b_unknown_reason_correspondence_gate(gate)
+
+
+def test_phase0b_validator_rejects_missing_materialized_context(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0b_unknown_reason_correspondence_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        **_fixture_expected_classification_counts(),
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0b_unknown_reason_correspondence_ready"] is True
+    gate.pop("baseline_raw_artifact_ref")
+    gate["categories"]["function_call"]["typed_payload_count"] = 999
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase0b_unknown_reason_correspondence_gate(gate)
+
+
 def test_phase0b_unknown_reason_correspondence_gate_rejects_unknown_log_without_typed_payload(tmp_path):
     raw_dir = _write_fixture(tmp_path)
     stale = raw_dir / "logs" / "function_call" / "fc_stale" / "fc_stale_B1_B2.log"

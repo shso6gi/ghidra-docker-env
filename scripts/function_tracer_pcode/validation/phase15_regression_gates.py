@@ -106,6 +106,12 @@ def build_phase15_regression_gates(
         "baseline_id": baseline_manifest.get("baseline_id"),
         "baseline_git_head": baseline_manifest.get("git_head"),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "baseline_raw_artifact_ref": {
+            "path": str(raw_dir / "artifact_manifest.json"),
+        },
+        "phase1_manifest_root": {
+            "phase1_dir": str(phase1),
+        },
         "phase1_manifest_refs": _phase1_manifest_refs(phase1, phase1_bundle["index"]),
         "current_log_roots": {
             category: str(path)
@@ -168,6 +174,25 @@ def _phase15_regression_gate_failures(manifest: Mapping[str, Any]) -> Sequence[s
             if not isinstance(ref, Mapping) or not ref.get("path") or not _is_sha256_hex(ref.get("sha256")):
                 failures.append("phase1_manifest_ref_missing_or_unhashed")
                 break
+    materialized = _materialize_phase15_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in (
+            "baseline_id",
+            "baseline_git_head",
+            "phase1_manifest_refs",
+            "current_log_roots",
+            "baseline_comparisons",
+        ):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _gate_summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
     if expected_summary.get("failed") and not expected_summary.get("failed_kinds"):
         failures.append("gate_summary_failed_kinds_missing")
     return tuple(sorted(set(failures + list(expected_summary.get("failed_kinds") or ()))))
@@ -202,6 +227,68 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_ready:
         validate_phase15_regression_gates(_read_json(path))
     return 0
+
+
+def _materialize_phase15_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    phase1_root_ref = manifest.get("phase1_manifest_root")
+    current_log_roots = manifest.get("current_log_roots")
+    if (
+        not isinstance(baseline_ref, Mapping)
+        or not isinstance(phase1_root_ref, Mapping)
+        or not isinstance(current_log_roots, Mapping)
+    ):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    phase1_dir = phase1_root_ref.get("phase1_dir")
+    if not isinstance(raw_manifest_path, str) or not isinstance(phase1_dir, str):
+        return None
+    raw_manifest_file = Path(raw_manifest_path)
+    phase1 = Path(phase1_dir)
+    if raw_manifest_file.name != "artifact_manifest.json" or not raw_manifest_file.is_file() or not phase1.is_dir():
+        return None
+    raw_dir = raw_manifest_file.parent
+    baseline_manifest = _read_json(raw_manifest_file)
+    phase1_bundle = _load_phase1_bundle(phase1)
+    current_roots = {
+        _normalize_log_root_category(str(category)): Path(str(path))
+        for category, path in current_log_roots.items()
+    }
+
+    checks = []
+    baseline_comparisons = {}
+    current_records_by_category = {}
+    checks.extend(_phase1_manifest_checks(phase1_bundle))
+    for category, current_root in sorted(current_roots.items()):
+        before_root = raw_dir / "logs" / category
+        before_records = aggregate_validation_logs(_log_paths(before_root)).records
+        current_records = aggregate_validation_logs(_log_paths(current_root)).records
+        current_records_by_category[category] = current_records
+        comparison = compare_validation_baseline_records(before_records, current_records)
+        baseline_comparisons[category] = _comparison_to_dict(comparison)
+        checks.extend(_baseline_comparison_checks(category, comparison))
+
+    current_records_by_key = _records_by_key(current_records_by_category)
+    checks.extend(_object_evidence_checks(phase1_bundle["positive"]))
+    checks.extend(_positive_pair_checks(phase1_bundle["positive"], current_records_by_key))
+    checks.extend(_negative_guard_checks(phase1_bundle["negative"], current_records_by_key))
+    checks.extend(
+        _representative_record_tuple_checks(
+            phase1_bundle["representative"],
+            current_records_by_key,
+        )
+    )
+    return {
+        "baseline_id": baseline_manifest.get("baseline_id"),
+        "baseline_git_head": baseline_manifest.get("git_head"),
+        "phase1_manifest_refs": _phase1_manifest_refs(phase1, phase1_bundle["index"]),
+        "current_log_roots": {
+            category: str(path)
+            for category, path in sorted(current_roots.items())
+        },
+        "checks": checks,
+        "baseline_comparisons": baseline_comparisons,
+    }
 
 
 def _phase1_manifest_checks(bundle: Mapping[str, Mapping[str, Any]]) -> Sequence[Dict[str, Any]]:
@@ -573,6 +660,15 @@ def _gate_summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 def _is_non_string_sequence(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _is_sha256_hex(value: Any) -> bool:

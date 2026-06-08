@@ -31,6 +31,27 @@ def test_phase0d_not_eq_audit_gate_accepts_unresolved_observed_audit(tmp_path):
     assert gate["classification_counts"] == {"unresolved": 1}
     assert gate["oracle_review_status_counts"] == {"draft": 1}
     validate_phase0d_not_eq_audit_gate(gate)
+    tampered_summary = json.loads(json.dumps(gate))
+    tampered_summary["summary"]["failed_kinds"] = ["hidden_phase0d_failure"]
+    tampered_summary["summary"]["failed"] = 1
+    with pytest.raises(ValueError, match="hidden_phase0d_failure"):
+        validate_phase0d_not_eq_audit_gate(tampered_summary)
+    tampered_checks = json.loads(json.dumps(gate))
+    tampered_checks["checks"].append({"kind": "hidden_phase0d_check_failure", "status": "failed"})
+    with pytest.raises(ValueError, match="hidden_phase0d_check_failure"):
+        validate_phase0d_not_eq_audit_gate(tampered_checks)
+    tampered_context = json.loads(json.dumps(gate))
+    del tampered_context["checks"]
+    with pytest.raises(ValueError, match="checks_missing"):
+        validate_phase0d_not_eq_audit_gate(tampered_context)
+    tampered_audit_ref = json.loads(json.dumps(gate))
+    tampered_audit_ref["audit_manifest_ref"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="materialized_audit_manifest_ref"):
+        validate_phase0d_not_eq_audit_gate(tampered_audit_ref)
+    missing_context = json.loads(json.dumps(gate))
+    del missing_context["baseline_raw_artifact_ref"]
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase0d_not_eq_audit_gate(missing_context)
 
 
 def test_phase0d_not_eq_audit_gate_rejects_unexpected_ground_truth(tmp_path):

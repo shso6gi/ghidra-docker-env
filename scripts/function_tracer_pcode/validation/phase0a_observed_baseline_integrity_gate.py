@@ -82,15 +82,45 @@ def build_phase0a_observed_baseline_integrity_gate(
 
 
 def validate_phase0a_observed_baseline_integrity_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase0a_observed_baseline_integrity_ready") is True:
-        return
+    failures = []
+    checks = manifest.get("checks")
+    if not isinstance(checks, (list, tuple)):
+        failures.append("checks_missing")
+        checks = ()
+    expected_summary = _summary(tuple(check for check in checks if isinstance(check, Mapping)))
     summary = manifest.get("summary")
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 0A observed baseline integrity gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
-        raise ValueError("Phase 0A observed baseline integrity gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 0A observed baseline integrity gate failed: {', '.join(map(str, failed))}")
+        failures.append("summary_missing")
+        summary = {}
+    for key in ("total", "passed", "failed"):
+        value = summary.get(key)
+        if isinstance(value, bool):
+            failures.append(f"summary_{key}_count")
+        elif value != expected_summary.get(key):
+            failures.append(f"summary_{key}_mismatch")
+    if tuple(summary.get("failed_kinds") or ()) != tuple(expected_summary.get("failed_kinds") or ()):
+        failures.append("summary_failed_kinds_mismatch")
+    if manifest.get("phase0a_observed_baseline_integrity_ready") is not (expected_summary.get("failed") == 0):
+        failures.append("phase0a_ready_consistency")
+
+    materialized = _materialize_phase0a_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in ("baseline_id", "baseline_git_head", "baseline_raw_artifact_ref", "raw_evidence"):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+        if not _strict_json_equal(list(checks), materialized.get("checks")):
+            failures.append("materialized_checks")
+        if tuple(expected_summary.get("failed_kinds") or ()) != tuple(
+            _summary(materialized["checks"]).get("failed_kinds") or ()
+        ):
+            failures.append("materialized_failed_kinds")
+
+    failed = tuple(expected_summary.get("failed_kinds") or ())
+    if failures or failed:
+        all_failures = tuple(dict.fromkeys([*failures, *failed]))
+        raise ValueError(f"Phase 0A observed baseline integrity gate failed: {', '.join(map(str, all_failures))}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -114,6 +144,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_ready:
         validate_phase0a_observed_baseline_integrity_gate(_read_json(path))
     return 0
+
+
+def _materialize_phase0a_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    raw_evidence = manifest.get("raw_evidence")
+    if not isinstance(baseline_ref, Mapping) or not isinstance(raw_evidence, Mapping):
+        return None
+    raw_manifest_path = baseline_ref.get("path")
+    hash_index_path = baseline_ref.get("hash_index_path")
+    if not isinstance(raw_manifest_path, str) or not isinstance(hash_index_path, str):
+        return None
+    raw_manifest_file = Path(raw_manifest_path)
+    hash_index_file = Path(hash_index_path)
+    if raw_manifest_file.name != "artifact_manifest.json" or hash_index_file.name != EXPECTED_HASH_INDEX_PATH:
+        return None
+    if not raw_manifest_file.is_file() or not hash_index_file.is_file():
+        return None
+    raw_dir = raw_manifest_file.parent
+    raw_manifest = _read_json(raw_manifest_file)
+    hash_index = _read_json(hash_index_file)
+    validate_file_content_hashes = raw_evidence.get("validate_file_content_hashes") is not False
+
+    checks = []
+    checks.extend(_baseline_identity_checks(raw_manifest))
+    checks.extend(_dirty_state_checks(raw_manifest))
+    checks.extend(_artifact_storage_checks(raw_manifest, raw_dir))
+    checks.extend(_hash_index_checks(raw_manifest, hash_index))
+    checks.extend(_recovered_manifest_checks(raw_manifest, raw_dir))
+    checks.extend(_source_path_checks(raw_manifest, hash_index))
+    if validate_file_content_hashes:
+        checks.extend(_file_content_hash_checks(raw_dir, hash_index))
+    else:
+        checks.append(_ok("file_content_hashes_validated", skipped=True, reason="disabled by CLI"))
+    return {
+        "baseline_id": raw_manifest.get("baseline_id"),
+        "baseline_git_head": raw_manifest.get("git_head"),
+        "baseline_raw_artifact_ref": {
+            "path": str(raw_manifest_file),
+            "hash_index_path": str(hash_index_file),
+        },
+        "raw_evidence": {
+            "indexed_file_count": len(hash_index),
+            "validate_file_content_hashes": validate_file_content_hashes,
+        },
+        "checks": checks,
+    }
 
 
 def _baseline_identity_checks(raw_manifest: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
@@ -313,6 +389,15 @@ def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "failed": sum(1 for check in checks if check.get("status") == "failed"),
         "failed_kinds": failed_kinds,
     }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":"), default=str) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _ok(kind: str, **details: Any) -> Dict[str, Any]:

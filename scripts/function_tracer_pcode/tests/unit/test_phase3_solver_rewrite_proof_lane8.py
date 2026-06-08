@@ -38,6 +38,7 @@ from scripts.function_tracer_pcode.validation.phase3_solver_rewrite_proof_lane8 
     _action_has_expected_id,
     _action_matches_lane_definition,
     _object_target_key_is_specific_solver_rewrite_proof,
+    _post_fix_checks,
 )
 from scripts.function_tracer_pcode.validation.unknown_reason_summary import (
     RESULT_JSON_BEGIN,
@@ -63,6 +64,69 @@ def _write_artifact_manifest(root: Path) -> None:
             }
         )
     )
+
+
+def test_solver_rewrite_proof_manifest_validator_rejects_ready_without_readiness():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_proof_lane8_representatives",
+        "phase3_lane8_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="solver_rewrite_proof_readiness_missing"):
+        validate_phase3_solver_rewrite_proof_lane8_manifest(manifest)
+
+
+def test_solver_rewrite_proof_manifest_validator_rejects_hidden_failed_kind():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_proof_lane8_representatives",
+        "phase3_lane8_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_solver_rewrite_proof_failure"],
+            "checks": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="hidden_solver_rewrite_proof_failure"):
+        validate_phase3_solver_rewrite_proof_lane8_manifest(manifest)
+
+
+def test_solver_rewrite_proof_post_fix_gate_validator_rejects_ready_without_checks():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_proof_lane8_post_fix_gate",
+        "phase3_lane8_post_fix_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="solver_rewrite_proof_post_fix_checks_missing"):
+        validate_phase3_solver_rewrite_proof_lane8_post_fix_gate(manifest)
+
+
+def test_solver_rewrite_proof_post_fix_checks_reject_tampered_pre_fix_manifest_ready():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_proof_lane8_representatives",
+        "phase3_lane8_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_solver_rewrite_proof_pre_fix_failure"],
+            "checks": [],
+        },
+        "entries": [],
+    }
+
+    checks = _post_fix_checks(
+        baseline_manifest={"baseline_id": "observed-v0@0a53352"},
+        phase3_manifest=manifest,
+        phase3_manifest_path=Path("solver_rewrite_proof_lane8_representatives.json"),
+        actual_phase3_sha256="a" * 64,
+        expected_phase3_sha256="a" * 64,
+        entries=(),
+    )
+
+    ready_check = next(check for check in checks if check["kind"] == "phase3_pre_fix_manifest_ready")
+    assert ready_check["status"] == "failed"
+    assert "hidden_solver_rewrite_proof_pre_fix_failure" in ready_check["error"]
 
 
 def _param(name: str, index: int = 0, size: int = 4):

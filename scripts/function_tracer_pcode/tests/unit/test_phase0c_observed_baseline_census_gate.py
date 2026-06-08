@@ -150,6 +150,76 @@ def test_phase0c_observed_baseline_census_gate_rejects_duplicate_pair_identity(t
         validate_phase0c_observed_baseline_census_gate(gate)
 
 
+def test_phase0c_observed_baseline_census_gate_rejects_tampered_ready_observed_counts(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_observed_baseline_census_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        expected_final_result_counts={
+            "function_call": {"EQ": 1, "UNKNOWN": 1},
+            "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
+        },
+        expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 2, "loop": 2},
+        expected_combined_pair_log_count=4,
+        expected_combined_final_result_counts={
+            "EQ": 1,
+            "NOT_EQ": 1,
+            "UNKNOWN": 1,
+            "TIMEOUT": 1,
+        },
+        expected_combined_validation_unknown_units=2,
+        expected_combined_unknown_by_reason={
+            "return_coverage_gap": 1,
+            "solver_unknown_timeout": 1,
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_observed_baseline_census_ready"] is True
+
+    gate["observed"]["combined_pair_log_count"] = 999
+    gate["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_observed"):
+        validate_phase0c_observed_baseline_census_gate(gate)
+
+
+def test_phase0c_observed_baseline_census_gate_rejects_missing_materialized_context(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0c_observed_baseline_census_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+        expected_final_result_counts={
+            "function_call": {"EQ": 1, "UNKNOWN": 1},
+            "loop": {"NOT_EQ": 1, "TIMEOUT": 1},
+        },
+        expected_validation_unknown_units={"function_call": 1, "loop": 1},
+        expected_category_pair_log_counts={"function_call": 2, "loop": 2},
+        expected_combined_pair_log_count=4,
+        expected_combined_final_result_counts={
+            "EQ": 1,
+            "NOT_EQ": 1,
+            "UNKNOWN": 1,
+            "TIMEOUT": 1,
+        },
+        expected_combined_validation_unknown_units=2,
+        expected_combined_unknown_by_reason={
+            "return_coverage_gap": 1,
+            "solver_unknown_timeout": 1,
+        },
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0c_observed_baseline_census_ready"] is True
+
+    gate.pop("baseline_raw_artifact_ref")
+    gate["observed"]["combined_pair_log_count"] = 999
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase0c_observed_baseline_census_gate(gate)
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

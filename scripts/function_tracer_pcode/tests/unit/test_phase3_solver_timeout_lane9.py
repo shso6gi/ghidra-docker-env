@@ -227,6 +227,10 @@ def test_phase3_solver_timeout_lane9_manifest_and_post_fix_gate_ready(tmp_path):
     manifest = json.loads(pre_fix_path.read_text())
     assert manifest["phase3_lane9_ready"] is True
     validate_phase3_solver_timeout_lane9_manifest(manifest)
+    tampered_manifest = json.loads(json.dumps(manifest))
+    tampered_manifest["readiness"]["failure_kinds"] = ["hidden_lane9_failure"]
+    with pytest.raises(ValueError, match="hidden_lane9_failure"):
+        validate_phase3_solver_timeout_lane9_manifest(tampered_manifest)
 
     entry = manifest["entries"][0]
     assert len(entry["target_object_keys"]) == 1
@@ -263,6 +267,39 @@ def test_phase3_solver_timeout_lane9_manifest_and_post_fix_gate_ready(tmp_path):
         }
     ]
     validate_phase3_solver_timeout_lane9_post_fix_gate(gate)
+    tampered_gate = json.loads(json.dumps(gate))
+    tampered_gate["post_fix_regression_gate"]["summary"]["failed_kinds"] = ["hidden_lane9_post_fix_failure"]
+    with pytest.raises(ValueError, match="hidden_lane9_post_fix_failure"):
+        validate_phase3_solver_timeout_lane9_post_fix_gate(tampered_gate)
+    tampered_pre_fix = json.loads(pre_fix_path.read_text())
+    tampered_pre_fix["readiness"]["failure_kinds"] = ["hidden_lane9_pre_fix_manifest_failure"]
+    tampered_pre_fix_path = pre_fix_path.with_name(
+        "tampered_solver_timeout_lane9_representatives.json"
+    )
+    tampered_pre_fix_path.write_text(json.dumps(tampered_pre_fix))
+    tampered_pre_fix_gate_path = build_phase3_solver_timeout_lane9_post_fix_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate-tampered-pre-fix",
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+        phase3_manifest_path=tampered_pre_fix_path,
+        phase3_manifest_sha256=_sha256_path(tampered_pre_fix_path),
+    )
+    tampered_pre_fix_gate = json.loads(tampered_pre_fix_gate_path.read_text())
+    assert tampered_pre_fix_gate["phase3_lane9_post_fix_ready"] is False
+    assert (
+        "phase3_pre_fix_manifest_ready"
+        in tampered_pre_fix_gate["post_fix_regression_gate"]["summary"]["failed_kinds"]
+    )
+    ready_check = next(
+        check
+        for check in tampered_pre_fix_gate["post_fix_regression_gate"]["checks"]
+        if check["kind"] == "phase3_pre_fix_manifest_ready"
+    )
+    assert ready_check["status"] == "failed"
+    assert "hidden_lane9_pre_fix_manifest_failure" in ready_check["error"]
+    with pytest.raises(ValueError, match="phase3_pre_fix_manifest_ready"):
+        validate_phase3_solver_timeout_lane9_post_fix_gate(tampered_pre_fix_gate)
 
 
 def test_phase3_solver_timeout_lane9_manifest_rejects_missing_concrete_pair(tmp_path):

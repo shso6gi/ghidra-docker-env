@@ -74,6 +74,40 @@ def test_phase0a_observed_baseline_integrity_gate_rejects_missing_dirty_snapshot
         validate_phase0a_observed_baseline_integrity_gate(gate)
 
 
+def test_phase0a_observed_baseline_integrity_gate_rejects_tampered_ready_raw_evidence(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0a_observed_baseline_integrity_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0a_observed_baseline_integrity_ready"] is True
+
+    gate["raw_evidence"]["indexed_file_count"] = 999
+    gate["summary"]["failed"] = False
+
+    with pytest.raises(ValueError, match="materialized_raw_evidence"):
+        validate_phase0a_observed_baseline_integrity_gate(gate)
+
+
+def test_phase0a_observed_baseline_integrity_gate_rejects_missing_materialized_context(tmp_path):
+    raw_dir = _write_fixture(tmp_path)
+
+    path = build_phase0a_observed_baseline_integrity_gate(
+        baseline_raw_dir=raw_dir,
+        output_dir=tmp_path / "gate",
+    )
+    gate = json.loads(path.read_text())
+    assert gate["phase0a_observed_baseline_integrity_ready"] is True
+
+    gate.pop("baseline_raw_artifact_ref")
+    gate["raw_evidence"]["indexed_file_count"] = 999
+
+    with pytest.raises(ValueError, match="materialized_context_missing"):
+        validate_phase0a_observed_baseline_integrity_gate(gate)
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

@@ -179,6 +179,18 @@ def build_phase0d_not_eq_audit_gate(
         "expected_oracle_review_status_counts": dict(
             expected_oracle_review_status_counts or EXPECTED_ORACLE_REVIEW_STATUS_COUNTS
         ),
+        "expected_target_proof_lane_counts": dict(
+            expected_target_proof_lane_counts or EXPECTED_TARGET_PROOF_LANE_COUNTS
+        ),
+        "expected_replay_status_counts": dict(expected_replay_status_counts or EXPECTED_REPLAY_STATUS_COUNTS),
+        "expected_coverage_status_source_counts": dict(
+            expected_coverage_status_source_counts or EXPECTED_COVERAGE_STATUS_SOURCE_COUNTS
+        ),
+        "expected_audit_category_counts": dict(expected_audit_category_counts or EXPECTED_AUDIT_CATEGORY_COUNTS),
+        "expected_oracle_scope_counts": dict(expected_oracle_scope_counts or EXPECTED_ORACLE_SCOPE_COUNTS),
+        "expected_oracle_expected_equivalent_counts": dict(
+            expected_oracle_expected_equivalent_counts or EXPECTED_ORACLE_EXPECTED_EQUIVALENT_COUNTS
+        ),
         "classification_counts": _classification_counts(audit),
         "oracle_review_status_counts": _oracle_review_status_counts(oracle),
         "audit_acceptance_posture": audit_posture,
@@ -194,15 +206,190 @@ def build_phase0d_not_eq_audit_gate(
 
 
 def validate_phase0d_not_eq_audit_gate(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("phase0d_not_eq_audit_ready") is True:
-        return
     summary = manifest.get("summary")
+    failures = []
     if not isinstance(summary, Mapping):
-        raise ValueError("Phase 0D NOT_EQ audit gate is not ready and summary is missing")
-    failed = summary.get("failed_kinds") or ()
-    if not failed:
+        failures.append("summary_missing")
+    else:
+        failures.extend(str(kind) for kind in (summary.get("failed_kinds") or ()))
+    checks = manifest.get("checks")
+    if isinstance(checks, list):
+        failures.extend(
+            str(check.get("kind"))
+            for check in checks
+            if isinstance(check, Mapping) and check.get("status") == "failed"
+        )
+    else:
+        failures.append("checks_missing")
+    if manifest.get("phase0d_not_eq_audit_ready") is not True:
+        failures.append("phase0d_not_eq_audit_not_ready")
+    materialized = _materialize_phase0d_gate_from_manifest(manifest)
+    if materialized is None:
+        failures.append("materialized_context_missing")
+    else:
+        for key in (
+            "baseline_id",
+            "baseline_git_head",
+            "baseline_raw_artifact_ref",
+            "audit_manifest_ref",
+            "oracle_manifest_ref",
+            "expected_entry_count",
+            "expected_classification_counts",
+            "expected_oracle_review_status_counts",
+            "expected_target_proof_lane_counts",
+            "expected_replay_status_counts",
+            "expected_coverage_status_source_counts",
+            "expected_audit_category_counts",
+            "expected_oracle_scope_counts",
+            "expected_oracle_expected_equivalent_counts",
+            "classification_counts",
+            "oracle_review_status_counts",
+            "audit_acceptance_posture",
+            "audit_concrete_identities",
+            "oracle_posture",
+            "phase0d_not_eq_audit_ready",
+            "summary",
+            "checks",
+        ):
+            if not _strict_json_equal(manifest.get(key), materialized.get(key)):
+                failures.append(f"materialized_{key}")
+    failures = list(dict.fromkeys(failures))
+    if not failures:
+        return
+    if manifest.get("phase0d_not_eq_audit_ready") is False and failures == ["phase0d_not_eq_audit_not_ready"]:
         raise ValueError("Phase 0D NOT_EQ audit gate is not ready without failed gate kinds")
-    raise ValueError(f"Phase 0D NOT_EQ audit gate failed: {', '.join(map(str, failed))}")
+    raise ValueError(f"Phase 0D NOT_EQ audit gate failed: {', '.join(map(str, failures))}")
+
+
+def _materialize_phase0d_gate_from_manifest(manifest: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    baseline_ref = manifest.get("baseline_raw_artifact_ref")
+    audit_ref = manifest.get("audit_manifest_ref")
+    oracle_ref = manifest.get("oracle_manifest_ref")
+    if not isinstance(baseline_ref, Mapping) or not isinstance(audit_ref, Mapping) or not isinstance(oracle_ref, Mapping):
+        return None
+    baseline_manifest_path = baseline_ref.get("path")
+    audit_path = audit_ref.get("path")
+    oracle_path = oracle_ref.get("path")
+    if not isinstance(baseline_manifest_path, str) or not isinstance(audit_path, str) or not isinstance(oracle_path, str):
+        return None
+    raw_manifest_path = Path(baseline_manifest_path)
+    audit_manifest_path = Path(audit_path)
+    oracle_manifest_path = Path(oracle_path)
+    if not raw_manifest_path.is_file() or not audit_manifest_path.is_file() or not oracle_manifest_path.is_file():
+        return None
+
+    raw_dir = raw_manifest_path.parent
+    raw_manifest = _read_json(raw_manifest_path)
+    audit = _read_json(audit_manifest_path)
+    oracle = _read_json(oracle_manifest_path)
+    expected_entry_count = manifest.get("expected_entry_count")
+    if not isinstance(expected_entry_count, int):
+        return None
+    expected_classification_counts = dict(
+        manifest.get("expected_classification_counts") or EXPECTED_CLASSIFICATION_COUNTS
+    )
+    expected_oracle_review_status_counts = dict(
+        manifest.get("expected_oracle_review_status_counts") or EXPECTED_ORACLE_REVIEW_STATUS_COUNTS
+    )
+    expected_target_proof_lane_counts = dict(
+        manifest.get("expected_target_proof_lane_counts") or EXPECTED_TARGET_PROOF_LANE_COUNTS
+    )
+    expected_replay_status_counts = dict(
+        manifest.get("expected_replay_status_counts") or EXPECTED_REPLAY_STATUS_COUNTS
+    )
+    expected_coverage_status_source_counts = dict(
+        manifest.get("expected_coverage_status_source_counts") or EXPECTED_COVERAGE_STATUS_SOURCE_COUNTS
+    )
+    expected_audit_category_counts = dict(
+        manifest.get("expected_audit_category_counts") or EXPECTED_AUDIT_CATEGORY_COUNTS
+    )
+    expected_oracle_scope_counts = dict(
+        manifest.get("expected_oracle_scope_counts") or EXPECTED_ORACLE_SCOPE_COUNTS
+    )
+    expected_oracle_expected_equivalent_counts = dict(
+        manifest.get("expected_oracle_expected_equivalent_counts")
+        or EXPECTED_ORACLE_EXPECTED_EQUIVALENT_COUNTS
+    )
+
+    checks = []
+    checks.extend(_schema_checks(audit, oracle))
+    checks.extend(_baseline_identity_checks(raw_manifest, audit, oracle))
+    checks.extend(
+        _count_checks(
+            audit=audit,
+            oracle=oracle,
+            expected_entry_count=expected_entry_count,
+            expected_classification_counts=expected_classification_counts,
+            expected_oracle_review_status_counts=expected_oracle_review_status_counts,
+        )
+    )
+    checks.extend(_oracle_scope_checks(audit, oracle))
+    checks.extend(_audit_source_log_checks(audit, raw_dir))
+    audit_posture = _audit_acceptance_posture(audit)
+    checks.extend(
+        _audit_acceptance_posture_checks(
+            audit_posture,
+            expected_target_proof_lane_counts=expected_target_proof_lane_counts,
+            expected_replay_status_counts=expected_replay_status_counts,
+            expected_coverage_status_source_counts=expected_coverage_status_source_counts,
+        )
+    )
+    concrete_identity_report = _audit_concrete_identity_report(audit)
+    checks.extend(
+        _audit_concrete_identity_checks(
+            concrete_identity_report,
+            expected_audit_category_counts=expected_audit_category_counts,
+        )
+    )
+    oracle_posture = _oracle_posture(oracle)
+    checks.extend(
+        _oracle_posture_checks(
+            oracle_posture,
+            expected_oracle_scope_counts=expected_oracle_scope_counts,
+            expected_oracle_expected_equivalent_counts=expected_oracle_expected_equivalent_counts,
+        )
+    )
+    summary = _summary(checks)
+    return {
+        "baseline_id": raw_manifest.get("baseline_id"),
+        "baseline_git_head": raw_manifest.get("git_head"),
+        "baseline_raw_artifact_ref": {"path": str(raw_manifest_path)},
+        "audit_manifest_ref": {
+            "path": str(audit_manifest_path),
+            "sha256": _sha256_file(audit_manifest_path),
+            "entry_count": len(audit.get("entries") or ()),
+        },
+        "oracle_manifest_ref": {
+            "path": str(oracle_manifest_path),
+            "sha256": _sha256_file(oracle_manifest_path),
+            "entry_count": len(oracle.get("entries") or ()),
+        },
+        "expected_entry_count": expected_entry_count,
+        "expected_classification_counts": expected_classification_counts,
+        "expected_oracle_review_status_counts": expected_oracle_review_status_counts,
+        "expected_target_proof_lane_counts": expected_target_proof_lane_counts,
+        "expected_replay_status_counts": expected_replay_status_counts,
+        "expected_coverage_status_source_counts": expected_coverage_status_source_counts,
+        "expected_audit_category_counts": expected_audit_category_counts,
+        "expected_oracle_scope_counts": expected_oracle_scope_counts,
+        "expected_oracle_expected_equivalent_counts": expected_oracle_expected_equivalent_counts,
+        "classification_counts": _classification_counts(audit),
+        "oracle_review_status_counts": _oracle_review_status_counts(oracle),
+        "audit_acceptance_posture": audit_posture,
+        "audit_concrete_identities": concrete_identity_report,
+        "oracle_posture": oracle_posture,
+        "phase0d_not_eq_audit_ready": summary["failed"] == 0,
+        "summary": summary,
+        "checks": checks,
+    }
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    return json.dumps(left, sort_keys=True, separators=(",", ":")) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

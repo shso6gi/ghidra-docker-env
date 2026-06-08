@@ -378,7 +378,9 @@ def validate_phase3_lane_index(
         if failed_check_kinds != _failed_check_kinds(derived_checks):
             failures.append("derived_failed_kinds")
         materialized_context = _materialized_lane_context(manifest)
-        if materialized_context is not None:
+        if materialized_context is None:
+            failures.append("materialized_context_missing")
+        else:
             materialized_lanes = [
                 _materialize_lane(materialized_context["baseline_root"], materialized_context["repo_root"], spec)
                 for spec in specs

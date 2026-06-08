@@ -449,6 +449,16 @@ def test_build_phase1_readiness_accepts_created_synthetic_negatives_and_verified
         "argument storage mismatch",
     ]
     validate_phase1_readiness(index)
+    tampered_readiness = json.loads(json.dumps(index))
+    tampered_readiness["readiness"]["blocking_issues"] = [
+        {"kind": "hidden_phase1_blocking_issue"}
+    ]
+    with pytest.raises(ValueError, match="hidden_phase1_blocking_issue"):
+        validate_phase1_readiness(tampered_readiness)
+    tampered_context = json.loads(json.dumps(index))
+    del tampered_context["readiness"]
+    with pytest.raises(ValueError, match="readiness_missing"):
+        validate_phase1_readiness(tampered_context)
 
 
 def test_synthetic_manifest_rejects_created_negative_without_oracle_and_artifact_fields():
@@ -509,9 +519,11 @@ def _synthetic_negative_entry(entry_id, negative_case, function, left, right):
             "classification": "ground_truth_not_eq",
             "oracle_review_status": "accepted",
             "expected_equivalent": False,
+            "oracle_source": "synthetic_negative_fixture",
             "oracle_exception": False,
             "eq_goal_excluded": True,
             "counterexample_replay_status": "passed",
+            "counterexample": {"status": "replayed", "input": {"x": 1}},
             "abi_storage_width_proof": "passed",
             "return_compare_width_proof": "passed",
             "ub_exclusion_rule": "defined_inputs_only",

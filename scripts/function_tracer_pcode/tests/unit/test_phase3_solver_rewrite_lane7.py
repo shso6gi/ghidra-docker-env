@@ -4,6 +4,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.equivalence.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.equivalence.unknown_reason import build_proof_obligation_id
@@ -27,7 +29,10 @@ from scripts.function_tracer_pcode.validation.phase3_solver_rewrite_lane7 import
     _action_has_expected_id,
     _action_matches_lane_definition,
     _object_target_key_is_specific_solver_rewrite_candidate,
+    _post_fix_checks,
     _post_fix_status,
+    validate_phase3_solver_rewrite_lane7_manifest,
+    validate_phase3_solver_rewrite_lane7_post_fix_gate,
 )
 from scripts.function_tracer_pcode.validation.phase3_return_width_bridge_lane2 import _display_path
 
@@ -47,6 +52,69 @@ def test_phase3_gate_display_path_uses_repo_relative_paths():
     absolute_path = repo_root / "logs/equivalence_all/lane7/example.log"
 
     assert _display_path(absolute_path) == "logs/equivalence_all/lane7/example.log"
+
+
+def test_solver_rewrite_manifest_validator_rejects_ready_without_readiness():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_lane7_representatives",
+        "phase3_lane7_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="solver_rewrite_readiness_missing"):
+        validate_phase3_solver_rewrite_lane7_manifest(manifest)
+
+
+def test_solver_rewrite_manifest_validator_rejects_hidden_failed_kind():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_lane7_representatives",
+        "phase3_lane7_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_solver_rewrite_failure"],
+            "checks": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="hidden_solver_rewrite_failure"):
+        validate_phase3_solver_rewrite_lane7_manifest(manifest)
+
+
+def test_solver_rewrite_post_fix_gate_validator_rejects_ready_without_checks():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_lane7_post_fix_gate",
+        "phase3_lane7_post_fix_ready": True,
+    }
+
+    with pytest.raises(ValueError, match="solver_rewrite_post_fix_checks_missing"):
+        validate_phase3_solver_rewrite_lane7_post_fix_gate(manifest)
+
+
+def test_solver_rewrite_post_fix_checks_reject_tampered_pre_fix_manifest_ready():
+    manifest = {
+        "manifest_kind": "phase3_solver_rewrite_lane7_representatives",
+        "phase3_lane7_ready": True,
+        "readiness": {
+            "ready": True,
+            "failed_checks": [],
+            "failed_kinds": ["hidden_solver_rewrite_pre_fix_failure"],
+            "checks": [],
+        },
+        "entries": [],
+    }
+
+    checks = _post_fix_checks(
+        baseline_manifest={"baseline_id": "observed-v0@0a53352"},
+        phase3_manifest=manifest,
+        phase3_manifest_path=Path("solver_rewrite_lane7_representatives.json"),
+        actual_phase3_sha256="a" * 64,
+        expected_phase3_sha256="a" * 64,
+        entries=(),
+    )
+
+    ready_check = next(check for check in checks if check["kind"] == "phase3_pre_fix_manifest_ready")
+    assert ready_check["status"] == "failed"
+    assert "hidden_solver_rewrite_pre_fix_failure" in ready_check["error"]
 
 
 def _pcode(binary_id: str, offset: int, mnemonic: str = "RETURN") -> PcodeOpRef:
