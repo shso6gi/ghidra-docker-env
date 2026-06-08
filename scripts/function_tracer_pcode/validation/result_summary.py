@@ -8,6 +8,8 @@ should be generated from this module so their counts cannot drift.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
@@ -291,6 +293,37 @@ def compare_validation_baseline_records(
         missing_pair_identities=tuple(sorted(before_pair_identities - after_pair_identities)),
         added_pair_identities=tuple(sorted(after_pair_identities - before_pair_identities)),
     )
+
+
+def canonical_validation_surface(records: Iterable[ValidationLogRecord]) -> Dict[str, Any]:
+    """Return the deterministic comparison surface for validation log records."""
+
+    record_tuple = tuple(records)
+    unknown_summary = summarize_validation_unknowns(_payloads_from_records(record_tuple))
+    return {
+        "total_results": len(record_tuple),
+        "final_result_counts": _status_counts(record_tuple),
+        "unknown_final_results": _status_counts(record_tuple).get(STATUS_UNKNOWN, 0),
+        "timeout_final_results": _status_counts(record_tuple).get(STATUS_TIMEOUT, 0),
+        "timeout_class_multiset": _string_count_items(_timeout_class_multiset(record_tuple)),
+        "validation_unknown_unit_multiset": _tuple_count_items(
+            unknown_summary.validation_unknown_unit_multiset
+        ),
+        "reason_record_multiset": _tuple_count_items(unknown_summary.reason_record_multiset),
+        "proof_action_multiset": _tuple_count_items(unknown_summary.proof_action_multiset),
+        "pair_final_result_multiset": _tuple_count_items(_pair_final_result_multiset(record_tuple)),
+        "pair_result_multiset": _tuple_count_items(_pair_result_multiset(record_tuple)),
+        "pair_identities": [list(item) for item in sorted(_pair_identity_set(record_tuple))],
+    }
+
+
+def canonical_validation_surface_hash(records: Iterable[ValidationLogRecord]) -> str:
+    payload = json.dumps(
+        canonical_validation_surface(records),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def scope_baseline_records_for_after_pairs(
@@ -718,6 +751,20 @@ def _status_counts(records: Iterable[ValidationLogRecord]) -> Dict[str, int]:
         status = record.status if record.status in counts else STATUS_UNKNOWN
         counts[status] += 1
     return counts
+
+
+def _string_count_items(counts: Mapping[str, int]) -> Sequence[Dict[str, Any]]:
+    return [
+        {"key": str(key), "count": int(value)}
+        for key, value in sorted(counts.items(), key=lambda item: str(item[0]))
+    ]
+
+
+def _tuple_count_items(counts: Mapping[Any, int]) -> Sequence[Dict[str, Any]]:
+    return [
+        {"key": list(key) if isinstance(key, tuple) else key, "count": int(value)}
+        for key, value in sorted(counts.items(), key=lambda item: str(item[0]))
+    ]
 
 
 def _pair_result_multiset(records: Iterable[ValidationLogRecord]) -> Dict[Tuple[str, ...], int]:

@@ -57,6 +57,8 @@ def build_phase1_concrete_manifest_gate(
     checks.extend(_object_evidence_ref_checks(manifests["positive"], phase1_root))
     checks.extend(_synthetic_artifact_ref_checks(manifests["synthetic"], phase1_root))
     checks.extend(_minimum_negative_case_checks(manifests["negative"]))
+    concrete_identity_report = _concrete_identity_report(manifests)
+    checks.extend(_concrete_identity_checks(concrete_identity_report))
 
     manifest_hashes = {
         "index": _sha256_file(index_path),
@@ -79,6 +81,7 @@ def build_phase1_concrete_manifest_gate(
             "manifest_hashes": manifest_hashes,
         },
         "counts": dict(index.get("counts") or {}),
+        "concrete_identities": concrete_identity_report,
         "phase1_concrete_manifest_ready": summary["failed"] == 0,
         "summary": summary,
         "checks": checks,
@@ -320,6 +323,130 @@ def _minimum_negative_case_checks(negative: Mapping[str, Any]) -> Sequence[Dict[
         else _failed("negative_minimum_cases_complete", missing_cases=missing),
     ]
     return checks
+
+
+def _concrete_identity_report(manifests: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    entries = []
+    for manifest_name in ("positive", "negative", "representative"):
+        for entry in manifests[manifest_name].get("entries") or ():
+            entries.append(_concrete_identity_entry(manifest_name, entry))
+    for entry in manifests["synthetic"].get("entries") or ():
+        entries.append(_concrete_identity_entry("synthetic", entry))
+    for entry in manifests["synthetic"].get("synthetic_negative_entries") or ():
+        entries.append(_concrete_identity_entry("synthetic_negative", entry))
+
+    id_counts: Dict[str, int] = {}
+    identity_counts: Dict[tuple[str, str, str, str], int] = {}
+    missing = []
+    pair_mismatches = []
+    for entry in entries:
+        is_synthetic_artifact_mirror = entry.get("manifest") == "synthetic_negative"
+        entry_id = str(entry.get("id") or "")
+        if entry_id and not is_synthetic_artifact_mirror:
+            id_counts[entry_id] = int(id_counts.get(entry_id, 0) or 0) + 1
+        required_missing = [
+            field_name
+            for field_name in ("id", "category", "function", "binary_pair", "left_binary_id", "right_binary_id")
+            if not entry.get(field_name)
+        ]
+        if required_missing:
+            missing.append(
+                {
+                    "manifest": entry.get("manifest"),
+                    "id": entry.get("id"),
+                    "missing_fields": required_missing,
+                }
+            )
+            continue
+        identity = (
+            str(entry["category"]),
+            str(entry["function"]),
+            str(entry["binary_pair"]),
+            str(entry["id"]),
+        )
+        if not is_synthetic_artifact_mirror:
+            identity_counts[identity] = int(identity_counts.get(identity, 0) or 0) + 1
+        expected_pair = _canonical_binary_pair_from_sides(entry["left_binary_id"], entry["right_binary_id"])
+        if str(entry["binary_pair"]) != expected_pair:
+            pair_mismatches.append(
+                {
+                    "manifest": entry.get("manifest"),
+                    "id": entry.get("id"),
+                    "binary_pair": entry.get("binary_pair"),
+                    "expected_binary_pair": expected_pair,
+                    "left_binary_id": entry.get("left_binary_id"),
+                    "right_binary_id": entry.get("right_binary_id"),
+                }
+            )
+
+    duplicate_ids = sorted(entry_id for entry_id, count in id_counts.items() if count > 1)
+    duplicate_identities = [
+        {
+            "category": key[0],
+            "function": key[1],
+            "binary_pair": key[2],
+            "id": key[3],
+            "count": count,
+        }
+        for key, count in sorted(identity_counts.items())
+        if count > 1
+    ]
+    return {
+        "entry_count": len(entries),
+        "unique_entry_id_count": len(id_counts),
+        "unique_concrete_identity_count": len(identity_counts),
+        "duplicate_entry_ids": duplicate_ids,
+        "duplicate_concrete_identities": duplicate_identities,
+        "missing_concrete_identity_fields": missing,
+        "binary_pair_side_mismatches": pair_mismatches,
+        "entries": entries,
+    }
+
+
+def _concrete_identity_entry(manifest_name: str, entry: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "manifest": manifest_name,
+        "id": entry.get("id"),
+        "category": entry.get("category"),
+        "function": entry.get("function"),
+        "binary_pair": entry.get("binary_pair"),
+        "left_binary_id": entry.get("left_binary_id"),
+        "right_binary_id": entry.get("right_binary_id"),
+    }
+
+
+def _concrete_identity_checks(report: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    duplicate_ids = list(report.get("duplicate_entry_ids") or ())
+    duplicate_identities = list(report.get("duplicate_concrete_identities") or ())
+    missing = list(report.get("missing_concrete_identity_fields") or ())
+    pair_mismatches = list(report.get("binary_pair_side_mismatches") or ())
+    return [
+        _ok("phase1_entry_ids_globally_unique", count=report.get("unique_entry_id_count"))
+        if not duplicate_ids
+        else _failed("phase1_entry_ids_globally_unique", duplicate_entry_ids=duplicate_ids),
+        _ok("phase1_concrete_identities_unique", count=report.get("unique_concrete_identity_count"))
+        if not duplicate_identities
+        else _failed("phase1_concrete_identities_unique", duplicate_concrete_identities=duplicate_identities),
+        _ok("phase1_concrete_identity_fields_present", count=report.get("entry_count"))
+        if not missing
+        else _failed("phase1_concrete_identity_fields_present", missing=missing),
+        _ok("phase1_binary_pair_matches_sides", count=report.get("entry_count"))
+        if not pair_mismatches
+        else _failed("phase1_binary_pair_matches_sides", mismatches=pair_mismatches),
+    ]
+
+
+def _canonical_binary_pair_from_sides(left: Any, right: Any) -> str:
+    return "_".join(sorted((str(left), str(right)), key=_binary_sort_key))
+
+
+def _binary_sort_key(binary_id: str) -> tuple[int, str]:
+    text = str(binary_id)
+    if len(text) > 1 and text[0].upper() == "B" and text[1:].isdigit():
+        return (0, f"{int(text[1:]):04d}")
+    if len(text) > 1 and text[0].upper() == "S" and text[1:].isdigit():
+        return (1, f"{int(text[1:]):04d}")
+    return (2, text)
 
 
 def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:

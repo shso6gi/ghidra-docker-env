@@ -17,6 +17,8 @@ __all__ = [
     "aggregate_validation_logs_by_function",
     "assert_aggregation_invariant",
     "compare_validation_unknowns",
+    "canonical_validation_surface",
+    "canonical_validation_surface_hash",
     "extract_result_payloads_from_logs",
     "extract_result_payloads_from_text",
     "format_function_results_summary",
@@ -47,6 +49,8 @@ def __getattr__(name):
         "aggregate_validation_logs",
         "aggregate_validation_logs_by_function",
         "assert_aggregation_invariant",
+        "canonical_validation_surface",
+        "canonical_validation_surface_hash",
         "format_function_results_summary",
         "format_overall_results_summary",
     }:

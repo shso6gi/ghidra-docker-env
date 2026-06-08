@@ -14,7 +14,7 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from .result_summary import STATUS_TIMEOUT, STATUS_UNKNOWN, aggregate_validation_logs
 from .unknown_reason_summary import diagnose_unknown_reason_correspondence, summarize_validation_unknowns
@@ -39,31 +39,65 @@ BLOCKING_CORRESPONDENCE_CLASSIFICATIONS = frozenset(
         "raw_log_missing",
     }
 )
+EXPECTED_CATEGORY_CLASSIFICATION_COUNTS: Mapping[str, Mapping[str, int]] = {
+    "function_call": {
+        "aggregation_difference": 3,
+        "proof_action_expansion": 11,
+    },
+    "loop": {
+        "aggregation_difference": 2,
+        "proof_action_expansion": 13,
+    },
+}
+EXPECTED_COMBINED_CLASSIFICATION_COUNTS: Mapping[str, int] = {
+    "aggregation_difference": 5,
+    "proof_action_expansion": 24,
+}
 
 
 def build_phase0b_unknown_reason_correspondence_gate(
     *,
     baseline_raw_dir: Path,
     output_dir: Path,
+    current_log_roots: Optional[Mapping[str, Path]] = None,
     categories: Sequence[str] = EXPECTED_CATEGORIES,
+    expected_category_classification_counts: Optional[Mapping[str, Mapping[str, int]]] = None,
+    expected_combined_classification_counts: Optional[Mapping[str, int]] = None,
 ) -> Path:
     raw_dir = Path(baseline_raw_dir)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
     raw_manifest = _read_json(raw_dir / "artifact_manifest.json")
+    category_names = tuple(str(category) for category in categories)
+    current_roots = _normalize_current_roots(
+        raw_dir=raw_dir,
+        categories=category_names,
+        current_log_roots=current_log_roots,
+    )
     category_reports: Dict[str, Any] = {}
     checks = []
     checks.extend(_baseline_identity_checks(raw_manifest))
+    expected_category_counts = {
+        str(category): {str(key): int(value) for key, value in counts.items()}
+        for category, counts in (
+            expected_category_classification_counts or EXPECTED_CATEGORY_CLASSIFICATION_COUNTS
+        ).items()
+    }
+    expected_combined_counts = _expected_combined_counts_for_categories(
+        category_names,
+        expected_category_counts,
+        expected_combined_classification_counts,
+    )
 
     combined_counts: Counter[str] = Counter()
     combined_blocking_counts: Counter[str] = Counter()
-    for category in tuple(str(item) for item in categories):
-        report = _build_category_report(raw_dir / "logs" / category)
+    for category in category_names:
+        report = _build_category_report(current_roots[category])
         category_reports[category] = report
         combined_counts.update(report["classification_counts"])
         combined_blocking_counts.update(report["blocking_classification_counts"])
-        checks.extend(_category_checks(category, report))
+        checks.extend(_category_checks(category, report, expected_category_counts.get(category, {})))
 
     checks.append(
         _ok("correspondence_blocking_classifications_absent")
@@ -71,6 +105,15 @@ def build_phase0b_unknown_reason_correspondence_gate(
         else _failed(
             "correspondence_blocking_classifications_absent",
             blocking_classification_counts=dict(sorted(combined_blocking_counts.items())),
+        )
+    )
+    checks.append(
+        _ok("combined_classification_counts_expected", counts=dict(sorted(combined_counts.items())))
+        if dict(sorted(combined_counts.items())) == dict(sorted(expected_combined_counts.items()))
+        else _failed(
+            "combined_classification_counts_expected",
+            expected=dict(sorted(expected_combined_counts.items())),
+            actual=dict(sorted(combined_counts.items())),
         )
     )
 
@@ -85,6 +128,14 @@ def build_phase0b_unknown_reason_correspondence_gate(
         "baseline_raw_artifact_ref": {
             "path": str(raw_dir / "artifact_manifest.json"),
         },
+        "baseline_log_roots": {
+            category: str(raw_dir / "logs" / category)
+            for category in category_names
+        },
+        "current_log_roots": {
+            category: str(path)
+            for category, path in sorted(current_roots.items())
+        },
         "diagnostic_model": {
             "required_classification_enum": sorted(ALLOWED_CORRESPONDENCE_CLASSIFICATIONS),
             "blocking_classifications": sorted(BLOCKING_CORRESPONDENCE_CLASSIFICATIONS),
@@ -92,6 +143,10 @@ def build_phase0b_unknown_reason_correspondence_gate(
                 ALLOWED_CORRESPONDENCE_CLASSIFICATIONS - BLOCKING_CORRESPONDENCE_CLASSIFICATIONS
             ),
             "comparison": "validation_unknown_unit_vs_reason_record_vs_proof_action",
+        },
+        "expected": {
+            "category_classification_counts": expected_category_counts,
+            "combined_classification_counts": expected_combined_counts,
         },
         "categories": category_reports,
         "combined_classification_counts": dict(sorted(combined_counts.items())),
@@ -122,18 +177,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--baseline-raw-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--category", action="append", default=None)
+    parser.add_argument(
+        "--current-log-root",
+        action="append",
+        default=None,
+        metavar="CATEGORY=PATH",
+        help="current validation log root for a category; may be repeated",
+    )
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args(argv)
 
     path = build_phase0b_unknown_reason_correspondence_gate(
         baseline_raw_dir=Path(args.baseline_raw_dir),
         output_dir=Path(args.output_dir),
+        current_log_roots=_parse_current_log_roots(args.current_log_root or ()),
         categories=tuple(args.category or EXPECTED_CATEGORIES),
     )
     print(path)
     if args.require_ready:
         validate_phase0b_unknown_reason_correspondence_gate(_read_json(path))
     return 0
+
+
+def _normalize_current_roots(
+    *,
+    raw_dir: Path,
+    categories: Sequence[str],
+    current_log_roots: Optional[Mapping[str, Path]],
+) -> Dict[str, Path]:
+    current = {str(category): Path(path) for category, path in (current_log_roots or {}).items()}
+    expected_categories = set(categories)
+    unknown_categories = sorted(set(current) - expected_categories)
+    if unknown_categories:
+        raise ValueError(
+            "unknown --current-log-root category: "
+            f"{', '.join(unknown_categories)}; expected one of {', '.join(sorted(expected_categories))}"
+        )
+    return {
+        category: current.get(category, raw_dir / "logs" / category)
+        for category in categories
+    }
 
 
 def _build_category_report(log_root: Path) -> Dict[str, Any]:
@@ -200,9 +283,21 @@ def _baseline_identity_checks(raw_manifest: Mapping[str, Any]) -> Sequence[Dict[
     ]
 
 
-def _category_checks(category: str, report: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+def _category_checks(
+    category: str,
+    report: Mapping[str, Any],
+    expected_classification_counts: Mapping[str, int],
+) -> Sequence[Dict[str, Any]]:
     unexpected = report.get("unexpected_classifications") or ()
     blocking = report.get("blocking_classification_counts") or {}
+    actual_counts = {
+        str(key): int(value)
+        for key, value in (report.get("classification_counts") or {}).items()
+    }
+    expected_counts = {
+        str(key): int(value)
+        for key, value in expected_classification_counts.items()
+    }
     return [
         _ok("category_logs_present", category=category, count=report.get("pair_log_count"))
         if int(report.get("pair_log_count") or 0) > 0
@@ -217,7 +312,49 @@ def _category_checks(category: str, report: Mapping[str, Any]) -> Sequence[Dict[
             category=category,
             blocking_classification_counts=dict(blocking),
         ),
+        _ok("category_classification_counts_expected", category=category, counts=actual_counts)
+        if actual_counts == expected_counts
+        else _failed(
+            "category_classification_counts_expected",
+            category=category,
+            expected=expected_counts,
+            actual=actual_counts,
+        ),
     ]
+
+
+def _parse_current_log_roots(values: Iterable[str]) -> Dict[str, Path]:
+    parsed: Dict[str, Path] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"--current-log-root must be CATEGORY=PATH, got {value!r}")
+        category, raw_path = value.split("=", 1)
+        category = category.strip()
+        if not category:
+            raise ValueError(f"--current-log-root category is empty in {value!r}")
+        parsed[category] = Path(raw_path)
+    return parsed
+
+
+def _expected_combined_counts_for_categories(
+    categories: Sequence[str],
+    expected_category_counts: Mapping[str, Mapping[str, int]],
+    explicit_expected_combined_counts: Optional[Mapping[str, int]],
+) -> Dict[str, int]:
+    if explicit_expected_combined_counts is not None:
+        return {
+            str(key): int(value)
+            for key, value in explicit_expected_combined_counts.items()
+        }
+    combined: Counter[str] = Counter()
+    for category in categories:
+        combined.update(
+            {
+                str(key): int(value)
+                for key, value in (expected_category_counts.get(str(category)) or {}).items()
+            }
+        )
+    return dict(sorted(combined.items()))
 
 
 def _summary(checks: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:

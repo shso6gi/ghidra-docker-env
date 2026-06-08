@@ -22,6 +22,8 @@ from scripts.function_tracer_pcode.validation.result_summary import (
     aggregate_validation_logs,
     aggregate_validation_logs_by_function,
     assert_aggregation_invariant,
+    canonical_validation_surface,
+    canonical_validation_surface_hash,
     classify_log_text,
     compare_validation_baseline_records,
     format_function_results_summary,
@@ -82,6 +84,35 @@ def test_validation_classifier_prefers_typed_payload_over_human_text():
     )
 
     assert classify_log_text(text) == STATUS_UNKNOWN
+
+
+def test_canonical_validation_surface_hash_is_stable_for_sorted_multisets(tmp_path):
+    log_a = _write_log(
+        tmp_path,
+        "fc_demo/fc_demo_B1_B2.log",
+        "Result: UNKNOWN",
+        _payload(
+            "fc_demo",
+            None,
+            binary1_name="B1",
+            binary2_name="B2",
+            unknown_reasons=[make_unknown_reason(UnknownReasonId.RETURN_COVERAGE_GAP).to_dict()],
+        ),
+    )
+    log_b = _write_log(
+        tmp_path,
+        "fc_demo/fc_demo_B1_B3.log",
+        "Result: EQUIVALENT",
+        _payload("fc_demo", True, binary1_name="B1", binary2_name="B3"),
+    )
+    forward = aggregate_validation_logs([log_a, log_b]).records
+    reversed_order = aggregate_validation_logs([log_b, log_a]).records
+
+    surface = canonical_validation_surface(forward)
+
+    assert surface["total_results"] == 2
+    assert surface["pair_identities"] == [["fc_demo", "B1 ↔ B2"], ["fc_demo", "B1 ↔ B3"]]
+    assert canonical_validation_surface_hash(forward) == canonical_validation_surface_hash(reversed_order)
 
 
 def test_validation_classifier_marks_markerless_resultless_logs_incomplete():
@@ -1106,6 +1137,7 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
 
     assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
     phase0a_gate = script.index("./phase0a_validate_observed_baseline_integrity_gate.sh")
+    phase0b_gate = script.index("./phase0b_validate_unknown_reason_correspondence_gate.sh")
     phase0c_gate = script.index("./phase0c_validate_observed_baseline_census_gate.sh")
     phase0c_reproduction_gate = script.index("./phase0c_validate_canonical_reproduction_gate.sh")
     phase0d_gate = script.index("./phase0d_validate_not_eq_audit_gate.sh")
@@ -1116,13 +1148,15 @@ def test_rerun_full_analysis_runs_full_matrix_without_phase2_preflight():
         "./phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"
     )
 
-    assert phase0a_gate < phase0c_gate
+    assert phase0a_gate < phase0b_gate
+    assert phase0b_gate < phase0c_gate
     assert phase0c_gate < phase0c_reproduction_gate
     assert phase0c_reproduction_gate < phase0d_gate
     assert phase0d_gate < phase1_gate
     assert phase1_gate < phase15_gate
     assert phase15_gate < normal_full_matrix
     assert "phase0a_observed_baseline_integrity_gate_stdout.log" in script
+    assert "phase0b_unknown_reason_correspondence_gate_stdout.log" in script
     assert "phase0c_observed_baseline_census_gate_stdout.log" in script
     assert "phase0c_canonical_reproduction_gate_stdout.log" in script
     assert "phase0d_not_eq_audit_gate_stdout.log" in script
@@ -1175,6 +1209,31 @@ def test_phase0c_observed_baseline_census_gate_wrapper_validates_frozen_raw_logs
         'phase0c_observed_baseline_census_gate'
     ) in script
     assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
+    assert "--require-ready" in script
+
+
+def test_phase0b_unknown_reason_correspondence_gate_wrapper_validates_current_roots():
+    script_path = Path("phase0b_validate_unknown_reason_correspondence_gate.sh")
+    script = script_path.read_text()
+
+    assert os.access(script_path, os.X_OK)
+    assert "set -euo pipefail" in script
+    assert 'cd "$SCRIPT_DIR"' in script
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"' in script
+    assert 'BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"' in script
+    assert 'FUNCTION_CALL_CURRENT_LOG_ROOT="${FUNCTION_CALL_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/function_call}"' in script
+    assert 'LOOP_CURRENT_LOG_ROOT="${LOOP_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/loop}"' in script
+    assert (
+        'OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/'
+        'phase0b_unknown_reason_correspondence_gate}"'
+    ) in script
+    assert (
+        '"$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.'
+        'phase0b_unknown_reason_correspondence_gate'
+    ) in script
+    assert '--baseline-raw-dir "$BASELINE_ROOT/raw"' in script
+    assert '--current-log-root "function_call=$FUNCTION_CALL_CURRENT_LOG_ROOT"' in script
+    assert '--current-log-root "loop=$LOOP_CURRENT_LOG_ROOT"' in script
     assert "--require-ready" in script
 
 
@@ -1233,10 +1292,14 @@ def test_phase0_observed_baseline_gate_wrapper_runs_all_lightweight_gates():
     assert "set -euo pipefail" in script
     assert 'cd "$SCRIPT_DIR"' in script
     assert "./phase0a_validate_observed_baseline_integrity_gate.sh" in script
+    assert "./phase0b_validate_unknown_reason_correspondence_gate.sh" in script
     assert "./phase0c_validate_observed_baseline_census_gate.sh" in script
     assert "./phase0c_validate_canonical_reproduction_gate.sh" in script
     assert "./phase0d_validate_not_eq_audit_gate.sh" in script
     assert script.index("./phase0a_validate_observed_baseline_integrity_gate.sh") < script.index(
+        "./phase0b_validate_unknown_reason_correspondence_gate.sh"
+    )
+    assert script.index("./phase0b_validate_unknown_reason_correspondence_gate.sh") < script.index(
         "./phase0c_validate_observed_baseline_census_gate.sh"
     )
     assert script.index("./phase0c_validate_observed_baseline_census_gate.sh") < script.index(

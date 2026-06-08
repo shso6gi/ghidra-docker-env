@@ -111,6 +111,9 @@ run_and_log unit_tests_stdout.log \
 run_and_log phase0a_observed_baseline_integrity_gate_stdout.log \
     ./phase0a_validate_observed_baseline_integrity_gate.sh
 
+run_and_log phase0b_unknown_reason_correspondence_gate_stdout.log \
+    ./phase0b_validate_unknown_reason_correspondence_gate.sh
+
 run_and_log phase0c_observed_baseline_census_gate_stdout.log \
     ./phase0c_validate_observed_baseline_census_gate.sh
 

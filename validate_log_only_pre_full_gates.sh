@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "Log-only pre-full validation gates:"
-echo "  - Phase 0 observed-baseline integrity/census/audit gates"
+echo "  - Phase 0 observed-baseline integrity/correspondence/census/audit gates"
 echo "  - Phase 1 concrete manifest gate"
 echo "  - Phase 1.5 pre-semantic-fix regression gates"
 echo "  - Phase 2 equivalence_blocking_unsafety reduced log gate"

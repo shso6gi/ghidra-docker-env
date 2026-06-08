@@ -58,6 +58,26 @@ def test_phase1_concrete_manifest_gate_rejects_tampered_source_log(tmp_path):
         validate_phase1_concrete_manifest_gate(gate)
 
 
+def test_phase1_concrete_manifest_gate_rejects_duplicate_concrete_entry_id(tmp_path):
+    baseline_root, phase1_dir = _ready_phase1_fixture(tmp_path)
+    negative_path = phase1_dir / "negative_manifest.json"
+    negative = json.loads(negative_path.read_text())
+    negative["entries"][0]["id"] = "positive-control"
+    negative_path.write_text(json.dumps(negative), encoding="utf-8")
+
+    gate_path = build_phase1_concrete_manifest_gate(
+        phase1_dir=phase1_dir,
+        baseline_raw_dir=baseline_root / "raw",
+        output_dir=tmp_path / "gate",
+    )
+
+    gate = json.loads(gate_path.read_text())
+    assert gate["phase1_concrete_manifest_ready"] is False
+    assert "phase1_entry_ids_globally_unique" in gate["summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="phase1_entry_ids_globally_unique"):
+        validate_phase1_concrete_manifest_gate(gate)
+
+
 def _ready_phase1_fixture(tmp_path: Path):
     source_root = tmp_path / "logs" / "function_call_test"
     _write_log(

@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 from .result_summary import (
     ValidationBaselineComparison,
     aggregate_validation_logs,
+    canonical_validation_surface_hash,
     compare_validation_baseline_records,
 )
 
@@ -62,11 +63,19 @@ def build_phase0c_canonical_reproduction_gate(
         combined_before.extend(before_records)
         combined_after.extend(after_records)
         comparison = compare_validation_baseline_records(before_records, after_records)
-        category_comparisons[category] = _comparison_to_dict(comparison)
+        surface_hashes = _surface_hashes(before_records, after_records)
+        category_comparisons[category] = {
+            **_comparison_to_dict(comparison),
+            "canonical_surface_hashes": surface_hashes,
+            "canonical_surface_hash_match": surface_hashes["baseline"] == surface_hashes["current"],
+        }
         checks.extend(_comparison_checks(f"category:{category}", comparison))
+        checks.append(_surface_hash_check(f"category:{category}", surface_hashes))
 
     combined_comparison = compare_validation_baseline_records(combined_before, combined_after)
     checks.extend(_comparison_checks("combined", combined_comparison))
+    combined_surface_hashes = _surface_hashes(combined_before, combined_after)
+    checks.append(_surface_hash_check("combined", combined_surface_hashes))
 
     summary = _summary(checks)
     manifest = {
@@ -100,7 +109,13 @@ def build_phase0c_canonical_reproduction_gate(
             "pair_result",
         ],
         "category_comparisons": category_comparisons,
-        "combined_comparison": _comparison_to_dict(combined_comparison),
+        "combined_comparison": {
+            **_comparison_to_dict(combined_comparison),
+            "canonical_surface_hashes": combined_surface_hashes,
+            "canonical_surface_hash_match": (
+                combined_surface_hashes["baseline"] == combined_surface_hashes["current"]
+            ),
+        },
         "phase0c_canonical_reproduction_ready": summary["failed"] == 0,
         "summary": summary,
         "checks": checks,
@@ -237,6 +252,26 @@ def _comparison_to_dict(comparison: ValidationBaselineComparison) -> Dict[str, A
         "missing_pair_identities": [list(item) for item in comparison.missing_pair_identities],
         "added_pair_identities": [list(item) for item in comparison.added_pair_identities],
     }
+
+
+def _surface_hashes(before_records: Sequence[Any], after_records: Sequence[Any]) -> Dict[str, str]:
+    return {
+        "baseline": canonical_validation_surface_hash(before_records),
+        "current": canonical_validation_surface_hash(after_records),
+    }
+
+
+def _surface_hash_check(scope: str, surface_hashes: Mapping[str, str]) -> Dict[str, Any]:
+    return (
+        _ok("canonical_reproduction_surface_hash", scope=scope, surface_hash=surface_hashes["current"])
+        if surface_hashes["baseline"] == surface_hashes["current"]
+        else _failed(
+            "canonical_reproduction_surface_hash",
+            scope=scope,
+            baseline_hash=surface_hashes["baseline"],
+            current_hash=surface_hashes["current"],
+        )
+    )
 
 
 def _tuple_count_items(counts: Mapping[Any, int]) -> Sequence[Dict[str, Any]]:

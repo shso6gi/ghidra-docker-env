@@ -28,6 +28,11 @@ def test_phase0c_canonical_reproduction_gate_accepts_exact_reproduction(tmp_path
 
     assert gate["phase0c_canonical_reproduction_ready"] is True
     assert gate["combined_comparison"]["before_total_results"] == 4
+    assert gate["combined_comparison"]["canonical_surface_hash_match"] is True
+    assert (
+        gate["combined_comparison"]["canonical_surface_hashes"]["baseline"]
+        == gate["combined_comparison"]["canonical_surface_hashes"]["current"]
+    )
     validate_phase0c_canonical_reproduction_gate(gate)
 
 
@@ -79,6 +84,7 @@ def test_phase0c_canonical_reproduction_gate_rejects_reason_tuple_drift(tmp_path
     gate = json.loads(path.read_text())
 
     assert gate["phase0c_canonical_reproduction_ready"] is False
+    assert gate["combined_comparison"]["canonical_surface_hash_match"] is False
     with pytest.raises(ValueError, match="canonical_reproduction_validation_unknown_unit_multiset"):
         validate_phase0c_canonical_reproduction_gate(gate)
 

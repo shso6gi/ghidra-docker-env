@@ -13,12 +13,16 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 BASELINE_ROOT="${BASELINE_ROOT:-$SCRIPT_DIR/artifacts/baselines/observed-v0@0a53352}"
+FUNCTION_CALL_CURRENT_LOG_ROOT="${FUNCTION_CALL_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/function_call}"
+LOOP_CURRENT_LOG_ROOT="${LOOP_CURRENT_LOG_ROOT:-$BASELINE_ROOT/raw/logs/loop}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/logs/equivalence_all/phase0b_unknown_reason_correspondence_gate}"
 
 mkdir -p "$OUTPUT_DIR"
 
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.validation.phase0b_unknown_reason_correspondence_gate \
     --baseline-raw-dir "$BASELINE_ROOT/raw" \
+    --current-log-root "function_call=$FUNCTION_CALL_CURRENT_LOG_ROOT" \
+    --current-log-root "loop=$LOOP_CURRENT_LOG_ROOT" \
     --output-dir "$OUTPUT_DIR" \
     --require-ready
 
