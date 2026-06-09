@@ -2166,7 +2166,7 @@ def test_pairwise_self_recursive_no_store_call_effect_proof_recovers(monkeypatch
     assert evidence[0]["proof_content"]["proof_rule"] == "self_recursive_no_store_effect_summary"
 
 
-def test_pairwise_preproducer_call_argument_evidence_requires_pending_proof(monkeypatch):
+def test_pairwise_preproducer_complete_call_argument_evidence_remains_equivalent(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -2189,24 +2189,11 @@ def test_pairwise_preproducer_call_argument_evidence_requires_pending_proof(monk
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is None
-    assert result.unknown_reasons
-    reason = result.unknown_reasons[0]
-    assert reason.reason_id == UnknownReasonId.EQUIVALENCE_BLOCKING_UNSAFETY.value
-    assert reason.action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
-    assert reason.detail == "function1:effect_call_argument_evidence"
-    assert reason.object_target_key[0] == "call_argument_evidence"
-    assert _object_target_key_is_specific(reason.object_target_key) is True
-    assert reason.proof_obligation_id == build_proof_obligation_id(
-        reason.reason_id,
-        reason.proof_stage,
-        reason.recovery_proof_kind,
-        reason.evidence_kind,
-        reason.object_target_key,
-    )
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
 
 
-def test_pairwise_call_argument_evidence_requires_matching_completed_proof_by_default(monkeypatch):
+def test_pairwise_complete_call_argument_evidence_remains_equivalent_by_default(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -2224,12 +2211,11 @@ def test_pairwise_call_argument_evidence_requires_matching_completed_proof_by_de
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is None
-    assert result.unknown_reasons
-    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
 
 
-def test_pairwise_call_argument_evidence_rejects_metadata_only_completed_proof(monkeypatch):
+def test_pairwise_complete_call_argument_evidence_ignores_metadata_only_completed_proof(monkeypatch):
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
@@ -2256,9 +2242,8 @@ def test_pairwise_call_argument_evidence_rejects_metadata_only_completed_proof(m
 
     result = strategy.check(analysis1, analysis2)
 
-    assert result.is_equivalent is None
-    assert result.unknown_reasons
-    assert result.unknown_reasons[0].detail == "function1:effect_call_argument_evidence"
+    assert result.is_equivalent is True
+    assert result.unknown_reasons == []
 
 
 def test_call_argument_proof_rejects_unrelated_proof_content_sections():

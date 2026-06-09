@@ -147,16 +147,6 @@ class CheckStrategy(ABC):
                 reasons.append(f"{label}:{reason}")
             effect_summary = getattr(analysis, "effect_summary", None)
             if effect_summary is not None:
-                notes = tuple(getattr(analysis, "analysis_notes", ()) or ())
-                if "effect_call_argument_evidence_incomplete" not in notes:
-                    call_argument_evidence = tuple(
-                        evidence
-                        for evidence in getattr(effect_summary, "call_argument_evidence", {}).values()
-                        if evidence is not None
-                    )
-                    for index, _evidence in enumerate(call_argument_evidence):
-                        suffix = f":{index}" if len(call_argument_evidence) > 1 else ""
-                        reasons.append(f"{label}:effect_call_argument_evidence{suffix}")
                 call_target_resolution_evidence = tuple(
                     evidence
                     for evidence in getattr(effect_summary, "call_target_resolution_evidence", ()) or ()

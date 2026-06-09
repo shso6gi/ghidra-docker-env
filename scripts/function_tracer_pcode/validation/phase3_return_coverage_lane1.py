@@ -18,6 +18,7 @@ from .result_summary import (
     STATUS_UNKNOWN,
     aggregate_validation_logs,
     classify_result_payload,
+    read_validation_log_record,
 )
 from .unknown_reason_summary import (
     _FINAL_UNKNOWN_TRANSITIONS,
@@ -1638,7 +1639,8 @@ def _phase1_positive_negative_checks(
         ]
     positive = _read_json(phase1_dir / "positive_manifest.json")
     negative = _read_json(phase1_dir / "negative_manifest.json")
-    records = _validation_records_by_key(current_log_roots)
+    phase1_entries = tuple(positive.get("entries") or ()) + tuple(negative.get("entries") or ())
+    records = _validation_records_for_entries(current_log_roots, phase1_entries)
     checks: list[Dict[str, Any]] = []
     for entry in positive.get("entries") or ():
         record = records.get(_entry_key(entry))
@@ -1664,6 +1666,45 @@ def _phase1_positive_negative_checks(
             )
         )
     return checks
+
+
+def _validation_records_for_entries(
+    current_log_roots: Mapping[str, Path],
+    entries: Sequence[Mapping[str, Any]],
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    records = {}
+    for entry in entries:
+        key = _entry_key(entry)
+        category, function, binary_pair = key
+        root = current_log_roots.get(category)
+        if root is None:
+            continue
+        record = _read_entry_validation_record(Path(root), function, binary_pair)
+        if record is None:
+            continue
+        records[key] = {
+            "status": record.status,
+            "reason_ids": _validation_record_reason_ids(record),
+        }
+    return records
+
+
+def _read_entry_validation_record(root: Path, function: str, binary_pair: str):
+    for path in _entry_log_paths(root, function, binary_pair):
+        if not path.is_file():
+            continue
+        return read_validation_log_record(path)
+    return None
+
+
+def _entry_log_paths(root: Path, function: str, binary_pair: str) -> Sequence[Path]:
+    if not root.is_dir() or "_" not in binary_pair:
+        return ()
+    left, right = binary_pair.split("_", 1)
+    return (
+        root / function / f"{function}_{left}_{right}.log",
+        root / function / f"{function}_{right}_{left}.log",
+    )
 
 
 def _negative_representative_check(

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 as lane1_module
 from scripts.function_tracer_pcode.equivalence.strategies.base import CheckStrategy
 from scripts.function_tracer_pcode.equivalence.unknown_reason import (
     UnknownRecoveryActionStatus,
@@ -20,6 +21,7 @@ from scripts.function_tracer_pcode.validation.phase3_return_coverage_lane1 impor
     DEFAULT_REPRESENTATIVES,
     FUNCTION_CALL_BINARY_NAMES,
     _object_target_key_is_specific,
+    _validation_records_for_entries,
     build_phase3_return_coverage_lane1_manifest,
     build_phase3_return_coverage_lane1_post_fix_gate,
     main as phase3_return_coverage_lane1_main,
@@ -1992,6 +1994,37 @@ def test_phase3_return_coverage_pre_fix_gate_checks_phase1_positive_negative(tmp
         negative_check["reclassification"]
         == "return_coverage_inconclusive_retired_to_return_coverage_gap"
     )
+
+
+def test_phase3_phase1_checks_read_only_manifest_entry_logs(tmp_path, monkeypatch):
+    current_root = tmp_path / "current" / "function_call"
+    _write_eq_log(current_root, "fc_positive_fixture", "B11", "B12")
+    unrelated = current_root / "fc_unrelated" / "fc_unrelated_B1_B2.log"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("Result: UNKNOWN\n")
+    entries = [
+        {
+            "id": "positive-fixture-eq",
+            "category": "function_call",
+            "function": "fc_positive_fixture",
+            "binary_pair": "B11_B12",
+        }
+    ]
+    read_paths = []
+    original_read = lane1_module.read_validation_log_record
+
+    def _tracking_read(path):
+        read_paths.append(Path(path))
+        return original_read(path)
+
+    monkeypatch.setattr(lane1_module, "read_validation_log_record", _tracking_read)
+
+    records = _validation_records_for_entries({"function_call": current_root}, entries)
+
+    assert records[("function_call", "fc_positive_fixture", "B11_B12")]["status"] == "EQ"
+    assert read_paths == [
+        current_root / "fc_positive_fixture" / "fc_positive_fixture_B11_B12.log"
+    ]
 
 
 def test_phase3_return_coverage_pre_fix_gate_rejects_missing_phase1_dir(tmp_path):
