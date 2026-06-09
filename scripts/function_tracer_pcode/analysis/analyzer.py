@@ -46,6 +46,7 @@ from .effect_summary import (
     EffectSummary,
     CallArgumentEvidence,
     _build_parameter_replacements,
+    _call_argument_evidence_storage_key,
     _expression_location_ref,
     _expression_reads_location,
     _enumerate_constant_expression_branches,
@@ -1891,7 +1892,18 @@ class ReturnAnalyzer:
             stable_key_fn = getattr(pcode_ref, "stable_key", None)
             if not callable(stable_key_fn):
                 continue
-            call_evidence = evidence.get(stable_key_fn())
+            pcode_key = stable_key_fn()
+            target_specific_key = _call_argument_evidence_storage_key(
+                pcode_key,
+                getattr(info, "target_ref", None),
+            )
+            call_evidence = (
+                evidence.get(target_specific_key)
+                if target_specific_key is not None
+                else None
+            )
+            if call_evidence is None:
+                call_evidence = evidence.get(pcode_key)
             if call_evidence is None:
                 continue
             target_matches = getattr(call_evidence, "target_matches", None)

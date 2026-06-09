@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 import re
-from typing import Callable, ClassVar, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, overload
+from typing import Callable, ClassVar, Dict, FrozenSet, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, overload
 
 from ..model import (
     AddressValueRef,
@@ -904,274 +904,314 @@ def summarize_store_effects(
                 for i in range(1, op.getNumInputs())
             ]
             target_expr = _resolve_call_target_expression(tracer, op)
-            target_ref = _resolve_call_target_ref(tracer, op)
-            if target_ref is None:
-                has_unsupported_call = True
-                unsupported_call_sites.append(
-                    _unsupported_call_effect_ref(
-                        op,
-                        target_ref=None,
-                        target_expr=target_expr,
-                        reason="target_identity_unavailable",
-                    )
-                )
-                if debug:
-                    print(
-                        "[EffectSummary] skip unresolved call effect summary: "
-                        "target identity is unavailable"
-                    )
-                continue
-            target_label = target_ref.display_name()
-            callee_parameters = (
-                list(resolve_callee_parameters(target_ref) or [])
-                if resolve_callee_parameters
-                else []
-            )
             if debug:
                 explicit_dump = ", ".join(arg.to_string() for arg in explicit_args)
             for path_conditions in path_sets:
                 normalized_path_conditions = ConditionSimplifier.simplify_conditions(list(path_conditions))
-                args = _recover_call_argument_expressions(
-                    op,
-                    tracer,
-                    parameters,
-                    callee_parameters,
-                    explicit_args,
-                    condition_tracker=condition_tracker,
-                    current_conditions=normalized_path_conditions,
-                )
-                argument_recovery_status = _call_argument_recovery_status(
-                    callee_parameters,
-                    args,
-                )
-                argument_coverage_complete = (
-                    argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
-                )
-                _record_call_argument_evidence(
-                    call_argument_evidence,
+                resolved_targets = _resolve_call_targets_for_effect_summary(
                     tracer,
                     op,
-                    target_ref,
-                    callee_parameters,
-                    args,
                     normalized_path_conditions,
-                    coverage_complete=argument_coverage_complete,
-                    sources=_infer_call_argument_sources(args, explicit_args),
-                    reason=(
-                        None
-                        if argument_coverage_complete
-                        else (
-                            "argument_recovery_recoverable_partial"
-                            if argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
-                            else "argument_recovery_incomplete"
-                        )
-                    ),
-                    recovery_status=argument_recovery_status,
+                    parameters,
+                    read_memory_value=read_memory_value,
+                    image_base=image_base,
+                    debug=debug,
                 )
-                if debug:
-                    recovered_dump = ", ".join(arg.to_string() for arg in args)
-                    print(
-                        "[EffectSummary] call arguments: "
-                        f"target={target_label} explicit=[{explicit_dump}] "
-                        f"path=[{', '.join(cond.to_string() for cond in normalized_path_conditions)}] "
-                        f"recovered=[{recovered_dump}]"
+                if not resolved_targets:
+                    has_unsupported_call = True
+                    unsupported_call_sites.append(
+                        _unsupported_call_effect_ref(
+                            op,
+                            target_ref=None,
+                            target_expr=target_expr,
+                            reason="target_identity_unavailable",
+                        )
                     )
-                if callee_parameters and not argument_coverage_complete:
-                    if argument_recovery_status != CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL:
+                    if debug:
+                        print(
+                            "[EffectSummary] skip unresolved call effect summary: "
+                            "target identity is unavailable"
+                        )
+                    continue
+                processed_target_for_path = False
+                for target_ref, target_conditions in resolved_targets:
+                    if target_ref is None or target_ref.is_unknown():
                         has_unsupported_call = True
+                        unsupported_call_sites.append(
+                            _unsupported_call_effect_ref(
+                                op,
+                                target_ref=target_ref,
+                                target_expr=target_expr,
+                                reason="target_identity_unavailable",
+                            )
+                        )
+                        continue
+                    normalized_target_conditions = ConditionSimplifier.simplify_conditions(
+                        list(target_conditions or ())
+                    )
+                    call_path_conditions = ConditionSimplifier.simplify_conditions(
+                        list(normalized_path_conditions) + list(normalized_target_conditions)
+                    )
+                    if ConditionSimplifier.is_contradiction(call_path_conditions):
+                        continue
+                    processed_target_for_path = True
+                    target_label = target_ref.display_name()
+                    callee_parameters = (
+                        list(resolve_callee_parameters(target_ref) or [])
+                        if resolve_callee_parameters
+                        else []
+                    )
+                    args = _recover_call_argument_expressions(
+                        op,
+                        tracer,
+                        parameters,
+                        callee_parameters,
+                        explicit_args,
+                        condition_tracker=condition_tracker,
+                        current_conditions=call_path_conditions,
+                    )
+                    argument_recovery_status = _call_argument_recovery_status(
+                        callee_parameters,
+                        args,
+                    )
+                    argument_coverage_complete = (
+                        argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
+                    )
+                    _record_call_argument_evidence(
+                        call_argument_evidence,
+                        tracer,
+                        op,
+                        target_ref,
+                        callee_parameters,
+                        args,
+                        call_path_conditions,
+                        coverage_complete=argument_coverage_complete,
+                        sources=_infer_call_argument_sources(args, explicit_args),
+                        reason=(
+                            None
+                            if argument_coverage_complete
+                            else (
+                                "argument_recovery_recoverable_partial"
+                                if argument_recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
+                                else "argument_recovery_incomplete"
+                            )
+                        ),
+                        recovery_status=argument_recovery_status,
+                    )
+                    if debug:
+                        recovered_dump = ", ".join(arg.to_string() for arg in args)
+                        print(
+                            "[EffectSummary] call arguments: "
+                            f"target={target_label} explicit=[{explicit_dump}] "
+                            f"path=[{', '.join(cond.to_string() for cond in call_path_conditions)}] "
+                            f"recovered=[{recovered_dump}]"
+                        )
+                    if callee_parameters and not argument_coverage_complete:
+                        if argument_recovery_status != CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL:
+                            has_unsupported_call = True
+                            if debug:
+                                print(
+                                    "[EffectSummary] skip call effect summary: "
+                                    f"target={target_label} recovered_args={len(args)} "
+                                    f"callee_params={len(callee_parameters)}"
+                                )
+                            continue
                         if debug:
                             print(
-                                "[EffectSummary] skip call effect summary: "
+                                "[EffectSummary] continue with recoverable partial call arguments: "
                                 f"target={target_label} recovered_args={len(args)} "
                                 f"callee_params={len(callee_parameters)}"
                             )
-                        continue
-                    if debug:
+                    path_reduced_args = [
+                        _reduce_expression_under_conditions(arg, call_path_conditions)
+                        for arg in args
+                    ]
+                    arg_variants = _enumerate_call_argument_variants(path_reduced_args)
+                    if debug and len(arg_variants) > 1:
                         print(
-                            "[EffectSummary] continue with recoverable partial call arguments: "
-                            f"target={target_label} recovered_args={len(args)} "
-                            f"callee_params={len(callee_parameters)}"
+                            "[EffectSummary] enumerated call argument variants: "
+                            f"target={target_label} count={len(arg_variants)}"
                         )
-                path_reduced_args = [
-                    _reduce_expression_under_conditions(arg, normalized_path_conditions)
-                    for arg in args
-                ]
-                arg_variants = _enumerate_call_argument_variants(path_reduced_args)
-                if debug and len(arg_variants) > 1:
-                    print(
-                        "[EffectSummary] enumerated call argument variants: "
-                        f"target={target_label} count={len(arg_variants)}"
-                    )
-                for variant_conditions, variant_args in arg_variants:
-                    active_conditions = ConditionSimplifier.simplify_conditions(
-                        list(normalized_path_conditions) + list(variant_conditions)
-                    )
-                    callee_summary = direct_call_summary(target_ref, variant_args)
-                    if callee_summary is None:
-                        has_unsupported_call = True
-                        unsupported_call_sites.append(
-                            _unsupported_call_effect_ref(
-                                op,
-                                target_ref=target_ref,
-                                target_expr=target_expr,
-                                reason="callee_effect_summary_missing",
-                            )
+                    for variant_conditions, variant_args in arg_variants:
+                        active_conditions = ConditionSimplifier.simplify_conditions(
+                            list(call_path_conditions) + list(variant_conditions)
                         )
-                        if debug:
-                            print(
-                                "[EffectSummary] missing callee effect summary: "
-                                f"target={target_label}"
-                            )
-                        continue
-                    if not _call_arguments_width_safe_for_effect_summary(
-                        callee_summary,
-                        callee_parameters,
-                        variant_args,
-                    ):
-                        has_unsupported_call = True
-                        unsupported_call_sites.append(
-                            _unsupported_call_effect_ref(
-                                op,
-                                target_ref=target_ref,
-                                target_expr=target_expr,
-                                reason="call_argument_width_unsafe_for_effect_summary",
-                            )
-                        )
-                        if debug:
-                            print(
-                                "[EffectSummary] skip call effect summary: "
-                                f"target={target_label} partial-width argument has full-width effect use"
-                            )
-                        continue
-                    callee_incomplete_reasons = _effect_summary_incomplete_reasons(callee_summary)
-                    if callee_incomplete_reasons:
-                        has_unsupported_call = True
-                        unsupported_call_sites.append(
-                            _unsupported_call_effect_ref(
-                                op,
-                                target_ref=target_ref,
-                                target_expr=target_expr,
-                                reason="callee_effect_summary_incomplete",
-                            )
-                        )
-                        if debug:
-                            print(
-                                "[EffectSummary] skip incomplete callee effect summary: "
-                                f"target={target_label} reasons={callee_incomplete_reasons}"
-                            )
-                        continue
-                    if not callee_summary.effects:
-                        if callee_summary.has_unsupported_call:
-                            if _call_arguments_may_expose_parameter_memory(
-                                variant_args,
-                                parameters,
-                                callee_parameters,
-                            ):
-                                has_unsupported_call = True
-                                unsupported_call_sites.append(
-                                    _unsupported_call_effect_ref(
-                                        op,
-                                        target_ref=target_ref,
-                                        target_expr=target_expr,
-                                        reason="callee_unsupported_call_may_expose_parameter_memory",
-                                    )
-                                )
-                            elif debug:
-                                print(
-                                    "[EffectSummary] effect-free callee summary has only "
-                                    "parameter-memory-insensitive unsupported calls: "
-                                    f"target={target_label}"
-                                )
-                        elif debug:
-                            print(
-                                "[EffectSummary] effect-free callee summary: "
-                                f"target={target_label}"
-                            )
-                        continue
-                    if not is_call_effect_summary_allowed(callee_summary):
-                        has_unsupported_call = True
-                        unsupported_call_sites.append(
-                            _unsupported_call_effect_ref(
-                                op,
-                                target_ref=target_ref,
-                                target_expr=target_expr,
-                                reason="callee_effect_summary_not_allowed",
-                            )
-                        )
-                        continue
-
-                    for effect in callee_summary.effects:
-                        substitution_args = _choose_effect_substitution_args(
-                            effect.location,
-                            callee_summary.parameter_refs,
-                            variant_args,
-                            parameters,
-                        )
-                        substituted_location = substitute_location(
-                            effect.location,
-                            callee_summary.parameter_refs,
-                            substitution_args,
-                            parameters,
-                        )
-                        if substituted_location is None:
+                        callee_summary = direct_call_summary(target_ref, variant_args)
+                        if callee_summary is None:
                             has_unsupported_call = True
                             unsupported_call_sites.append(
                                 _unsupported_call_effect_ref(
                                     op,
                                     target_ref=target_ref,
                                     target_expr=target_expr,
-                                    reason="substituted_effect_location_unavailable",
+                                    reason="callee_effect_summary_missing",
                                 )
                             )
                             if debug:
-                                arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
                                 print(
-                                    "[EffectSummary] skip substituted effect: "
-                                    f"callee_loc={effect.location} args=[{arg_dump}]"
+                                    "[EffectSummary] missing callee effect summary: "
+                                    f"target={target_label}"
                                 )
                             continue
-                        substitutions = _build_parameter_replacements(
-                            callee_summary.parameter_refs,
-                            substitution_args,
-                        )
-                        substituted_value = substitute_expression(effect.value, substitutions, parameters)
-                        substituted_value = _reduce_expression_under_conditions(
-                            substituted_value,
-                            active_conditions,
-                        )
-                        substituted_conditions = [
-                            substitute_condition(cond, substitutions, parameters)
-                            for cond in effect.conditions
-                        ]
-                        substituted_conditions = _reduce_conditions_under_context(
-                            substituted_conditions,
-                            active_conditions,
-                        )
-                        merged_conditions = ConditionSimplifier.simplify_conditions(
-                            list(active_conditions) + substituted_conditions
-                        )
-                        substituted_value = _reduce_expression_under_conditions(
-                            substituted_value,
-                            merged_conditions,
-                        )
-                        if debug:
-                            cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
-                            variant_dump = ", ".join(cond.to_string() for cond in variant_conditions)
-                            merged_dump = ", ".join(cond.to_string() for cond in merged_conditions)
-                            print(
-                                "[EffectSummary] substituted effect: "
-                                f"callee_loc={effect.location} caller_loc={substituted_location} "
-                                f"value={substituted_value.to_string()} conditions=[{cond_dump}] "
-                                f"arg_variant_conditions=[{variant_dump}] merged_conditions=[{merged_dump}]"
+                        if not _call_arguments_width_safe_for_effect_summary(
+                            callee_summary,
+                            callee_parameters,
+                            variant_args,
+                        ):
+                            has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                _unsupported_call_effect_ref(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    reason="call_argument_width_unsafe_for_effect_summary",
+                                )
                             )
-                        effects.append(
-                            StoreEffect(
-                                location=substituted_location,
-                                value=substituted_value,
-                                conditions=merged_conditions,
-                                order_key=op_order_key,
+                            if debug:
+                                print(
+                                    "[EffectSummary] skip call effect summary: "
+                                    f"target={target_label} partial-width argument has full-width effect use"
+                                )
+                            continue
+                        callee_incomplete_reasons = _effect_summary_incomplete_reasons(callee_summary)
+                        if callee_incomplete_reasons:
+                            has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                _unsupported_call_effect_ref(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    reason="callee_effect_summary_incomplete",
+                                )
                             )
+                            if debug:
+                                print(
+                                    "[EffectSummary] skip incomplete callee effect summary: "
+                                    f"target={target_label} reasons={callee_incomplete_reasons}"
+                                )
+                            continue
+                        if not callee_summary.effects:
+                            if callee_summary.has_unsupported_call:
+                                if _call_arguments_may_expose_parameter_memory(
+                                    variant_args,
+                                    parameters,
+                                    callee_parameters,
+                                ):
+                                    has_unsupported_call = True
+                                    unsupported_call_sites.append(
+                                        _unsupported_call_effect_ref(
+                                            op,
+                                            target_ref=target_ref,
+                                            target_expr=target_expr,
+                                            reason="callee_unsupported_call_may_expose_parameter_memory",
+                                        )
+                                    )
+                                elif debug:
+                                    print(
+                                        "[EffectSummary] effect-free callee summary has only "
+                                        "parameter-memory-insensitive unsupported calls: "
+                                        f"target={target_label}"
+                                    )
+                            elif debug:
+                                print(
+                                    "[EffectSummary] effect-free callee summary: "
+                                    f"target={target_label}"
+                                )
+                            continue
+                        if not is_call_effect_summary_allowed(callee_summary):
+                            has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                _unsupported_call_effect_ref(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    reason="callee_effect_summary_not_allowed",
+                                )
+                            )
+                            continue
+
+                        for effect in callee_summary.effects:
+                            substitution_args = _choose_effect_substitution_args(
+                                effect.location,
+                                callee_summary.parameter_refs,
+                                variant_args,
+                                parameters,
+                            )
+                            substituted_location = substitute_location(
+                                effect.location,
+                                callee_summary.parameter_refs,
+                                substitution_args,
+                                parameters,
+                            )
+                            if substituted_location is None:
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        reason="substituted_effect_location_unavailable",
+                                    )
+                                )
+                                if debug:
+                                    arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
+                                    print(
+                                        "[EffectSummary] skip substituted effect: "
+                                        f"callee_loc={effect.location} args=[{arg_dump}]"
+                                    )
+                                continue
+                            substitutions = _build_parameter_replacements(
+                                callee_summary.parameter_refs,
+                                substitution_args,
+                            )
+                            substituted_value = substitute_expression(effect.value, substitutions, parameters)
+                            substituted_value = _reduce_expression_under_conditions(
+                                substituted_value,
+                                active_conditions,
+                            )
+                            substituted_conditions = [
+                                substitute_condition(cond, substitutions, parameters)
+                                for cond in effect.conditions
+                            ]
+                            substituted_conditions = _reduce_conditions_under_context(
+                                substituted_conditions,
+                                active_conditions,
+                            )
+                            merged_conditions = ConditionSimplifier.simplify_conditions(
+                                list(active_conditions) + substituted_conditions
+                            )
+                            substituted_value = _reduce_expression_under_conditions(
+                                substituted_value,
+                                merged_conditions,
+                            )
+                            if debug:
+                                cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
+                                variant_dump = ", ".join(cond.to_string() for cond in variant_conditions)
+                                merged_dump = ", ".join(cond.to_string() for cond in merged_conditions)
+                                print(
+                                    "[EffectSummary] substituted effect: "
+                                    f"callee_loc={effect.location} caller_loc={substituted_location} "
+                                    f"value={substituted_value.to_string()} conditions=[{cond_dump}] "
+                                    f"arg_variant_conditions=[{variant_dump}] merged_conditions=[{merged_dump}]"
+                                )
+                            effects.append(
+                                StoreEffect(
+                                    location=substituted_location,
+                                    value=substituted_value,
+                                    conditions=merged_conditions,
+                                    order_key=op_order_key,
+                                )
+                            )
+                if not processed_target_for_path:
+                    has_unsupported_call = True
+                    unsupported_call_sites.append(
+                        _unsupported_call_effect_ref(
+                            op,
+                            target_ref=None,
+                            target_expr=target_expr,
+                            reason="target_identity_unavailable",
                         )
+                    )
 
     synthetic_expr = build_void_effect_summary_expr(effects)
     if debug:
@@ -1189,6 +1229,64 @@ def summarize_store_effects(
         call_argument_evidence=dict(call_argument_evidence),
         unsupported_call_sites=tuple(unsupported_call_sites),
     )
+
+
+def _resolve_call_targets_for_effect_summary(
+    tracer,
+    op,
+    path_conditions: Sequence[Condition],
+    parameters: Sequence[Dict],
+    *,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
+    debug: bool = False,
+) -> List[Tuple[CallTargetRef, List[Condition]]]:
+    path_conditions_list = list(path_conditions or ())
+    try:
+        resolved = resolve_call_targets(
+            tracer,
+            op,
+            conditions=path_conditions_list,
+            parameters=list(parameters or ()),
+            read_memory_value=read_memory_value,
+            image_base=image_base,
+            debug=debug,
+        )
+    except Exception:
+        resolved = []
+    if resolved:
+        return [
+            (target_ref, list(target_conditions or ()))
+            for target_ref, target_conditions in resolved
+        ]
+
+    # Target identity recovery should not depend on a caller path being simple
+    # enough for readonly-load concretization. Re-resolve without the path
+    # context, then reapply the original path when the caller combines
+    # path_conditions + target_conditions below.
+    if path_conditions_list:
+        try:
+            resolved = resolve_call_targets(
+                tracer,
+                op,
+                conditions=[],
+                parameters=list(parameters or ()),
+                read_memory_value=read_memory_value,
+                image_base=image_base,
+                debug=debug,
+            )
+        except Exception:
+            resolved = []
+        if resolved:
+            return [
+                (target_ref, list(target_conditions or ()))
+                for target_ref, target_conditions in resolved
+            ]
+
+    target_ref = _resolve_call_target_ref(tracer, op)
+    if target_ref is not None:
+        return [(target_ref, [])]
+    return []
 
 
 def _record_call_argument_evidence(
@@ -1212,6 +1310,7 @@ def _record_call_argument_evidence(
     if ref is None:
         return
     key = ref.stable_key()
+    target_specific_key = _call_argument_evidence_storage_key(key, target_ref)
     target_is_resolved = _call_target_ref_is_resolved(target_ref)
     param_identities = _call_evidence_callee_param_identities(callee_parameters)
     identities_are_proven = (
@@ -1267,9 +1366,70 @@ def _record_call_argument_evidence(
     )
     previous = evidence.get(key)
     if previous is None:
+        if target_specific_key is not None:
+            current_for_target = evidence.get(target_specific_key)
+            if current_for_target is not None:
+                evidence[target_specific_key] = _merge_call_argument_evidence(
+                    current_for_target,
+                    new_evidence,
+                )
+                return
+            if _has_target_specific_call_argument_evidence(evidence, key):
+                evidence[target_specific_key] = new_evidence
+                return
         evidence[key] = new_evidence
         return
+    if not previous.target_matches(target_ref):
+        previous_target_key = _call_argument_evidence_storage_key(key, previous.target_ref)
+        if previous_target_key is not None:
+            previous_for_target = evidence.get(previous_target_key)
+            evidence[previous_target_key] = (
+                _merge_call_argument_evidence(previous_for_target, previous)
+                if previous_for_target is not None
+                else previous
+            )
+        if target_specific_key is not None:
+            current_for_target = evidence.get(target_specific_key)
+            evidence[target_specific_key] = (
+                _merge_call_argument_evidence(current_for_target, new_evidence)
+                if current_for_target is not None
+                else new_evidence
+            )
+            if previous_target_key is not None:
+                evidence.pop(key, None)
+            return
     evidence[key] = _merge_call_argument_evidence(previous, new_evidence)
+
+
+def _has_target_specific_call_argument_evidence(
+    evidence: Mapping[Tuple[object, ...], CallArgumentEvidence],
+    pcode_key: Tuple[object, ...],
+) -> bool:
+    for key in evidence:
+        if (
+            isinstance(key, tuple)
+            and len(key) == 3
+            and key[0] == "call_argument_evidence"
+            and key[1] == pcode_key
+            and isinstance(key[2], tuple)
+            and len(key[2]) == 2
+            and key[2][0] == "target"
+        ):
+            return True
+    return False
+
+
+def _call_argument_evidence_storage_key(
+    pcode_key: Optional[Tuple[object, ...]],
+    target_ref: Optional[CallTargetRef],
+) -> Optional[Tuple[object, ...]]:
+    if pcode_key is None or not _call_target_ref_is_resolved(target_ref):
+        return None
+    try:
+        target_key = target_ref.stable_key()
+    except Exception:
+        return None
+    return ("call_argument_evidence", pcode_key, ("target", target_key))
 
 
 def _merge_call_argument_evidence(

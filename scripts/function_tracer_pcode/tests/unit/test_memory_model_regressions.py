@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
     collect_memory_bit_widths_from_analysis,
     concretize_readonly_loads,
 )
+from scripts.function_tracer_pcode.analysis import effect_summary as effect_summary_module
 from scripts.function_tracer_pcode.analysis.effect_summary import (
     CallArgumentEvidence,
     CallArgumentWidthEvidence,
@@ -15,6 +16,7 @@ from scripts.function_tracer_pcode.analysis.effect_summary import (
     StoreEffect,
     _additive_signature,
     _build_parameter_replacements,
+    _call_argument_evidence_storage_key,
     _enumerate_call_argument_variants,
     _resolve_call_target_ref,
     _resolve_call_target_name,
@@ -3689,6 +3691,190 @@ def test_zero_argument_call_evidence_is_usable_for_true_no_arg_callee():
     assert evidence.arguments == ()
 
 
+def test_call_argument_evidence_keeps_multiple_targets_for_same_callsite_separate():
+    class FakeTracer:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def _make_pcode_op_ref(self, _op):
+            return self.ref
+
+    pcode_ref = PcodeOpRef(address_offset=0x1110, seq_time=2, seq_order=1, mnemonic="CALLIND")
+    tracer = FakeTracer(pcode_ref)
+    target_a = CallTargetRef.from_name("callee_a", entry_offset=0x2000)
+    target_b = CallTargetRef.from_name("callee_b", entry_offset=0x3000)
+    evidence_map = {}
+
+    _record_call_argument_evidence(
+        evidence_map,
+        tracer,
+        object(),
+        target_a,
+        [{"name": "arg", "index": 0}],
+        [Expression.parameter("arg_a", 0, size=4)],
+        [],
+        coverage_complete=True,
+    )
+    _record_call_argument_evidence(
+        evidence_map,
+        tracer,
+        object(),
+        target_b,
+        [{"name": "arg", "index": 0}],
+        [Expression.parameter("arg_b", 0, size=4)],
+        [],
+        coverage_complete=True,
+    )
+
+    base_key = pcode_ref.stable_key()
+    target_a_key = _call_argument_evidence_storage_key(base_key, target_a)
+    target_b_key = _call_argument_evidence_storage_key(base_key, target_b)
+
+    assert base_key not in evidence_map
+    assert set(evidence_map) == {target_a_key, target_b_key}
+    assert evidence_map[target_a_key].is_usable() is True
+    assert evidence_map[target_b_key].is_usable() is True
+    assert evidence_map[target_a_key].arguments[0].name == "arg_a"
+    assert evidence_map[target_b_key].arguments[0].name == "arg_b"
+
+
+def test_call_argument_evidence_merges_reappearing_target_after_target_specific_split():
+    class FakeTracer:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def _make_pcode_op_ref(self, _op):
+            return self.ref
+
+    pcode_ref = PcodeOpRef(address_offset=0x1114, seq_time=2, seq_order=1, mnemonic="CALLIND")
+    tracer = FakeTracer(pcode_ref)
+    target_a = CallTargetRef.from_name("callee_a", entry_offset=0x2000)
+    target_b = CallTargetRef.from_name("callee_b", entry_offset=0x3000)
+    arg_a = Expression.parameter("arg_a", 0, size=4)
+    arg_b = Expression.parameter("arg_b", 0, size=4)
+    condition_a0 = Condition(
+        Expression.binary_op("INT_EQUAL", Expression.parameter("mode", 1, size=4), Expression.constant(0, 4))
+    )
+    condition_a1 = Condition(
+        Expression.binary_op("INT_EQUAL", Expression.parameter("mode", 1, size=4), Expression.constant(2, 4))
+    )
+    condition_b = Condition(
+        Expression.binary_op("INT_EQUAL", Expression.parameter("mode", 1, size=4), Expression.constant(1, 4))
+    )
+    evidence_map = {}
+
+    _record_call_argument_evidence(
+        evidence_map,
+        tracer,
+        object(),
+        target_a,
+        [{"name": "arg", "index": 0}],
+        [arg_a],
+        [condition_a0],
+        coverage_complete=True,
+    )
+    _record_call_argument_evidence(
+        evidence_map,
+        tracer,
+        object(),
+        target_b,
+        [{"name": "arg", "index": 0}],
+        [arg_b],
+        [condition_b],
+        coverage_complete=True,
+    )
+    _record_call_argument_evidence(
+        evidence_map,
+        tracer,
+        object(),
+        target_a,
+        [{"name": "arg", "index": 0}],
+        [arg_a],
+        [condition_a1],
+        coverage_complete=True,
+    )
+
+    base_key = pcode_ref.stable_key()
+    target_a_key = _call_argument_evidence_storage_key(base_key, target_a)
+    target_b_key = _call_argument_evidence_storage_key(base_key, target_b)
+
+    assert base_key not in evidence_map
+    assert set(evidence_map) == {target_a_key, target_b_key}
+    assert evidence_map[target_a_key].is_usable() is True
+    assert evidence_map[target_a_key].arguments == (arg_a,)
+    assert len(evidence_map[target_a_key].path_conditions) == 2
+    assert evidence_map[target_b_key].arguments == (arg_b,)
+
+
+def test_target_specific_call_argument_evidence_is_applied_to_matching_deferred_call():
+    pcode_ref = PcodeOpRef(address_offset=0x1118, seq_time=3, seq_order=0, mnemonic="CALLIND")
+    target_a = CallTargetRef.from_name("callee_a", entry_offset=0x2000)
+    target_b = CallTargetRef.from_name("callee_b", entry_offset=0x3000)
+    target_a_key = _call_argument_evidence_storage_key(pcode_ref.stable_key(), target_a)
+    target_b_key = _call_argument_evidence_storage_key(pcode_ref.stable_key(), target_b)
+    deferred_a = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee_a#0",
+        target_ref=target_a,
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=target_a,
+            sequence=0,
+        ),
+    )
+    deferred_b = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee_b#0",
+        target_ref=target_b,
+        deferred_call_ref=DeferredCallRef(
+            pcode_op_ref=pcode_ref,
+            target_ref=target_b,
+            sequence=1,
+        ),
+    )
+    analysis = FunctionReturnAnalysis(
+        function_name="caller",
+        entry_point="0x1000",
+        returns=[],
+        parameters=[{"name": "arg", "index": 0, "size": 4}],
+    )
+    analysis.deferred_calls = {
+        deferred_a.deferred_call_ref.stable_key(): deferred_a,
+        deferred_b.deferred_call_ref.stable_key(): deferred_b,
+    }
+    analysis.effect_summary = EffectSummary(
+        parameter_names=["arg"],
+        effects=[],
+        call_argument_evidence={
+            target_a_key: CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=target_a,
+                callee_param_identities=(("parameter", 0),),
+                arguments=(Expression.parameter("arg_a", 0, size=4),),
+                sources=("explicit_input",),
+                path_conditions=((),),
+                coverage_complete=True,
+            ),
+            target_b_key: CallArgumentEvidence(
+                pcode_op_ref=pcode_ref,
+                target_ref=target_b,
+                callee_param_identities=(("parameter", 0),),
+                arguments=(Expression.parameter("arg_b", 0, size=4),),
+                sources=("explicit_input",),
+                path_conditions=((),),
+                coverage_complete=True,
+            ),
+        },
+    )
+
+    ReturnAnalyzer(program=None, debug=False)._apply_effect_call_argument_evidence_to_deferred_calls(analysis)
+
+    assert deferred_a.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
+    assert deferred_b.call_argument_recovery_status == CallArgumentEvidence.RECOVERY_COMPLETE
+    assert deferred_a.arguments[0].name == "arg_a"
+    assert deferred_b.arguments[0].name == "arg_b"
+    assert "effect_call_argument_evidence" in analysis.analysis_notes
+    assert "effect_call_argument_evidence_incomplete" not in analysis.analysis_notes
+
+
 def test_callee_parameter_ref_refuses_positional_identity_without_index_or_storage():
     assert _coerce_callee_parameter_ref({"name": "param_1"}, 0) is None
     assert _coerce_callee_parameter_ref("param_1", 0) is None
@@ -6659,6 +6845,230 @@ def test_summarize_store_effects_keeps_unresolved_scalar_callback_unsupported():
     assert summary.effects == []
     assert summary.has_unsupported_call is True
     assert summary.incomplete_reasons == ()
+
+
+def test_summarize_store_effects_resolves_path_conditioned_indirect_targets():
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallIndOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("lhs", 4),
+                FakeVarnode("rhs", 4),
+            ]
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    mode_is_zero = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("mode", 0, size=4),
+            Expression.constant(0, 4),
+        )
+    )
+    mode_is_one = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("mode", 0, size=4),
+            Expression.constant(1, 4),
+        )
+    )
+
+    class FakeTracer:
+        program = None
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "lhs":
+                return Expression.parameter("lhs", 1, size=4)
+            if varnode.key == "rhs":
+                return Expression.parameter("rhs", 2, size=4)
+            return Expression.phi(
+                [
+                    (mode_is_zero, Expression.constant(0x1000, 8)),
+                    (mode_is_one, Expression.constant(0x2000, 8)),
+                ]
+            )
+
+    seen_targets = []
+
+    def direct_call_summary(target_ref, args):
+        seen_targets.append((target_ref.stable_key(), tuple(arg.name for arg in args)))
+        return EffectSummary(
+            parameter_names=["lhs", "rhs"],
+            effects=[],
+            has_unsupported_call=False,
+        )
+
+    call_op = FakeCallIndOp()
+    summary = summarize_store_effects(
+        [FakeBlockInfo(call_op)],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("mode", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0")),
+            _param("lhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1")),
+            _param("rhs", size=4, index=2, storage=_reg_storage("w2", size_bytes=4, register_name="w2")),
+        ],
+        direct_call_summary=direct_call_summary,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("lhs", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0")),
+            _param("rhs", size=4, index=1, storage=_reg_storage("w1", size_bytes=4, register_name="w1")),
+        ],
+        debug=False,
+    )
+
+    assert summary.effects == []
+    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == ()
+    assert sorted(target for target, _args in seen_targets) == [
+        ("code_address", None, 0x1000),
+        ("code_address", None, 0x2000),
+    ]
+    assert all(args == ("lhs", "rhs") for _target, args in seen_targets)
+
+
+def test_summarize_store_effects_falls_back_to_pathless_target_identity(monkeypatch):
+    class FakeVarnode:
+        def __init__(self, key, size):
+            self.key = key
+            self._size = size
+
+        def getSize(self):
+            return self._size
+
+    class FakeCallIndOp:
+        def __init__(self):
+            self._inputs = [
+                FakeVarnode("target", 8),
+                FakeVarnode("dst", 8),
+            ]
+
+        def getMnemonic(self):
+            return "CALLIND"
+
+        def getNumInputs(self):
+            return len(self._inputs)
+
+        def getInput(self, index):
+            return self._inputs[index]
+
+    class FakeBlockInfo:
+        def __init__(self, op):
+            self.pcode_ops = [op]
+
+    path_cond = Condition(
+        Expression.binary_op(
+            "INT_EQUAL",
+            Expression.parameter("selector", 0, size=4),
+            Expression.constant(1, 4),
+        )
+    )
+    target_cond = Condition(
+        Expression.binary_op(
+            "INT_NOTEQUAL",
+            Expression.parameter("selector", 0, size=4),
+            Expression.constant(0, 4),
+        )
+    )
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[path_cond]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        program = None
+
+        def resolve_call_target_ref(self, _varnode, **_kwargs):
+            return None
+
+        def trace_varnode(self, varnode, use_cache=False):
+            if varnode.key == "dst":
+                return Expression.parameter("dst", 1, size=8)
+            return Expression.unknown("target_requires_pathless_fallback")
+
+    seen_condition_lengths = []
+
+    def fake_resolve_call_targets(_tracer, _op, **kwargs):
+        conditions = list(kwargs.get("conditions") or ())
+        seen_condition_lengths.append(len(conditions))
+        if conditions:
+            return []
+        return [(CallTargetRef.from_code_address(0x401000), [target_cond])]
+
+    monkeypatch.setattr(
+        effect_summary_module,
+        "resolve_call_targets",
+        fake_resolve_call_targets,
+    )
+
+    def direct_call_summary(_target_ref, _args):
+        return EffectSummary(
+            parameter_names=["dst"],
+            parameter_refs=[LocationBaseRef.parameter("dst", index=0)],
+            effects=[
+                StoreEffect(
+                    location=_loc("dst", 0, 4),
+                    value=Expression.constant(1, 4),
+                    conditions=[],
+                    order_key=1,
+                )
+            ],
+            has_unsupported_call=False,
+        )
+
+    summary = summarize_store_effects(
+        [FakeBlockInfo(FakeCallIndOp())],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [
+            _param("selector", size=4, index=0, storage=_reg_storage("w0", size_bytes=4, register_name="w0")),
+            _param("dst", size=8, index=1, storage=_reg_storage("x1", size_bytes=8, register_name="x1")),
+        ],
+        direct_call_summary=direct_call_summary,
+        resolve_callee_parameters=lambda _target_ref: [
+            _param("dst", size=8, index=0, storage=_reg_storage("x0", size_bytes=8, register_name="x0")),
+        ],
+        debug=False,
+    )
+
+    assert summary.has_unsupported_call is False
+    assert len(summary.effects) == 1
+    assert seen_condition_lengths == [1, 0]
+    condition_texts = [cond.to_string() for cond in summary.effects[0].conditions]
+    assert "(selector == 1)" in condition_texts
 
 
 def test_summarize_store_effects_keeps_unresolved_pointer_callback_effect_unsupported():
@@ -13254,6 +13664,83 @@ def test_effect_summary_returns_code_address_target_ref_for_raw_local_target():
     assert target_ref.is_code_address() is True
     assert target_ref.address_offset == 0x401234
     assert target_ref.display_name() == "ADDR_401234"
+
+
+def test_tracer_deferred_call_target_ref_uses_traced_constant_target_expression():
+    class FakeAddressSpace:
+        def getAddress(self, value):
+            return value
+
+    class FakeAddressFactory:
+        def getDefaultAddressSpace(self):
+            return FakeAddressSpace()
+
+    class FakeFunction:
+        def __init__(self, name, entry, program):
+            self._name = name
+            self._entry = entry
+            self._program = program
+
+        def getName(self):
+            return self._name
+
+        def getEntryPoint(self):
+            return self._entry
+
+        def getProgram(self):
+            return self._program
+
+    class FakeFunctionManager:
+        def __init__(self, program):
+            self.program = program
+
+        def getFunctionAt(self, addr):
+            if addr == 0x401000:
+                return FakeFunction("callee", 0x401000, self.program)
+            return None
+
+        def getReferencedFunction(self, _addr):
+            return None
+
+        def getFunctionContaining(self, _addr):
+            return None
+
+    class FakeProgram:
+        def __init__(self):
+            self._function_manager = FakeFunctionManager(self)
+
+        def getAddressFactory(self):
+            return FakeAddressFactory()
+
+        def getFunctionManager(self):
+            return self._function_manager
+
+        def getUniqueProgramID(self):
+            return 77
+
+    class FakeOp:
+        def getNumInputs(self):
+            return 1
+
+        def getInput(self, index):
+            assert index == 0
+            return object()
+
+    tracer = object.__new__(PcodeTracer)
+    tracer.program = FakeProgram()
+    tracer.resolve_call_target_ref = lambda *_args, **_kwargs: None
+    tracer.trace_varnode = lambda *_args, **_kwargs: Expression.constant(0x401000, 8)
+
+    target_ref = PcodeTracer._resolve_call_target_ref_from_op(
+        tracer,
+        FakeOp(),
+        depth=0,
+        use_cache=False,
+    )
+
+    assert target_ref.is_function() is True
+    assert target_ref.display_name() == "callee"
+    assert target_ref.stable_key() == ("function", 77, 0x401000)
 
 
 def test_call_effect_summary_policy_accepts_simple_param_store_summary():

@@ -500,6 +500,10 @@ def expression_provenance_key(
     if expr is None:
         return ("none",)
 
+    parameter_runtime_key = _parameter_runtime_ref_key(expr)
+    if parameter_runtime_key is not None:
+        return ("runtime_ref", parameter_runtime_key)
+
     storage_key = _expression_storage_key(expr)
     if storage_key is not None:
         return ("storage", storage_key)
@@ -713,6 +717,10 @@ def _expression_descriptor(expr: Expression) -> StructuralKey:
 
 
 def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
+    parameter_runtime_key = _parameter_runtime_ref_key(expr)
+    if parameter_runtime_key is not None:
+        return ("runtime_ref", _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None)))
+
     storage_key = _expression_storage_key(expr)
     if storage_key is not None:
         return ("storage", storage_key)
@@ -748,6 +756,17 @@ def _expression_storage_key(expr: Expression) -> Optional[StructuralKey]:
                 return _stable_value_key(storage_key)
         except Exception:
             return None
+    return None
+
+
+def _parameter_runtime_ref_key(expr: Expression) -> Optional[StructuralKey]:
+    runtime_key = _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
+    if (
+        isinstance(runtime_key, tuple)
+        and len(runtime_key) >= 1
+        and runtime_key[0] == "parameter"
+    ):
+        return runtime_key
     return None
 
 

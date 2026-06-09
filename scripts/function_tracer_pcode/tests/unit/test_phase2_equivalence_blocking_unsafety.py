@@ -152,8 +152,16 @@ def _representative_entry(entry_id: str, function: str, binary_pair: str, left: 
     }
 
 
-def _payload(function: str, left_binary: str, right_binary: str, is_equivalent, reasons):
-    return {
+def _payload(
+    function: str,
+    left_binary: str,
+    right_binary: str,
+    is_equivalent,
+    reasons,
+    *,
+    completed_recovery_proof_evidence=None,
+):
+    payload = {
         "function1_name": function,
         "function2_name": function,
         "binary1_name": left_binary,
@@ -166,6 +174,9 @@ def _payload(function: str, left_binary: str, right_binary: str, is_equivalent, 
             for reason in reasons
         ],
     }
+    if completed_recovery_proof_evidence is not None:
+        payload["completed_recovery_proof_evidence"] = list(completed_recovery_proof_evidence)
+    return payload
 
 
 def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
@@ -251,6 +262,28 @@ def _pending_reason(*, object_target_key=None, proof_obligation_id=None):
         recovery_action="call_effect_summary_proof_required",
         action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
     )
+
+
+def _completed_call_effect_proof_evidence(reason=None):
+    reason = reason or _pending_reason()
+    proof_obligation_id = build_proof_obligation_id(
+        "equivalence_blocking_unsafety",
+        "object_evidence_collected",
+        "call_effect_summary_proof",
+        "call_effect_summary",
+        reason.object_target_key,
+    )
+    return {
+        "object_derived": True,
+        "status": "complete",
+        "reason_id": "equivalence_blocking_unsafety",
+        "recovery_proof_kind": "call_effect_summary_proof",
+        "proof_stage": "object_evidence_collected",
+        "evidence_kind": "call_effect_summary",
+        "object_target_key": reason.object_target_key,
+        "proof_obligation_id": proof_obligation_id,
+        "proof_source": "self_recursive_no_store_call_effect_summary",
+    }
 
 
 def test_phase2_call_effect_specificity_rejects_legacy_pcode_ref():
@@ -571,6 +604,179 @@ def test_phase2_accepts_expected_pending_proof_movement_for_representative(tmp_p
     assert manifest["overall_baseline_comparison_gate"]["passed"] is True
     assert {entry["movement_status"] for entry in manifest["entries"]} == {"expected_movement"}
     validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_target_reason_only_unknown_to_eq_even_with_completed_proof(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    completed_evidence = _completed_call_effect_proof_evidence()
+    _write_all_representative_logs(
+        current_root,
+        payload_by_function={
+            "fc_dispatch_indirect": _payload(
+                "fc_dispatch_indirect",
+                "B10",
+                "B11",
+                True,
+                [],
+                completed_recovery_proof_evidence=[
+                    {
+                        "side": "function1",
+                        "function_name": "fc_dispatch_indirect",
+                        "binary_name": "function_call_test-arm64-clang-O2",
+                        "binary_id": "B10",
+                        "evidence": completed_evidence,
+                    },
+                ],
+            )
+        },
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    dispatch_entry = next(
+        entry
+        for entry in manifest["entries"]
+        if entry["function"] == "fc_dispatch_indirect"
+    )
+    allowed_movements = manifest["overall_baseline_comparison_gate"]["allowed_final_result_movements"]
+
+    assert dispatch_entry["movement_status"] == "failed"
+    assert "target_reason_unknown_to_eq_not_allowed" in dispatch_entry["failed_kinds"]
+    assert manifest["phase2_ready"] is False
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is False
+    assert allowed_movements == []
+    assert (
+        "target_reason_unknown_to_eq_not_allowed"
+        in manifest["overall_baseline_comparison_gate"]["failed_kinds"]
+    )
+    with pytest.raises(ValueError, match="target_reason_unknown_to_eq_not_allowed"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_target_reason_only_unknown_to_eq_without_completed_proof(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(baseline_root)
+    _write_all_representative_logs(
+        current_root,
+        payload_by_function={
+            "fc_dispatch_indirect": _payload(
+                "fc_dispatch_indirect",
+                "B10",
+                "B11",
+                True,
+                [],
+            )
+        },
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    dispatch_entry = next(
+        entry
+        for entry in manifest["entries"]
+        if entry["function"] == "fc_dispatch_indirect"
+    )
+
+    assert dispatch_entry["movement_status"] == "failed"
+    assert "target_reason_unknown_to_eq_not_allowed" in dispatch_entry["failed_kinds"]
+    assert manifest["phase2_ready"] is False
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is False
+    assert (
+        "target_reason_unknown_to_eq_not_allowed"
+        in manifest["overall_baseline_comparison_gate"]["failed_kinds"]
+    )
+    assert manifest["overall_baseline_comparison_gate"]["allowed_final_result_movements"] == []
+    with pytest.raises(ValueError, match="target_reason_unknown_to_eq_not_allowed"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_validator_rejects_tampered_unknown_to_eq_allowed_movement(tmp_path):
+    manifest = _ready_phase2_manifest(tmp_path)
+    entry = manifest["entries"][0]
+    entry["accepted_reason_records"] = []
+    entry["final_result_movement"] = "target_reason_unknown_to_eq"
+    manifest["overall_baseline_comparison_gate"]["allowed_final_result_movements"] = [
+        {
+            "function": entry["function"],
+            "binary_pair": entry["binary_pair"],
+            "status_movement": "UNKNOWN->EQ",
+            "removed_reasons": {"equivalence_blocking_unsafety": 1},
+        },
+    ]
+    manifest["phase2_ready"] = True
+
+    with pytest.raises(ValueError, match="not_allowed"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
+
+
+def test_phase2_rejects_unknown_to_eq_when_non_target_reason_disappears(tmp_path):
+    phase1_dir = tmp_path / "phase1"
+    baseline_root = tmp_path / "baseline" / "function_call"
+    current_root = tmp_path / "logs" / "function_call"
+    output_dir = tmp_path / "phase2"
+    _representative_manifest(phase1_dir)
+    _write_all_baseline_representative_logs(
+        baseline_root,
+        payload_by_function={
+            "fc_dispatch_indirect": _payload(
+                "fc_dispatch_indirect",
+                "B10",
+                "B11",
+                None,
+                [
+                    _old_blocking_reason(),
+                    make_unknown_reason(UnknownReasonId.RETURN_WIDTH_BRIDGE_MISSING),
+                ],
+            )
+        },
+    )
+    _write_all_representative_logs(
+        current_root,
+        payload_by_function={
+            "fc_dispatch_indirect": _payload(
+                "fc_dispatch_indirect",
+                "B10",
+                "B11",
+                True,
+                [],
+            )
+        },
+    )
+
+    path = build_phase2_equivalence_blocking_unsafety_movement(
+        phase1_dir=phase1_dir,
+        output_dir=output_dir,
+        current_log_roots={"function_call": current_root},
+        baseline_log_roots={"function_call": baseline_root},
+    )
+
+    manifest = json.loads(path.read_text())
+    assert manifest["phase2_ready"] is False
+    assert manifest["overall_baseline_comparison_gate"]["passed"] is False
+    assert "unexpected_non_target_final_result_movement" in manifest["movement_summary"]["failed_kinds"]
+    with pytest.raises(ValueError, match="unexpected_non_target_final_result_movement"):
+        validate_phase2_equivalence_blocking_unsafety_movement(manifest)
 
 
 def test_phase2_validator_rejects_ready_true_with_failed_entry(tmp_path):

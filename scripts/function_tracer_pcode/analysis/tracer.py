@@ -1028,6 +1028,94 @@ class PcodeTracer:
         except Exception:
             return None
 
+    def _resolve_call_target_ref_from_expression(
+        self,
+        expr: Optional[Expression],
+        *,
+        allow_containing: bool = True,
+        allow_code_address: bool = True,
+    ) -> Optional[CallTargetRef]:
+        if expr is None or expr.expr_type != ExpressionType.CONSTANT:
+            return None
+        try:
+            address_value = int(expr.value)
+        except (TypeError, ValueError):
+            return None
+        if address_value < 0 or self.program is None:
+            return None
+
+        try:
+            address_factory = self.program.getAddressFactory()
+            default_space = address_factory.getDefaultAddressSpace()
+            address = default_space.getAddress(address_value)
+        except Exception:
+            address = None
+        if address is None:
+            return None
+
+        try:
+            function_manager = self.program.getFunctionManager()
+        except Exception:
+            function_manager = None
+        if function_manager is not None:
+            for accessor in ("getFunctionAt", "getReferencedFunction"):
+                getter = getattr(function_manager, accessor, None)
+                if callable(getter):
+                    try:
+                        function = getter(address)
+                    except Exception:
+                        function = None
+                    if function is not None:
+                        return CallTargetRef.from_function(function)
+            if allow_containing:
+                getter = getattr(function_manager, "getFunctionContaining", None)
+                if callable(getter):
+                    try:
+                        function = getter(address)
+                    except Exception:
+                        function = None
+                    if function is not None:
+                        return CallTargetRef.from_function(function)
+
+        if not allow_code_address:
+            return None
+        return CallTargetRef.from_code_address(address_value)
+
+    def _resolve_call_target_ref_from_op(
+        self,
+        pcode_op,
+        depth: int,
+        use_cache: bool,
+        *,
+        allow_containing: bool = True,
+        allow_code_address: bool = True,
+    ) -> CallTargetRef:
+        try:
+            target_varnode = pcode_op.getInput(0)
+        except Exception:
+            target_varnode = None
+        direct_ref = self.resolve_call_target_ref(
+            target_varnode,
+            allow_containing=allow_containing,
+            allow_code_address=allow_code_address,
+        ) if target_varnode is not None else None
+        if direct_ref is not None and not direct_ref.is_unknown():
+            return direct_ref
+
+        target_expr = self._recover_call_target_expression(
+            pcode_op,
+            depth,
+            use_cache,
+        )
+        expr_ref = self._resolve_call_target_ref_from_expression(
+            target_expr,
+            allow_containing=allow_containing,
+            allow_code_address=allow_code_address,
+        )
+        if expr_ref is not None:
+            return expr_ref
+        return direct_ref or CallTargetRef.unknown()
+
     def _build_unresolved_call_unknown(
         self,
         pcode_op,
@@ -2104,12 +2192,13 @@ class PcodeTracer:
         # CALL
         if mnemonic == "CALL":
             if inputs:
-                func_addr = inputs[0]
-                target_ref = self.resolve_call_target_ref(
-                    func_addr,
+                target_ref = self._resolve_call_target_ref_from_op(
+                    pcode_op,
+                    depth,
+                    use_cache,
                     allow_containing=True,
                     allow_code_address=True,
-                ) or CallTargetRef.unknown()
+                )
                 func_name = target_ref.display_name()
                 self.emit_unknown_event(
                     reason="call_out_of_scope",
@@ -2130,11 +2219,13 @@ class PcodeTracer:
         # CALLIND
         if mnemonic == "CALLIND":
             if inputs:
-                target_ref = self.resolve_call_target_ref(
-                    inputs[0],
+                target_ref = self._resolve_call_target_ref_from_op(
+                    pcode_op,
+                    depth,
+                    use_cache,
                     allow_containing=True,
                     allow_code_address=True,
-                ) or CallTargetRef.unknown()
+                )
                 target_name = target_ref.display_name()
                 self.emit_unknown_event(
                     reason="callind_out_of_scope",

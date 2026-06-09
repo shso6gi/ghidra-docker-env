@@ -35,6 +35,7 @@ from scripts.function_tracer_pcode.model import (
     FunctionReturnAnalysis,
     PcodeOpRef,
     ReturnInfo,
+    StorageInfo,
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.model.runtime_refs import LocationBaseRef
@@ -3152,6 +3153,60 @@ def test_expression_provenance_key_distinguishes_deep_tail_structure_beyond_dige
     )
 
     assert zext_key != sext_key
+
+
+def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
+    storage = StorageInfo(
+        is_register=True,
+        space_name="register",
+        offset=32,
+        size=8,
+        register_name="a0",
+        base_register_name="a0",
+        base_register_size_bits=64,
+    )
+    parameter_ref = LocationBaseRef.parameter(
+        "op",
+        index=0,
+        owner_program_id=1234,
+        owner_entry_offset=0x401000,
+    )
+    expr = Expression.parameter(
+        "op",
+        0,
+        "int (*)(int, int)",
+        size=8,
+        storage_info=storage,
+        runtime_ref=parameter_ref,
+    )
+
+    key = expression_provenance_key(expr)
+
+    assert key == ("runtime_ref", ("parameter", 1234, 0x401000, 0))
+    assert key[0] != "storage"
+
+
+def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    program_id = 3734980569294953568
+    analysis = FunctionReturnAnalysis(
+        function_name="fc_apply_indirect",
+        entry_point="0x101000",
+        parameters=[],
+        returns=[],
+        return_type="int",
+    )
+    analysis.binary_id = "B10"
+    key = (
+        "typed_target_expression",
+        ("runtime_ref", ("parameter", program_id, 0x101000, 0)),
+    )
+
+    normalized = strategy._artifact_stable_key_for_analysis(key, analysis)
+
+    assert not _nested_contains(normalized, program_id)
+    assert _nested_contains(normalized, "B10")
+    assert _nested_contains(normalized, 0x101000)
 
 
 def test_unsupported_call_effect_object_key_distinguishes_target_expression_provenance():

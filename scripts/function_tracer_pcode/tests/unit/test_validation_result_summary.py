@@ -1107,11 +1107,16 @@ def test_phase2_gate_reduced_pre_producer_matrix_pins_gate_contributor_pairs():
         'fc_recursive_sum:B10_B14,fc_apply_indirect:B1_B2,'
         'fc_apply_indirect:B1_B14,fc_is_even:B1_B10,fc_is_odd:B1_B10'
     ) in script
+    assert 'VALIDATION_REQUIRE_BASELINE_MATCH="${VALIDATION_REQUIRE_BASELINE_MATCH:-0}"' in script
     assert 'VALIDATION_BASELINE_MATCH_SCOPE="${VALIDATION_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
     assert 'VALIDATION_BASELINE_MATCH_LEVEL="${VALIDATION_BASELINE_MATCH_LEVEL:-final-results}"' in script
     assert 'PARALLEL_JOBS="${PARALLEL_JOBS:-32}"' in script
     assert 'PHASE2_RUN_EXPECTED_MOVEMENT_GATE="${PHASE2_RUN_EXPECTED_MOVEMENT_GATE:-1}"' in script
     assert 'PHASE2_GATE_BASELINE_MATCH_SCOPE="${PHASE2_GATE_BASELINE_MATCH_SCOPE:-after-pairs}"' in script
+    assert (
+        'PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT="${PHASE2_EXPECTED_FINAL_RESULT_MOVEMENT:-'
+        'none}"'
+    ) in script
     assert "phase2_function_call_full_matrix_pre_producer" in script
     assert 'exec "$SCRIPT_DIR/phase2_run_function_call_full_matrix_pre_producer_32jobs.sh"' in script
 

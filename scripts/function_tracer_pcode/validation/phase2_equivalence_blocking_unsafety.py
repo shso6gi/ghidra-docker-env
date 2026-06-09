@@ -576,6 +576,12 @@ def _phase2_entry_failures(entries: Sequence[Mapping[str, Any]]) -> Sequence[str
             failures.append("entry_failure_without_failed_kinds")
         if status == "expected_movement":
             accepted_records = entry.get("accepted_reason_records")
+            final_result_movement = str(entry.get("final_result_movement") or "")
+            if final_result_movement == "target_reason_unknown_to_eq":
+                failures.append("entry_final_result_movement_not_allowed")
+                if accepted_records not in ([], ()):
+                    failures.append("entry_final_result_movement_has_accepted_reason")
+                continue
             if not _is_non_string_sequence(accepted_records) or not accepted_records:
                 failures.append("entry_expected_movement_without_accepted_reason")
             else:
@@ -645,6 +651,12 @@ def _phase2_baseline_gate_failures(baseline_gate: Mapping[str, Any]) -> Sequence
             failures.append("overall_baseline_comparison_gate_status_mismatch")
         if not failed_kinds:
             failures.append("overall_baseline_comparison_gate_failed_without_kinds")
+    allowed_movements = baseline_gate.get("allowed_final_result_movements")
+    if allowed_movements is not None:
+        if not _is_non_string_sequence(allowed_movements):
+            failures.append("overall_baseline_comparison_gate_allowed_movements_invalid")
+        elif allowed_movements:
+            failures.append("overall_allowed_final_movement_not_allowed")
     return failures
 
 
@@ -793,16 +805,23 @@ def _validate_representative_expected_movement(
     payload = record.payloads[-1] if record.payloads else {}
     result["current_result"] = record.status
     result["current_log_path"] = record.path
-    if record.status == STATUS_EQ or payload.get("is_equivalent") is True:
-        failures.append("pending_proof_allowed_equivalent")
-    elif record.status != STATUS_UNKNOWN:
-        failures.append("representative_result_not_unknown")
-
     matching_records = [
         reason
         for reason in coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
         if reason.reason_id == TARGET_REASON_ID
     ]
+    if record.status == STATUS_EQ or payload.get("is_equivalent") is True:
+        if matching_records:
+            failures.append("pending_proof_allowed_equivalent")
+        else:
+            failures.append("target_reason_unknown_to_eq_not_allowed")
+        result["accepted_reason_records"] = []
+        result["rejected_reason_records"] = []
+        result["movement_status"] = "failed"
+        result["failed_kinds"] = sorted(set(failures))
+        return result
+    elif record.status != STATUS_UNKNOWN:
+        failures.append("representative_result_not_unknown")
     if not matching_records:
         failures.append("target_reason_missing")
 
@@ -1329,6 +1348,7 @@ def _validate_overall_baseline_comparison(
             "old": _reason_tuple_to_string(ALLOWED_OLD_REASON_TUPLE),
             "new": _reason_tuple_to_string(ALLOWED_NEW_REASON_TUPLE),
         },
+        "allowed_final_result_movements": [],
         "unexpected_deltas": _unexpected_baseline_deltas(
             comparison,
             before_records,
@@ -1347,25 +1367,36 @@ def _baseline_comparison_failures(
     allowed_positive_tuple_deltas = _allowed_positive_tuple_deltas(
         _pair_unknown_tuple_deltas(before_records, after_records)
     )
+    allowed_final_movement_pairs: set = set()
+    allowed_final_movement_count = 0
     allow_reason_reclassification = _allows_reason_reclassification(
         comparison,
         pair_reason_deltas=pair_reason_deltas,
+        allowed_final_movement_pairs=allowed_final_movement_pairs,
     )
     if comparison.before_total_results != comparison.after_total_results:
         failures.append("total_result_count_delta")
-    if comparison.final_result_counts_delta:
+    expected_final_count_delta = (
+        {STATUS_EQ: allowed_final_movement_count, STATUS_UNKNOWN: -allowed_final_movement_count}
+        if allowed_final_movement_count
+        else {}
+    )
+    if dict(comparison.final_result_counts_delta) != expected_final_count_delta:
         failures.append("final_result_count_delta")
-    if comparison.unknown_final_results_delta != 0:
+    if comparison.unknown_final_results_delta != -allowed_final_movement_count:
         failures.append("unknown_final_result_delta")
     if comparison.timeout_final_results_delta != 0:
         failures.append("timeout_final_result_delta")
     if _non_target_final_result_movements(before_records, after_records):
         failures.append("unexpected_non_target_final_result_movement")
+    if _target_unknown_to_eq_final_movements(before_records, after_records):
+        failures.append("target_reason_unknown_to_eq_not_allowed")
     if comparison.timeout_class_multiset_delta:
         failures.append("timeout_class_delta")
     if _unexpected_pair_result_deltas(
         comparison.pair_result_multiset_delta,
         pair_reason_deltas=pair_reason_deltas,
+        allowed_final_movement_pairs=allowed_final_movement_pairs,
     ):
         failures.append("pair_result_tuple_delta")
     if comparison.missing_pair_identities:
@@ -1405,9 +1436,11 @@ def _unexpected_baseline_deltas(
     allowed_positive_tuple_deltas = _allowed_positive_tuple_deltas(
         _pair_unknown_tuple_deltas(before_records, after_records)
     )
+    allowed_final_movement_pairs: set = set()
     allow_reason_reclassification = _allows_reason_reclassification(
         comparison,
         pair_reason_deltas=pair_reason_deltas,
+        allowed_final_movement_pairs=allowed_final_movement_pairs,
     )
     unexpected = {
         "validation_unknown_unit_multiset_delta": _stringify_delta_mapping(
@@ -1438,14 +1471,24 @@ def _unexpected_baseline_deltas(
             _unexpected_pair_result_deltas(
                 comparison.pair_result_multiset_delta,
                 pair_reason_deltas=pair_reason_deltas,
+                allowed_final_movement_pairs=allowed_final_movement_pairs,
             )
         ),
         "timeout_class_multiset_delta": dict(comparison.timeout_class_multiset_delta),
-        "final_result_counts_delta": dict(comparison.final_result_counts_delta),
+        "final_result_counts_delta": _unexpected_final_result_count_delta(
+            comparison.final_result_counts_delta,
+            0,
+        ),
     }
     non_target_movements = _non_target_final_result_movements(before_records, after_records)
     if non_target_movements:
         unexpected["non_target_final_result_movements"] = non_target_movements
+    target_movements = _target_unknown_to_eq_final_movements(
+        before_records,
+        after_records,
+    )
+    if target_movements:
+        unexpected["target_unknown_to_eq_final_movements"] = target_movements
     return unexpected
 
 
@@ -1498,6 +1541,52 @@ def _non_target_final_result_movements(
             }
         )
     return movements
+
+
+def _target_unknown_to_eq_final_movements(
+    before_records: Sequence[ValidationLogRecord],
+    after_records: Sequence[ValidationLogRecord],
+) -> Sequence[Dict[str, Any]]:
+    before_by_identity = _records_by_pair_identity(before_records)
+    after_by_identity = _records_by_pair_identity(after_records)
+    movements = []
+    for identity in sorted(set(before_by_identity) & set(after_by_identity)):
+        before_record = before_by_identity[identity]
+        after_record = after_by_identity[identity]
+        if before_record.status != STATUS_UNKNOWN or after_record.status != STATUS_EQ:
+            continue
+        before_payload = before_record.payloads[-1] if before_record.payloads else {}
+        before_reasons = _reason_id_counts(_extract_final_unknown_reasons(before_payload))
+        if set(before_reasons) != {TARGET_REASON_ID}:
+            continue
+        movements.append(
+            {
+                "function": identity[0],
+                "binary_pair": identity[1],
+                "status_movement": f"{STATUS_UNKNOWN}->{STATUS_EQ}",
+                "removed_reasons": {TARGET_REASON_ID: int(before_reasons[TARGET_REASON_ID])},
+            }
+        )
+    return movements
+
+
+def _unexpected_final_result_count_delta(
+    deltas: Mapping[str, int],
+    allowed_final_movement_count: int,
+) -> Dict[str, int]:
+    expected = (
+        {STATUS_EQ: allowed_final_movement_count, STATUS_UNKNOWN: -allowed_final_movement_count}
+        if allowed_final_movement_count
+        else {}
+    )
+    unexpected = dict(deltas)
+    for key, expected_value in expected.items():
+        actual = int(unexpected.get(key, 0) or 0)
+        if actual == expected_value:
+            unexpected.pop(key, None)
+        else:
+            unexpected[key] = actual - expected_value
+    return {key: value for key, value in unexpected.items() if value}
 
 
 def _records_by_pair_identity(
@@ -1597,11 +1686,18 @@ def _allows_reason_reclassification(
     comparison: ValidationBaselineComparison,
     *,
     pair_reason_deltas: Optional[Mapping[Tuple[str, str, str, str], Mapping[str, int]]] = None,
+    allowed_final_movement_pairs: Optional[set] = None,
 ) -> bool:
+    allowed_final_movement_pairs = allowed_final_movement_pairs or set()
     return (
         comparison.before_total_results == comparison.after_total_results
-        and not comparison.final_result_counts_delta
-        and comparison.unknown_final_results_delta == 0
+        and dict(comparison.final_result_counts_delta)
+        == (
+            {STATUS_EQ: len(allowed_final_movement_pairs), STATUS_UNKNOWN: -len(allowed_final_movement_pairs)}
+            if allowed_final_movement_pairs
+            else {}
+        )
+        and comparison.unknown_final_results_delta == -len(allowed_final_movement_pairs)
         and comparison.timeout_final_results_delta == 0
         and not comparison.timeout_class_multiset_delta
         and not comparison.missing_pair_identities
@@ -1609,6 +1705,7 @@ def _allows_reason_reclassification(
         and not _unexpected_pair_result_deltas(
             comparison.pair_result_multiset_delta,
             pair_reason_deltas=pair_reason_deltas,
+            allowed_final_movement_pairs=allowed_final_movement_pairs,
         )
         and _has_allowed_broad_reason_reduction(comparison)
     )
@@ -1637,15 +1734,26 @@ def _unexpected_pair_result_deltas(
     deltas: Mapping[Tuple[str, ...], int],
     *,
     pair_reason_deltas: Optional[Mapping[Tuple[str, str, str, str], Mapping[str, int]]] = None,
+    allowed_final_movement_pairs: Optional[set] = None,
 ) -> Dict[Tuple[str, ...], int]:
     unexpected: Dict[Tuple[str, ...], int] = {}
     pair_reason_deltas = pair_reason_deltas or {}
+    allowed_final_movement_pairs = allowed_final_movement_pairs or set()
     grouped: Dict[Tuple[str, str, str, str], Dict[str, list]] = {}
     for key, value in deltas.items():
         if not isinstance(key, tuple) or len(key) != 5:
             unexpected[key] = value
             continue
         function_name, binary_pair, status, reasons, timeout_class = key
+        if (
+            (function_name, binary_pair) in allowed_final_movement_pairs
+            and timeout_class == MISSING_SENTINEL
+            and (
+                (status == STATUS_UNKNOWN and value < 0)
+                or (status == STATUS_EQ and value > 0)
+            )
+        ):
+            continue
         if status != STATUS_UNKNOWN or timeout_class != MISSING_SENTINEL:
             unexpected[key] = value
             continue

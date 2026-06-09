@@ -1659,6 +1659,8 @@ class CheckStrategy(ABC):
             return atom_rewritten
         if tag in {"function", "code_address"} and len(rewritten) >= 3 and cls._program_id_like(rewritten[1]):
             return (tag, binary_id, rewritten[2], *rewritten[3:])
+        if tag == "parameter" and len(rewritten) >= 4 and cls._program_id_like(rewritten[1]):
+            return (tag, binary_id, rewritten[2], *rewritten[3:])
         if tag == "deferred_call_site" and len(rewritten) == 6 and cls._program_id_like(rewritten[1]):
             caller_entry = rewritten[2]
             caller_key: Any = None
@@ -1698,6 +1700,8 @@ class CheckStrategy(ABC):
             return None
         atom_tag = items[0][1]
         if atom_tag in {"function", "code_address"} and len(items) >= 3 and cls._atom_program_id_like(items[1]):
+            return ("tuple", (items[0], ("str", binary_id), items[2], *items[3:]))
+        if atom_tag == "parameter" and len(items) >= 4 and cls._atom_program_id_like(items[1]):
             return ("tuple", (items[0], ("str", binary_id), items[2], *items[3:]))
         if atom_tag == "unknown" and len(items) >= 2 and cls._atom_program_id_like(items[1]):
             return ("tuple", (items[0], ("str", binary_id), *items[2:]))
